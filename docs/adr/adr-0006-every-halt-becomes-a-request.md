@@ -26,7 +26,9 @@
   - a seat that ends with no done signal;
   - a refused launch;
   - a failed merge;
-  - a store write failure. On a store write failure, the controller stops admitting work.
+  - a store write failure. On a store write failure, the controller stops admitting work. It writes the
+    failure to a health file outside the store and to its journal. `status` then reports the
+    controller as degraded, with the reason, and no longer reads the store.
 - The controller writes a log. The log is for diagnosis. `status` and `requests` are the visibility
   channel.
 

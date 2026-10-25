@@ -15,9 +15,12 @@
   and every file it references: role briefs and rule sets. A seat is launched only from the pinned
   content. A change to any pinned file needs a new run.
 - Store migrations are forward-only (ADR-0003).
-- A binary rolls back only to one with the same store schema version. Otherwise the fix goes forward.
+- A binary rolls back only to one with the same store schema version and the same CLI-to-controller
+  protocol version. Otherwise the fix goes forward.
 - On start-up, the controller enters reconciliation:
-  - every unit whose seat process is gone is parked, and a request is opened for it;
+  - every unit in `running` or waiting on a seat's next signal whose seat process is gone is parked,
+    and a request is opened for it. Units already done, failed, stopped or parked are left as they
+    are;
   - nothing relaunches by default;
   - the claim decides each relaunch.
 - To back out a bad release, reinstall the earlier binary while no run is active.

@@ -16,7 +16,9 @@
   - portable-pty;
   - clap;
   - serde and serde_json;
-  - yaml-rust2 for the strict workflow file.
+  - yaml-rust2 for parsing the strict workflow file. `crates/pf-workflow` validates the parsed tree
+    against its own typed schema. It rejects unknown keys and unknown versions, and it reports each
+    error at the parser's marker position.
 - Builds follow the host's build rules: no `CARGO_PROFILE_*` overrides, one shared target directory,
   and one cold build at a time.
 - Not in Release 0. These come with the run view or terminal attach:
@@ -54,6 +56,7 @@ These were read from crates.io and the host on 2026-10-25, with no build:
 The skeleton spine's first build verifies each of these:
 - portable-pty can spawn, read, write and resize a PTY from Tokio.
 - rusqlite runs WAL with `synchronous=FULL` behind one writer thread.
-- yaml-rust2 rejects duplicate keys, and reports positions for unknown-field errors.
+- yaml-rust2 rejects duplicate keys, and its markers give `pf-workflow` a position for each
+  unknown-field error.
 
 portable-pty has had no release since 2025-02. Revisit this ADR if it fails its first-use check.

@@ -41,7 +41,9 @@ Pulse Factory parses them as data in strict formats and never executes their tex
 
 Only code merges, and only under the workflow's merge rule:
 - item PRs merge into the spine branch on green CI, in the declared order;
-- the spine PR merges into `main` only on the claim's ack.
+- the spine PR merges into `main` only on the claim's ack. The ack binds to the current claim
+  generation, the exact request ID and revision (ADR-0009), and the PR's head SHA. Code merges with
+  that SHA pinned, so a moved head or a superseded claim cannot merge.
 
 **Authority:**
 - Only a session that holds the claim can answer a request.
