@@ -18,6 +18,9 @@
 - **The workflow file:** YAML with a top-level `version:`.
   - The parser rejects unknown fields and unknown versions. There is no silent conversion.
   - It holds only what the ossify spine workflow needs.
+  - It declares the plugins its seats need, each with a minimum version (for example the ossify
+    plugin). `arm` refuses a run whose seats cannot load a declared plugin. (Amended 2026-10-26.)
+  - It names its unit sources: the queue directory and the record keys (ADR-0002).
 - **Breaking-change policy** (the project is pre-1.0):
   - A breaking change to the CLI's JSON or to the workflow format bumps that schema version and adds
     a changelog line.

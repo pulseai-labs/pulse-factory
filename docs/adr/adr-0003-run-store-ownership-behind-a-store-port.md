@@ -5,7 +5,8 @@
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
-truth for a spine, and Pulse Factory reads it through `oss`. The ledger is one file per spine in the
+truth for a spine. A seat reads it through `oss` and writes unit records into the run's queue; Pulse
+Factory reads only those records (ADR-0002, amended 2026-10-26). The ledger is one file per spine in the
 AI workspace. The operator decided on 2026-10-25:
 - answer data ownership now;
 - plan the store schema properly in the release after Release 0;
@@ -16,7 +17,7 @@ AI workspace. The operator decided on 2026-10-25:
 | State | Owner | How Pulse Factory uses it |
 |---|---|---|
 | Runs, nodes, sessions, requests, claims, admissions, and each session's token usage and cost | The controller, through the store port | Reads and writes. The first adapter is `crates/pf-store-sqlite`: rusqlite, one serialized writer, WAL, `synchronous=FULL`. |
-| Spine plan, rounds, items, spine state | ossify | Reads through `oss` at each lane step. Never copies it. |
+| Spine plan, rounds, items, spine state | ossify | A lane seat reads it through `oss` and writes one unit record per item into the run's queue. Pulse Factory reads the records, never calls `oss`, and never copies the plan. |
 | Ledger | One append-only file per spine in the AI workspace. The controller is its only writer. | Seats write their decisions to their own run files. The controller appends each one to the ledger as a whole line, in admission order, and never rewrites a line. The controller never commits. Spine close's second pass commits the ledger with the spine's other AI-workspace records, through that workspace's PR flow. |
 | Worktrees, handoffs, reports, stop files | The seats and ossify | Reads them as done signals. |
 | Transcripts and token usage | Each agent's own logs | Reads them. |

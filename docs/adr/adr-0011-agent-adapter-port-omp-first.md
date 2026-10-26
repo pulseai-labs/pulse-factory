@@ -23,8 +23,11 @@
 ## Decision
 - `pf-engine` defines an agent adapter port with the nine duties.
 - `crates/pf-adapter-omp` is the first adapter. It launches OMP as an interactive TUI in a PTY, with:
-  - `--no-extensions`, `--no-skills` and `--no-rules`, so discovered operator extensions, skills and
-    rules do not load. Only the `--hook` path Pulse Factory passes is loaded. Whether OMP still loads
+  - `--no-extensions` and `--no-rules`, so discovered operator extensions and rules do not load;
+  - `--plugin-dir <path>` for each plugin the workflow declares (ADR-0004), with `--skills=<globs>`
+    limited to those plugins' skills. (Amended 2026-10-26: `--no-skills` disables all skill loading,
+    so a seat could not run the workflow's method skills, such as ossify's `/run-spine`.)
+    Only the `--hook` path Pulse Factory passes is loaded as an extension. Whether OMP still loads
     MCP servers from its own config is unverified. The adapter must check it, or launch with an
     isolated `--profile`, before relying on "no wake tool reaches the seat";
   - `--approval-mode yolo`, which turns prompts off;
@@ -64,6 +67,8 @@ in the AI workspace, at `docs/superpowers/evidence/2026-10-25-omp-adapter-spike/
 
 ### Unverified claims
 - Whether OMP loads MCP servers from its config when launched with the flags above.
+- Whether `--plugin-dir` with `--skills` gives a seat exactly the declared plugins' skills and no
+  others.
 - Interrupting a session (duty 4).
 - Answering launch dialogs (duty 6).
 - Handing off to a successor session (duty 9).
