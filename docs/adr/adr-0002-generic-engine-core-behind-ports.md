@@ -8,8 +8,8 @@
 ## Context
 Pulse Factory is a registry and driver of workflows. The engine is generic. A workflow is data that
 names its stages, roles, models, briefs, done signals and merge rules. The ossify spine is the first
-workflow, not the engine's model of work. Pulse Factory must call ossify, never re-implement an ossify
-contract. Each coding agent gets its own adapter.
+workflow, not the engine's model of work. Pulse Factory must never re-implement an ossify contract:
+seats use ossify through the plugin the workflow declares. Each coding agent gets its own adapter.
 
 **Vocabulary** (operator, 2026-10-26):
 
@@ -20,7 +20,7 @@ contract. Each coding agent gets its own adapter.
 | Skill | An instruction folder that a session loads. It is usually part of a plugin. |
 | App | An MCP connector and the skills that drive it. |
 | Agent | A persona: a name, instructions, a brain (runtime, model, effort) and the plugins it carries. The operator chats with it. |
-| Workflow | Pulse Factory's own recipe: stages, roles, briefs, done signals, unit sources, the merge rule and slots. It is data, not a plugin. It declares the plugins its seats need. |
+| Workflow | Pulse Factory's own recipe: stages, roles, models, briefs, done signals, unit sources, seed units, the merge rule and capacity settings. It is data, not a plugin. It declares the plugins its seats need. |
 | Unit source | Where a run's units come from. |
 | Run | One armed instance of a workflow. |
 
@@ -33,23 +33,26 @@ contract. Each coding agent gets its own adapter.
   the reverse.
 - **No crate knows a planning method.** Pulse Factory has no ossify code. A workflow's seats use a
   method through the plugins the workflow declares (ADR-0004), and the workflow's briefs name the
-  method's commands.
+  method's commands. A workflow file may also name a command that the engine runs as data, such as
+  an `oss` status write.
 - **The unit source reads a queue that a seat fills.** A seat writes one versioned JSON record per
   unit into the run's queue directory: its ID, its group, its order and its variables. That record
   format is the port's contract, so any method's seat can produce it.
 - `crates/pulse-factory`, the binary, is the composition root.
 
 Rejected alternatives:
-- **One crate.** ossify knowledge would leak into the engine, and the second workflow would need a
+- **One crate.** Planning-method knowledge would leak into the engine, and the second workflow would need a
   rewrite.
 - **Dynamically loaded plugins.** No measured need.
 - **One crate per planning method (`pf-ossify`).** A workflow for another method, such as
   Superpowers, would need a new crate and a rebuild. The baton pilot runs the ossify spine through a
-  generic queue with no ossify code, so the crate buys nothing.
+  generic queue, with no ossify code in its engine and the `oss` commands as recipe data, so the crate
+  buys nothing.
 
 ## Consequences
-- A second workflow is a new workflow file and its briefs, with no rebuild. A second agent runtime is
-  a new adapter crate.
+- A second workflow is a new workflow file and its briefs, with no rebuild, as long as the current
+  workflow format and rule sets can express it. A change to either is a product change (ADR-0004). A
+  second agent runtime is a new adapter crate.
 - The real method contract (for ossify, `oss` and its skills) is exercised by real seats, not by
   Pulse Factory's own tests.
 - Engine tests use fake ports.
