@@ -2,10 +2,12 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-25
+- **Amended:** 2026-10-26, at the planning of spine r0.s1: the spine-plan row and the run queue row.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
-truth for a spine, and Pulse Factory reads it through `oss`. The ledger is one file per spine in the
+truth for a spine. A seat reads it through `oss` and writes unit records into the run's queue; Pulse
+Factory takes its units from those records (ADR-0002). The ledger is one file per spine in the
 AI workspace. The operator decided on 2026-10-25:
 - answer data ownership now;
 - plan the store schema properly in the release after Release 0;
@@ -16,7 +18,8 @@ AI workspace. The operator decided on 2026-10-25:
 | State | Owner | How Pulse Factory uses it |
 |---|---|---|
 | Runs, nodes, sessions, requests, claims, admissions, and each session's token usage and cost | The controller, through the store port | Reads and writes. The first adapter is `crates/pf-store-sqlite`: rusqlite, one serialized writer, WAL, `synchronous=FULL`. |
-| Spine plan, rounds, items, spine state | ossify | Reads through `oss` at each lane step. Never copies it. |
+| Spine plan, rounds, items, spine state | ossify | A seat reads it through `oss` and writes one unit record per item into the run's queue. Pulse Factory's code never calls `oss`: a command such as an `oss` status write is data in the workflow file, which the engine runs (ADR-0002). It never copies the plan: a record holds only what launches a unit. |
+| Run queue (unit records) | The controller owns the directory, under the run's state. The seats the workflow names write to it. | A seat publishes a record by atomic rename. The controller admits each record once by its unit ID. The same ID with changed content, or a malformed record, parks the run (ADR-0006). The queue stays with the run's state. |
 | Ledger | One append-only file per spine in the AI workspace. The controller is its only writer. | Seats write their decisions to their own run files. The controller appends each one to the ledger as a whole line, in admission order, and never rewrites a line. The controller never commits. Spine close's second pass commits the ledger with the spine's other AI-workspace records, through that workspace's PR flow. |
 | Worktrees, handoffs, reports, stop files | The seats and ossify | Reads them as done signals. |
 | Transcripts and token usage | Each agent's own logs | Reads them. |

@@ -2,6 +2,8 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-25
+- **Amended:** 2026-10-26, at the planning of spine r0.s1: `--no-skills` disables all skill loading,
+  so a seat could not run the workflow's method skills, such as ossify's `/run-spine`.
 
 ## Context
 - Each coding agent gets an adapter with nine duties:
@@ -23,10 +25,11 @@
 ## Decision
 - `pf-engine` defines an agent adapter port with the nine duties.
 - `crates/pf-adapter-omp` is the first adapter. It launches OMP as an interactive TUI in a PTY, with:
-  - `--no-extensions`, `--no-skills` and `--no-rules`, so discovered operator extensions, skills and
-    rules do not load. Only the `--hook` path Pulse Factory passes is loaded. Whether OMP still loads
-    MCP servers from its own config is unverified. The adapter must check it, or launch with an
-    isolated `--profile`, before relying on "no wake tool reaches the seat";
+  - `--no-extensions` and `--no-rules`, so discovered operator extensions and rules do not load;
+  - `--plugin-dir <path>` for each plugin the workflow declares (ADR-0004), with `--skills=<globs>`
+    intended to limit the seat to those plugins' skills. This limit is unverified. If an undeclared
+    skill, hook, tool or MCP server reaches a seat, the adapter launches with a verified isolated
+    `--profile` or refuses the launch. The only extension Pulse Factory passes is its `--hook` path;
   - `--approval-mode yolo`, which turns prompts off;
   - a `--tools` list that leaves out `ask`, and leaves out `task` unless the adapter tracks subagents;
   - `--hook` loading Pulse Factory's own OMP extension.
@@ -64,6 +67,8 @@ in the AI workspace, at `docs/superpowers/evidence/2026-10-25-omp-adapter-spike/
 
 ### Unverified claims
 - Whether OMP loads MCP servers from its config when launched with the flags above.
+- Whether `--plugin-dir` with `--skills` gives a seat exactly the declared plugins' skills, and which
+  hooks, tools and MCP servers a plugin brings with it.
 - Interrupting a session (duty 4).
 - Answering launch dialogs (duty 6).
 - Handing off to a successor session (duty 9).
