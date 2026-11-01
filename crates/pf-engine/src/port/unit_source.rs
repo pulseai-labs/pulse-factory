@@ -135,4 +135,10 @@ pub trait UnitSource: Send {
     /// Return the records that are ready. A source may return a record again on a later call;
     /// the engine admits each unit ID once.
     fn poll(&mut self) -> Result<Vec<UnitRecord>, UnitSourceError>;
+
+    /// The track that this source's units join. A source with no track joins the workflow's only
+    /// track, and the engine refuses it when the workflow has several.
+    fn track(&self) -> Option<&str> {
+        None
+    }
 }

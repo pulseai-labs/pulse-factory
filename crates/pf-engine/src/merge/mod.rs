@@ -13,11 +13,31 @@ use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::forge::{Checks, ForgeEffect, ForgeOutcome, Mergeable};
 use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow};
-use crate::status::{REASON_RUN_HALTED, Status, check_reason};
+use crate::status::{REASON_RUN_HALTED, Status, check_reason, one_line_reason};
 use crate::unit::UnitDetail;
 use crate::workflow::Workflow;
 
 type Rejected = String;
+
+/// The last push of a unit that succeeded: where it went, and the SHA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PushRecord {
+    pub repo: String,
+    pub branch: String,
+    pub sha: String,
+}
+
+/// Compare a PR head with the last recorded push. A PR head with no recorded push, or with
+/// another one, is refused. This catches a push from a script that the rules cannot parse.
+///
+/// It is a pure function in the engine, because the engine may not call a workflow crate. The
+/// forge adapter's merge step calls it when the unit's track sets `head_check`.
+pub fn head_check(pr_sha: &str, last_push: Option<&PushRecord>) -> Result<(), String> {
+    match last_push {
+        Some(push) if !pr_sha.is_empty() && push.sha.eq_ignore_ascii_case(pr_sha) => Ok(()),
+        _ => Err(format!("PR head {pr_sha} has no recorded push")),
+    }
+}
 
 /// A unit that has all its stages done and is ready for the merge rule.
 fn merge_ready(
@@ -25,8 +45,12 @@ fn merge_ready(
     workflow: &Workflow,
     unit: &NodeRow,
 ) -> Result<UnitDetail, Rejected> {
-    if workflow.merge.is_none() {
-        return Err("the workflow has no merge rule".to_string());
+    let detail = view.unit_detail(unit)?;
+    let track = workflow
+        .track(&detail.track)
+        .ok_or_else(|| crate::admission::unknown_track(&unit.id, &detail.track))?;
+    if track.merge.is_none() {
+        return Err(format!("track {:?} has no merge rule", track.name));
     }
     if unit.status != Status::Running {
         return Err(format!(
@@ -35,8 +59,7 @@ fn merge_ready(
             unit.status.as_str()
         ));
     }
-    let detail = view.unit_detail(unit)?;
-    if (detail.stages_done as usize) < workflow.stages.len() {
+    if (detail.stages_done as usize) < track.stages.len() {
         return Err(format!("unit {} has stages left", unit.id));
     }
     Ok(detail)
@@ -128,9 +151,12 @@ pub enum Next {
 pub fn next_in_order(view: &RunView, workflow: &Workflow) -> Next {
     let mut ranked: Vec<(u32, u32, &str, &NodeRow, UnitDetail)> = Vec::new();
     let mut group_rank: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    // Only units on a track with a merge rule take part. A unit on another track never waits on
+    // a merge, and never holds one back.
     let mut units: Vec<(&NodeRow, UnitDetail)> = view
         .units()
         .filter_map(|n| UnitDetail::from_text(&n.detail).ok().map(|d| (n, d)))
+        .filter(|(_, d)| workflow.track(&d.track).is_some_and(|t| t.merge.is_some()))
         .collect();
     units.sort_by_key(|(_, d)| d.ingest_seq);
     for (_, d) in &units {
@@ -147,7 +173,8 @@ pub fn next_in_order(view: &RunView, workflow: &Workflow) -> Next {
         match node.status {
             Status::Done => continue,
             Status::Running => {
-                return if detail.stages_done as usize >= workflow.stages.len() {
+                let stages = workflow.track(&detail.track).map_or(0, |t| t.stages.len());
+                return if detail.stages_done as usize >= stages {
                     Next::Ready(id.to_string())
                 } else {
                     Next::NotReady(id.to_string())
@@ -177,7 +204,7 @@ pub enum MergeStep {
 impl Engine {
     /// Merge the next unit in the declared order, by the workflow's rule.
     pub fn merge_next(&self) -> Result<MergeStep, EngineError> {
-        if self.cfg.workflow.merge.is_none() {
+        if !self.cfg.workflow.has_merge() {
             return Ok(MergeStep::Idle);
         }
         let view = self.view()?;
@@ -317,6 +344,8 @@ impl Engine {
         outcome: &str,
         landed: bool,
     ) -> Result<MergeStep, EngineError> {
+        // The outcome can hold text from the forge. It is one clean line before it is recorded.
+        let outcome = one_line_reason(outcome);
         self.submit(Command {
             id: format!("merge-result:{unit_id}"),
             body: CommandBody::MergeResult {
@@ -324,7 +353,7 @@ impl Engine {
                 repo: repo.to_string(),
                 branch: branch.to_string(),
                 sha: sha.to_string(),
-                outcome: outcome.to_string(),
+                outcome: outcome.clone(),
                 landed,
             },
         })?;
@@ -341,7 +370,7 @@ impl Engine {
         } else {
             Ok(MergeStep::Parked {
                 unit: unit_id.to_string(),
-                reason: outcome.to_string(),
+                reason: outcome,
             })
         }
     }

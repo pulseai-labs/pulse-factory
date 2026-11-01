@@ -11,7 +11,7 @@ use crate::status::{EndStatus, Status, check_reason};
 use crate::unit::{Signal, UnitDetail};
 use crate::workflow::Workflow;
 
-use super::{Command, CommandBody, RunView};
+use super::{Command, CommandBody, PushOutcome, RunView};
 
 /// What `decide` returns for a command.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,7 +93,9 @@ pub fn decide(
 
     match &command.body {
         CommandBody::OpenRun { .. } => unreachable!("handled above"),
-        CommandBody::AdmitUnit { unit } => admit_unit(view, run_id, unit, now),
+        CommandBody::AdmitUnit { unit, track } => {
+            admit_unit(view, workflow, run_id, unit, track, now)
+        }
         CommandBody::Launch {
             unit_id,
             stage,
@@ -147,6 +149,14 @@ pub fn decide(
         } => merge::decide_merge_result(
             view, workflow, unit_id, repo, branch, sha, outcome, *landed, now,
         ),
+        CommandBody::Push {
+            unit_id,
+            repo,
+            branch,
+            sha,
+            outcome,
+            ..
+        } => push_effect(view, unit_id, repo, branch, sha, outcome),
         CommandBody::EndRun { reason } => {
             let reason = check_reason(reason).map_err(|e| e.to_string())?;
             let mut r = run.clone();
@@ -160,13 +170,45 @@ pub fn decide(
     }
 }
 
+/// A push is recorded for any unit of the run, in any state.
+fn push_effect(
+    view: &RunView,
+    unit_id: &str,
+    repo: &str,
+    branch: &str,
+    sha: &str,
+    outcome: &PushOutcome,
+) -> Result<Decision, Rejected> {
+    view.node(unit_id)
+        .filter(|n| n.kind == NodeKind::Unit)
+        .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
+    let mut d = Decision::admitted();
+    d.unit_id = Some(unit_id.to_string());
+    let how = match outcome {
+        PushOutcome::Pushed => "pushed".to_string(),
+        PushOutcome::Failed(why) => format!("failed: {why}"),
+    };
+    d.ledger = Some(format!(
+        "push: repo={repo} branch={branch} sha={sha} outcome={how}"
+    ));
+    Ok(d)
+}
+
 fn admit_unit(
     view: &RunView,
+    workflow: &Workflow,
     run_id: &str,
     unit: &crate::port::unit_source::UnitRecord,
+    track: &str,
     now: &str,
 ) -> Result<Decision, Rejected> {
     unit.check().map_err(|e| e.to_string())?;
+    if workflow.track(track).is_none() {
+        return Err(format!(
+            "unit {} names track {track:?}, which the workflow does not define",
+            unit.id
+        ));
+    }
     if view.node(&unit.id).is_some() {
         return Err(format!(
             "unit {} is already admitted under another command",
@@ -176,6 +218,7 @@ fn admit_unit(
     let ingest_seq = u32::try_from(view.units().count() + 1).unwrap_or(u32::MAX);
     let detail = UnitDetail {
         record: unit.clone(),
+        track: track.to_string(),
         ingest_seq,
         stages_done: 0,
         pr: None,
@@ -197,6 +240,10 @@ fn admit_unit(
         updated_at: now.to_string(),
     }));
     Ok(d)
+}
+
+pub(crate) fn unknown_track(unit_id: &str, track: &str) -> String {
+    format!("unit {unit_id} is on track {track:?}, which the workflow does not define")
 }
 
 fn attach(
@@ -256,6 +303,9 @@ fn signal_stage(
         .filter(|n| n.status == Status::Running)
         .ok_or_else(|| format!("unit {unit_id} has no running stage {stage}"))?;
     let mut detail = view.unit_detail(unit)?;
+    let track = workflow
+        .track(&detail.track)
+        .ok_or_else(|| unknown_track(unit_id, &detail.track))?;
     if pr.is_some() {
         detail.pr = pr;
     }
@@ -271,8 +321,8 @@ fn signal_stage(
     if signal.is_success() {
         stage_end.status = Status::Done;
         detail.stages_done += 1;
-        let all_done = detail.stages_done as usize >= workflow.stages.len();
-        if all_done && workflow.merge.is_none() {
+        let all_done = detail.stages_done as usize >= track.stages.len();
+        if all_done && track.merge.is_none() {
             unit_next.status = Status::Done;
             unit_next.reason = Some("all stages done".to_string());
             text = format!("stage {stage} done ({}); unit done", signal.describe());

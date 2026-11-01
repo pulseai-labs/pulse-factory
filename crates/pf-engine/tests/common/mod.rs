@@ -12,6 +12,7 @@ use pf_engine::port::agent::*;
 use pf_engine::port::forge::*;
 use pf_engine::port::store::*;
 use pf_engine::port::unit_source::{UnitRecord, UnitSource, UnitSourceError};
+use pf_engine::workflow::{MergeDef, Track};
 use pf_engine::{Clock, Engine, EngineConfig, MergeRule, StageDef, Workflow};
 
 // ---------------------------------------------------------------- store
@@ -410,14 +411,59 @@ pub fn unit(id: &str, group: &str, order: u32) -> UnitRecord {
 // ---------------------------------------------------------------- engine
 
 pub fn workflow(stages: &[&str], merge: bool) -> Workflow {
-    Workflow {
-        name: "test-flow".to_string(),
-        stages: stages
+    Workflow::single_track(
+        "test-flow",
+        stages
             .iter()
             .map(|s| StageDef::new(s, &format!("{s}-role"), "model-a"))
             .collect(),
-        merge: merge.then_some(MergeRule::GreenChecksInDeclaredOrder),
+        merge.then_some(MergeRule::GreenChecksInDeclaredOrder),
+        Settings::default(),
+    )
+}
+
+/// Like [`workflow`], with the one track named `item`.
+pub fn item_workflow(stages: &[&str], merge: bool) -> Workflow {
+    let mut wf = workflow(stages, merge);
+    wf.tracks[0].name = "item".to_string();
+    wf
+}
+
+/// A workflow with two tracks. `lane` has the stage `fill` and no merge rule. `item` has the
+/// stages `build` and `check` and merges by rule.
+pub fn two_track_workflow() -> Workflow {
+    let stage = |s: &str| StageDef::new(s, &format!("{s}-role"), "model-a");
+    Workflow {
+        name: "two-tracks".to_string(),
+        tracks: vec![
+            Track {
+                name: "lane".to_string(),
+                stages: vec![stage("fill")],
+                merge: None,
+            },
+            Track {
+                name: "item".to_string(),
+                stages: vec![stage("build"), stage("check")],
+                merge: Some(MergeDef::new(MergeRule::GreenChecksInDeclaredOrder)),
+            },
+        ],
         settings: Settings::default(),
+        roots: Vec::new(),
+    }
+}
+
+/// A unit source that names its track.
+pub struct TrackedSource {
+    pub track: String,
+    pub records: Vec<UnitRecord>,
+}
+
+impl UnitSource for TrackedSource {
+    fn poll(&mut self) -> Result<Vec<UnitRecord>, UnitSourceError> {
+        Ok(self.records.clone())
+    }
+    fn track(&self) -> Option<&str> {
+        Some(&self.track)
     }
 }
 
@@ -454,23 +500,38 @@ impl Env {
 }
 
 pub fn config(dir: &std::path::Path, wf: Workflow) -> EngineConfig {
+    config_with(dir, wf, BTreeMap::new())
+}
+
+pub fn config_with(
+    dir: &std::path::Path,
+    wf: Workflow,
+    params: BTreeMap<String, String>,
+) -> EngineConfig {
     EngineConfig {
         run_id: "run-1".to_string(),
         workflow: wf,
         ledger_path: dir.join("ledger.md"),
         state_dir: dir.join("state"),
+        run_dir: dir.join("run"),
+        params,
     }
 }
 
 /// A started engine on fake ports.
 pub fn env(wf: Workflow) -> Env {
+    env_with_params(wf, BTreeMap::new())
+}
+
+/// A started engine on fake ports, with run parameters.
+pub fn env_with_params(wf: Workflow, params: BTreeMap<String, String>) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let store = FakeStore::new();
     let agent = FakeAgent::new();
     let forge = FakeForge::new();
     let ledger: Box<dyn LedgerFile> = Box::new(FsLedger::new(dir.path().join("ledger.md")));
     let engine = Engine::new(
-        config(dir.path(), wf),
+        config_with(dir.path(), wf, params),
         store.clone(),
         agent.clone(),
         forge.clone(),

@@ -8,21 +8,24 @@
 //! `health.json` in the state directory (outside the store) and to stderr, which the systemd
 //! journal collects. A failed ledger append does the same.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::admission::{
-    Admission, Command, CommandBody, EngineError, RunView, canonical_content, decide,
+    Admission, Command, CommandBody, EngineError, PushOutcome, RunView, body_of_content,
+    canonical_content, decide,
 };
 use crate::capacity::Capacity;
 use crate::ledger::{FsLedger, LedgerFile, format_line};
+use crate::merge::PushRecord;
 use crate::port::agent::{AgentPort, Usage};
 use crate::port::forge::{ForgePort, PrRef};
 use crate::port::store::{
     Commit, Committed, LedgerEntry, LedgerLine, NewAdmission, Store, StoreError,
 };
-use crate::port::unit_source::UnitSource;
-use crate::status::EndStatus;
+use crate::port::unit_source::{UnitRecord, UnitSource};
+use crate::status::{EndStatus, one_line_reason, redact};
 use crate::unit::Signal;
 use crate::workflow::Workflow;
 
@@ -70,6 +73,10 @@ pub struct EngineConfig {
     pub ledger_path: PathBuf,
     /// Where `health.json` goes. It is outside the store.
     pub state_dir: PathBuf,
+    /// The run's own directory. `{run.dir}` renders to it.
+    pub run_dir: PathBuf,
+    /// The values of the workflow's parameters. `{param.<k>}` renders to them.
+    pub params: BTreeMap<String, String>,
 }
 
 pub(crate) struct Inner {
@@ -248,7 +255,11 @@ impl Engine {
                 .unwrap_or_default();
             LedgerEntry {
                 ledger_file: self.ledger_file(),
-                body: format!("{now} {run_id} {}{unit} | {text}", command.body.kind()),
+                // Every ledger line passes `redact`, whichever command wrote it.
+                body: redact(&format!(
+                    "{now} {run_id} {}{unit} | {text}",
+                    command.body.kind()
+                )),
             }
         });
         let commit = Commit {
@@ -331,17 +342,30 @@ impl Engine {
     }
 
     /// Admit the units a source has ready. A unit ID that was admitted before is a replay.
+    ///
+    /// The units join the track the source names. A source with no track joins the workflow's
+    /// only track, and the call is refused when the workflow has several.
     pub fn ingest(&self, source: &mut dyn UnitSource) -> Result<IngestReport, EngineError> {
+        let track = match source.track() {
+            Some(name) => name.to_string(),
+            None => self
+                .cfg
+                .workflow
+                .sole_track()
+                .map(|t| t.name.clone())
+                .ok_or_else(|| {
+                    EngineError::Rejected(
+                        "the unit source names no track, and the workflow has several".to_string(),
+                    )
+                })?,
+        };
         let records = source
             .poll()
             .map_err(|e| EngineError::Port(e.to_string()))?;
         let mut report = IngestReport::default();
         for record in records {
             let id = record.id.clone();
-            let admission = self.submit(Command {
-                id: format!("unit:{id}"),
-                body: CommandBody::AdmitUnit { unit: record },
-            })?;
+            let admission = self.admit_unit(record, &track)?;
             if admission.replayed {
                 report.replayed.push(id);
             } else {
@@ -349,6 +373,18 @@ impl Engine {
             }
         }
         Ok(report)
+    }
+
+    /// Admit one unit onto a track. The same ID with the same content is a replay. A seed unit
+    /// comes in through here too.
+    pub fn admit_unit(&self, record: UnitRecord, track: &str) -> Result<Admission, EngineError> {
+        self.submit(Command {
+            id: format!("unit:{}", record.id),
+            body: CommandBody::AdmitUnit {
+                unit: record,
+                track: track.to_string(),
+            },
+        })
     }
 
     /// A signal ends the unit's running stage `stage`.
@@ -394,13 +430,64 @@ impl Engine {
         })
     }
 
+    /// Record a seat's push at the push boundary. It writes one ledger line with repo, branch,
+    /// SHA and outcome, in every run state. `event_id` makes a retry safe: a repeat of one ID is
+    /// a replay, and two failed pushes with different IDs give two lines.
+    pub fn record_push(
+        &self,
+        unit_id: &str,
+        event_id: &str,
+        repo: &str,
+        branch: &str,
+        sha: &str,
+        outcome: PushOutcome,
+    ) -> Result<Admission, EngineError> {
+        // Outside text is cleaned before it is stored, not only before it is written to the ledger.
+        let outcome = match outcome {
+            PushOutcome::Pushed => PushOutcome::Pushed,
+            PushOutcome::Failed(why) => PushOutcome::Failed(one_line_reason(&why)),
+        };
+        self.submit(Command {
+            id: format!("push:{event_id}"),
+            body: CommandBody::Push {
+                unit_id: unit_id.to_string(),
+                event_id: event_id.to_string(),
+                repo: redact(repo),
+                branch: redact(branch),
+                sha: sha.to_string(),
+                outcome,
+            },
+        })
+    }
+
+    /// The last push of a unit that succeeded, as the admissions record it. A later failed push
+    /// does not hide it.
+    pub fn last_successful_push(&self, unit_id: &str) -> Result<Option<PushRecord>, EngineError> {
+        let view = self.view()?;
+        Ok(view
+            .admissions
+            .iter()
+            .rev()
+            .filter(|a| a.kind == "push" && a.unit_id.as_deref() == Some(unit_id))
+            .find_map(|a| match body_of_content(&a.content)? {
+                CommandBody::Push {
+                    repo,
+                    branch,
+                    sha,
+                    outcome: PushOutcome::Pushed,
+                    ..
+                } => Some(PushRecord { repo, branch, sha }),
+                _ => None,
+            }))
+    }
+
     /// Park a unit that is `running`. Every halt condition comes through here.
     pub fn park(&self, unit_id: &str, reason: &str) -> Result<Admission, EngineError> {
         self.submit(Command {
             id: format!("park:{unit_id}"),
             body: CommandBody::Park {
                 unit_id: unit_id.to_string(),
-                reason: reason.to_string(),
+                reason: one_line_reason(reason),
             },
         })
     }
@@ -417,7 +504,7 @@ impl Engine {
             body: CommandBody::End {
                 node_id: node_id.to_string(),
                 status,
-                reason: reason.to_string(),
+                reason: one_line_reason(reason),
             },
         })
     }
@@ -427,7 +514,24 @@ impl Engine {
         self.submit(Command {
             id: format!("halt:{}", self.cfg.run_id),
             body: CommandBody::Halt {
-                reason: reason.to_string(),
+                reason: one_line_reason(reason),
+            },
+        })
+    }
+
+    /// A halt from one named source, such as a queue that holds a bad record. It has the effect
+    /// of [`Engine::halt`] and its own command ID, `halt:<source>`, so it never conflicts with
+    /// the operator's `halt` or with a halt from another source.
+    pub fn halt_for(&self, source: &str, reason: &str) -> Result<Admission, EngineError> {
+        if source.trim().is_empty() {
+            return Err(EngineError::Rejected(
+                "a halt needs the name of its source".to_string(),
+            ));
+        }
+        self.submit(Command {
+            id: format!("halt:{source}"),
+            body: CommandBody::Halt {
+                reason: one_line_reason(reason),
             },
         })
     }
@@ -437,7 +541,7 @@ impl Engine {
         self.submit(Command {
             id: format!("end-run:{}", self.cfg.run_id),
             body: CommandBody::EndRun {
-                reason: reason.to_string(),
+                reason: one_line_reason(reason),
             },
         })
     }

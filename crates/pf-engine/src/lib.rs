@@ -13,11 +13,12 @@ pub mod ledger;
 pub mod merge;
 pub mod port;
 pub mod reconcile;
+pub mod render;
 pub mod status;
 pub mod unit;
 pub mod workflow;
 
-pub use admission::{Admission, Command, CommandBody, EngineError, RunView};
+pub use admission::{Admission, Command, CommandBody, EngineError, PushOutcome, RunView};
 pub use engine::{Clock, Engine, EngineConfig, IngestReport, system_clock};
 pub use status::{EndStatus, Status};
-pub use workflow::{MergeRule, StageDef, Workflow};
+pub use workflow::{MergeDef, MergeRule, StageDef, Track, Workflow};

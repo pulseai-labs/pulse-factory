@@ -16,8 +16,11 @@ pub struct LaunchPlan {
     pub stage: String,
     pub role: String,
     pub model: String,
+    /// The agent runtime of the role. A router picks the adapter by this name.
+    pub runtime: String,
     pub attempt: u32,
-    /// Free settings the adapter adds, such as flags. The engine does not read them.
+    /// The stage's launch settings, rendered (`docs/contracts/launch-settings.md`), and the
+    /// settings the adapter adds, such as flags.
     pub settings: std::collections::BTreeMap<String, String>,
 }
 
