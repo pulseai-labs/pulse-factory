@@ -245,6 +245,12 @@ fn a_failed_liveness_check_stops_the_start_up_and_parks_nothing() {
                 "socket closed".to_string(),
             ))
         }
+        fn stop(
+            &self,
+            _: &pf_engine::port::agent::SessionRef,
+        ) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
         fn resolve_plugin(
             &self,
             _: &str,

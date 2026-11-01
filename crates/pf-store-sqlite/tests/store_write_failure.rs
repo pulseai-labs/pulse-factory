@@ -53,6 +53,9 @@ impl AgentPort for IdleAgent {
     fn is_alive(&self, _: &SessionRef) -> Result<bool, AgentError> {
         Ok(true)
     }
+    fn stop(&self, _: &SessionRef) -> Result<(), AgentError> {
+        Ok(())
+    }
     fn resolve_plugin(&self, name: &str, _: &str) -> Result<ResolvedPlugin, AgentError> {
         Err(AgentError::Refused(format!("no plugin {name}")))
     }

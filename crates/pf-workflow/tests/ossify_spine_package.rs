@@ -25,6 +25,24 @@ fn the_workflow_file_parses() {
 }
 
 #[test]
+fn the_repo_on_the_forge_is_a_parameter_apart_from_the_local_repo_path() {
+    let file = load().file;
+    for name in ["repo", "forge_repo", "briefs"] {
+        assert!(file.params.iter().any(|p| p == name), "param {name}");
+    }
+    let merge = file.track("item").unwrap().merge.as_ref().unwrap();
+    assert_eq!(merge.repo, "{param.forge_repo}");
+    // `git -C` still takes the local path.
+    assert!(
+        merge
+            .after_merge
+            .iter()
+            .any(|c| c.argv.iter().any(|a| a == "{param.repo}")),
+        "after_merge keeps {{param.repo}}"
+    );
+}
+
+#[test]
 fn it_declares_the_ossify_plugin_with_a_minimum_version() {
     let file = load().file;
     let plugin = file

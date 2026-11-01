@@ -17,7 +17,6 @@ export default function (pi) {
   const INBOX_FILE = process.env.PF_INBOX_FILE
   const HOOK_CMD = process.env.PF_HOOK_CMD
   const ROLE = process.env.PF_SEAT_ROLE || ''
-  const OUTPUT_LIMIT = 20000
   const HOOK_TIMEOUT_MS = 10000
   // The tools the seat may use. OMP loads MCP servers from project, user and plugin config
   // whatever `--tools` says, so the extension limits the tools itself.
@@ -36,14 +35,6 @@ export default function (pi) {
     } catch {
       // A broken event file must not break the seat. The adapter sees the missing events.
     }
-  }
-
-  function textOf(content) {
-    if (typeof content === 'string') return content
-    if (!Array.isArray(content)) return ''
-    return content
-      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
-      .join('')
   }
 
   // The rule hook gets the call as JSON on stdin and answers {"decision":"allow"|"deny","reason":"..."}.
@@ -221,8 +212,8 @@ export default function (pi) {
     if (id) commands.delete(id)
     const details = event.details || {}
     let exitCode = typeof details.exitCode === 'number' ? details.exitCode : typeof event.exitCode === 'number' ? event.exitCode : event.isError ? 1 : 0
-    let output = textOf(event.content)
-    if (output.length > OUTPUT_LIMIT) output = output.slice(output.length - OUTPUT_LIMIT)
-    emit({ ev: 'bash', command, exitCode, output })
+    // The output is not sent. A first push prints no SHA, an update prints a short one, and a seat
+    // can print any text, so the adapter measures a push in git and never reads it from output.
+    emit({ ev: 'bash', command, exitCode })
   })
 }

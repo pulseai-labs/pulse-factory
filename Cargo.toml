@@ -9,6 +9,8 @@ members = [
     "crates/pf-adapter-fake",
     "crates/pf-forge-github",
     "crates/pf-forge-bare",
+    "crates/pf-ipc",
+    "crates/pulse-factory",
 ]
 
 [workspace.package]
@@ -25,6 +27,7 @@ tokio = { version = "=1.54.1", default-features = false }
 rusqlite = { version = "=0.41.0", features = ["bundled"] }
 yaml-rust2 = "=0.13.0"
 portable-pty = "=0.9.0"
+clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
 # dev-only test crates
 proptest = "1.11.0"
 tempfile = "3"

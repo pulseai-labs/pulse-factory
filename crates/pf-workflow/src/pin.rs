@@ -25,7 +25,7 @@ pub const DEFAULT_HASH_PROGRAM: &str = "sha256sum";
 const HASH_TIMEOUT_SECONDS: u64 = 60;
 
 /// How a pin reads its files.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PinScope {
     /// Every file under the directory. A new file is a change.
     Directory,
@@ -34,7 +34,7 @@ pub enum PinScope {
 }
 
 /// One pinned directory, or one pinned list of files.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Pin {
     pub name: String,
     pub version: String,

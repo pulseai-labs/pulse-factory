@@ -1,0 +1,34 @@
+[package]
+name = "pulse-factory"
+description = "The pulse-factory binary: the CLI verbs, the controller and the hook."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pulse_factory"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pulse-factory"
+path = "src/main.rs"
+
+[dependencies]
+pf-adapter-fake = { path = "../pf-adapter-fake" }
+pf-adapter-omp = { path = "../pf-adapter-omp" }
+pf-engine = { path = "../pf-engine" }
+pf-forge-bare = { path = "../pf-forge-bare" }
+pf-forge-github = { path = "../pf-forge-github" }
+pf-ipc = { path = "../pf-ipc" }
+pf-rules = { path = "../pf-rules" }
+pf-store-sqlite = { path = "../pf-store-sqlite" }
+pf-workflow = { path = "../pf-workflow" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros", "sync", "signal"] }
+
+[dev-dependencies]
+tempfile.workspace = true

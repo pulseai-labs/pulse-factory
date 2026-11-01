@@ -1,0 +1,13 @@
+[Unit]
+Description=Pulse Factory controller: one process that drives the seats of a run
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pulse-factory controller
+Restart=on-failure
+RestartSec=5
+# Seats inherit this environment. `gh` and `git` take their credentials from the operator's home.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

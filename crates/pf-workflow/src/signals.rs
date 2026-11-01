@@ -99,11 +99,24 @@ impl Probe for SystemProbe {
     }
 }
 
-/// Read a PR reference: `https://<host>/<owner>/<repo>/pull/<n>` or `<owner>/<repo>#<n>`.
+/// Read a PR reference: `https://<host>/<owner>/<repo>/pull/<n>`, `<owner>/<repo>#<n>` or, for
+/// the bare forge, `file://<absolute path>#<n>`. The last names a repo by its path. A relative
+/// path is refused.
 pub fn parse_pr(text: &str) -> Option<PrRef> {
     let text = text.trim();
     if text.is_empty() || text.contains(char::is_whitespace) {
         return None;
+    }
+    if let Some(rest) = text.strip_prefix("file://") {
+        let (path, number) = rest.rsplit_once('#')?;
+        if !path.starts_with('/') || path.len() < 2 {
+            return None;
+        }
+        let number: u64 = number.parse().ok().filter(|n| *n > 0)?;
+        return Some(PrRef {
+            repo: path.to_string(),
+            number,
+        });
     }
     let (repo, number) = if let Some(rest) = text.strip_prefix("https://") {
         let parts: Vec<&str> = rest.split('/').collect();

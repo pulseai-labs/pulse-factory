@@ -13,7 +13,7 @@ pub mod screen;
 pub mod token;
 pub mod version;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +44,8 @@ const DEFAULT_FIRST_TURN_SECONDS: u64 = 120;
 const DEFAULT_STALL_MINUTES: u64 = 20;
 
 /// Environment names that only the adapter sets.
-const RESERVED_ENV: [&str; 6] = [
+const RESERVED_ENV: [&str; 7] = [
+    "PI_EDIT_VARIANT",
     "PF_ALLOWED_TOOLS",
     "PF_SEAT_TOKEN",
     "PF_EVENT_FILE",
@@ -137,6 +138,10 @@ struct Session {
     cwd: PathBuf,
     push_dir: Option<PathBuf>,
     push_branch: Option<String>,
+    /// The `remote` setting: the remote that the push measurement reads.
+    remote: String,
+    /// The remote-tracking refs of `remote` at the last read, by branch name.
+    refs: BTreeMap<String, String>,
     baseline: Option<Baseline>,
     queue: Vec<SessionEvent>,
     push_seq: u64,
@@ -227,15 +232,6 @@ impl OmpAdapter {
         let s = self.find(session)?;
         let s = s.lock().unwrap_or_else(|e| e.into_inner());
         s.pty.write(bytes).map_err(failed)
-    }
-
-    /// End a session's process.
-    pub fn stop(&self, session: &SessionRef) -> Result<(), AgentError> {
-        let s = self.find(session)?;
-        let mut s = s.lock().unwrap_or_else(|e| e.into_inner());
-        s.pty.kill();
-        s.state = SessionState::Ended;
-        Ok(())
     }
 
     fn find(&self, session: &SessionRef) -> Result<Arc<Mutex<Session>>, AgentError> {
@@ -413,107 +409,151 @@ impl Session {
                 events::add(&mut self.usage, &usage);
                 self.activity(line.time_ms, now);
             }
-            Ev::Bash {
-                command,
-                exit_code,
-                output,
-            } => {
+            Ev::Bash { command, exit_code } => {
                 self.activity(line.time_ms, now);
-                self.on_bash(&command, exit_code, &output);
+                self.on_bash(&command, exit_code);
             }
             Ev::Other => {}
         }
     }
 
-    /// One bash call. Each push in it gives a `Push` event, and a push with an unread target
-    /// also checks the default branch of the remote.
-    fn on_bash(&mut self, command: &str, exit_code: Option<i64>, output: &str) {
+    /// One bash call. A push that names its branch and directory in the command gives one `Push`
+    /// for that branch. A push with an unread target is measured in git (`measure_unread`), and
+    /// the default branch of the remote is read again after it.
+    fn on_bash(&mut self, command: &str, exit_code: Option<i64>) {
         let intents = push_of(command);
         if intents.is_empty() {
             return;
         }
-        let ok = exit_code == Some(0);
-        let summary = git::summary_of(output);
+        let outcome = match exit_code {
+            Some(0) => PushOutcome::Pushed,
+            Some(c) => PushOutcome::Failed(one_line_reason(&format!("exit code {c}"))),
+            None => PushOutcome::Failed(one_line_reason("the exit code was not reported")),
+        };
+        let mut unread = false;
         for intent in intents {
             let dir_unread = !matches!(intent.dir, Part::Literal(_) | Part::Absent);
             let branch_unread = matches!(intent.branch, Part::Unresolved(_));
-            let dir: Option<PathBuf> = match &intent.dir {
-                Part::Literal(d) => Some(PathBuf::from(d)),
-                Part::Absent => Some(self.push_dir.clone().unwrap_or_else(|| self.cwd.clone())),
-                Part::Unresolved(_) => self.push_dir.clone(),
+            if dir_unread || branch_unread {
+                unread = true;
+                continue;
+            }
+            // A named-branch push from a literal command: the branch is the command's own text,
+            // and the SHA is the branch in the push directory.
+            let dir: PathBuf = match &intent.dir {
+                Part::Literal(d) => PathBuf::from(d),
+                _ => self.push_dir.clone().unwrap_or_else(|| self.cwd.clone()),
             };
-            // The branch: the command's own text when it is read, else the summary line, else the
-            // measured `push_branch`.
-            let mut sha: Option<String> = None;
             let branch: Option<String> = match &intent.branch {
                 Part::Literal(b) if b != "HEAD" => Some(b.clone()),
-                Part::Literal(_) | Part::Absent => dir.as_deref().and_then(|d| {
-                    git::git(d, &["symbolic-ref", "--short", "HEAD"]).filter(|b| !b.is_empty())
-                }),
-                Part::Unresolved(_) => match &summary {
-                    Some(s) => {
-                        sha = s.sha.clone();
-                        Some(s.branch.clone())
-                    }
-                    None => self.push_branch.clone(),
-                },
+                _ => git::git(&dir, &["symbolic-ref", "--short", "HEAD"]).filter(|b| !b.is_empty()),
             };
-            let sha_dir = dir.clone();
-            let full = match (&branch, &sha_dir) {
-                (Some(b), Some(d)) => {
-                    let by_summary = sha.as_deref().and_then(|s| git::rev_parse(d, s));
-                    by_summary.or_else(|| git::rev_parse(d, b))
+            let sha = branch
+                .as_deref()
+                .and_then(|b| git::rev_parse(&dir, b))
+                .unwrap_or_else(|| "unknown".to_string());
+            self.push_event(
+                branch.unwrap_or_else(|| "unknown".to_string()),
+                sha,
+                outcome.clone(),
+            );
+        }
+        if unread {
+            self.measure_unread(&outcome);
+            self.check_default_branch();
+        }
+    }
+
+    fn push_event(&mut self, branch: String, sha: String, outcome: PushOutcome) {
+        self.push_seq += 1;
+        self.queue.push(SessionEvent::Push {
+            id: format!("{}-push-{}", self.id, self.push_seq),
+            repo: self.repo.clone(),
+            branch,
+            sha,
+            outcome,
+        });
+    }
+
+    /// Measure the pushes of a call whose target the rules could not read. Read the
+    /// remote-tracking refs in `push_dir`. Each ref that changed since the last read gives one
+    /// `Push`, named by that ref, with its SHA. The last `Push` is always `push_branch`, with its
+    /// SHA from `rev-parse`, whether or not its ref changed. A failed read counts as no ref
+    /// changed, and a failed `rev-parse` gives the SHA `unknown`.
+    fn measure_unread(&mut self, outcome: &PushOutcome) {
+        let Some(dir) = self.push_dir.clone() else {
+            // A role with no push directory cannot push: the rules deny it.
+            return;
+        };
+        let mut changed: Vec<(String, String)> = Vec::new();
+        if let Some(now) = git::remote_refs(&dir, &self.remote) {
+            for (name, sha) in &now {
+                if self.refs.get(name) != Some(sha) {
+                    changed.push((name.clone(), sha.clone()));
                 }
-                _ => None,
-            };
-            let sha_text = full.or(sha).unwrap_or_else(|| "unknown".to_string());
-            self.push_seq += 1;
-            let outcome = if ok {
-                PushOutcome::Pushed
-            } else {
-                let why = match exit_code {
-                    Some(c) => {
-                        format!("exit code {c}: {}", redacted_tail(output, &self.token, 300))
-                    }
-                    None => "the exit code was not reported".to_string(),
-                };
-                PushOutcome::Failed(one_line_reason(&why))
-            };
-            self.queue.push(SessionEvent::Push {
-                id: format!("{}-push-{}", self.id, self.push_seq),
-                repo: self.repo.clone(),
-                branch: branch.unwrap_or_else(|| "unknown".to_string()),
-                sha: sha_text,
-                outcome,
-            });
-            if ok && (branch_unread || dir_unread) {
-                self.check_default_branch(&intent.remote);
+            }
+            self.refs = now;
+        }
+        let last = self.push_branch.clone();
+        let seq_before = self.push_seq;
+        for (name, sha) in changed {
+            if last.as_deref() == Some(name.as_str()) {
+                continue;
+            }
+            self.push_event(name, sha, outcome.clone());
+        }
+        match last {
+            Some(branch) => {
+                let sha = git::rev_parse(&dir, &branch).unwrap_or_else(|| "unknown".to_string());
+                self.push_event(branch, sha, outcome.clone());
+            }
+            None => {
+                // No `push_branch` and no ref moved: the push is still one line, with no name.
+                if self.push_seq == seq_before {
+                    self.push_event(
+                        "unknown".to_string(),
+                        "unknown".to_string(),
+                        outcome.clone(),
+                    );
+                }
             }
         }
     }
 
-    /// Compare the default branch of the remote with the value read at launch.
-    fn check_default_branch(&mut self, remote: &Part) {
+    /// Read the default branch of the remote again after a push with an unread target.
+    ///
+    /// - unchanged: nothing;
+    /// - moved, and the push directory holds the new commit: `DefaultBranchMoved`;
+    /// - moved, and the push directory lacks it: someone else moved it, so the new value becomes
+    ///   the baseline and nothing is reported;
+    /// - a failed read: one retry, then `DefaultBranchMoved` with an empty `after`.
+    fn check_default_branch(&mut self) {
         let Some(base) = self.baseline.clone() else {
             return;
         };
-        let remote_name = match remote {
-            Part::Literal(r) => r.clone(),
-            _ => base.remote.clone(),
-        };
-        let Some(now_sha) = git::remote_branch_sha(&base.dir, &remote_name, &base.branch) else {
+        let read = || git::remote_branch_sha(&base.dir, &base.remote, &base.branch);
+        let Some(now_sha) = read().or_else(read) else {
+            self.queue.push(SessionEvent::DefaultBranchMoved {
+                remote: base.remote.clone(),
+                branch: base.branch.clone(),
+                before: base.sha.clone(),
+                after: String::new(),
+            });
             return;
         };
-        if now_sha != base.sha {
+        if now_sha == base.sha {
+            return;
+        }
+        if git::has_commit(&base.dir, &now_sha) {
             self.queue.push(SessionEvent::DefaultBranchMoved {
-                remote: remote_name,
+                remote: base.remote.clone(),
                 branch: base.branch.clone(),
                 before: base.sha.clone(),
                 after: now_sha.clone(),
             });
-            if let Some(b) = self.baseline.as_mut() {
-                b.sha = now_sha;
-            }
+        }
+        if let Some(b) = self.baseline.as_mut() {
+            b.sha = now_sha;
         }
     }
 }
@@ -592,6 +632,9 @@ impl OmpAdapter {
             &dir.join("omp-sessions"),
             self.cfg.brief_root.as_deref(),
         )?;
+        // OMP's `edit` carries no path in its default mode. In `replace` mode it does, so the
+        // controller's hook can judge the write.
+        env.push(("PI_EDIT_VARIANT".into(), "replace".into()));
         env.push(("PF_SEAT_TOKEN".into(), token.clone()));
         env.push(("PF_EVENT_FILE".into(), events_path.display().to_string()));
         env.push(("PF_INBOX_FILE".into(), inbox_path.display().to_string()));
@@ -600,14 +643,38 @@ impl OmpAdapter {
         env.push(("PF_ALLOWED_TOOLS".into(), argv::SEAT_TOOLS.join(",")));
 
         let push_dir = setting(plan, "push_dir").map(PathBuf::from);
-        let baseline = push_dir.as_ref().and_then(|d| {
-            git::remote_head(d, "origin").map(|(branch, sha)| Baseline {
-                remote: "origin".to_string(),
+        let remote = setting(plan, "remote").unwrap_or("origin").to_string();
+        // With a `default_branch` setting, the launch reads that branch on the remote, and a
+        // failed read refuses the launch: a seat that pushes must have a baseline to be checked
+        // against. Without the setting, the remote's own HEAD gives the branch, and a failed read
+        // leaves no baseline.
+        let baseline = match (&push_dir, setting(plan, "default_branch")) {
+            (Some(d), Some(branch)) => {
+                let sha = git::remote_branch_sha(d, &remote, branch).ok_or_else(|| {
+                    refused(format!(
+                        "cannot read {remote}/{branch} in {}, so the default branch has no baseline",
+                        d.display()
+                    ))
+                })?;
+                Some(Baseline {
+                    remote: remote.clone(),
+                    branch: branch.to_string(),
+                    sha,
+                    dir: d.clone(),
+                })
+            }
+            (Some(d), None) => git::remote_head(d, &remote).map(|(branch, sha)| Baseline {
+                remote: remote.clone(),
                 branch,
                 sha,
                 dir: d.clone(),
-            })
-        });
+            }),
+            (None, _) => None,
+        };
+        let refs = push_dir
+            .as_ref()
+            .and_then(|d| git::remote_refs(d, &remote))
+            .unwrap_or_default();
 
         let spec = SpawnSpec {
             program: self.cfg.omp_bin.clone(),
@@ -653,6 +720,8 @@ impl OmpAdapter {
             cwd,
             push_dir,
             push_branch: setting(plan, "push_branch").map(str::to_string),
+            remote,
+            refs,
             baseline,
             queue: Vec::new(),
             push_seq: 0,
@@ -688,6 +757,10 @@ impl OmpAdapter {
             let exited = session.pty.exit_code();
             let timed_out = Instant::now() >= end;
             if exited.is_some() || timed_out {
+                if exited.is_some() {
+                    // The exit code can be known before the last output reaches the buffer.
+                    session.pty.wait_output_end(Duration::from_secs(2));
+                }
                 let head = match exited {
                     Some(code) => format!("OMP exited with {code} before a first turn; screen: "),
                     None => format!("no first turn in {first_turn} s; screen: "),
@@ -807,9 +880,22 @@ impl AgentPort for OmpAdapter {
     }
 
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
-        let s = self.find(session)?;
+        let Ok(s) = self.find(session) else {
+            return Ok(false);
+        };
         let s = s.lock().unwrap_or_else(|e| e.into_inner());
         Ok(s.pty.exit_code().is_none())
+    }
+
+    /// End the process group of a session. A session this adapter does not know is gone: `Ok`.
+    fn stop(&self, session: &SessionRef) -> Result<(), AgentError> {
+        let Ok(s) = self.find(session) else {
+            return Ok(());
+        };
+        let mut s = s.lock().unwrap_or_else(|e| e.into_inner());
+        s.pty.kill();
+        s.state = SessionState::Ended;
+        Ok(())
     }
 
     fn resolve_plugin(&self, name: &str, min_version: &str) -> Result<ResolvedPlugin, AgentError> {

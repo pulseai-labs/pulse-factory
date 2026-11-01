@@ -66,6 +66,10 @@ pub struct Cmd {
     pub piped_from: Option<usize>,
     /// True for a `for`, `select` or `case` header: it holds no command.
     pub header: bool,
+    /// True when the header is a `for` or a `select`.
+    pub loop_header: bool,
+    /// The words of a `for` or `select` header after the keyword. The first is the variable.
+    pub head: Vec<Word>,
 }
 
 /// All commands of a command line, nested ones included.
@@ -347,6 +351,9 @@ impl Parser<'_> {
             if plain && word.text == "in" && case_headers.contains(&idx) {
                 return Action::CaseIn;
             }
+            if cmd.loop_header {
+                cmd.head.push(word);
+            }
             return Action::Nothing;
         }
         if cmd.words.is_empty() {
@@ -363,6 +370,7 @@ impl Parser<'_> {
             }
             if plain && matches!(word.text.as_str(), "for" | "select") {
                 cmd.header = true;
+                cmd.loop_header = true;
                 return Action::Nothing;
             }
             if plain && word.text == "case" {

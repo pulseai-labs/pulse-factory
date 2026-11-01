@@ -299,6 +299,9 @@ impl AgentPort for FakeAgent {
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         Ok(!self.dead.lock().unwrap().contains(&session.0))
     }
+    fn stop(&self, _session: &SessionRef) -> Result<(), AgentError> {
+        Ok(())
+    }
     fn resolve_plugin(&self, name: &str, _min: &str) -> Result<ResolvedPlugin, AgentError> {
         Err(AgentError::Refused(format!("no plugin {name}")))
     }

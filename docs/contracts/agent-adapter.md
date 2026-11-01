@@ -23,11 +23,14 @@ rule that the engine knows no agent.
 - A runtime name has text and no `:`. A plan with a runtime that has no adapter is refused with
   `AgentError::Refused("no adapter for runtime \"<name>\"")`. The unit then parks with that reason.
 - An adapter keeps no state that must survive a restart (ADR-0007). After a restart, the controller
-  asks `is_alive` for each stored reference. A reference that the adapter does not know is not alive.
+  asks `is_alive` for each stored reference. A reference that the adapter does not know is not alive:
+  `is_alive` answers `Ok(false)` for it, never an error. (A router answers `Refused` for a reference
+  with no runtime tag.)
 
 ## The nine duties
 
-Each duty is one method of `AgentPort`. `is_alive` is a tenth call, for liveness. An adapter returns
+Each duty is one method of `AgentPort`. `is_alive` and `stop` are two more calls, for liveness and
+for ending a session. An adapter returns
 `AgentError::Refused` when it will not do a call, and `AgentError::Failed` when it tried and could not.
 
 | # | Method | What the adapter must do |
@@ -43,6 +46,14 @@ Each duty is one method of `AgentPort`. `is_alive` is a tenth call, for liveness
 | 9 | `hand_off(session, successor)` | Start the successor session so it continues from a handoff file. The old session ends. The successor has the same runtime as the session. A router refuses any other. |
 
 The engine calls duty 7, then duty 8, then duty 1, in that order, on the same plan.
+
+### `stop`
+
+`stop(session)` ends the session's process **and every process it started**, and waits for the
+leader. It is safe to call twice. A reference the adapter does not know, and an untagged reference to
+a router, is `Ok(())`: there is nothing to stop. Reads such as `usage` and `drain_events` still work
+after a stop, so the controller can take the last reading. The controller calls `stop` for every
+session it ends, so no process outlives its stage.
 
 ### What a runtime may refuse
 
@@ -119,23 +130,50 @@ parks the unit through `Engine::park`.
 
 ### Push events
 
-- The adapter learns of each tool call that ran a shell command, its exit code and its output.
-- It finds each push with `pf_rules::push_of(command)`.
+- The adapter learns of each tool call that ran a shell command, and its exit code. It does **not**
+  learn the call's output: a first push prints no SHA, an update prints a short one, and a seat can
+  print any text. A branch and a SHA never come from output.
+- It finds each push with `pf_rules::push_of(command)`. An intent is **read** when its branch is
+  literal and its directory is literal or absent. Any other intent has an **unread** target.
 - `id` is fresh for each event. `repo` is the **declared** repo of the plan (the `repo` setting),
   never text that the seat's remote printed.
 - `outcome` is `PushOutcome::Pushed`, or `PushOutcome::Failed(reason)` with a one-line reason. A
-  failed push gives an event too.
-- `branch` and `sha` come from the push command when it names a branch. When the branch or the
-  directory is a shell variable, they come from the summary line of `git push` in the output if there
-  is one, and otherwise from the plan's `push_dir` and `push_branch`, measured with
-  `git -C <dir> rev-parse <branch>`. When nothing can be read, `sha` is `unknown`.
+  failed push gives an event too. The call's exit code is the outcome of each line it gives.
+- **A read push** gives one `Push` for the branch the command names. The SHA is
+  `git -C <dir> rev-parse <branch>`; `HEAD` or no branch means the directory's current branch. When
+  nothing can be read, `sha` is `unknown`.
+- **An unread push** is measured in git. For a seat with a `push_dir`, the adapter reads
+  `git -C <push_dir> for-each-ref refs/remotes/<remote>` at launch and again after each bash call
+  with an unread target. It leaves out `<remote>/HEAD`. Each other ref that changed since the last
+  read gives one `Push`, named by that ref, with that ref's SHA, in name order. A failed read counts
+  as no ref changed.
+- **The last `Push` of such a call is always `push_branch`**, with its SHA from
+  `git -C <push_dir> rev-parse <push_branch>`, whether or not its ref changed, because the
+  controller's `last_successful_push` reads the unit's last ledger line. A failed `rev-parse` gives the
+  SHA `unknown`. A call that moved no ref gives that one line. Without a `push_branch`, a call that
+  moved no ref gives one line with the branch and SHA `unknown`.
 - The controller writes the ledger line with `Engine::record_push`.
+- A `Push` from a seat with no `push_dir` has no measurement: the rules deny that seat a push.
 
 ### Default branch check
 
-At launch the adapter reads the remote's default branch tip. After a push with a target it could not
-read, it reads the tip again. A tip that moved gives `DefaultBranchMoved`, and the controller parks the
-unit.
+The `default_branch` setting names the branch. For a seat with a `push_dir`:
+
+- **At launch** the adapter reads `git -C <push_dir> ls-remote --exit-code <remote> refs/heads/<default
+  branch>`, with a 30-second limit. Only a line for exactly that ref counts, so `x/main` is not
+  `main`. **A failed read refuses the launch** (`AgentError::Refused`): a seat that pushes must have a
+  baseline.
+- **After a push with an unread target** it reads the same ref again:
+  - unchanged: nothing;
+  - moved, and `git -C <push_dir> cat-file -e <sha>^{commit}` finds the new tip: `DefaultBranchMoved`,
+    and the new tip becomes the baseline;
+  - moved, and the repository lacks it: someone else moved it. The new tip becomes the baseline and
+    nothing is reported, so a later unread push compares against it;
+  - a failed read: one retry, then `DefaultBranchMoved` with an empty `after`.
+- `remote` is the setting of that name (default `origin`). The remote's name in a seat's command is
+  never used for a read.
+- Without a `default_branch` setting, an adapter may take the branch from the remote's `HEAD`, and a
+  failed read then leaves no baseline.
 
 ## `resolve_plugin`
 
@@ -168,6 +206,7 @@ reads these keys and ignores the rest:
 | `first_turn_seconds` | The time for a first turn. Default 120. |
 | `stall_minutes` | The time without activity before `Stalled`. Default 20. |
 | `push_dir`, `push_branch` | Where to measure a push whose target the rules cannot read. |
+| `remote`, `default_branch` | The remote to read, and the branch of it that a push must not move. The controller adds them. |
 | `repo` | The declared repo for `Push` events. The workflow file does not admit this key. The controller adds it. |
 | `thinking` | An optional reasoning level. The workflow file does not admit this key. The controller adds it. |
 

@@ -1,9 +1,15 @@
-//! `pf-adapter-fake`: a scripted agent adapter behind the same port as a real one. It starts no
-//! process and uses no network, so it is the default for every test (`seat-launch-spend`).
+//! `pf-adapter-fake`: two agent adapters behind the same port as a real one, with no model and no
+//! network (`seat-launch-spend`). [`FakeAdapter`] is scripted: it starts no process, and it is the
+//! default for every test. [`PaperAdapter`] runs a seat script as a real process with no PTY, for
+//! the paper env (`pulse-factory arm --paper`).
 //!
 //! A scenario is chosen by unit ID. A launch fails as the scenario says, or it gives a session
 //! that follows a script. The script advances only when the test says so (`advance`, `finish`),
 //! so a test sees each state between two steps.
+
+mod paper;
+
+pub use paper::{PaperAdapter, PaperConfig};
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -72,6 +78,7 @@ struct State {
     plugins: Vec<ResolvedPlugin>,
     launches: usize,
     interrupts: usize,
+    stops: usize,
     push_seq: u64,
 }
 
@@ -146,6 +153,11 @@ impl FakeAdapter {
     /// How many sessions started. A failed launch does not count.
     pub fn launch_count(&self) -> usize {
         lock(&self.state).launches
+    }
+
+    /// How many times `stop` was called.
+    pub fn stop_count(&self) -> usize {
+        lock(&self.state).stops
     }
 
     pub fn interrupt_count(&self) -> usize {
@@ -355,10 +367,17 @@ impl AgentPort for FakeAdapter {
 
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let st = lock(&self.state);
-        st.sessions
-            .get(&session.0)
-            .map(|f| f.alive)
-            .ok_or_else(|| no_session(session))
+        Ok(st.sessions.get(&session.0).is_some_and(|f| f.alive))
+    }
+
+    fn stop(&self, session: &SessionRef) -> Result<(), AgentError> {
+        let mut st = lock(&self.state);
+        st.stops += 1;
+        if let Some(f) = st.sessions.get_mut(&session.0) {
+            f.alive = false;
+            f.state = SessionState::Ended;
+        }
+        Ok(())
     }
 
     fn resolve_plugin(&self, name: &str, min_version: &str) -> Result<ResolvedPlugin, AgentError> {

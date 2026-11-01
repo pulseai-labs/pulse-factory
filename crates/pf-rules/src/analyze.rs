@@ -1,11 +1,12 @@
 //! The rules: what a parsed command line does, and whether a role may do it.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use pf_workflow::rules::{Allow, RoleRules};
 
 use crate::shell::{Cmd, Parsed, Word, parse};
-use crate::{Context, PushIntent};
+use crate::{Context, Part, PushIntent};
 
 /// The most levels of `bash -c` inside `bash -c` that are read.
 const MAX_DEPTH: usize = 6;
@@ -47,10 +48,38 @@ const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tc
 
 // ---------------------------------------------------------------- walking
 
+/// What the call does to the working directory and the branch, in text order.
+struct Flow {
+    /// Every directory a relative path may mean: the working directory, and the directory of
+    /// each literal `cd` so far. A subshell is not told apart, so a path must hold in all of them.
+    cwds: Vec<PathBuf>,
+    /// The raw target of a `cd` that cannot be read. After it a relative path has no meaning.
+    cwd_unknown: Option<String>,
+    /// The branch that a literal `git switch` or `git checkout` set, or the raw text of one that
+    /// cannot be read.
+    switched: Option<Part>,
+}
+
+/// The directory of a push, as far as the command lets us read it.
+enum PushDir {
+    /// Every directory the push may run in lies inside the worktree or the push directory.
+    Inside,
+    /// A directory lies outside both. The text says which.
+    Outside(String),
+    /// A variable, or a `cd` to one, names the directory.
+    Unread,
+}
+
 pub struct Analyzer<'a> {
     pub rules: &'a RoleRules,
     pub ctx: &'a Context,
     pub walk: Walk,
+    /// For each variable that the call assigns: true while every assignment is `mktemp` or the
+    /// empty string. A first pass over the call fills it, so an assignment after its use counts.
+    pub vars: HashMap<String, bool>,
+    /// A `declare -n` makes any variable an alias of another. No variable is then known.
+    poisoned: bool,
+    flow: Flow,
 }
 
 impl<'a> Analyzer<'a> {
@@ -59,6 +88,119 @@ impl<'a> Analyzer<'a> {
             rules,
             ctx,
             walk: Walk::default(),
+            vars: HashMap::new(),
+            poisoned: false,
+            flow: Flow {
+                cwds: vec![ctx.cwd.clone()],
+                cwd_unknown: None,
+                switched: None,
+            },
+        }
+    }
+
+    /// An analyzer for the second pass, with the variables that the first pass saw.
+    pub fn with_vars(
+        rules: &'a RoleRules,
+        ctx: &'a Context,
+        vars: HashMap<String, bool>,
+        poisoned: bool,
+    ) -> Analyzer<'a> {
+        let mut a = Analyzer::new(rules, ctx);
+        a.vars = vars;
+        a.poisoned = poisoned;
+        a
+    }
+
+    /// Read the text twice: the first pass learns every assignment of the call, wherever it sits,
+    /// and the second judges.
+    pub fn judged(rules: &'a RoleRules, ctx: &'a Context, src: &str) -> Analyzer<'a> {
+        let mut first = Analyzer::new(rules, ctx);
+        first.text(src, 0);
+        let poisoned = first.poisoned;
+        let mut second = Analyzer::with_vars(rules, ctx, first.vars, poisoned);
+        second.text(src, 0);
+        second
+    }
+
+    fn note_var(&mut self, name: &str, safe: bool) {
+        let e = self.vars.entry(name.to_string()).or_insert(true);
+        *e = *e && safe;
+    }
+
+    /// Record the assignments of a parsed text.
+    fn record_assigns(&mut self, parsed: &Parsed) {
+        for cmd in &parsed.cmds {
+            for a in &cmd.assigns {
+                if let Some((name, value, append)) = split_assign(&a.raw) {
+                    self.note_var(&name, !append && safe_value(&value));
+                }
+            }
+            if let (true, Some(v)) = (cmd.loop_header, cmd.head.first()) {
+                self.note_var(&v.text, false);
+            }
+            for w in cmd.words.iter().chain(&cmd.assigns).chain(&cmd.head) {
+                for name in default_assigned(&w.raw) {
+                    self.note_var(&name, false);
+                }
+            }
+            let Some(first) = cmd.words.first() else {
+                continue;
+            };
+            if first.dynamic {
+                continue;
+            }
+            let args = &cmd.words[1..];
+            match basename(&first.text) {
+                "read" | "mapfile" | "readarray" => {
+                    let mut i = 0;
+                    while i < args.len() {
+                        let t = args[i].text.as_str();
+                        if t.starts_with('-') && t.len() > 1 {
+                            if t[1..].chars().any(|c| "pdnNutaCcOs".contains(c))
+                                && t.len() == 2
+                                && !matches!(t, "-r" | "-s" | "-e" | "-a")
+                            {
+                                i += 1;
+                            }
+                            i += 1;
+                            continue;
+                        }
+                        self.note_var(&args[i].text, false);
+                        i += 1;
+                    }
+                }
+                "getopts" => {
+                    if let Some(v) = args.get(1) {
+                        self.note_var(&v.text, false);
+                    }
+                }
+                "printf" => {
+                    let named = args
+                        .iter()
+                        .position(|a| a.text == "-v")
+                        .and_then(|k| args.get(k + 1));
+                    if let Some(v) = named {
+                        self.note_var(&v.text, false);
+                    }
+                }
+                "export" | "declare" | "typeset" | "local" | "readonly" | "let" => {
+                    for a in args {
+                        let t = a.text.as_str();
+                        if t.starts_with('-') && t.len() > 1 {
+                            if t[1..].contains('n') {
+                                self.poisoned = true;
+                            }
+                            continue;
+                        }
+                        if let Some((name, value, append)) = split_assign(&a.raw) {
+                            self.note_var(&name, !append && safe_value(&value));
+                        } else if basename(&first.text) == "let" {
+                            self.note_var(t.split('=').next().unwrap_or(t), false);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -85,7 +227,10 @@ impl<'a> Analyzer<'a> {
                 "unparsed-command",
                 format!("the command cannot be parsed: {why}"),
             ),
-            Ok(parsed) => self.parsed(&parsed, depth),
+            Ok(parsed) => {
+                self.record_assigns(&parsed);
+                self.parsed(&parsed, depth);
+            }
         }
     }
 
@@ -328,8 +473,16 @@ impl<'a> Analyzer<'a> {
             "git" => self.git(words, cmd, parsed),
             "gh" => self.gh(args),
             "curl" | "wget" => self.net(&name, args),
-            "rm" | "rmdir" | "unlink" | "shred" => self.rm(args, fin.stdin_operands),
+            "rm" | "rmdir" | "unlink" => self.rm(args, fin.stdin_operands, true),
+            "shred" => self.rm(args, fin.stdin_operands, false),
             "find" => self.find_delete(args),
+            "cd" => self.cd(args),
+            "pushd" | "popd" => {
+                let raw = args.first().map_or(name.clone(), |a| a.raw.clone());
+                self.flow.cwd_unknown.get_or_insert(raw);
+            }
+            "trap" => self.trap(args, depth),
+            "cargo" => self.cargo(args),
             _ => {}
         }
     }
@@ -422,16 +575,115 @@ impl<'a> Analyzer<'a> {
         let _ = (fed, idx);
     }
 
+    // ------------------------------------------------------------ cd, trap, cargo
+
+    /// `cd`: a literal target adds a directory that a relative path may mean. Any other `cd`
+    /// leaves the directory unknown.
+    fn cd(&mut self, args: &[Word]) {
+        let mut operands: Vec<&Word> = Vec::new();
+        let mut after_dd = false;
+        for a in args {
+            if !after_dd && a.text == "--" {
+                after_dd = true;
+            } else if after_dd || !(a.text.starts_with('-') && a.text.len() > 1) || a.dynamic {
+                operands.push(a);
+            }
+        }
+        let target = match operands.as_slice() {
+            [one] if !one.dynamic && one.text != "-" && !one.text.starts_with('~') => &one.text,
+            other => {
+                let raw = other.first().map_or("cd".to_string(), |w| w.raw.clone());
+                self.flow.cwd_unknown.get_or_insert(raw);
+                return;
+            }
+        };
+        let mut next: Vec<PathBuf> = Vec::new();
+        for c in &self.flow.cwds {
+            let p = normalize(c, target);
+            if !next.contains(&p) {
+                next.push(p);
+            }
+        }
+        for p in next {
+            if !self.flow.cwds.contains(&p) {
+                self.flow.cwds.push(p);
+            }
+        }
+        if self.flow.cwds.len() > 16 {
+            self.flow.cwd_unknown.get_or_insert(target.clone());
+        }
+    }
+
+    /// `trap 'body' SIGNAL`: the body is a string the shell will run, so it is read as a command.
+    fn trap(&mut self, args: &[Word], depth: usize) {
+        let Some(first) = args.first() else { return };
+        if !first.dynamic && first.text.starts_with('-') && first.text.len() > 1 {
+            // `trap -p` and `trap -l` print. They run nothing.
+            if first.text != "--" {
+                return;
+            }
+        }
+        let body = if first.text == "--" {
+            args.get(1)
+        } else {
+            Some(first)
+        };
+        let Some(body) = body else { return };
+        if body.dynamic {
+            self.deny(
+                "unparsed-command",
+                "a trap body that is a variable or a substitution cannot be read",
+            );
+            return;
+        }
+        if body.text == "-" {
+            return;
+        }
+        let text = body.text.clone();
+        self.text(&text, depth + 1);
+    }
+
+    /// A bare `cargo clean` wipes the whole target directory, and a shared target is not the
+    /// seat's own. `cargo clean -p` names the packages it removes.
+    fn cargo(&mut self, args: &[Word]) {
+        let mut i = 0;
+        while i < args.len() && (args[i].text.starts_with('+') || args[i].text.starts_with('-')) {
+            if matches!(args[i].text.as_str(), "--config" | "-C" | "--color" | "-Z") {
+                i += 1;
+            }
+            i += 1;
+        }
+        if args.get(i).is_none_or(|w| w.text != "clean") {
+            return;
+        }
+        let rest = &args[i + 1..];
+        let named = rest.iter().any(|w| {
+            let t = w.text.as_str();
+            t == "-p"
+                || t == "--package"
+                || t.starts_with("--package=")
+                || (t.starts_with("-p") && !t.starts_with("--") && t.len() > 2)
+        });
+        if !named {
+            self.deny(
+                "cargo-clean",
+                "a bare cargo clean wipes the whole target directory, which seats may share; name the packages with -p",
+            );
+        }
+    }
+
     // ------------------------------------------------------------ git
 
     fn git(&mut self, words: &[Word], cmd: &Cmd, parsed: &Parsed) {
         let mut i = 1;
         let mut dir: Option<Word> = None;
+        let mut dirs: Vec<Word> = Vec::new();
         while i < words.len() {
             let t = words[i].text.as_str();
             match t {
                 "-C" => {
                     dir = words.get(i + 1).cloned();
+                    dirs.extend(dir.clone());
                     i += 2;
                 }
                 "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
@@ -459,7 +711,8 @@ impl<'a> Analyzer<'a> {
             );
         }
         match sub_name {
-            "push" => self.git_push(rest, dir.as_ref()),
+            "push" => self.git_push(rest, &dirs),
+            "switch" | "checkout" => self.git_switch(sub_name, &rest[..options_end]),
             "commit" => {
                 if short_cluster_has(
                     &rest[..options_end],
@@ -501,7 +754,7 @@ impl<'a> Analyzer<'a> {
                     if options_end < rest.len() {
                         targets.extend(rest[options_end + 1..].iter().cloned());
                     }
-                    self.delete_targets("git clean", &targets, false);
+                    self.delete_targets("git clean", &targets, false, false);
                 }
             }
             "worktree" if rest.first().is_some_and(|w| w.text == "remove") => {
@@ -510,19 +763,102 @@ impl<'a> Analyzer<'a> {
                     .filter(|w| !w.text.starts_with('-'))
                     .cloned()
                     .collect();
-                self.delete_targets("git worktree remove", &targets, false);
+                self.delete_targets("git worktree remove", &targets, false, false);
             }
             _ => {}
         }
     }
 
+    /// `git switch` and `git checkout` change the branch that a later bare push names.
+    fn git_switch(&mut self, sub: &str, args: &[Word]) {
+        // `git checkout -- path` and `git checkout <tree> -- path` restore files. They switch
+        // nothing.
+        if sub == "checkout" && args.iter().any(|w| w.text == "--") {
+            return;
+        }
+        let mut name: Option<Part> = None;
+        let mut i = 0;
+        while i < args.len() {
+            let w = &args[i];
+            let t = w.text.as_str();
+            let create = matches!(t, "-c" | "-C" | "-b" | "-B" | "--create" | "--force-create")
+                || t.starts_with("--orphan");
+            if create && !w.dynamic {
+                if let Some(n) = args.get(i + 1) {
+                    name = Some(branch_part(n));
+                } else {
+                    name = Some(Part::Unresolved(t.to_string()));
+                }
+                break;
+            }
+            if matches!(t, "-d" | "--detach" | "-p" | "--patch" | "--detach=") {
+                // A detached HEAD has no branch to read.
+                name = Some(Part::Unresolved(t.to_string()));
+                break;
+            }
+            if t.starts_with('-') && t.len() > 1 && !w.dynamic {
+                i += 1;
+                continue;
+            }
+            name = Some(if t == "-" {
+                Part::Unresolved("-".to_string())
+            } else {
+                branch_part(w)
+            });
+            break;
+        }
+        if let Some(n) = name {
+            self.flow.switched = Some(n);
+        }
+    }
+
+    /// Where a push runs: the `git -C` words, else the working directory, each read against
+    /// every directory a literal `cd` may have reached.
+    fn push_dir(&self, dirs: &[Word]) -> PushDir {
+        let absolute = dirs
+            .first()
+            .is_some_and(|d| !d.dynamic && Path::new(&d.text).is_absolute());
+        let lost = self.flow.cwd_unknown.is_some() && !absolute;
+        if lost || dirs.iter().any(|d| d.dynamic) {
+            return PushDir::Unread;
+        }
+        let mut places: Vec<PathBuf> = if absolute {
+            vec![PathBuf::from("/")]
+        } else {
+            self.flow.cwds.clone()
+        };
+        for d in dirs {
+            places = places.iter().map(|p| normalize(p, &d.text)).collect();
+        }
+        let wt = &self.ctx.paths.worktree;
+        let pd = &self.ctx.push_dir;
+        for p in &places {
+            if !(under(p, wt) || under(p, pd)) {
+                return PushDir::Outside(format!(
+                    "the push runs in {}, which lies outside the worktree and the push directory",
+                    p.display()
+                ));
+            }
+        }
+        PushDir::Inside
+    }
+
     /// `git push`: force, delete, the default branch and the role's own branch or tag.
-    fn git_push(&mut self, rest: &[Word], dir: Option<&Word>) {
+    fn git_push(&mut self, rest: &[Word], dirs: &[Word]) {
         let p = push_args(rest);
         for w in &p.unreadable {
             self.deny(
                 "push-unreadable",
                 format!("the push has {:?}, which cannot be read (a variable outside quotes, or one that changes the meaning)", w.raw),
+            );
+        }
+        for d in dirs.iter().filter(|d| d.dynamic && d.quoted_var.is_none()) {
+            self.deny(
+                "push-unreadable",
+                format!(
+                    "git -C {:?} names a directory that cannot be read (a variable outside quotes)",
+                    d.raw
+                ),
             );
         }
         if p.force {
@@ -549,20 +885,40 @@ impl<'a> Analyzer<'a> {
                 "git push --tags pushes every tag, not only the seat's own",
             );
         }
-        // The intents for `push_of`.
-        let intents = p.intents(dir);
+        // The intents for `push_of`. A directory or a branch that no literal gives is marked
+        // unresolved, so the adapter measures the push.
+        let dir_part = if let Some(d) = dirs.iter().find(|d| d.dynamic) {
+            Part::Unresolved(d.raw.clone())
+        } else if let Some(d) = dirs.last() {
+            Part::Literal(d.text.clone())
+        } else if let Some(raw) = &self.flow.cwd_unknown {
+            Part::Unresolved(raw.clone())
+        } else {
+            Part::Absent
+        };
+        let intents = p.intents(dir_part, self.flow.switched.as_ref());
         self.walk.pushes.extend(intents);
         if !p.unreadable.is_empty() || p.force || p.delete || p.all || p.tags {
             return;
         }
+        let pdir = self.push_dir(dirs);
         let ctx = self.ctx;
         let default = ctx.default_branch.as_str();
-        // Each target the push names; a bare push names the current branch.
+        // Each target the push names; a bare push names the branch of the last switch, else the
+        // current branch.
         let mut targets: Vec<Target> = p.specs.iter().map(|s| s.target.clone()).collect();
         if targets.is_empty() {
             targets.push(Target::Branch("HEAD".to_string()));
         }
         for t in targets {
+            let t = match (t, &self.flow.switched) {
+                (Target::Branch(b), Some(Part::Literal(n))) if b == "HEAD" => {
+                    Target::Branch(n.clone())
+                }
+                (Target::Branch(b), Some(Part::Unresolved(_))) if b == "HEAD" => Target::QuotedVar,
+                (t, _) => t,
+            };
+            let before = self.walk.allows.len();
             match t {
                 Target::QuotedVar => {
                     if self.has(Allow::PushOwnBranch) {
@@ -609,7 +965,14 @@ impl<'a> Analyzer<'a> {
                             format!("role {} may not push", self.rules.role),
                         );
                     } else if name == ctx.own_branch && !name.is_empty() {
-                        self.allow("push-own-branch", format!("pushes its own branch {name}"));
+                        if matches!(pdir, PushDir::Unread) {
+                            self.allow(
+                                "own-branch-unverified",
+                                format!("the push is to {name}, but its directory is a variable; the check after the push reads what moved"),
+                            );
+                        } else {
+                            self.allow("push-own-branch", format!("pushes its own branch {name}"));
+                        }
                     } else {
                         self.deny(
                             "push-other-branch",
@@ -620,6 +983,10 @@ impl<'a> Analyzer<'a> {
                         );
                     }
                 }
+            }
+            if let (PushDir::Outside(why), true) = (&pdir, self.walk.allows.len() > before) {
+                self.walk.allows.truncate(before);
+                self.deny("push-outside-worktree", why.clone());
             }
         }
     }
@@ -779,7 +1146,7 @@ impl<'a> Analyzer<'a> {
 
     // ------------------------------------------------------------ delete class
 
-    fn rm(&mut self, args: &[Word], stdin_operands: bool) {
+    fn rm(&mut self, args: &[Word], stdin_operands: bool, worktree_ok: bool) {
         let mut targets: Vec<Word> = Vec::new();
         let mut done = false;
         for a in args {
@@ -792,7 +1159,7 @@ impl<'a> Analyzer<'a> {
             }
             targets.push(a.clone());
         }
-        self.delete_targets("rm", &targets, stdin_operands);
+        self.delete_targets("rm", &targets, stdin_operands, worktree_ok);
     }
 
     fn find_delete(&mut self, args: &[Word]) {
@@ -803,12 +1170,20 @@ impl<'a> Analyzer<'a> {
             } else {
                 starts
             };
-            self.delete_targets("find -delete", &targets, false);
+            self.delete_targets("find -delete", &targets, false, false);
         }
     }
 
-    /// The delete class: only inside the seat's own paths, and only when the role lists it.
-    fn delete_targets(&mut self, what: &str, targets: &[Word], stdin_operands: bool) {
+    /// The delete class. `rm`, `rmdir` and `unlink` of a path inside the worktree are a seat's
+    /// normal work (`worktree_ok`). Any other delete needs the seat's scratch or build target, and
+    /// the role must list it.
+    fn delete_targets(
+        &mut self,
+        what: &str,
+        targets: &[Word],
+        stdin_operands: bool,
+        worktree_ok: bool,
+    ) {
         if stdin_operands {
             self.deny(
                 "delete-unreadable",
@@ -823,19 +1198,33 @@ impl<'a> Analyzer<'a> {
         let build = self.has(Allow::DeleteOwnBuildTarget);
         for t in targets {
             if t.dynamic {
+                // The word must be one quoted variable that the whole call assigns only from
+                // `mktemp` or the empty string.
+                let known = !self.poisoned
+                    && t.quoted_var
+                        .as_ref()
+                        .is_some_and(|n| self.vars.get(n).copied().unwrap_or(false));
+                if known && scratch {
+                    self.allow(
+                        "delete-own-scratch",
+                        format!("{what} {:?}: a file that mktemp made", t.raw),
+                    );
+                    continue;
+                }
                 self.deny(
                     "delete-unreadable",
                     format!(
-                        "{what} {:?}: a path held in a variable cannot be read",
-                        t.raw
+                        "{what} {:?}: a path held in a variable cannot be read{}",
+                        t.raw,
+                        if known {
+                            format!(
+                                ", and role {} may not delete scratch files",
+                                self.rules.role
+                            )
+                        } else {
+                            String::new()
+                        }
                     ),
-                );
-                return;
-            }
-            if !scratch && !build {
-                self.deny(
-                    "delete-not-allowed",
-                    format!("role {} may not delete", self.rules.role),
                 );
                 return;
             }
@@ -847,40 +1236,188 @@ impl<'a> Analyzer<'a> {
                 return;
             }
             let mut path = t.text.clone();
+            let mut rest = String::new();
             if t.glob {
                 // Judge the directory in front of the first glob character.
                 let cut = path.find(['*', '?', '[']).unwrap_or(path.len());
                 let dir = &path[..cut];
-                path = match dir.rfind('/') {
-                    Some(k) => dir[..=k].to_string(),
-                    None => ".".to_string(),
+                let dir_len = dir.rfind('/').map_or(0, |k| k + 1);
+                rest = path[dir_len..].to_string();
+                path = if dir_len == 0 {
+                    ".".to_string()
+                } else {
+                    path[..dir_len].to_string()
                 };
             }
-            let abs = normalize(&self.ctx.cwd, &path);
-            let in_scratch = scratch && under(&abs, &self.ctx.paths.scratch);
-            let in_build = build && under(&abs, &self.ctx.paths.build_target);
-            if in_scratch {
-                self.allow(
-                    "delete-own-scratch",
-                    format!("{what} inside the seat's scratch"),
-                );
-            } else if in_build {
-                self.allow(
-                    "delete-own-build-target",
-                    format!("{what} inside the seat's build target"),
-                );
-            } else {
+            let relative = !Path::new(&path).is_absolute();
+            if relative && self.flow.cwd_unknown.is_some() {
                 self.deny(
-                    "delete-outside-own-paths",
-                    format!("{what} {:?} lies outside the seat's own paths", t.text),
+                    "delete-unreadable",
+                    format!(
+                        "{what} {:?}: the working directory changed to a variable, so a relative path has no meaning",
+                        t.raw
+                    ),
                 );
                 return;
             }
+            let places: Vec<PathBuf> = if relative {
+                self.flow.cwds.iter().map(|c| normalize(c, &path)).collect()
+            } else {
+                vec![normalize(&self.ctx.cwd, &path)]
+            };
+            for abs in places {
+                let hit = self.delete_place(what, &abs, &rest, worktree_ok, scratch, build);
+                match hit {
+                    Ok(()) => {}
+                    Err((rule, why)) => {
+                        self.deny(rule, format!("{what} {:?} {why}", t.text));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Judge one resolved delete place and record the allow, or give the deny.
+    fn delete_place(
+        &mut self,
+        what: &str,
+        abs: &Path,
+        glob_rest: &str,
+        worktree_ok: bool,
+        scratch: bool,
+        build: bool,
+    ) -> Result<(), (&'static str, String)> {
+        let wt = self.ctx.paths.worktree.clone();
+        if worktree_ok && !wt.as_os_str().is_empty() && under(abs, &wt) {
+            let git_dir = wt.join(".git");
+            let is_wt = abs == wt;
+            if under(abs, &git_dir) {
+                return Err((
+                    "delete-outside-own-paths",
+                    "lies in the worktree's .git directory".to_string(),
+                ));
+            }
+            let named = glob_rest
+                .chars()
+                .any(|c| !matches!(c, '*' | '?' | '[' | ']' | '/'));
+            if !is_wt || (named && !glob_rest.starts_with('.')) {
+                self.allow(
+                    "delete-in-worktree",
+                    format!("{what} inside the seat's worktree is its normal work"),
+                );
+                return Ok(());
+            }
+            return Err((
+                "delete-outside-own-paths",
+                "is the worktree itself, or a glob that may take most of it or its .git directory"
+                    .to_string(),
+            ));
+        }
+        if !scratch && !build {
+            return Err((
+                "delete-not-allowed",
+                format!(
+                    "is not deletable: role {} may not delete there",
+                    self.rules.role
+                ),
+            ));
+        }
+        if scratch && under(abs, &self.ctx.paths.scratch) {
+            self.allow(
+                "delete-own-scratch",
+                format!("{what} inside the seat's scratch"),
+            );
+            Ok(())
+        } else if build && under(abs, &self.ctx.paths.build_target) {
+            self.allow(
+                "delete-own-build-target",
+                format!("{what} inside the seat's build target"),
+            );
+            Ok(())
+        } else {
+            Err((
+                "delete-outside-own-paths",
+                "lies outside the seat's own paths".to_string(),
+            ))
         }
     }
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// A branch word of `git switch` or `git checkout`, as a part.
+fn branch_part(w: &Word) -> Part {
+    if w.dynamic {
+        Part::Unresolved(w.raw.clone())
+    } else {
+        let t = w.text.strip_prefix("refs/heads/").unwrap_or(&w.text);
+        Part::Literal(t.to_string())
+    }
+}
+
+/// Split `NAME=value` or `NAME+=value`. Give the name, the value as written and whether it
+/// appends.
+fn split_assign(raw: &str) -> Option<(String, String, bool)> {
+    let name_len = raw.chars().take_while(|c| is_name(*c)).count();
+    if name_len == 0 || raw.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let name: String = raw.chars().take(name_len).collect();
+    let rest = &raw[name_len..];
+    if let Some(v) = rest.strip_prefix("+=") {
+        Some((name, v.to_string(), true))
+    } else {
+        rest.strip_prefix('=').map(|v| (name, v.to_string(), false))
+    }
+}
+
+fn is_name(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Is a value as written the empty string or the output of `mktemp`?
+fn safe_value(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() || v == "\"\"" || v == "''" {
+        return true;
+    }
+    let v = v
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(v);
+    let inner = if let Some(x) = v.strip_prefix("$(").and_then(|x| x.strip_suffix(')')) {
+        x
+    } else if let Some(x) = v.strip_prefix('`').and_then(|x| x.strip_suffix('`')) {
+        x
+    } else {
+        return false;
+    };
+    let inner = inner.trim();
+    let Some(args) = inner.strip_prefix("mktemp") else {
+        return false;
+    };
+    args.is_empty()
+        || (args.starts_with(' ')
+            && args
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " ._/=+-".contains(c)))
+}
+
+/// The names that a `${NAME:=…}` or `${NAME=…}` in a word may assign.
+fn default_assigned(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = raw;
+    while let Some(k) = rest.find("${") {
+        rest = &rest[k + 2..];
+        let name: String = rest.chars().take_while(|c| is_name(*c)).collect();
+        let after = &rest[name.len()..];
+        if !name.is_empty() && (after.starts_with(":=") || after.starts_with('=')) {
+            out.push(name);
+        }
+    }
+    out
+}
 
 /// Skip options. `takes_arg` lists the options with a separate value. Then skip `positional`
 /// operands (the duration of `timeout`). Give the words from the command on.
@@ -1049,8 +1586,7 @@ pub struct PushArgs {
 }
 
 impl PushArgs {
-    pub fn intents(&self, dir: Option<&Word>) -> Vec<PushIntent> {
-        use crate::Part;
+    pub fn intents(&self, dir: Part, switched: Option<&Part>) -> Vec<PushIntent> {
         let part = |w: &Word| {
             if w.dynamic {
                 Part::Unresolved(w.raw.clone())
@@ -1059,11 +1595,10 @@ impl PushArgs {
             }
         };
         let remote = self.remote.as_ref().map_or(Part::Absent, part);
-        let dir = dir.map_or(Part::Absent, part);
         if self.specs.is_empty() {
             return vec![PushIntent {
                 remote,
-                branch: Part::Absent,
+                branch: switched.cloned().unwrap_or(Part::Absent),
                 dir,
             }];
         }
@@ -1073,6 +1608,8 @@ impl PushArgs {
                 remote: remote.clone(),
                 branch: if s.word.dynamic {
                     Part::Unresolved(s.word.raw.clone())
+                } else if s.name == "HEAD" && switched.is_some() {
+                    switched.cloned().unwrap_or(Part::Absent)
                 } else {
                     Part::Literal(s.name.clone())
                 },

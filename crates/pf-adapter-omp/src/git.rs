@@ -1,6 +1,8 @@
 //! The few `git` reads the adapter makes: a branch's SHA, the default branch of a remote, and the
-//! summary line of a push. Every call is `git -C <dir> …` with prompts off and a time limit.
+//! remote-tracking refs that a push moved. Every call is `git -C <dir> …` with prompts off and a
+//! 30-second limit. No read takes its answer from a seat's text.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -63,73 +65,48 @@ pub fn remote_head(dir: &Path, remote: &str) -> Option<(String, String)> {
     Some((branch?, sha?))
 }
 
-/// The SHA of `refs/heads/<branch>` on a remote.
+/// The SHA of `refs/heads/<branch>` on a remote, from `ls-remote --exit-code`. A branch the remote
+/// lacks, and a read that fails, give `None`. Only a line for exactly that ref counts, so a branch
+/// `x/main` is not `main`.
 pub fn remote_branch_sha(dir: &Path, remote: &str, branch: &str) -> Option<String> {
-    let r = format!("refs/heads/{branch}");
-    let out = git(dir, &["ls-remote", remote, &r])?;
-    out.split_whitespace().next().map(str::to_string)
+    let want = format!("refs/heads/{branch}");
+    let out = git(dir, &["ls-remote", "--exit-code", remote, &want])?;
+    out.lines().find_map(|line| {
+        let (sha, name) = line.split_once('\t')?;
+        (name == want).then(|| sha.trim().to_string())
+    })
 }
 
-/// What a push's summary line says: the remote branch and, when the line gives one, the SHA the
-/// branch moved to. The SHA can be short.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Summary {
-    pub branch: String,
-    pub sha: Option<String>,
-}
-
-/// Read the first accepted line of `git push` output, such as
-/// `   abc1234..def5678  local -> remote` or ` * [new branch]      local -> remote`.
-/// A rejected line (` ! `) and a text with no line of that form give `None`.
-pub fn summary_of(output: &str) -> Option<Summary> {
-    for line in output.lines() {
-        if line.starts_with(" !") || !line.starts_with(' ') {
-            continue;
-        }
-        let Some((left, right)) = line.split_once(" -> ") else {
+/// The remote-tracking refs of a remote and their SHAs, by branch name, without `<remote>/HEAD`.
+/// A failed read gives `None`.
+pub fn remote_refs(dir: &Path, remote: &str) -> Option<BTreeMap<String, String>> {
+    let prefix = format!("refs/remotes/{remote}/");
+    let out = git(
+        dir,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            &format!("refs/remotes/{remote}"),
+        ],
+    )?;
+    let mut refs = BTreeMap::new();
+    for line in out.lines() {
+        let Some((sha, name)) = line.split_once(' ') else {
             continue;
         };
-        let branch = right.split_whitespace().next()?;
-        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-        let sha = left
-            .split_whitespace()
-            .find_map(|w| w.rsplit_once("..").map(|(_, b)| b.trim_start_matches('.')))
-            .filter(|s| s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()))
-            .map(str::to_string);
-        return Some(Summary {
-            branch: branch.to_string(),
-            sha,
-        });
+        let Some(branch) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if branch != "HEAD" && !branch.is_empty() {
+            refs.insert(branch.to_string(), sha.to_string());
+        }
     }
-    None
+    Some(refs)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_an_update_line() {
-        let out = "To /tmp/r.git\n   abc1234..def5678  topic -> topic\n";
-        assert_eq!(
-            summary_of(out),
-            Some(Summary {
-                branch: "topic".into(),
-                sha: Some("def5678".into())
-            })
-        );
-    }
-
-    #[test]
-    fn a_new_branch_has_no_sha_and_a_rejection_is_skipped() {
-        assert_eq!(
-            summary_of(" * [new branch]      a -> b").map(|s| (s.branch, s.sha)),
-            Some(("b".to_string(), None))
-        );
-        assert_eq!(
-            summary_of(" ! [rejected]        a -> b (fetch first)"),
-            None
-        );
-        assert_eq!(summary_of("Everything up-to-date"), None);
-    }
+/// Does the repository hold this commit?
+pub fn has_commit(dir: &Path, sha: &str) -> bool {
+    !sha.is_empty()
+        && !sha.starts_with('-')
+        && git(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some()
 }

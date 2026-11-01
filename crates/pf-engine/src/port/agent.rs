@@ -161,8 +161,12 @@ pub trait AgentPort: Send + Sync {
         session: &SessionRef,
         successor: &LaunchPlan,
     ) -> Result<SessionRef, AgentError>;
-    /// Is this session's process alive?
+    /// Is this session's process alive? A reference the adapter does not know is `Ok(false)`.
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError>;
+    /// End the session's process and its children. It is safe to repeat. A reference the
+    /// adapter does not know, or that has no runtime tag, is `Ok(())`. Reads (`usage`,
+    /// `drain_events`) still work after a stop.
+    fn stop(&self, session: &SessionRef) -> Result<(), AgentError>;
     /// Find a plugin by name, at a version of at least `min_version`. It makes no prompt of its
     /// own. A plugin it cannot find, or finds at a lower version, is `AgentError::Refused`.
     fn resolve_plugin(&self, name: &str, min_version: &str) -> Result<ResolvedPlugin, AgentError>;
@@ -299,6 +303,14 @@ impl AgentPort for AgentRouter {
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let (_, adapter, inner) = self.route(session)?;
         adapter.is_alive(&inner)
+    }
+
+    /// An untagged reference, or one for a runtime with no adapter, is already gone: `Ok`.
+    fn stop(&self, session: &SessionRef) -> Result<(), AgentError> {
+        match self.route(session) {
+            Ok((_, adapter, inner)) => adapter.stop(&inner),
+            Err(_) => Ok(()),
+        }
     }
 
     /// A plugin name has no runtime, so the adapters are tried in name order. The first one that

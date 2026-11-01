@@ -248,7 +248,19 @@ fn a_pr_reference_is_read_from_a_url_or_a_short_form() {
             number: 7
         })
     );
+    // The bare forge names a repo by its absolute path.
+    assert_eq!(
+        ok("file:///a/b#3"),
+        Some(PrRef {
+            repo: "/a/b".into(),
+            number: 3
+        })
+    );
     for bad in [
+        "file://a/b#3",
+        "file:///a/b#0",
+        "file:///a/b",
+        "file://#3",
         "",
         "null",
         "https://github.com/o/r/issues/7",

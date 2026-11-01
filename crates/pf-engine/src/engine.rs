@@ -460,6 +460,25 @@ impl Engine {
         })
     }
 
+    /// Record one line of a seat's decisions file. The ID `decision:<unit>:<line_number>` makes a
+    /// repeat of the same line a replay. Another text for the same line is a `Conflict`. The text
+    /// is a seat's own, so it is cleaned to one line first.
+    pub fn record_decision(
+        &self,
+        unit_id: &str,
+        line_number: u64,
+        text: &str,
+    ) -> Result<Admission, EngineError> {
+        self.submit(Command {
+            id: format!("decision:{unit_id}:{line_number}"),
+            body: CommandBody::Decision {
+                unit_id: unit_id.to_string(),
+                line_number,
+                text: one_line_reason(text),
+            },
+        })
+    }
+
     /// The last push of a unit that succeeded, as the admissions record it. A later failed push
     /// does not hide it.
     pub fn last_successful_push(&self, unit_id: &str) -> Result<Option<PushRecord>, EngineError> {

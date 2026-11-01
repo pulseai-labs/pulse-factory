@@ -99,7 +99,7 @@ pub struct StageSpec {
     pub stall_minutes: u32,
     pub first_turn_seconds: u32,
     pub skills: Vec<String>,
-    /// `env.<NAME>`, `push_dir` and `push_branch`.
+    /// `env.<NAME>` and the keys of [`STAGE_SETTING_KEYS`].
     pub settings: BTreeMap<String, String>,
     pub done: Vec<DoneCond>,
     pub park_on: Vec<ParkOn>,
@@ -955,6 +955,17 @@ fn read_stage(
     })
 }
 
+/// The keys other than `env.<NAME>` that a stage's `settings` admits. Each is a template that
+/// `start_stage` renders into the launch plan (`docs/contracts/launch-settings.md`).
+pub const STAGE_SETTING_KEYS: [&str; 6] = [
+    "push_dir",
+    "push_branch",
+    "report_dir",
+    "worktree",
+    "own_branch",
+    "decisions_file",
+];
+
 fn read_stage_settings(
     node: &Node,
     check: &Checker,
@@ -975,14 +986,15 @@ fn read_stage_settings(
                         .chars()
                         .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             }
-            None => matches!(e.key.as_str(), "push_dir" | "push_branch"),
+            None => STAGE_SETTING_KEYS.contains(&e.key.as_str()),
         };
         if !ok {
             return Err(ParseError::new(
                 e.key_pos,
                 format!(
-                    "unknown field `{}` in a stage's `settings`; the known fields are: env.<NAME>, push_dir, push_branch",
-                    e.key
+                    "unknown field `{}` in a stage's `settings`; the known fields are: env.<NAME>, {}",
+                    e.key,
+                    STAGE_SETTING_KEYS.join(", ")
                 ),
             ));
         }

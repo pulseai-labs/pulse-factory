@@ -287,6 +287,9 @@ fn delete_is_judged_on_the_target() {
         (&close, "rm -rf /scratch/u1/tmp"),
         (&implementer, "rm -rf -- /scratch/u1/x"),
         (&implementer, "rm /scratch/u1/../u1/x"),
+        // `r0.s1.w5`: a path inside the worktree is a seat's normal work, as `git rm` is.
+        (&implementer, "rm -rf /work/u1/src"),
+        (&close, "rm src/old.rs"),
     ] {
         let d = bash(r, c);
         assert!(d.is_allow(), "{} {c}: {d:?}", r.role);
@@ -297,7 +300,6 @@ fn delete_is_judged_on_the_target() {
         "rm -rf $x",
         "rm -rf /scratch/u1/../u2",
         "rm -rf /scratch/u1x/tmp",
-        "rm -rf /work/u1/src",
         "rm -rf /",
         "rm -rf ~/scratch",
         "rm -rf /scratch/u1/$(date)",

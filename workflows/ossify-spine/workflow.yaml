@@ -8,12 +8,13 @@ name: ossify-spine
 #   spine_branch  the branch the item PRs merge into
 #   spine_dir     the directory that holds the spine's specs and reports
 #   method_root   the directory where the method's tool runs (it holds the method's state)
-#   repo          the repository the spine builds
+#   repo          the local path of the repository the spine builds (a `git -C` path)
+#   forge_repo    the repository on the forge, such as `owner/name`; `arm` reads it from the forge
 #   worktree_root the directory that holds the item worktrees
 #   state_file    the method's state file
 #   oss           the method's command-line tool
-#   briefs        the directory that holds the pinned briefs
-params: [spine, spine_branch, spine_dir, method_root, repo, worktree_root, state_file, oss, briefs]
+#   briefs        the directory that holds the pinned briefs; `arm` sets it to the run's own copy
+params: [spine, spine_branch, spine_dir, method_root, repo, forge_repo, worktree_root, state_file, oss, briefs]
 
 plugins:
   - name: ossify
@@ -95,6 +96,8 @@ tracks:
         settings:
           env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
           env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          report_dir: "{param.spine_dir}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
         done:
           - file: "{run.dir}/out/{unit.id}/lane.done"
 
@@ -132,6 +135,10 @@ tracks:
         settings:
           env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
           env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
         done:
           - file: "{param.spine_dir}/work-{unit.id}/report.md"
         park_on:
@@ -160,6 +167,9 @@ tracks:
         settings:
           env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
           env.OSSIFY_VERIFY_WORKTREE: "{unit.vars.worktree_path}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
         done:
           - file: "{run.dir}/out/{unit.id}/verdict.json"
 
@@ -188,6 +198,10 @@ tracks:
           env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
           push_dir: "{unit.vars.worktree_path}"
           push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
         done:
           - pr:
               argv:
@@ -204,7 +218,7 @@ tracks:
 
     merge:
       rule: green_checks_in_declared_order
-      repo: "{param.repo}"
+      repo: "{param.forge_repo}"
       base: "{param.spine_branch}"
       pr:
         - env

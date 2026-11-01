@@ -4,6 +4,7 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,8 @@ pub struct PtySession {
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     output: Arc<Mutex<Vec<u8>>>,
+    /// True once the reader thread has seen the end of the output.
+    output_ended: Arc<AtomicBool>,
     pid: Option<u32>,
 }
 
@@ -70,11 +73,16 @@ impl PtySession {
             .map_err(|e| format!("cannot write the PTY: {e}"))?;
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&output);
+        let output_ended = Arc::new(AtomicBool::new(false));
+        let ended = Arc::clone(&output_ended);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        ended.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     Ok(n) => {
                         let mut out = sink.lock().unwrap_or_else(|e| e.into_inner());
                         out.extend_from_slice(&buf[..n]);
@@ -92,8 +100,23 @@ impl PtySession {
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             output,
+            output_ended,
             pid,
         })
+    }
+
+    /// After the process ended, wait until the reader thread has taken all of its output. The
+    /// exit code can be known before the last bytes reach the buffer, so a reader that needs the
+    /// final screen waits here first. False on timeout.
+    pub fn wait_output_end(&self, timeout: Duration) -> bool {
+        let end = Instant::now() + timeout;
+        while !self.output_ended.load(Ordering::SeqCst) {
+            if Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -145,8 +168,15 @@ impl PtySession {
         }
     }
 
-    /// End the process and wait for it.
+    /// End the process and every process in its group, and wait for the leader. A PTY child is
+    /// a session and group leader, so its group holds the children it started, such as `cargo`.
     pub fn kill(&self) {
+        if let Some(pid) = self.pid {
+            let _ = std::process::Command::new("sh")
+                .args(["-c", "kill -s KILL -- \"-$1\" 2>/dev/null; exit 0", "sh"])
+                .arg(pid.to_string())
+                .status();
+        }
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
         let _ = child.wait();

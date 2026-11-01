@@ -85,7 +85,7 @@ A track is `{stages, merge}`. `stages` is a list of one or more stages and runs 
 | Field | Required | Meaning |
 |---|---|---|
 | `rule` | yes | `green_checks_in_declared_order` is the only rule in version 1. |
-| `repo` | yes | The repository a unit's PR must be in, a template. The engine renders it for each unit and parks a unit whose PR names another repo. |
+| `repo` | yes | The repository a unit's PR must be in, a template. The engine renders it for each unit and parks a unit whose PR names another repo. It names the repo on the forge, such as `{param.forge_repo}`, which is the name the forge puts in a PR URL. A local path for `git -C` is a different parameter. |
 | `base` | yes | The branch the unit's PR must merge into, a template. The engine renders it for each unit and parks a unit whose PR has another base. |
 | `pr` | yes | A command that prints the unit's PR URL. |
 | `head_check` | no | `true` or `false`; default `false`. When `true`, the engine's merge step compares the PR head with the last recorded push and parks the unit when there is none. |
@@ -109,7 +109,7 @@ Each stage of a track has these fields:
 | `stall_minutes` | yes | Minutes without output before the seat counts as stalled. 1 or more. |
 | `first_turn_seconds` | yes | Seconds the seat has to finish a first turn. 1 or more. |
 | `skills` | no | The skill names the seat may use. |
-| `settings` | no | A mapping with `env.<NAME>`, `push_dir` and `push_branch` keys. |
+| `settings` | no | A mapping with `env.<NAME>`, `push_dir`, `push_branch`, `report_dir`, `worktree`, `own_branch` and `decisions_file` keys. |
 | `done` | yes | One or more conditions. All of them must hold. |
 | `park_on` | no | A list of `{file, reason}`. |
 
@@ -117,8 +117,12 @@ Each stage of a track has these fields:
 count runs after a first turn, not after a launch, so a launch that sits at a trust prompt does not
 count.
 
-`settings` keys other than `env.<NAME>` (`NAME` is `A-Z`, `0-9` and `_`), `push_dir` and
-`push_branch` are refused here. `launch-settings.md` lists every key that reaches the adapter and how
+`settings` keys other than `env.<NAME>` (`NAME` is `A-Z`, `0-9` and `_`), `push_dir`, `push_branch`,
+`report_dir`, `worktree`, `own_branch` and `decisions_file` are refused here. Each of the six is a
+template, rendered for the unit like the other settings. `report_dir` is the directory that holds the
+seat's report. `worktree` and `own_branch` are the seat's worktree and its own branch, and a stage
+whose seat has none leaves them out. `decisions_file` is the file where the seat writes its decisions,
+one per line. `launch-settings.md` lists every key that reaches the adapter and how
 the engine builds them.
 
 ### `done` conditions
