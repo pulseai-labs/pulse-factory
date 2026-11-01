@@ -1,0 +1,15 @@
+[package]
+name = "pf-adapter-fake"
+description = "A scripted agent adapter behind the agent port: no process and no network. The default for tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pf-engine = { path = "../pf-engine" }
+
+[dev-dependencies]
+pf-store-sqlite = { path = "../pf-store-sqlite" }
+tempfile.workspace = true

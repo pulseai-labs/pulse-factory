@@ -75,3 +75,9 @@ Rejected alternatives:
 - **Known limit:** with a shared token, least privilege holds only at the command level. A seat that
   writes a script calling the forge API can merge or delete. A separate seat identity, with a token
   that cannot merge, is on the feature map.
+- **Known limit, a push target the rules cannot read (stated departure, `r0.s1.w3`):** the real push
+  of the `ossify` package is `git push -u origin "$wi_branch"`, so its branch is a shell variable.
+  `pf-rules` allows a push whose branch is one quoted variable only for a role with `push_own_branch`,
+  and it audits the call with the rule `own-branch-unverified`. The rules cannot check the value. The
+  adapter's post-push check of the remote's default branch guards it after the fact. `"+$b"` (force),
+  `":$b"` (delete) and a variable without quotes are denied.

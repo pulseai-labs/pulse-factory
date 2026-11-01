@@ -4,6 +4,9 @@
 - **Date:** 2026-10-25
 - **Amended:** 2026-10-26, at the planning of spine r0.s1: `--no-skills` disables all skill loading,
   so a seat could not run the workflow's method skills, such as ossify's `/run-spine`.
+- **Amended:** 2026-11-01, in `r0.s1.w3`: the six unverified claims were settled on real OMP sessions.
+  Each result is under "Verified claims". No decision changed: each result took a fallback that
+  this ADR already named.
 
 ## Context
 - Each coding agent gets an adapter with nine duties:
@@ -27,11 +30,13 @@
 - `crates/pf-adapter-omp` is the first adapter. It launches OMP as an interactive TUI in a PTY, with:
   - `--no-extensions` and `--no-rules`, so discovered operator extensions and rules do not load;
   - `--plugin-dir <path>` for each plugin the workflow declares (ADR-0004), with `--skills=<globs>`
-    intended to limit the seat to those plugins' skills. This limit is unverified. If an undeclared
-    skill, hook, tool or MCP server reaches a seat, the adapter launches with a verified isolated
-    `--profile` or refuses the launch. The only extension Pulse Factory passes is its `--hook` path;
+    to limit the seat to those plugins' skills. The limit holds for skills (see "Verified claims").
+    It does not hold for MCP servers. If an undeclared skill, hook, tool or MCP server reaches a
+    seat, the adapter launches with a verified isolated `--profile` or refuses the launch. The
+    adapter refuses. The only extension Pulse Factory passes is its `--hook` path;
   - `--approval-mode yolo`, which turns prompts off;
-  - a `--tools` list that leaves out `ask`, and leaves out `task` unless the adapter tracks subagents;
+  - a `--tools` list that leaves out `ask` and every self-wake tool, and leaves out `task`: the
+    adapter cannot track subagents (see "Verified claims");
   - `--hook` loading Pulse Factory's own OMP extension.
 - The extension uses only OMP's public extension API:
   - **turn end** is `agent_end` without `willContinue === true`;
@@ -41,7 +46,8 @@
   - **usage** is the `usage` on each assistant `message_end`.
 - The adapter reads `omp --version` at launch, and refuses a version not yet qualified. 18.11.3 is
   qualified by the spike.
-- Duties 4, 6 and 9 are designed in the skeleton spine. The spike did not test them.
+- Duties 4, 6 and 9 follow the probes of 2026-11-01 (see "Verified claims"): interrupt is Escape,
+  there is no launch dialog to answer, and a handoff is a new launch that names a handoff file.
 
 Rejected alternatives:
 - **`--mode rpc` or `rpc-ui`.** It would need a recorded change to the interactive-terminal rule, and
@@ -65,16 +71,44 @@ in the AI workspace, at `docs/superpowers/evidence/2026-10-25-omp-adapter-spike/
 - `usage` carried input, output, cache-read, cache-write and cost fields.
 - With `ask` left out of `--tools`, the model had no ask tool.
 
-### Unverified claims
-- Whether OMP loads MCP servers from its config when launched with the flags above.
-- Whether `--plugin-dir` with `--skills` gives a seat exactly the declared plugins' skills, and which
-  hooks, tools and MCP servers a plugin brings with it.
-- Interrupting a session (duty 4).
-- Answering launch dialogs (duty 6).
-- Handing off to a successor session (duty 9).
-- Turn end while OMP subagents run.
+These were settled on 2026-11-01, on OMP 18.11.3 and `zai/glm-5.3-flash`, by the real probes in
+`crates/pf-adapter-omp/tests/real_probe_*.rs`. The count of real sessions is in the item's report.
+- **MCP servers (2026-11-01).** OMP loads MCP servers from config under the launch flags. A project
+  `.mcp.json` server and a declared plugin's `.mcp.json` server both started, and their tools were
+  active in the seat although `--tools` named six tools. `pi.setActiveTools` from the extension did
+  not remove them. Result: the adapter refuses a launch when a declared plugin brings an MCP server
+  or when an MCP config file lies in the seat's directory tree or the operator's home, and it ends
+  a launch whose seat reports a tool outside its list.
+- **`--plugin-dir` with `--skills` (2026-11-01).** `--plugin-dir A --skills=alpha-*` gave the seat
+  exactly plugin A's two skills. A skill of a plugin that was not passed, a project `.claude/skills`
+  skill and the operator's user skills did not reach the seat. A plugin's `hooks/hooks.json`
+  (SessionStart and PreToolUse) did not run. A plugin brought no tool except through an MCP
+  server. With no declared skill the adapter passes `--no-skills`, and the extension reads the
+  `<skills>` list of the system prompt so that the adapter ends a launch that holds a skill no
+  declared glob matches.
+- **Interrupting a session, duty 4 (2026-11-01).** Escape written to the PTY ends a running turn:
+  `agent_end` without `willContinue` came 100 ms later, the session was idle and alive, the running
+  bash call ended with exit code 1 and "Command aborted", and a message delivered next started a
+  new turn.
+- **Launch dialogs, duty 6 (2026-11-01).** No launch dialog appeared in any real launch, each in a
+  directory OMP had not seen, with `--approval-mode yolo`. The first screen held only terminal
+  capability queries. This holds on a host whose OMP setup wizard and update check are off. Duty 6
+  answers no dialog: an unknown dialog returns `DialogAnswer::Unknown`, and the unit parks.
+- **Handing off, duty 9 (2026-11-01).** A successor session continued from a handoff file. The first
+  session wrote `handoff.md`; `hand_off` started the successor, whose first turn started; the
+  successor read the file and wrote its content to a second file; the first process was gone. OMP
+  carries no conversation across, so a handoff is a new launch whose message names the file.
+- **Turn end while subagents run (2026-11-01).** With `task` in `--tools`, each subagent loaded the
+  extension and wrote its own `agent_start` and `agent_end` into the seat's event file. One seat and
+  two subagents gave three `agent_end` lines without `willContinue`, and the first came before the
+  seat's last. A subagent's tool list was wider than `--tools` (it held `web_search`, `eval` and
+  `find`). The adapter cannot attribute these events, so it leaves `task` out of `--tools`.
+- **Context files (2026-11-01, finding).** `--no-rules` does not stop OMP from loading context
+  files: the seat's system prompt held the operator's `~/.omp/agent/AGENTS.md`. This is a known
+  limit, not a settled claim.
 
-The skeleton spine's adapter item verifies these.
+### Unverified claims
+None. `r0.s1.w3` settled the six that this ADR listed.
 
 ### Spike contract
 

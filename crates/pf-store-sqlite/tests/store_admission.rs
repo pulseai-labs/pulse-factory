@@ -36,6 +36,7 @@ impl AgentPort for OkAgent {
         Ok(SessionStatus {
             state: SessionState::Working,
             turn_ended: false,
+            first_turn_started: true,
         })
     }
     fn deliver(&self, _: &SessionRef, _: &str) -> Result<(), AgentError> {
@@ -61,6 +62,12 @@ impl AgentPort for OkAgent {
     }
     fn is_alive(&self, _: &SessionRef) -> Result<bool, AgentError> {
         Ok(true)
+    }
+    fn resolve_plugin(&self, name: &str, _: &str) -> Result<ResolvedPlugin, AgentError> {
+        Err(AgentError::Refused(format!("no plugin {name}")))
+    }
+    fn drain_events(&self, _: &SessionRef) -> Result<Vec<SessionEvent>, AgentError> {
+        Ok(Vec::new())
     }
 }
 

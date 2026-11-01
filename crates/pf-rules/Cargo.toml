@@ -1,0 +1,15 @@
+[package]
+name = "pf-rules"
+description = "Role rules: allow or deny for each tool call, by role. A pure library with no knowledge of any agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pf-engine = { path = "../pf-engine" }
+pf-workflow = { path = "../pf-workflow" }
+
+[dev-dependencies]
+tempfile.workspace = true
