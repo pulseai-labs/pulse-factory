@@ -1,0 +1,20 @@
+[package]
+name = "pf-adapter-omp"
+description = "The OMP agent adapter: launches OMP in a PTY and reads its turn ends, usage, pushes and stalls."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pf-engine = { path = "../pf-engine" }
+pf-rules = { path = "../pf-rules" }
+portable-pty.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+pf-store-sqlite = { path = "../pf-store-sqlite" }
+pf-workflow = { path = "../pf-workflow" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
