@@ -216,9 +216,7 @@ impl AgentPort for PaperAdapter {
         let run_dir = Some(setting("run_dir"))
             .filter(|d| !d.is_empty())
             .map(PathBuf::from);
-        let base = run_dir
-            .clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("pf-paper"));
+        let base = run_dir.clone().unwrap_or_else(|| self.cfg.dir.clone());
         let session_dir = base.join("paper");
         std::fs::create_dir_all(&session_dir)
             .map_err(|e| failed(format!("cannot make {}: {e}", session_dir.display())))?;
