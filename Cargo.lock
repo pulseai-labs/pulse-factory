@@ -362,6 +362,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-forge-bare"
+version = "0.1.0"
+dependencies = [
+ "pf-adapter-fake",
+ "pf-engine",
+ "pf-store-sqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "pf-forge-github"
+version = "0.1.0"
+dependencies = [
+ "pf-adapter-fake",
+ "pf-engine",
+ "pf-store-sqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "pf-rules"
 version = "0.1.0"
 dependencies = [

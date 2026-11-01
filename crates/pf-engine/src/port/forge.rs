@@ -1,6 +1,10 @@
 //! The forge port: read a PR's checks and mergeability, merge a PR, read whether a merge landed.
 //!
 //! Each effect returns its repo, branch, SHA and outcome.
+//!
+//! A forge is built for one repo. `merge` takes the head SHA the engine read, and the forge
+//! merges that SHA or nothing. A PR for another repo is never merged: `merge` answers it with
+//! [`ForgeOutcome::Refused`] and the reads answer it with a [`ForgeError`].
 
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +32,12 @@ pub enum Mergeable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrStatus {
     pub repo: String,
+    /// The PR's head branch.
     pub branch: String,
+    /// The PR's head SHA.
     pub sha: String,
+    /// The branch the PR merges into.
+    pub base: String,
     pub checks: Checks,
     pub mergeable: Mergeable,
 }
@@ -41,7 +49,8 @@ pub enum ForgeOutcome {
     Merged,
     /// The forge refused the merge because of a conflict.
     Conflict,
-    /// The forge refused the merge for another reason.
+    /// The forge refused the merge for another reason. A head that differs from the expected
+    /// SHA, and a PR of another repo, are refusals.
     Refused(String),
     /// A read found the merge on the target branch.
     Landed,
@@ -85,8 +94,10 @@ impl std::error::Error for ForgeError {}
 pub trait ForgePort: Send + Sync {
     /// Read a PR's checks and mergeability.
     fn pr_status(&self, pr: &PrRef) -> Result<PrStatus, ForgeError>;
-    /// Merge a PR.
-    fn merge(&self, pr: &PrRef) -> Result<ForgeEffect, ForgeError>;
+    /// Merge a PR, but only when its head is `expected_sha`. A head that differs gives
+    /// [`ForgeOutcome::Refused`], not an error. The effect may leave `branch` empty when the
+    /// call did not read the PR; the engine then records the branch it read in `pr_status`.
+    fn merge(&self, pr: &PrRef, expected_sha: &str) -> Result<ForgeEffect, ForgeError>;
     /// Read whether the merge landed.
     fn merge_landed(&self, pr: &PrRef) -> Result<ForgeEffect, ForgeError>;
 }
