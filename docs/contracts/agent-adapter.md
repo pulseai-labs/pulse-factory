@@ -104,12 +104,24 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
   branch is one quoted variable is allowed only for a role that may push its own branch, with the rule
   `own-branch-unverified`. The adapter's push check (see "Push events") guards the default branch after
   the fact.
-- The rules read a brace expansion of plain text as the words it makes, and a `function`, `coproc` or
-  `time { … }` body as commands. These are denied with `unparsed-command`: a glob or an expansion in a
-  command name or a `gh` or `git` subcommand; a brace expansion that mixes quoted text or a variable;
-  a wrapper whose options are not read (`taskset`, `chrt`, `setpriv`, `unshare`, `nsenter`, `strace`,
-  `su`, `runuser`, `script`, `busybox`, `systemd-run`, and the like); and an alias defined by
-  `git -c alias.…`, `git config alias.…` or `gh alias set`.
+- The rules read a brace expansion of plain text as the words it makes. They read a `function`,
+  `coproc` or `time { … }` body, and a compound command after `time`, as commands. A `case` pattern
+  and the values of an array literal are not commands. These are denied with `unparsed-command`:
+  - a glob or an expansion in a command name or a `gh` or `git` subcommand;
+  - a brace expansion that mixes quoted text with other parts, in any command (`"--no-ver"{ify,}`).
+    A brace beside a variable only makes the word unread, which is denied in a command name, a
+    `gh` or `git` subcommand and the arguments of a push;
+  - a wrapper whose options are not read, from a fixed list of 33 names (`taskset`, `chrt`,
+    `setpriv`, `unshare`, `nsenter`, `strace`, `setarch`, `prlimit`, `numactl`, `systemd-run` and
+    others in `UNREAD_WRAPPERS`). A wrapper that is not on the list is not read;
+  - a git config that runs a command the rules cannot read: an alias, or a key such as
+    `core.fsmonitor`, `core.sshCommand` or `credential.helper` with more than a bare program name,
+    given by `git -c`, `git --config-env`, `git config` (a write; a read or an `--unset` is
+    allowed), or the `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n` and
+    `GIT_CONFIG_PARAMETERS` variables; and a `git -c` value that is a variable;
+  - an alias set by `gh alias set` or `gh alias import`.
+  A brace sequence of more than 256 words, or with a number beyond 64 bits, is not expanded. Its word
+  counts as unread, like a variable.
 - The seat token: the adapter sets a fresh `PF_SEAT_TOKEN` in each seat's environment, different for
   each launch. A hook that calls the controller presents it. The token never appears in a log, a reason
   or an event.

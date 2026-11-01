@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use pf_workflow::rules::{Allow, RoleRules};
 
-use crate::shell::{Cmd, Parsed, Word, parse};
+use crate::shell::{Cmd, Parsed, Word, is_keyword, parse};
 use crate::{Context, Part, PushIntent};
 
 /// The most levels of `bash -c` inside `bash -c` that are read.
@@ -48,7 +48,7 @@ const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tc
 
 /// Commands that run another command, with options that this crate does not read. A call that
 /// uses one is denied, because the command it runs could be any.
-const UNREAD_WRAPPERS: [&str; 22] = [
+const UNREAD_WRAPPERS: [&str; 33] = [
     "taskset",
     "chrt",
     "setpriv",
@@ -71,6 +71,17 @@ const UNREAD_WRAPPERS: [&str; 22] = [
     "firejail",
     "cgexec",
     "eatmydata",
+    "setarch",
+    "linux32",
+    "linux64",
+    "prlimit",
+    "choom",
+    "numactl",
+    "cpulimit",
+    "xvfb-run",
+    "torsocks",
+    "proxychains",
+    "proxychains4",
 ];
 
 // ---------------------------------------------------------------- walking
@@ -263,11 +274,36 @@ impl<'a> Analyzer<'a> {
 
     fn parsed(&mut self, parsed: &Parsed, depth: usize) {
         for (idx, cmd) in parsed.cmds.iter().enumerate() {
+            self.git_config_env(cmd);
             if cmd.header || cmd.words.is_empty() {
+                continue;
+            }
+            if cmd.words.iter().any(|w| w.brace_quoted) {
+                // `"--no-ver"{ify,}`: the shell makes words that the rules do not read.
+                self.deny(
+                    "unparsed-command",
+                    "a brace expansion that mixes quoted text cannot be read",
+                );
                 continue;
             }
             for fin in self.unwrap(&cmd.words, depth) {
                 self.check(parsed, idx, cmd, &fin, depth);
+            }
+        }
+    }
+
+    /// `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n` and `GIT_CONFIG_PARAMETERS`
+    /// give git a config as `-c` does, so a call that sets one is denied: an alias or a command
+    /// key in it cannot be read.
+    fn git_config_env(&mut self, cmd: &Cmd) {
+        for w in cmd.assigns.iter().chain(&cmd.words) {
+            if let Some((name, _, _)) = split_assign(&w.raw)
+                && is_git_config_env(&name)
+            {
+                self.deny(
+                    "unparsed-command",
+                    format!("{name} gives git a config that cannot be read"),
+                );
             }
         }
     }
@@ -283,9 +319,9 @@ impl<'a> Analyzer<'a> {
             let Some(first) = w.first().cloned() else {
                 return Vec::new();
             };
-            if !first.any_quote && !first.dynamic && matches!(first.text.as_str(), "{" | "!") {
-                // `time { cmd; }`: the keyword that follows a wrapper starts a group. The group
-                // holds the command.
+            if !first.any_quote && !first.dynamic && is_keyword(&first.text) {
+                // `time { cmd; }`, `time while cmd; do …; done`: the keyword that follows a
+                // wrapper starts a group or a compound command. The command is inside it.
                 w.remove(0);
                 continue;
             }
@@ -729,21 +765,30 @@ impl<'a> Analyzer<'a> {
                     i += 2;
                 }
                 "-c" | "--config-env" => {
-                    if words.get(i + 1).is_some_and(|v| sets_alias(&v.text)) {
-                        self.deny(
+                    match words.get(i + 1) {
+                        Some(v) if v.dynamic => self.deny(
                             "unparsed-command",
-                            "git -c defines an alias, and the command it runs cannot be read",
-                        );
+                            format!("git {t} sets a config that cannot be read"),
+                        ),
+                        Some(v) if config_runs_command(&v.text, t == "--config-env") => self.deny(
+                            "unparsed-command",
+                            format!(
+                                "git {t} sets a config that runs a command that cannot be read"
+                            ),
+                        ),
+                        _ => {}
                     }
                     i += 2;
                 }
                 "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" | "--super-prefix"
                 | "--attr-source" => i += 2,
-                _ if t.starts_with("--config-env=") && sets_alias(&t["--config-env=".len()..]) => {
-                    self.deny(
-                        "unparsed-command",
-                        "git --config-env defines an alias, and the command it runs cannot be read",
-                    );
+                _ if t.starts_with("--config-env=") => {
+                    if words[i].dynamic || config_runs_command(&t["--config-env=".len()..], true) {
+                        self.deny(
+                            "unparsed-command",
+                            "git --config-env sets a config that runs a command that cannot be read",
+                        );
+                    }
                     i += 1;
                 }
                 _ if t.starts_with('-') => i += 1,
@@ -757,10 +802,10 @@ impl<'a> Analyzer<'a> {
         }
         let sub_name = sub.text.as_str();
         let rest = &words[i + 1..];
-        if sub_name == "config" && rest.iter().any(|w| sets_alias(&w.text)) {
+        if sub_name == "config" && config_writes_command(rest) {
             self.deny(
                 "unparsed-command",
-                "git config names an alias, and the command it runs cannot be read",
+                "git config sets a config that runs a command that cannot be read",
             );
         }
         // `--no-verify` skips hooks in any git command.
@@ -1521,6 +1566,104 @@ fn after_opts(args: &[Word], takes_arg: &[&str], positional: usize) -> Vec<Word>
 /// True for `alias.name=value` and `alias.name`: a git config key that defines an alias.
 fn sets_alias(text: &str) -> bool {
     text.trim_start().to_ascii_lowercase().starts_with("alias.")
+}
+
+/// Git config keys whose value is a command that git runs.
+const COMMAND_KEYS: [&str; 14] = [
+    "core.fsmonitor",
+    "core.sshcommand",
+    "core.pager",
+    "core.editor",
+    "core.askpass",
+    "sequence.editor",
+    "diff.external",
+    "credential.helper",
+    "gpg.program",
+    "gpg.ssh.program",
+    "gpg.x509.program",
+    "gpg.openpgp.program",
+    "uploadpack.packobjectshook",
+    "web.browser",
+];
+
+/// Key endings that name a command in a config: `diff.<driver>.textconv`, `filter.<name>.clean`,
+/// `difftool.<tool>.cmd` and the like.
+const COMMAND_KEY_ENDINGS: [&str; 9] = [
+    ".program",
+    ".command",
+    ".helper",
+    ".textconv",
+    ".cmd",
+    ".clean",
+    ".smudge",
+    ".process",
+    ".driver",
+];
+
+/// Does a `NAME=value` config key run a command the rules cannot read? An alias always does. A key
+/// that names a command does when its value is more than a bare word. `value_unread` is true when
+/// the value comes from the environment, as with `--config-env`.
+fn config_runs_command(setting: &str, value_unread: bool) -> bool {
+    let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+    let key = key.trim().to_ascii_lowercase();
+    if key.starts_with("alias.") {
+        return true;
+    }
+    let names_command = COMMAND_KEYS.contains(&key.as_str())
+        || key.starts_with("pager.")
+        || COMMAND_KEY_ENDINGS.iter().any(|e| key.ends_with(e));
+    if !names_command {
+        return false;
+    }
+    if value_unread {
+        return true;
+    }
+    let bare = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-' | '+' | ':'));
+    // An empty value turns the command off, and a bare word is one program with no arguments.
+    !(value.is_empty() || bare)
+}
+
+/// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,
+/// listing and removing one do not.
+fn config_writes_command(rest: &[Word]) -> bool {
+    let reads = rest.iter().any(|w| {
+        matches!(
+            w.text.as_str(),
+            "--get"
+                | "--get-all"
+                | "--get-regexp"
+                | "--get-urlmatch"
+                | "--list"
+                | "-l"
+                | "--unset"
+                | "--unset-all"
+                | "--remove-section"
+        )
+    });
+    if reads {
+        return false;
+    }
+    let writes_more = rest
+        .iter()
+        .any(|w| matches!(w.text.as_str(), "--add" | "--replace-all"));
+    let positional: Vec<&Word> = rest
+        .iter()
+        .filter(|w| !(w.text.starts_with('-') && w.text.len() > 1))
+        .collect();
+    // `git config alias.x` reads the key. A value after it, or `--add`, writes it.
+    let writing = writes_more || positional.len() > 1;
+    writing && positional.iter().any(|w| sets_alias(&w.text))
+}
+
+/// Is this env name one that gives git config without a `-c`?
+fn is_git_config_env(name: &str) -> bool {
+    name == "GIT_CONFIG_COUNT"
+        || name == "GIT_CONFIG_PARAMETERS"
+        || name.starts_with("GIT_CONFIG_KEY_")
+        || name.starts_with("GIT_CONFIG_VALUE_")
 }
 
 /// Skip `NAME=value` words.

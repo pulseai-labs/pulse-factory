@@ -38,6 +38,9 @@ pub struct Word {
     /// The words that an unquoted brace expansion makes of this word, such as `{merge,x}`.
     /// Empty when the word has none. The parser puts these words in the command in its place.
     pub alts: Vec<String>,
+    /// True when a brace expansion mixes quoted text with other parts, such as `"--no-ver"{ify,}`.
+    /// The words it makes are not read, so a flag could hide in them.
+    pub brace_quoted: bool,
 }
 
 impl Word {
@@ -51,6 +54,7 @@ impl Word {
             glob: false,
             any_quote: false,
             alts: Vec::new(),
+            brace_quoted: false,
         }
     }
 }
@@ -89,6 +93,12 @@ const RESERVED: [&str; 13] = [
     "if", "then", "elif", "else", "fi", "while", "until", "do", "done", "!", "{", "function",
     "coproc",
 ];
+
+/// Is this word a shell keyword that starts a compound command or a group? After a wrapper such
+/// as `time`, the command that the keyword introduces is the one that runs.
+pub fn is_keyword(text: &str) -> bool {
+    RESERVED.contains(&text) || text == "}"
+}
 
 /// Parse a command line.
 pub fn parse(src: &str) -> Result<Parsed, String> {
@@ -183,6 +193,10 @@ impl Parser<'_> {
         let mut paren_depth = 0usize;
         let mut in_case = 0usize;
         let mut case_headers: Vec<usize> = Vec::new();
+        // True while the patterns of a `case` arm are read. They are not commands.
+        let mut in_pattern = false;
+        // The depth of `@(…)` and `+(…)` groups inside a pattern.
+        let mut pat_paren = 0usize;
         loop {
             // Skip blanks and line continuations.
             while let Some(c) = self.peek() {
@@ -215,11 +229,17 @@ impl Parser<'_> {
                 }
                 ';' => {
                     self.i += 1;
+                    let mut arm_end = false;
                     if self.peek() == Some(';') || self.peek() == Some('&') {
                         self.i += 1;
+                        arm_end = true;
                     }
                     cur = None;
                     pipe_from = None;
+                    if arm_end && in_case > 0 && paren_depth == 0 {
+                        // `;;`, `;&` and `;;&` end an arm. The next words are patterns.
+                        in_pattern = true;
+                    }
                 }
                 '&' => {
                     if self.peek_at(1) == Some('>') {
@@ -253,9 +273,24 @@ impl Parser<'_> {
                         pipe_from = cur;
                     }
                     cur = None;
+                    if in_pattern {
+                        pipe_from = None;
+                    }
                 }
                 '(' => {
-                    if self.peek_at(1) == Some('(') && cur.is_none() {
+                    if in_pattern {
+                        // The `(` that opens a pattern, or an extended glob group inside it.
+                        if self.i > 0
+                            && matches!(self.chars[self.i - 1], '?' | '*' | '+' | '@' | '!')
+                        {
+                            pat_paren += 1;
+                        }
+                        self.i += 1;
+                    } else if cur.is_some() && self.i > 0 && self.chars[self.i - 1] == '=' {
+                        // `name=( … )`: an array. Its words are values, not commands.
+                        self.i += 1;
+                        self.array_literal(depth)?;
+                    } else if self.peek_at(1) == Some('(') && cur.is_none() {
                         // `(( … ))` arithmetic command.
                         self.i += 2;
                         self.skip_arith()?;
@@ -273,7 +308,16 @@ impl Parser<'_> {
                     }
                 }
                 ')' => {
-                    if paren_depth > 0 {
+                    if in_pattern {
+                        self.i += 1;
+                        if pat_paren > 0 {
+                            pat_paren -= 1;
+                        } else {
+                            in_pattern = false;
+                            cur = None;
+                            pipe_from = None;
+                        }
+                    } else if paren_depth > 0 {
                         self.i += 1;
                         paren_depth -= 1;
                         cur = None;
@@ -319,10 +363,23 @@ impl Parser<'_> {
                         }
                     }
                     let word = self.word(depth)?;
+                    if in_pattern
+                        && !word.any_quote
+                        && !word.dynamic
+                        && word.alts.is_empty()
+                        && word.text == "esac"
+                    {
+                        // An arm ended with `;;` and the next word closes the `case`.
+                        in_case = in_case.saturating_sub(1);
+                        in_pattern = false;
+                        continue;
+                    }
+                    let pattern_cmd = in_pattern;
                     let idx = *cur.get_or_insert_with(|| {
                         let v = self.cmds.len();
                         self.cmds.push(Cmd {
                             piped_from: pipe_from.take(),
+                            header: pattern_cmd,
                             ..Cmd::default()
                         });
                         v
@@ -343,6 +400,7 @@ impl Parser<'_> {
                                 glob: word.glob,
                                 any_quote: false,
                                 alts: Vec::new(),
+                                brace_quoted: false,
                             })
                             .collect()
                     };
@@ -353,9 +411,48 @@ impl Parser<'_> {
                             Action::CaseIn => {
                                 case_headers.retain(|k| *k != idx);
                                 in_case += 1;
+                                in_pattern = true;
                             }
-                            Action::Esac => in_case = in_case.saturating_sub(1),
+                            Action::Esac => {
+                                in_case = in_case.saturating_sub(1);
+                                in_pattern = false;
+                            }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Read the inside of `name=( … )` after the `(`. The words are values. A substitution in
+    /// one is still read as commands.
+    fn array_literal(&mut self, depth: usize) -> Result<(), String> {
+        loop {
+            while self
+                .peek()
+                .is_some_and(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+            {
+                self.i += 1;
+            }
+            match self.peek() {
+                None => return Err("an array is not closed".to_string()),
+                Some(')') => {
+                    self.i += 1;
+                    return Ok(());
+                }
+                Some('#') => {
+                    while self.peek().is_some_and(|c| c != '\n') {
+                        self.i += 1;
+                    }
+                }
+                Some(';' | '&' | '|' | '<' | '>' | '(') => {
+                    return Err("an array holds an operator that is not read".to_string());
+                }
+                Some(_) => {
+                    let before = self.i;
+                    self.word(depth)?;
+                    if self.i == before {
+                        return Err("an array holds text that is not read".to_string());
                     }
                 }
             }
@@ -726,6 +823,7 @@ impl Parser<'_> {
         // commas do nothing. A word that is only plain text is expanded here. Any other word that
         // would expand cannot be read, so it counts as dynamic.
         let mut alts = Vec::new();
+        let mut brace_quoted = false;
         let pattern: String = segs
             .iter()
             .map(|s| match s {
@@ -737,7 +835,10 @@ impl Parser<'_> {
             match expand_braces(&pattern) {
                 Expansion::None => {}
                 Expansion::Words(v) if !pattern.contains('\u{1}') => alts = v,
-                _ => dynamic = true,
+                _ => {
+                    dynamic = true;
+                    brace_quoted = segs.iter().any(|s| matches!(s, Seg::Quoted(_)));
+                }
             }
         }
         Ok(Word {
@@ -748,6 +849,7 @@ impl Parser<'_> {
             glob,
             any_quote,
             alts,
+            brace_quoted,
         })
     }
 
@@ -1012,16 +1114,30 @@ fn expand_braces(src: &str) -> Expansion {
     Expansion::None
 }
 
+/// Is this text a whole number: an optional sign and digits?
+fn looks_whole(t: &str) -> bool {
+    let digits = t.strip_prefix(['-', '+']).unwrap_or(t);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// The words of `a..b` or `a..b..step`: whole numbers or single letters. `None` when the text is
-/// not a sequence, `Some(None)` when it is one that is too long.
+/// not a sequence, `Some(None)` when it is one that is too long or too large to read. The
+/// arithmetic is in `i128`, so no `i64` input can overflow it, and the word count is checked
+/// before any word is made.
 fn sequence(inside: &str) -> Option<Option<Vec<String>>> {
     let parts: Vec<&str> = inside.split("..").collect();
     if !(2..=3).contains(&parts.len()) {
         return None;
     }
-    let step = match parts.get(2) {
-        None => 1i64,
-        Some(t) => t.parse::<i64>().ok().filter(|n| *n != 0)?.abs(),
+    let whole = |t: &str| t.parse::<i64>().ok().map(i128::from);
+    let step: i128 = match parts.get(2) {
+        None => 1,
+        Some(t) if looks_whole(t) => match whole(t) {
+            Some(0) => return None,
+            Some(n) => n.abs(),
+            None => return Some(None),
+        },
+        Some(_) => return None,
     };
     let width = |t: &str| {
         let digits = t.trim_start_matches('-');
@@ -1032,62 +1148,47 @@ fn sequence(inside: &str) -> Option<Option<Vec<String>>> {
         }
     };
     let (a, b) = (parts[0], parts[1]);
-    let render = |n: i64, w: usize| {
+    let render = |n: i128, w: usize| {
         if w > 0 {
             format!("{n:0w$}", w = w + usize::from(n < 0))
         } else {
             n.to_string()
         }
     };
-    if let (Ok(x), Ok(y)) = (a.parse::<i64>(), b.parse::<i64>()) {
-        let w = width(a).max(width(b));
-        let count = (x - y).unsigned_abs() / step.unsigned_abs() + 1;
-        if count > MAX_BRACE_WORDS as u64 {
+    // The words from `x` to `y` in steps of `step`: the count first, then the words.
+    let walk = |x: i128, y: i128, render: &dyn Fn(i128) -> String| {
+        let count = (x - y).abs() / step + 1;
+        if count > MAX_BRACE_WORDS as i128 {
+            return None;
+        }
+        let sign = if x <= y { 1 } else { -1 };
+        Some(
+            (0..count)
+                .map(|k| render(x + sign * k * step))
+                .collect::<Vec<String>>(),
+        )
+    };
+    if looks_whole(a) && looks_whole(b) {
+        let (Some(x), Some(y)) = (whole(a), whole(b)) else {
             return Some(None);
-        }
-        let mut v = Vec::new();
-        let mut n = x;
-        loop {
-            v.push(render(n, w));
-            if x <= y {
-                n += step;
-                if n > y {
-                    break;
-                }
-            } else {
-                n -= step;
-                if n < y {
-                    break;
-                }
-            }
-        }
-        return Some(Some(v));
+        };
+        let w = width(a).max(width(b));
+        return Some(walk(x, y, &|n| render(n, w)));
     }
     let single = |t: &str| {
         let mut it = t.chars();
         match (it.next(), it.next()) {
-            (Some(c), None) if c.is_ascii_alphabetic() => Some(c as u32),
+            (Some(c), None) if c.is_ascii_alphabetic() => Some(i128::from(c as u32)),
             _ => None,
         }
     };
     let (x, y) = (single(a)?, single(b)?);
-    let mut v = Vec::new();
-    let mut n = x as i64;
-    loop {
-        v.push(char::from_u32(n as u32).map_or(String::new(), |c| c.to_string()));
-        if x <= y {
-            n += step;
-            if n > y as i64 {
-                break;
-            }
-        } else {
-            n -= step;
-            if n < y as i64 {
-                break;
-            }
-        }
-    }
-    Some(Some(v))
+    Some(walk(x, y, &|n| {
+        u32::try_from(n)
+            .ok()
+            .and_then(char::from_u32)
+            .map_or(String::new(), |c| c.to_string())
+    }))
 }
 
 #[cfg(test)]
@@ -1227,6 +1328,33 @@ mod brace_tests {
     }
 
     #[test]
+    fn a_sequence_never_overflows_and_never_runs_long() {
+        // Each of these made the old code loop for ever or panic on an `i64` overflow.
+        let max = i64::MAX;
+        assert_eq!(
+            expand(&format!("{{0..{max}..{max}}}")),
+            ["0", &max.to_string()]
+        );
+        assert_eq!(expand(&format!("{{1..3..{max}}}")), ["1"]);
+        assert_eq!(expand(&format!("{{a..z..{max}}}")), ["a"]);
+        assert_eq!(expand(&format!("{{3..1..{}}}", i64::MIN)), ["3"]);
+        for src in [
+            format!("{{{}..{max}}}", i64::MIN),
+            format!("{{{max}..{}}}", i64::MIN),
+            "{1..3..99999999999999999999}".to_string(),
+            "{99999999999999999999..1}".to_string(),
+        ] {
+            assert_eq!(expand_braces(&src), Expansion::TooMany, "{src}");
+        }
+        // A step that is not a whole number, and a step of nothing, are text.
+        for src in ["{1..3..x}", "{1..3..0}", "{a..z..}"] {
+            assert_eq!(expand_braces(src), Expansion::None, "{src}");
+        }
+        assert_eq!(expand("{a..e..2}"), ["a", "c", "e"]);
+        assert_eq!(expand("{5..1..-2}"), ["5", "3", "1"]);
+    }
+
+    #[test]
     fn a_word_becomes_the_commands_words() {
         let p = parse("gh pr {merge,x} 1").unwrap();
         let words: Vec<&str> = p.cmds[0].words.iter().map(|w| w.text.as_str()).collect();
@@ -1257,5 +1385,82 @@ mod brace_tests {
                 .collect();
             assert_eq!(all, [want], "{src}");
         }
+    }
+}
+
+#[cfg(test)]
+mod arm_and_array_tests {
+    use super::*;
+
+    fn commands(src: &str) -> Vec<String> {
+        parse(src)
+            .unwrap()
+            .cmds
+            .iter()
+            .filter(|c| !c.header && !c.words.is_empty())
+            .map(|c| {
+                c.words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_pattern_of_a_case_arm_is_a_command() {
+        for src in [
+            "case \"$f\" in\n *.c|*.h) echo src ;;\nesac",
+            "case $f in a*|b*|c*) echo x ;; esac",
+            "case $f in (a*|b*) echo x ;; esac",
+            "case $f in\n a*)\n echo x\n ;;\n *.c | *.h | *.o) echo x ;;\n *) echo y ;;\nesac",
+            "case $f in @(a|b)*) echo x ;; esac",
+            "case $f in a) echo x ;; b) echo x ;;& *) echo y ;& esac",
+        ] {
+            let c = commands(src);
+            assert!(
+                c.iter().all(|t| t.starts_with("echo ")),
+                "{src:?} gave {c:?}"
+            );
+            assert!(!c.is_empty(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_case_arm_body_is_still_read() {
+        let c = commands("case $f in\n *.c|*.h) gh pr merge 1 | cat ;;\n x) ls ;;\nesac");
+        assert_eq!(c, ["gh pr merge 1", "cat", "ls"]);
+        // After the `esac`, words are commands again.
+        let c = commands("case $f in a|b) echo x ;; esac; *.sh");
+        assert_eq!(c, ["echo x", "*.sh"]);
+        // A nested `case` returns to the arm body of the outer one.
+        let c = commands("case $a in x) case $b in y|z) echo n ;; esac; ls ;; *) echo o ;; esac");
+        assert_eq!(c, ["echo n", "ls", "echo o"]);
+    }
+
+    #[test]
+    fn an_array_literal_holds_values_and_its_substitutions_are_commands() {
+        assert_eq!(commands("files=(*.rs *.toml); echo hi"), ["echo hi"]);
+        assert_eq!(
+            commands("declare -a f=(a\n b # c\n *.d)"),
+            ["declare -a f="]
+        );
+        assert_eq!(commands("x+=(a b) ls"), ["ls"]);
+        assert!(commands("f=($(gh pr merge 1) *.c)").contains(&"gh pr merge 1".to_string()));
+        assert!(parse("f=(a b").is_err());
+        assert!(parse("f=(a; b)").is_err());
+    }
+
+    #[test]
+    fn a_quoted_brace_word_is_marked() {
+        let p = parse("git commit \"--no-ver\"{ify,} -m x").unwrap();
+        assert!(p.cmds[0].words.iter().any(|w| w.brace_quoted));
+        // A variable with a brace is dynamic, and is not marked.
+        let p = parse("mkdir \"$d\"/{a,b}").unwrap();
+        assert!(p.cmds[0].words.iter().all(|w| !w.brace_quoted));
+        assert!(p.cmds[0].words.iter().any(|w| w.dynamic));
+        let p = parse("echo '{a,b}' {a,b}").unwrap();
+        assert!(p.cmds[0].words.iter().all(|w| !w.brace_quoted));
     }
 }
