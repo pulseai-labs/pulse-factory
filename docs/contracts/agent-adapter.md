@@ -104,6 +104,12 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
   branch is one quoted variable is allowed only for a role that may push its own branch, with the rule
   `own-branch-unverified`. The adapter's push check (see "Push events") guards the default branch after
   the fact.
+- The rules read a brace expansion of plain text as the words it makes, and a `function`, `coproc` or
+  `time { … }` body as commands. These are denied with `unparsed-command`: a glob or an expansion in a
+  command name or a `gh` or `git` subcommand; a brace expansion that mixes quoted text or a variable;
+  a wrapper whose options are not read (`taskset`, `chrt`, `setpriv`, `unshare`, `nsenter`, `strace`,
+  `su`, `runuser`, `script`, `busybox`, `systemd-run`, and the like); and an alias defined by
+  `git -c alias.…`, `git config alias.…` or `gh alias set`.
 - The seat token: the adapter sets a fresh `PF_SEAT_TOKEN` in each seat's environment, different for
   each launch. A hook that calls the controller presents it. The token never appears in a log, a reason
   or an event.

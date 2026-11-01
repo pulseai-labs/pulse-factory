@@ -35,6 +35,9 @@ pub struct Word {
     pub glob: bool,
     /// True when any part of the word was in quotes.
     pub any_quote: bool,
+    /// The words that an unquoted brace expansion makes of this word, such as `{merge,x}`.
+    /// Empty when the word has none. The parser puts these words in the command in its place.
+    pub alts: Vec<String>,
 }
 
 impl Word {
@@ -47,6 +50,7 @@ impl Word {
             quoted_var: None,
             glob: false,
             any_quote: false,
+            alts: Vec::new(),
         }
     }
 }
@@ -70,6 +74,9 @@ pub struct Cmd {
     pub loop_header: bool,
     /// The words of a `for` or `select` header after the keyword. The first is the variable.
     pub head: Vec<Word>,
+    /// 1 after `function`: the next word names the function. 2 after `coproc`: the next word
+    /// names the coprocess when a body follows it. 0 otherwise.
+    pub name_next: u8,
 }
 
 /// All commands of a command line, nested ones included.
@@ -320,18 +327,48 @@ impl Parser<'_> {
                         });
                         v
                     });
-                    match self.add_word(idx, word, &case_headers) {
-                        Action::Nothing => {}
-                        Action::CaseHeader => case_headers.push(idx),
-                        Action::CaseIn => {
-                            case_headers.retain(|k| *k != idx);
-                            in_case += 1;
+                    // Brace expansion happens before the command runs: one word may be several.
+                    let words = if word.alts.is_empty() {
+                        vec![word]
+                    } else {
+                        // An empty result of an unquoted expansion is dropped, as the shell does.
+                        word.alts
+                            .iter()
+                            .filter(|alt| !alt.is_empty())
+                            .map(|alt| Word {
+                                text: alt.clone(),
+                                raw: alt.clone(),
+                                dynamic: false,
+                                quoted_var: None,
+                                glob: word.glob,
+                                any_quote: false,
+                                alts: Vec::new(),
+                            })
+                            .collect()
+                    };
+                    for word in words {
+                        match self.add_word(idx, word, &case_headers) {
+                            Action::Nothing => {}
+                            Action::CaseHeader => case_headers.push(idx),
+                            Action::CaseIn => {
+                                case_headers.retain(|k| *k != idx);
+                                in_case += 1;
+                            }
+                            Action::Esac => in_case = in_case.saturating_sub(1),
                         }
-                        Action::Esac => in_case = in_case.saturating_sub(1),
                     }
                 }
             }
         }
+    }
+
+    /// True when the next thing after blanks is `{` or `(`.
+    fn body_follows(&self) -> bool {
+        let mut k = 0;
+        while matches!(self.peek_at(k), Some(' ' | '\t')) {
+            k += 1;
+        }
+        matches!(self.peek_at(k), Some('{' | '('))
     }
 
     fn new_cmd(&mut self, piped_from: Option<usize>) -> usize {
@@ -345,6 +382,7 @@ impl Parser<'_> {
     /// Put a word into a command, treating assignments and reserved words at the start.
     fn add_word(&mut self, idx: usize, word: Word, case_headers: &[usize]) -> Action {
         let plain = !word.any_quote && !word.dynamic;
+        let body_follows = self.body_follows();
         let cmd = &mut self.cmds[idx];
         if cmd.header {
             // The rest of a `for`, `select` or `case` header holds no command.
@@ -357,6 +395,22 @@ impl Parser<'_> {
             return Action::Nothing;
         }
         if cmd.words.is_empty() {
+            if cmd.name_next != 0 {
+                // The name after `function`, or after `coproc` when a body follows it. The body
+                // is read as commands, so the name must not become the command name.
+                let mode = std::mem::take(&mut cmd.name_next);
+                if !(plain && word.text == "{") && (mode == 1 || body_follows) {
+                    return Action::Nothing;
+                }
+            }
+            if plain && word.text == "function" {
+                cmd.name_next = 1;
+                return Action::Nothing;
+            }
+            if plain && word.text == "coproc" {
+                cmd.name_next = 2;
+                return Action::Nothing;
+            }
             if assignment_prefix(&word.raw) {
                 cmd.assigns.push(word);
                 return Action::Nothing;
@@ -668,6 +722,24 @@ impl Parser<'_> {
             [Seg::Var { name, quoted: true }] => Some(name.clone()),
             _ => None,
         };
+        // Brace expansion. Quoted and expanded parts stand as a placeholder, so their braces and
+        // commas do nothing. A word that is only plain text is expanded here. Any other word that
+        // would expand cannot be read, so it counts as dynamic.
+        let mut alts = Vec::new();
+        let pattern: String = segs
+            .iter()
+            .map(|s| match s {
+                Seg::Lit(t) => t.clone(),
+                _ => "\u{1}".to_string(),
+            })
+            .collect();
+        if !assignment_prefix(&raw) {
+            match expand_braces(&pattern) {
+                Expansion::None => {}
+                Expansion::Words(v) if !pattern.contains('\u{1}') => alts = v,
+                _ => dynamic = true,
+            }
+        }
         Ok(Word {
             text,
             raw,
@@ -675,6 +747,7 @@ impl Parser<'_> {
             quoted_var,
             glob,
             any_quote,
+            alts,
         })
     }
 
@@ -860,6 +933,163 @@ impl Parser<'_> {
     }
 }
 
+/// What brace expansion makes of a word.
+#[derive(Debug, PartialEq, Eq)]
+enum Expansion {
+    /// The word has nothing to expand.
+    None,
+    /// The words it expands to.
+    Words(Vec<String>),
+    /// It expands to more words than are read.
+    TooMany,
+}
+
+/// The most words one brace expansion is read as.
+const MAX_BRACE_WORDS: usize = 256;
+
+/// Expand `{a,b}` and `{1..3}` as the shell does, before anything else. The text holds no
+/// quotes: a quoted part is a placeholder character.
+fn expand_braces(src: &str) -> Expansion {
+    let chars: Vec<char> = src.chars().collect();
+    let mut from = 0;
+    while let Some(open) = chars[from..]
+        .iter()
+        .position(|c| *c == '{')
+        .map(|k| k + from)
+    {
+        from = open + 1;
+        // The matching close brace, and the commas at the top level between them.
+        let mut depth = 0usize;
+        let mut commas: Vec<usize> = Vec::new();
+        let mut close = None;
+        for (k, c) in chars.iter().enumerate().skip(open) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(k);
+                        break;
+                    }
+                }
+                ',' if depth == 1 => commas.push(k),
+                _ => {}
+            }
+        }
+        let Some(close) = close else { continue };
+        let inside: String = chars[open + 1..close].iter().collect();
+        let alts: Vec<String> = if commas.is_empty() {
+            match sequence(&inside) {
+                Some(Some(v)) => v,
+                Some(None) => return Expansion::TooMany,
+                None => continue,
+            }
+        } else {
+            let mut parts = Vec::new();
+            let mut start = open + 1;
+            for k in commas.iter().copied().chain(std::iter::once(close)) {
+                parts.push(chars[start..k].iter().collect::<String>());
+                start = k + 1;
+            }
+            parts
+        };
+        let prefix: String = chars[..open].iter().collect();
+        let suffix: String = chars[close + 1..].iter().collect();
+        let mut out: Vec<String> = Vec::new();
+        for alt in alts {
+            let joined = format!("{alt}{suffix}");
+            match expand_braces(&joined) {
+                Expansion::None => out.push(format!("{prefix}{joined}")),
+                Expansion::Words(v) => out.extend(v.into_iter().map(|w| format!("{prefix}{w}"))),
+                Expansion::TooMany => return Expansion::TooMany,
+            }
+            if out.len() > MAX_BRACE_WORDS {
+                return Expansion::TooMany;
+            }
+        }
+        return Expansion::Words(out);
+    }
+    Expansion::None
+}
+
+/// The words of `a..b` or `a..b..step`: whole numbers or single letters. `None` when the text is
+/// not a sequence, `Some(None)` when it is one that is too long.
+fn sequence(inside: &str) -> Option<Option<Vec<String>>> {
+    let parts: Vec<&str> = inside.split("..").collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let step = match parts.get(2) {
+        None => 1i64,
+        Some(t) => t.parse::<i64>().ok().filter(|n| *n != 0)?.abs(),
+    };
+    let width = |t: &str| {
+        let digits = t.trim_start_matches('-');
+        if digits.len() > 1 && digits.starts_with('0') {
+            digits.len()
+        } else {
+            0
+        }
+    };
+    let (a, b) = (parts[0], parts[1]);
+    let render = |n: i64, w: usize| {
+        if w > 0 {
+            format!("{n:0w$}", w = w + usize::from(n < 0))
+        } else {
+            n.to_string()
+        }
+    };
+    if let (Ok(x), Ok(y)) = (a.parse::<i64>(), b.parse::<i64>()) {
+        let w = width(a).max(width(b));
+        let count = (x - y).unsigned_abs() / step.unsigned_abs() + 1;
+        if count > MAX_BRACE_WORDS as u64 {
+            return Some(None);
+        }
+        let mut v = Vec::new();
+        let mut n = x;
+        loop {
+            v.push(render(n, w));
+            if x <= y {
+                n += step;
+                if n > y {
+                    break;
+                }
+            } else {
+                n -= step;
+                if n < y {
+                    break;
+                }
+            }
+        }
+        return Some(Some(v));
+    }
+    let single = |t: &str| {
+        let mut it = t.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) if c.is_ascii_alphabetic() => Some(c as u32),
+            _ => None,
+        }
+    };
+    let (x, y) = (single(a)?, single(b)?);
+    let mut v = Vec::new();
+    let mut n = x as i64;
+    loop {
+        v.push(char::from_u32(n as u32).map_or(String::new(), |c| c.to_string()));
+        if x <= y {
+            n += step;
+            if n > y as i64 {
+                break;
+            }
+        } else {
+            n -= step;
+            if n < y as i64 {
+                break;
+            }
+        }
+    }
+    Some(Some(v))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,5 +1188,74 @@ mod tests {
             n.contains(&"rm -rf y".to_string()) && n.contains(&"z".to_string()),
             "{n:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod brace_tests {
+    use super::*;
+
+    fn expand(src: &str) -> Vec<String> {
+        match expand_braces(src) {
+            Expansion::Words(v) => v,
+            other => panic!("{src}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lists_sequences_and_nests() {
+        assert_eq!(expand("a{b,c}d"), ["abd", "acd"]);
+        assert_eq!(expand("f{,.bak}"), ["f", "f.bak"]);
+        assert_eq!(expand("{1..3}"), ["1", "2", "3"]);
+        assert_eq!(expand("{3..1}"), ["3", "2", "1"]);
+        assert_eq!(expand("{a..c}"), ["a", "b", "c"]);
+        assert_eq!(expand("{01..03}"), ["01", "02", "03"]);
+        assert_eq!(expand("{1..7..3}"), ["1", "4", "7"]);
+        assert_eq!(expand("{a,{b,c}}"), ["a", "b", "c"]);
+        assert_eq!(expand("{a,b}{c,d}"), ["ac", "ad", "bc", "bd"]);
+        assert_eq!(expand("x{a}{b,c}"), ["x{a}b", "x{a}c"]);
+    }
+
+    #[test]
+    fn leaves_what_the_shell_leaves() {
+        for src in [
+            "{}", "{a}", "{", "}", "a{b", "{a..}", "{..a}", "{1..a}", "plain",
+        ] {
+            assert_eq!(expand_braces(src), Expansion::None, "{src}");
+        }
+        assert_eq!(expand_braces("{1..100000}"), Expansion::TooMany);
+    }
+
+    #[test]
+    fn a_word_becomes_the_commands_words() {
+        let p = parse("gh pr {merge,x} 1").unwrap();
+        let words: Vec<&str> = p.cmds[0].words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["gh", "pr", "merge", "x", "1"]);
+    }
+
+    #[test]
+    fn function_and_coproc_names_are_not_commands() {
+        for (src, want) in [
+            ("function f { gh pr merge 1; }", "gh pr merge 1"),
+            ("function f() { gh pr merge 1; }", "gh pr merge 1"),
+            ("coproc n { gh pr merge 1; }", "gh pr merge 1"),
+            ("coproc gh pr merge 1", "gh pr merge 1"),
+            ("coproc { gh pr merge 1; }", "gh pr merge 1"),
+        ] {
+            let p = parse(src).unwrap();
+            let all: Vec<String> = p
+                .cmds
+                .iter()
+                .filter(|c| !c.words.is_empty())
+                .map(|c| {
+                    c.words
+                        .iter()
+                        .map(|w| w.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect();
+            assert_eq!(all, [want], "{src}");
+        }
     }
 }

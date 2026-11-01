@@ -46,6 +46,33 @@ pub fn basename(text: &str) -> &str {
 
 const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh"];
 
+/// Commands that run another command, with options that this crate does not read. A call that
+/// uses one is denied, because the command it runs could be any.
+const UNREAD_WRAPPERS: [&str; 22] = [
+    "taskset",
+    "chrt",
+    "setpriv",
+    "unshare",
+    "nsenter",
+    "strace",
+    "ltrace",
+    "su",
+    "runuser",
+    "sg",
+    "script",
+    "busybox",
+    "systemd-run",
+    "chroot",
+    "watch",
+    "parallel",
+    "pkexec",
+    "fakeroot",
+    "bwrap",
+    "firejail",
+    "cgexec",
+    "eatmydata",
+];
+
 // ---------------------------------------------------------------- walking
 
 /// What the call does to the working directory and the branch, in text order.
@@ -256,7 +283,15 @@ impl<'a> Analyzer<'a> {
             let Some(first) = w.first().cloned() else {
                 return Vec::new();
             };
-            if first.dynamic {
+            if !first.any_quote && !first.dynamic && matches!(first.text.as_str(), "{" | "!") {
+                // `time { cmd; }`: the keyword that follows a wrapper starts a group. The group
+                // holds the command.
+                w.remove(0);
+                continue;
+            }
+            // `[` is the test command. Any other glob in a command name may match any file.
+            let glob = first.glob && !matches!(first.text.as_str(), "[" | "[[");
+            if first.dynamic || glob {
                 self.deny(
                     "unparsed-command",
                     format!("the command name {:?} is not readable", first.raw),
@@ -394,6 +429,13 @@ impl<'a> Analyzer<'a> {
                 }
                 "find" => {
                     return self.find_commands(&w, depth);
+                }
+                n if UNREAD_WRAPPERS.contains(&n) => {
+                    self.deny(
+                        "unparsed-command",
+                        format!("{n} runs a command that the rules cannot read"),
+                    );
+                    return Vec::new();
                 }
                 _ => None,
             };
@@ -686,19 +728,41 @@ impl<'a> Analyzer<'a> {
                     dirs.extend(dir.clone());
                     i += 2;
                 }
-                "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
-                | "--super-prefix" | "--config-env" | "--attr-source" => i += 2,
+                "-c" | "--config-env" => {
+                    if words.get(i + 1).is_some_and(|v| sets_alias(&v.text)) {
+                        self.deny(
+                            "unparsed-command",
+                            "git -c defines an alias, and the command it runs cannot be read",
+                        );
+                    }
+                    i += 2;
+                }
+                "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" | "--super-prefix"
+                | "--attr-source" => i += 2,
+                _ if t.starts_with("--config-env=") && sets_alias(&t["--config-env=".len()..]) => {
+                    self.deny(
+                        "unparsed-command",
+                        "git --config-env defines an alias, and the command it runs cannot be read",
+                    );
+                    i += 1;
+                }
                 _ if t.starts_with('-') => i += 1,
                 _ => break,
             }
         }
         let Some(sub) = words.get(i) else { return };
-        if sub.dynamic {
+        if sub.dynamic || sub.glob {
             self.deny("unparsed-command", "the git subcommand is not readable");
             return;
         }
         let sub_name = sub.text.as_str();
         let rest = &words[i + 1..];
+        if sub_name == "config" && rest.iter().any(|w| sets_alias(&w.text)) {
+            self.deny(
+                "unparsed-command",
+                "git config names an alias, and the command it runs cannot be read",
+            );
+        }
         // `--no-verify` skips hooks in any git command.
         let mut options_end = rest.len();
         if let Some(k) = rest.iter().position(|w| w.text == "--") {
@@ -1037,6 +1101,18 @@ impl<'a> Analyzer<'a> {
         }
         let first = pos.first().map(|w| w.text.as_str());
         let second = pos.get(1).map(|w| w.text.as_str());
+        let unreadable = |k: usize| pos.get(k).is_some_and(|w| w.dynamic || w.glob);
+        if unreadable(0) || (first == Some("pr") && unreadable(1)) {
+            self.deny("unparsed-command", "the gh subcommand is not readable");
+            return;
+        }
+        if first == Some("alias") && matches!(second, Some("set" | "import")) {
+            self.deny(
+                "unparsed-command",
+                "gh alias defines a command that cannot be read",
+            );
+            return;
+        }
         match (first, second) {
             (Some("pr"), Some("merge")) => {
                 self.deny(
@@ -1440,6 +1516,11 @@ fn after_opts(args: &[Word], takes_arg: &[&str], positional: usize) -> Vec<Word>
     }
     i = (i + positional).min(args.len());
     args[i..].to_vec()
+}
+
+/// True for `alias.name=value` and `alias.name`: a git config key that defines an alias.
+fn sets_alias(text: &str) -> bool {
+    text.trim_start().to_ascii_lowercase().starts_with("alias.")
 }
 
 /// Skip `NAME=value` words.
