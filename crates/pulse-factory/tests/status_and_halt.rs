@@ -351,6 +351,7 @@ fn a_restart_parks_a_running_unit_relaunches_nothing_and_ends_a_stale_session() 
         fake: fake.clone(),
         plans: Default::default(),
         gate: Default::default(),
+        block_run_json: Default::default(),
     });
     let second = pulse_factory::controller::Controller::open(
         pulse_factory::controller::Config {

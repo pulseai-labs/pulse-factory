@@ -112,10 +112,19 @@ pub struct TestPorts {
     pub fake: Arc<FakeAdapter>,
     pub plans: Arc<Mutex<Vec<LaunchPlan>>>,
     pub gate: Arc<Gate>,
+    /// When set, the next runs cannot write `run.json`: a directory of that name is in the way.
+    /// It makes an arm fail late, after the engine has started and committed.
+    pub block_run_json: std::sync::atomic::AtomicBool,
 }
 
 impl Ports for TestPorts {
     fn build(&self, spec: &RunSpec) -> Result<RunPorts, String> {
+        if self
+            .block_run_json
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::fs::create_dir_all(spec.run_dir.join("run.json")).map_err(|e| e.to_string())?;
+        }
         let forge = pf_forge_bare::BareForge::open(&spec.forge_repo).map_err(|e| e.to_string())?;
         Ok(RunPorts {
             agent: Arc::new(Recording {
@@ -157,6 +166,7 @@ impl Live {
             fake,
             plans: Arc::new(Mutex::new(Vec::new())),
             gate: Arc::new(Gate::default()),
+            block_run_json: std::sync::atomic::AtomicBool::new(false),
         });
         let bare = sb.root.path().join("forge.git");
         std::fs::create_dir_all(&bare).unwrap();

@@ -298,6 +298,54 @@ fn a_failed_pin_leaves_the_first_run_as_it_was() {
 }
 
 #[test]
+fn an_arm_that_fails_late_leaves_no_run_to_collide_with_and_the_old_run_as_it_was() {
+    use std::sync::atomic::Ordering;
+    let live = Live::start();
+    let first = live.arm();
+    assert_eq!(first, "s1-1");
+
+    // The record of the new run cannot be written. The engine has started and committed by now.
+    // The run it replaces must stay as it was.
+    live.ports.block_run_json.store(true, Ordering::SeqCst);
+    let mut plan = live.plan();
+    plan.replace = Some(first.clone());
+    let err = live.controller.arm(plan).unwrap_err();
+    assert!(err.contains("run.json"), "{err}");
+    assert!(!live.sb.state.join("runs/s1-2").exists());
+    let old = live.sb.status_json(&first);
+    assert_eq!(old["state"], "active", "{old}");
+    assert_eq!(old["end_reason"], Value::Null);
+
+    // A retry takes a new ID, because the failed run's rows are still in the store. The same ID
+    // with another ledger would be a conflict, and the spine could not be armed again.
+    live.ports.block_run_json.store(false, Ordering::SeqCst);
+    let mut plan = live.plan();
+    plan.replace = Some(first.clone());
+    plan.ledger = live.sb.root.path().join("other-ledger.md");
+    let second = live.controller.arm(plan).unwrap();
+    assert_eq!(second, "s1-3");
+    assert_eq!(live.sb.status_json(&first)["state"], "ended");
+}
+
+#[test]
+fn an_unwritable_ledger_refuses_the_arm_before_the_store_commits_anything() {
+    let live = Live::start();
+    let mut plan = live.plan();
+    plan.ledger = live.sb.root.path().join("no-such-dir/ledger.md");
+    let err = live.controller.arm(plan).unwrap_err();
+    assert!(err.contains("cannot be written"), "{err}");
+    assert!(
+        std::fs::read_dir(live.sb.state.join("runs"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 0,
+        "the failed arm must leave no directory"
+    );
+    // The first number is still free: nothing was committed under it.
+    assert_eq!(live.arm(), "s1-1");
+}
+
+#[test]
 fn replace_ends_a_parked_run() {
     // A change to a copy parks the lane at its first launch, with no seat started. A parked run
     // is not at an end state, so it blocks `arm` until `--replace` names it, and then it ends.

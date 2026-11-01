@@ -59,12 +59,21 @@ pub fn run_id_for(spine: &str, n: u32) -> String {
 }
 
 /// Make the next free run directory. `create_dir` fails if the directory exists, so two arms
-/// cannot take one number.
-pub fn create_run_dir(state: &Path, spine: &str) -> Result<(String, PathBuf), String> {
+/// cannot take one number. `taken` says that the store already knows a run ID: the store lives
+/// outside the run directory, so a failed arm that removed its directory still leaves its rows,
+/// and its ID must not be handed out again.
+pub fn create_run_dir(
+    state: &Path,
+    spine: &str,
+    taken: &dyn Fn(&str) -> bool,
+) -> Result<(String, PathBuf), String> {
     let runs = runs_dir(state);
     std::fs::create_dir_all(&runs).map_err(|e| format!("cannot make {}: {e}", runs.display()))?;
     for n in 1..100_000u32 {
         let id = run_id_for(spine, n);
+        if taken(&id) {
+            continue;
+        }
         let dir = runs.join(&id);
         match std::fs::create_dir(&dir) {
             Ok(()) => return Ok((id, dir)),
@@ -125,4 +134,20 @@ pub fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taken_run_id_is_never_handed_out_again() {
+        let state = tempfile::tempdir().unwrap();
+        let taken = |id: &str| id == "s1-1" || id == "s1-2";
+        let (id, dir) = create_run_dir(state.path(), "s1", &taken).unwrap();
+        assert_eq!(id, "s1-3");
+        assert!(dir.is_dir());
+        let (id, _) = create_run_dir(state.path(), "s1", &taken).unwrap();
+        assert_eq!(id, "s1-4");
+    }
 }

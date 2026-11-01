@@ -315,7 +315,13 @@ impl Controller {
             { drop_guard_infos(&registry, &self.store, |h| self.running_sessions(h)) };
         check_earlier(&infos, plan.replace.as_deref()).map_err(strip_prefix)?;
 
-        let (run_id, dir) = files::create_run_dir(&self.cfg.state_dir, &plan.spine)?;
+        ledger_is_writable(&plan.ledger)?;
+
+        // A run ID that the store knows is never reused. A store that cannot answer counts as
+        // knowing it.
+        let (run_id, dir) = files::create_run_dir(&self.cfg.state_dir, &plan.spine, &|id| {
+            self.store.run(id).map_or(true, |row| row.is_some())
+        })?;
         match self.arm_into(&plan, &run_id, &dir, &registry) {
             Ok(handle) => {
                 registry.push(handle);
@@ -422,24 +428,61 @@ impl Controller {
             ),
         };
         let handle = self.build_run(dir, info.clone(), Some(run_ports))?;
+        if let Err(why) = self.finish_arm(plan, run_id, dir, registry, &info, &handle) {
+            // Start-up committed the run to the store, which outlives the directory that `arm`
+            // removes. End the run, so no open run is left without a directory. An engine that
+            // degraded cannot end it: the ID stays taken, and no later arm reuses it.
+            let _ = handle.engine.end_run(&format!("arm failed: {why}"));
+            return Err(why);
+        }
+        Ok(handle)
+    }
+
+    /// The steps of an arm after the new run started. A failure here leaves the replaced run as
+    /// it was: it ends last, after everything that can fail has passed.
+    fn finish_arm(
+        &self,
+        plan: &ArmPlan,
+        run_id: &str,
+        dir: &Path,
+        registry: &[Arc<RunHandle>],
+        info: &RunJson,
+        handle: &RunHandle,
+    ) -> Result<(), String> {
         if !handle.driven.load(Ordering::SeqCst) {
             return Err("the new run did not start up".to_string());
         }
-        // The replaced run ends after the new run's pins and start-up succeeded.
-        if let Some(old) = &plan.replace {
-            let old = registry
-                .iter()
-                .find(|r| &r.info.run_id == old)
-                .ok_or_else(|| format!("run {old} is unknown"))?;
+        let old = match &plan.replace {
+            Some(old) => Some(
+                registry
+                    .iter()
+                    .find(|r| &r.info.run_id == old)
+                    .ok_or_else(|| format!("run {old} is unknown"))?,
+            ),
+            None => None,
+        };
+        files::write_json(&dir.join("run.json"), info)?;
+        // The replaced run ends after the new run's pins, start-up and record succeeded.
+        if let Some(old) = old {
             old.engine
                 .end_run(&format!("replaced by {run_id}"))
                 .map_err(|e| format!("cannot end run {}: {e}", old.info.run_id))?;
             old.driven.store(false, Ordering::SeqCst);
             old.driver.sweep();
         }
-        files::write_json(&dir.join("run.json"), &info)?;
-        Ok(handle)
+        Ok(())
     }
+}
+
+/// The ledger can be appended to. The check runs before start-up commits anything, so a ledger
+/// that cannot be written leaves no run in the store.
+fn ledger_is_writable(path: &Path) -> Result<(), String> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|e| format!("the ledger {} cannot be written: {e}", path.display()))
 }
 
 fn valid_spine(s: &str) -> bool {
