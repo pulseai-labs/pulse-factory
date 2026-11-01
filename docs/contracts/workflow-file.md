@@ -85,10 +85,10 @@ A track is `{stages, merge}`. `stages` is a list of one or more stages and runs 
 | Field | Required | Meaning |
 |---|---|---|
 | `rule` | yes | `green_checks_in_declared_order` is the only rule in version 1. |
-| `repo` | yes | The repository, a template. |
-| `base` | yes | The branch the unit merges into, a template. |
+| `repo` | yes | The repository a unit's PR must be in, a template. The engine renders it for each unit and parks a unit whose PR names another repo. |
+| `base` | yes | The branch the unit's PR must merge into, a template. The engine renders it for each unit and parks a unit whose PR has another base. |
 | `pr` | yes | A command that prints the unit's PR URL. |
-| `head_check` | no | `true` or `false`; default `false`. When `true`, the merge step compares the PR head with the last recorded push. |
+| `head_check` | no | `true` or `false`; default `false`. When `true`, the engine's merge step compares the PR head with the last recorded push and parks the unit when there is none. |
 | `after_merge` | no | A list of commands that run after the merge, on a unit already `done`. |
 
 ## Stages

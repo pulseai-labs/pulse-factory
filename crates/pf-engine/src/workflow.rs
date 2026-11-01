@@ -48,9 +48,11 @@ pub enum MergeRule {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MergeDef {
     pub rule: MergeRule,
-    /// The repository, with placeholders. A forge adapter renders it.
+    /// The repository a unit's PR must be in, with placeholders. The engine renders it for each
+    /// unit and parks a unit whose PR names another repo. Empty declares nothing.
     pub repo: String,
-    /// The branch the PR merges into, with placeholders.
+    /// The branch a unit's PR must merge into, with placeholders. The engine renders it for each
+    /// unit and parks a unit whose PR has another base. Empty declares nothing.
     pub base: String,
     /// Compare the PR head with the last recorded push before the merge ([`crate::merge::head_check`]).
     pub head_check: bool,

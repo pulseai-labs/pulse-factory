@@ -7,6 +7,8 @@ members = [
     "crates/pf-rules",
     "crates/pf-adapter-omp",
     "crates/pf-adapter-fake",
+    "crates/pf-forge-github",
+    "crates/pf-forge-bare",
 ]
 
 [workspace.package]

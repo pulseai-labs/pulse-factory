@@ -77,7 +77,7 @@ impl ForgePort for NoForge {
     fn pr_status(&self, _: &PrRef) -> Result<PrStatus, ForgeError> {
         Err(ForgeError("no forge".into()))
     }
-    fn merge(&self, _: &PrRef) -> Result<ForgeEffect, ForgeError> {
+    fn merge(&self, _: &PrRef, _: &str) -> Result<ForgeEffect, ForgeError> {
         Err(ForgeError("no forge".into()))
     }
     fn merge_landed(&self, _: &PrRef) -> Result<ForgeEffect, ForgeError> {

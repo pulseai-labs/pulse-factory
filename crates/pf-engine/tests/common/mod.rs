@@ -313,10 +313,17 @@ impl AgentPort for FakeAgent {
 pub struct PrScript {
     pub branch: String,
     pub sha: String,
+    pub base: String,
     pub checks: Checks,
     pub mergeable: Mergeable,
     pub merge: ForgeOutcome,
     pub landed: bool,
+    /// After the next `pr_status` read, the head becomes this SHA: a push between read and merge.
+    pub head_after_read: Option<String>,
+    /// The repo `pr_status` reports, when it differs from the repo the PR names.
+    pub reported_repo: Option<String>,
+    /// The merge effect leaves its branch empty, as a forge that does not read the PR may.
+    pub blank_effect_branch: bool,
 }
 
 impl PrScript {
@@ -324,10 +331,14 @@ impl PrScript {
         PrScript {
             branch: branch.to_string(),
             sha: sha.to_string(),
+            base: "spine".to_string(),
             checks: Checks::Green,
             mergeable: Mergeable::Clean,
             merge: ForgeOutcome::Merged,
             landed: true,
+            head_after_read: None,
+            reported_repo: None,
+            blank_effect_branch: false,
         }
     }
 }
@@ -336,6 +347,10 @@ impl PrScript {
 pub struct FakeForge {
     pub scripts: Mutex<HashMap<u64, PrScript>>,
     pub merges: Mutex<Vec<u64>>,
+    /// Every `pr_status` call, by PR number.
+    pub status_reads: Mutex<Vec<u64>>,
+    /// Every `merge` call: the PR number and the head the caller pinned.
+    pub merge_calls: Mutex<Vec<(u64, String)>>,
 }
 
 impl FakeForge {
@@ -363,21 +378,51 @@ impl FakeForge {
 
 impl ForgePort for FakeForge {
     fn pr_status(&self, pr: &PrRef) -> Result<PrStatus, ForgeError> {
+        self.status_reads.lock().unwrap().push(pr.number);
         let s = self.get(pr)?;
+        // A push after the read: the stored head changes, and this read still shows the old one.
+        {
+            let mut scripts = self.scripts.lock().unwrap();
+            let stored = scripts.get_mut(&pr.number).unwrap();
+            if let Some(sha) = stored.head_after_read.take() {
+                stored.sha = sha;
+            }
+        }
         Ok(PrStatus {
-            repo: pr.repo.clone(),
+            repo: s.reported_repo.clone().unwrap_or_else(|| pr.repo.clone()),
             branch: s.branch,
             sha: s.sha,
+            base: s.base,
             checks: s.checks,
             mergeable: s.mergeable,
         })
     }
-    fn merge(&self, pr: &PrRef) -> Result<ForgeEffect, ForgeError> {
+    fn merge(&self, pr: &PrRef, expected_sha: &str) -> Result<ForgeEffect, ForgeError> {
+        self.merge_calls
+            .lock()
+            .unwrap()
+            .push((pr.number, expected_sha.to_string()));
         let s = self.get(pr)?;
+        if s.sha != expected_sha {
+            // The head is not the one the caller read: refuse, and merge nothing.
+            return Ok(ForgeEffect {
+                repo: pr.repo.clone(),
+                branch: s.branch,
+                sha: s.sha.clone(),
+                outcome: ForgeOutcome::Refused(format!(
+                    "the head moved: expected {expected_sha}, found {}",
+                    s.sha
+                )),
+            });
+        }
         self.merges.lock().unwrap().push(pr.number);
         Ok(ForgeEffect {
             repo: pr.repo.clone(),
-            branch: s.branch,
+            branch: if s.blank_effect_branch {
+                String::new()
+            } else {
+                s.branch
+            },
             sha: s.sha,
             outcome: s.merge,
         })
@@ -427,6 +472,16 @@ pub fn workflow(stages: &[&str], merge: bool) -> Workflow {
         merge.then_some(MergeRule::GreenChecksInDeclaredOrder),
         Settings::default(),
     )
+}
+
+/// Like [`workflow`], with a merge definition that declares the repo and the base.
+pub fn guarded_workflow(repo: &str, base: &str, head_check: bool) -> Workflow {
+    let mut wf = workflow(&["build"], true);
+    let def = wf.tracks[0].merge.as_mut().unwrap();
+    def.repo = repo.to_string();
+    def.base = base.to_string();
+    def.head_check = head_check;
+    wf
 }
 
 /// Like [`workflow`], with the one track named `item`.

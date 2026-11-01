@@ -13,9 +13,10 @@ use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::forge::{Checks, ForgeEffect, ForgeOutcome, Mergeable};
 use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow};
+use crate::render::{RenderContext, UnitView, render};
 use crate::status::{REASON_RUN_HALTED, Status, check_reason, one_line_reason};
 use crate::unit::UnitDetail;
-use crate::workflow::Workflow;
+use crate::workflow::{MergeDef, Workflow};
 
 type Rejected = String;
 
@@ -31,11 +32,43 @@ pub struct PushRecord {
 /// another one, is refused. This catches a push from a script that the rules cannot parse.
 ///
 /// It is a pure function in the engine, because the engine may not call a workflow crate. The
-/// forge adapter's merge step calls it when the unit's track sets `head_check`.
+/// engine's merge step calls it, with the unit's last successful push, when the unit's track sets
+/// `head_check`.
 pub fn head_check(pr_sha: &str, last_push: Option<&PushRecord>) -> Result<(), String> {
     match last_push {
         Some(push) if !pr_sha.is_empty() && push.sha.eq_ignore_ascii_case(pr_sha) => Ok(()),
         _ => Err(format!("PR head {pr_sha} has no recorded push")),
+    }
+}
+
+/// The repo and the base branch that the track's merge definition declares, rendered for one
+/// unit. An empty text declares nothing, and nothing is checked against it.
+struct Declared {
+    repo: String,
+    base: String,
+}
+
+/// The reason a PR value differs from the declared one. It names both.
+fn differs(what: &str, found: &str, declared: &str) -> String {
+    format!("PR {what} {found} differs from the declared {what} {declared}")
+}
+
+impl Declared {
+    /// Check the repo a PR names. A seat writes it, so it is untrusted (ADR-0005).
+    fn check_repo(&self, found: &str) -> Result<(), String> {
+        if self.repo.is_empty() || found == self.repo {
+            Ok(())
+        } else {
+            Err(differs("repo", found, &self.repo))
+        }
+    }
+
+    fn check_base(&self, found: &str) -> Result<(), String> {
+        if self.base.is_empty() || found == self.base {
+            Ok(())
+        } else {
+            Err(differs("base", found, &self.base))
+        }
     }
 }
 
@@ -232,7 +265,7 @@ impl Engine {
             .node(unit_id)
             .ok_or_else(|| EngineError::Rejected(format!("unit {unit_id} is unknown")))?;
         let detail = view.unit_detail(node).map_err(EngineError::Rejected)?;
-        let Some(pr) = detail.pr else {
+        let Some(pr) = detail.pr.clone() else {
             let reason = "no PR is recorded for the unit".to_string();
             self.park(unit_id, &reason)?;
             return Ok(MergeStep::Parked {
@@ -241,6 +274,24 @@ impl Engine {
             });
         };
         let forge_error = |e: crate::port::forge::ForgeError| format!("forge error: {e}");
+
+        // The merge definition says which repo and which branch a unit's PR may merge into.
+        let def = self
+            .cfg
+            .workflow
+            .track(&detail.track)
+            .and_then(|t| t.merge.as_ref())
+            .ok_or_else(|| {
+                EngineError::Rejected(format!("unit {unit_id} has no merge definition"))
+            })?;
+        let declared = match self.declared(unit_id, &detail, def) {
+            Ok(d) => d,
+            Err(why) => return self.finish_merge(unit_id, &pr.repo, "", "", &why, false),
+        };
+        // The repo comes from the seat's PR reference. Nothing reads or merges a PR elsewhere.
+        if let Err(why) = declared.check_repo(&pr.repo) {
+            return self.finish_merge(unit_id, &pr.repo, "", "", &why, false);
+        }
 
         let status = match self.forge.pr_status(&pr) {
             Ok(s) => s,
@@ -256,6 +307,18 @@ impl Engine {
                 false,
             )
         };
+        if let Err(why) = declared
+            .check_repo(&status.repo)
+            .and_then(|()| declared.check_base(&status.base))
+        {
+            return done(&why);
+        }
+        if def.head_check {
+            let last_push = self.last_successful_push(unit_id)?;
+            if let Err(why) = head_check(&status.sha, last_push.as_ref()) {
+                return done(&why);
+            }
+        }
         match (status.checks, status.mergeable) {
             (Checks::Pending, _) => {
                 return Ok(MergeStep::Waiting {
@@ -281,7 +344,7 @@ impl Engine {
             });
         }
 
-        let merged = match self.forge.merge(&pr) {
+        let merged = match self.forge.merge(&pr, &status.sha) {
             Ok(e) => e,
             Err(e) => {
                 return self.finish_merge(
@@ -294,11 +357,18 @@ impl Engine {
                 );
             }
         };
+        // A forge may leave the branch of a merge effect empty. The ledger line still names the
+        // branch that the status read gave.
+        let merged_branch = if merged.branch.is_empty() {
+            &status.branch
+        } else {
+            &merged.branch
+        };
         let fail = |outcome: &str| {
             self.finish_merge(
                 unit_id,
                 &merged.repo,
-                &merged.branch,
+                merged_branch,
                 &merged.sha,
                 outcome,
                 false,
@@ -332,6 +402,34 @@ impl Engine {
                 false,
             ),
         }
+    }
+
+    /// Render the repo and the base of the track's merge definition for one unit.
+    fn declared(
+        &self,
+        unit_id: &str,
+        detail: &UnitDetail,
+        def: &MergeDef,
+    ) -> Result<Declared, String> {
+        let run_dir = self.cfg.run_dir.display().to_string();
+        let ctx = RenderContext {
+            run_id: &self.cfg.run_id,
+            run_dir: &run_dir,
+            params: &self.cfg.params,
+            unit: Some(UnitView {
+                id: unit_id,
+                vars: &detail.record.vars,
+            }),
+        };
+        let part = |name: &str, template: &str| {
+            render(template, &ctx)
+                .map(|r| r.text)
+                .map_err(|e| format!("the merge definition's {name} does not render: {e}"))
+        };
+        Ok(Declared {
+            repo: part("repo", &def.repo)?,
+            base: part("base", &def.base)?,
+        })
     }
 
     /// Record the merge result. It writes the ledger line and ends or parks the unit.
