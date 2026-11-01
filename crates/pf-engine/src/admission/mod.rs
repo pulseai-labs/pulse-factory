@@ -90,6 +90,14 @@ pub enum CommandBody {
         sha: String,
         outcome: PushOutcome,
     },
+    /// A line a seat wrote to its decisions file, reported by the controller. It is recorded in
+    /// every run state and for a unit in any state, as a push is. `text` is one clean line.
+    Decision {
+        unit_id: String,
+        /// The 1-based number of the line in the file. Together with the unit it names the line.
+        line_number: u64,
+        text: String,
+    },
     /// End the run.
     EndRun { reason: String },
 }
@@ -119,6 +127,7 @@ impl CommandBody {
             CommandBody::Merge { .. } => "merge",
             CommandBody::MergeResult { .. } => "merge_result",
             CommandBody::Push { .. } => "push",
+            CommandBody::Decision { .. } => "decision",
             CommandBody::EndRun { .. } => "end_run",
         }
     }

@@ -7,6 +7,8 @@
 - **Amended:** 2026-11-01, in `r0.s1.w3`: the six unverified claims were settled on real OMP sessions.
   Each result is under "Verified claims". No decision changed: each result took a fallback that
   this ADR already named.
+- **Amended:** 2026-11-01, in `r0.s1.w5`: the port gets a `stop` call (see the duty list). The
+  adapter measures a push in git and no longer reads it from a call's output.
 
 ## Context
 - Each coding agent gets an adapter with nine duties:
@@ -19,6 +21,11 @@
   7. apply prompts-off and the role rule set;
   8. remove the ask tool;
   9. hand off to a successor session.
+- Two calls sit beside the nine and are not duties of the agent: `is_alive` asks whether a stored
+  reference is still a live session, and `stop` ends a session's process and every child of it. `stop`
+  is safe to repeat, and a reference the adapter does not know is `Ok`. The controller calls `stop` for
+  every session it ends, so no seat outlives its stage. `is_alive` of a reference the adapter does not
+  know is `Ok(false)`: after a restart the controller parks the unit that holds it.
 - Execution units are interactive terminal sessions. There is no headless or API substitute.
 - Release 0 runs cheap seats only, in OMP, as the r3.s2 pilot did. The pilot drove OMP through T3
   Code's injected extension, and Pulse Factory depends on no T3 Code. So it was not known whether

@@ -79,6 +79,9 @@ pub struct Context {
     pub api_hosts: Vec<String>,
     /// The seat's working directory. Relative paths are read from here.
     pub cwd: PathBuf,
+    /// The directory that the seat pushes from, when it is not the worktree. A literal push
+    /// directory may lie inside it.
+    pub push_dir: PathBuf,
     pub paths: OwnPaths,
 }
 
@@ -157,6 +160,12 @@ const WRITE_TOOLS: [&str; 12] = [
     "write_file",
 ];
 
+/// Whether a tool writes a file at a path. A hook that cannot find the path of such a call must
+/// deny it.
+pub fn is_write_tool(tool: &str) -> bool {
+    WRITE_TOOLS.contains(&tool.to_ascii_lowercase().as_str())
+}
+
 fn allow(rule: &str, reason: &str) -> Decision {
     Decision {
         outcome: Outcome::Allow,
@@ -168,9 +177,7 @@ fn allow(rule: &str, reason: &str) -> Decision {
 /// Decide one tool call for a role.
 pub fn decide(rules: &RoleRules, ctx: &Context, call: &ToolCall) -> Decision {
     if let Some(command) = &call.command {
-        let mut a = Analyzer::new(rules, ctx);
-        a.text(command, 0);
-        let walk = a.walk;
+        let walk = Analyzer::judged(rules, ctx, command).walk;
         if let Some(d) = walk.denies.first() {
             return Decision {
                 outcome: Outcome::Deny,
@@ -184,6 +191,7 @@ pub fn decide(rules: &RoleRules, ctx: &Context, call: &ToolCall) -> Decision {
             "push-own-tag",
             "delete-own-scratch",
             "delete-own-build-target",
+            "delete-in-worktree",
         ] {
             if let Some(f) = walk.allows.iter().find(|f| f.rule == rule) {
                 return allow(&f.rule, &f.reason);

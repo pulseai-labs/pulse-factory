@@ -9,7 +9,9 @@ publish.workspace = true
 
 [dependencies]
 pf-engine = { path = "../pf-engine" }
+serde_json.workspace = true
 
 [dev-dependencies]
 pf-store-sqlite = { path = "../pf-store-sqlite" }
+pf-workflow = { path = "../pf-workflow" }
 tempfile.workspace = true

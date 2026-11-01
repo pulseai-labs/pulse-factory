@@ -109,6 +109,10 @@ impl AgentPort for Named {
         self.note(format!("is_alive:{}", s.0));
         Ok(!self.dead.lock().unwrap().contains(&s.0))
     }
+    fn stop(&self, s: &SessionRef) -> Result<(), AgentError> {
+        self.note(format!("stop:{}", s.0));
+        Ok(())
+    }
     fn resolve_plugin(&self, name: &str, _min: &str) -> Result<ResolvedPlugin, AgentError> {
         self.note(format!("resolve_plugin:{name}"));
         if self.plugins.contains(&name) {

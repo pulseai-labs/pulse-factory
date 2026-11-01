@@ -74,7 +74,7 @@ fn stage_settings(stage: &StageSpec) -> BTreeMap<String, String> {
         stage.first_turn_seconds.to_string(),
     );
     out.insert("stall_minutes".to_string(), stage.stall_minutes.to_string());
-    // `env.<NAME>`, `push_dir` and `push_branch`. The parser admits no other key, so these
+    // `env.<NAME>` and the keys of `STAGE_SETTING_KEYS`. The parser admits no other key, so these
     // never replace a key above.
     out.extend(stage.settings.clone());
     out

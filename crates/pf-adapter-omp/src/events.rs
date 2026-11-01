@@ -21,11 +21,10 @@ pub enum Ev {
     },
     /// A tool call started or ended. It is activity.
     ToolActivity,
-    /// A bash call, its exit code and its output.
+    /// A bash call and its exit code. The output is not sent: the adapter measures a push in git.
     Bash {
         command: String,
         exit_code: Option<i64>,
-        output: String,
     },
     /// The tools the seat holds, as the extension read them after it limited the list.
     Inventory {
@@ -105,7 +104,6 @@ pub fn parse_line(line: &str) -> Result<Line, String> {
         "bash" => Ev::Bash {
             command: text(&v, "command"),
             exit_code: v.get("exitCode").and_then(Value::as_i64),
-            output: text(&v, "output"),
         },
         "inventory" => {
             let list = |key: &str| -> Vec<String> {

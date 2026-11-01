@@ -53,6 +53,7 @@ pub fn ctx() -> Context {
         default_branch: "main".to_string(),
         api_hosts: vec!["api.github.com".to_string()],
         cwd: PathBuf::from("/work/u1"),
+        push_dir: PathBuf::new(),
         paths: OwnPaths {
             scratch: PathBuf::from("/scratch/u1"),
             build_target: PathBuf::from("/build/u1"),

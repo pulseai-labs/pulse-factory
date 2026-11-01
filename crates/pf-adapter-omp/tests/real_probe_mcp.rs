@@ -12,6 +12,7 @@ mod common;
 
 use common::*;
 use pf_adapter_omp::probe::{self, Probe};
+use pf_engine::port::agent::AgentPort;
 
 #[test]
 #[ignore = "spends a real session; runs only with PF_REAL_OMP=1"]

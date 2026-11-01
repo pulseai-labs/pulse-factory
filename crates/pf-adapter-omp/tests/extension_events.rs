@@ -79,9 +79,8 @@ fn drain(s: &Started) -> Vec<SessionEvent> {
     s.adapter.drain_events(&s.session).unwrap()
 }
 
-fn bash_line(command: &str, exit_code: i64, output: &str) -> String {
-    serde_json::json!({"ev":"bash","t":10,"command":command,"exitCode":exit_code,"output":output})
-        .to_string()
+fn bash_line(command: &str, exit_code: i64) -> String {
+    serde_json::json!({"ev":"bash","t":10,"command":command,"exitCode":exit_code}).to_string()
 }
 
 #[test]
@@ -170,7 +169,6 @@ fn a_push_event_gives_one_push_with_id_repo_branch_sha_and_outcome() {
         &[&bash_line(
             &format!("git -C {} push origin topic", work.display()),
             0,
-            "To remote\n * [new branch]      topic -> topic\n",
         )],
     );
     let pushes: Vec<_> = drain(&s)
@@ -203,7 +201,6 @@ fn a_push_event_gives_one_push_with_id_repo_branch_sha_and_outcome() {
         &[&bash_line(
             &format!("git -C {} push origin topic", work.display()),
             1,
-            " ! [rejected]        topic -> topic (fetch first)\nerror: failed to push\n",
         )],
     );
     let failed: Vec<_> = drain(&s)
@@ -216,7 +213,7 @@ fn a_push_event_gives_one_push_with_id_repo_branch_sha_and_outcome() {
     assert_eq!(failed.len(), 1);
     assert_ne!(&failed[0].0, id);
     assert!(
-        matches!(&failed[0].1, PushOutcome::Failed(why) if why.contains("rejected")),
+        matches!(&failed[0].1, PushOutcome::Failed(why) if why.contains("exit code 1")),
         "{failed:?}"
     );
 }
@@ -232,7 +229,7 @@ fn a_target_in_variables_is_measured_at_push_dir_and_push_branch() {
     let topic = git(&work, &["rev-parse", "topic"]);
     append(
         &s.events,
-        &[&bash_line(r#"git -C "$wt" push -u origin "$b""#, 0, "")],
+        &[&bash_line(r#"git -C "$wt" push -u origin "$b""#, 0)],
     );
     let pushes: Vec<_> = drain(&s)
         .into_iter()
@@ -250,82 +247,6 @@ fn a_target_in_variables_is_measured_at_push_dir_and_push_branch() {
         pushes,
         vec![("topic".to_string(), topic, PushOutcome::Pushed)]
     );
-}
-
-#[test]
-fn a_summary_line_sets_the_branch_and_the_sha() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_remote, work) = scratch_repo(dir.path());
-    // push_branch is wrong on purpose: the summary line must win.
-    let s = start(&[
-        ("push_dir", work.to_str().unwrap()),
-        ("push_branch", "main"),
-    ]);
-    let topic = git(&work, &["rev-parse", "topic"]);
-    let short = &topic[..9];
-    let out = format!("To remote\n   1111111..{short}  topic -> feature-x\n");
-    append(
-        &s.events,
-        &[&bash_line(r#"git -C "$wt" push -u origin "$b""#, 0, &out)],
-    );
-    let got: Vec<_> = drain(&s)
-        .into_iter()
-        .filter_map(|e| match e {
-            SessionEvent::Push { branch, sha, .. } => Some((branch, sha)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(got, vec![("feature-x".to_string(), topic)]);
-}
-
-#[test]
-fn a_moved_default_branch_is_reported_after_a_push_with_an_unread_target() {
-    let dir = tempfile::tempdir().unwrap();
-    let (remote, work) = scratch_repo(dir.path());
-    let s = start(&[
-        ("push_dir", work.to_str().unwrap()),
-        ("push_branch", "topic"),
-    ]);
-    // A push that read its target and kept `main` where it was: no report.
-    append(&s.events, &[&bash_line("git push origin topic", 0, "")]);
-    assert!(
-        !drain(&s)
-            .iter()
-            .any(|e| matches!(e, SessionEvent::DefaultBranchMoved { .. }))
-    );
-
-    // Another clone moves `main` on the remote.
-    let other = dir.path().join("other");
-    git(dir.path(), &["clone", remote.to_str().unwrap(), "other"]);
-    std::fs::write(other.join("c.txt"), "c").unwrap();
-    git(&other, &["add", "c.txt"]);
-    git(&other, &["commit", "-m", "moved"]);
-    git(&other, &["push", "origin", "HEAD:main"]);
-    let after = git(&remote, &["rev-parse", "main"]);
-
-    append(
-        &s.events,
-        &[&bash_line(r#"git -C "$wt" push -u origin "$b""#, 0, "")],
-    );
-    let events = drain(&s);
-    let moved: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e, SessionEvent::DefaultBranchMoved { .. }))
-        .collect();
-    assert_eq!(moved.len(), 1, "{events:?}");
-    match moved[0] {
-        SessionEvent::DefaultBranchMoved {
-            branch,
-            after: a,
-            before,
-            ..
-        } => {
-            assert_eq!(branch, "main");
-            assert_eq!(a, &after);
-            assert_ne!(before, &after);
-        }
-        _ => unreachable!(),
-    }
 }
 
 #[test]

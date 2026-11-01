@@ -59,7 +59,8 @@ fn only_the_item_track_merges_and_it_checks_the_head() {
         .expect("item merges");
     assert_eq!(merge.rule, MergeRule::GreenChecksInDeclaredOrder);
     assert!(merge.head_check);
-    assert_eq!(merge.repo, "{param.repo}");
+    // `merge.repo` is the repo on the forge. `{param.repo}` stays the local path for `git -C`.
+    assert_eq!(merge.repo, "{param.forge_repo}");
     assert_eq!(merge.base, "{param.spine_branch}");
     assert!(wf.has_merge());
 }
@@ -86,6 +87,46 @@ fn the_settings_hold_the_stage_fields_and_the_settings_map() {
     assert_eq!(close.settings["push_dir"], "{unit.vars.worktree_path}");
     assert_eq!(close.settings["push_branch"], "{unit.vars.branch}");
     assert!(!s.contains_key("push_dir"));
+}
+
+#[test]
+fn each_stage_carries_the_run_facts_its_seat_needs() {
+    let (_, wf) = converted();
+    let lane = &wf.track("lane").unwrap().stages[0];
+    assert_eq!(lane.settings["report_dir"], "{param.spine_dir}");
+    assert_eq!(
+        lane.settings["decisions_file"],
+        "{run.dir}/out/{unit.id}/decisions.md"
+    );
+    // A lane has no worktree and no branch of its own.
+    assert!(!lane.settings.contains_key("worktree"));
+    assert!(!lane.settings.contains_key("own_branch"));
+    for stage in &wf.track("item").unwrap().stages {
+        let s = &stage.settings;
+        assert_eq!(
+            s["report_dir"], "{param.spine_dir}/work-{unit.id}",
+            "{}",
+            stage.name
+        );
+        assert_eq!(s["worktree"], "{unit.vars.worktree_path}", "{}", stage.name);
+        assert_eq!(s["own_branch"], "{unit.vars.branch}", "{}", stage.name);
+    }
+    // The decisions file is set where the stage's env names one.
+    for name in ["implement", "close"] {
+        let stage = wf
+            .track("item")
+            .unwrap()
+            .stages
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap();
+        assert_eq!(
+            stage.settings["env.SPINE_DECISIONS"],
+            stage.settings["decisions_file"]
+        );
+    }
+    let verify = &wf.track("item").unwrap().stages[1];
+    assert!(!verify.settings.contains_key("decisions_file"));
 }
 
 /// The parameters `arm` supplies, with real directories under `base`.
