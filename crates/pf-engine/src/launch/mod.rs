@@ -16,6 +16,7 @@ use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::agent::{AgentError, LaunchPlan};
 use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow};
+use crate::render::{RenderContext, UnitView, render};
 use crate::status::{EndStatus, REASON_RUN_HALTED, Status, check_reason};
 use crate::unit::{UnitDetail, stage_node_id};
 use crate::workflow::Workflow;
@@ -37,9 +38,12 @@ pub(crate) fn next_step_is_launch_or_merge(
     let Ok(detail) = UnitDetail::from_text(&unit.detail) else {
         return false;
     };
-    let stages = workflow.stages.len();
+    let Some(track) = workflow.track(&detail.track) else {
+        return false;
+    };
+    let stages = track.stages.len();
     let done = detail.stages_done as usize;
-    done < stages || (done == stages && workflow.merge.is_some())
+    done < stages || (done == stages && track.merge.is_some())
 }
 
 /// A copy of the unit that carries the "run halted" reason, or `None` when it has it already.
@@ -75,7 +79,10 @@ pub(crate) fn decide_launch(
         ));
     }
     let detail = view.unit_detail(unit)?;
-    let def = workflow
+    let track = workflow
+        .track(&detail.track)
+        .ok_or_else(|| crate::admission::unknown_track(unit_id, &detail.track))?;
+    let def = track
         .stages
         .get(detail.stages_done as usize)
         .ok_or_else(|| format!("unit {unit_id} has no stage left to launch"))?;
@@ -211,7 +218,70 @@ pub enum LaunchStep {
     NothingToLaunch,
 }
 
+/// The settings whose value is a directory. When it comes from a unit record it must lie under a
+/// declared root.
+const DIRECTORY_SETTINGS: [&str; 2] = ["cwd", "push_dir"];
+
+/// Check a directory that a unit record names against the roots.
+fn check_record_directory(path: &str, roots: &[String], ctx: &RenderContext) -> Result<(), String> {
+    if !std::path::Path::new(path).is_absolute() {
+        return Err(format!("{path:?} is not absolute"));
+    }
+    let real = std::fs::canonicalize(path).map_err(|_| format!("{path:?} does not exist"))?;
+    if !real.is_dir() {
+        return Err(format!("{path:?} is not a directory"));
+    }
+    if roots.is_empty() {
+        return Err(format!(
+            "{path:?} comes from a unit record, and the workflow declares no root"
+        ));
+    }
+    // A root is rendered with the run and its parameters, never with a unit.
+    let run_only = RenderContext { unit: None, ..*ctx };
+    for root in roots {
+        let Ok(rendered) = render(root, &run_only) else {
+            continue;
+        };
+        let Ok(root_real) = std::fs::canonicalize(&rendered.text) else {
+            continue;
+        };
+        if real.starts_with(&root_real) {
+            return Ok(());
+        }
+    }
+    Err(format!("{path:?} lies outside the declared roots"))
+}
+
 impl Engine {
+    /// Render a stage's settings for one unit.
+    fn render_settings(
+        &self,
+        def: &crate::workflow::StageDef,
+        unit_id: &str,
+        detail: &UnitDetail,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let run_dir = self.cfg.run_dir.display().to_string();
+        let ctx = RenderContext {
+            run_id: &self.cfg.run_id,
+            run_dir: &run_dir,
+            params: &self.cfg.params,
+            unit: Some(UnitView {
+                id: unit_id,
+                vars: &detail.record.vars,
+            }),
+        };
+        let mut out = std::collections::BTreeMap::new();
+        for (key, template) in &def.settings {
+            let rendered = render(template, &ctx).map_err(|e| format!("setting {key}: {e}"))?;
+            if rendered.from_record && DIRECTORY_SETTINGS.contains(&key.as_str()) {
+                check_record_directory(&rendered.text, &self.cfg.workflow.roots, &ctx)
+                    .map_err(|e| format!("setting {key}: {e}"))?;
+            }
+            out.insert(key.clone(), rendered.text);
+        }
+        Ok(out)
+    }
+
     /// Launch the unit's next stage: admit the launch, then start the session through the agent
     /// port. A launch the adapter refuses or fails parks the unit through [`Engine::park`].
     pub fn start_stage(&self, unit_id: &str) -> Result<LaunchStep, EngineError> {
@@ -227,7 +297,10 @@ impl Engine {
             )));
         }
         let detail = view.unit_detail(unit).map_err(EngineError::Rejected)?;
-        let Some(def) = self.cfg.workflow.stages.get(detail.stages_done as usize) else {
+        let track = self.cfg.workflow.track(&detail.track).ok_or_else(|| {
+            EngineError::Rejected(crate::admission::unknown_track(unit_id, &detail.track))
+        })?;
+        let Some(def) = track.stages.get(detail.stages_done as usize) else {
             return Ok(LaunchStep::NothingToLaunch);
         };
         if view.running_stage_of(unit_id).is_some() {
@@ -257,14 +330,27 @@ impl Engine {
         }
 
         let session_id = stage_node_id(unit_id, &def.name, attempt);
+        let rendered = self.render_settings(def, unit_id, &detail);
+        let settings = match rendered {
+            Ok(settings) => settings,
+            Err(why) => {
+                // A launch that cannot render never reaches the adapter. Park first: a stop
+                // between the two leaves a parked unit, never a running unit with no session.
+                let reason = format!("launch refused: {why}");
+                self.park(unit_id, &reason)?;
+                self.end(&session_id, EndStatus::Failed, &reason)?;
+                return Ok(LaunchStep::Parked { reason });
+            }
+        };
         let mut plan = LaunchPlan {
             run_id: self.cfg.run_id.clone(),
             unit_id: unit_id.to_string(),
             stage: def.name.clone(),
             role: def.role.clone(),
             model: def.model.clone(),
+            runtime: def.runtime.clone(),
             attempt,
-            settings: std::collections::BTreeMap::new(),
+            settings,
         };
         let started = self
             .agent

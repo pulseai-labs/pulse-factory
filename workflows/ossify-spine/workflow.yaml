@@ -1,0 +1,220 @@
+# The ossify-spine workflow: arm a spine, and its item PRs merge into the spine branch with no
+# operator present. Every path is a placeholder. The arm step supplies the parameters.
+version: 1
+name: ossify-spine
+
+# What `arm` must supply.
+#   spine         the spine ID
+#   spine_branch  the branch the item PRs merge into
+#   spine_dir     the directory that holds the spine's specs and reports
+#   method_root   the directory where the method's tool runs (it holds the method's state)
+#   repo          the repository the spine builds
+#   worktree_root the directory that holds the item worktrees
+#   state_file    the method's state file
+#   oss           the method's command-line tool
+#   briefs        the directory that holds the pinned briefs
+params: [spine, spine_branch, spine_dir, method_root, repo, worktree_root, state_file, oss, briefs]
+
+plugins:
+  - name: ossify
+    min_version: 1.26.0
+
+# Cheap models. Every role runs in the OMP runtime.
+roles:
+  lane:
+    runtime: omp
+    model: zai/glm-5.3-flash
+    rules: rules/lane.yaml
+  implementer:
+    runtime: omp
+    model: zai/glm-5.3-flash
+    rules: rules/implementer.yaml
+  verifier:
+    runtime: omp
+    model: zai/glm-5.3-flash
+    rules: rules/verifier.yaml
+  close:
+    runtime: omp
+    model: zai/glm-5.3-flash
+    rules: rules/close.yaml
+
+settings:
+  model_sessions: 2
+  cold_builds: 1
+
+# `arm` runs this to learn how many items the spine has. It prints one whole number.
+plan_check:
+  - jq
+  - -r
+  - --arg
+  - s
+  - "{param.spine}"
+  - "[.work_items[] | select(.spine == $s)] | length"
+  - "{param.state_file}"
+
+# A working directory that a seat's record names must lie under one of these.
+roots: ["{param.worktree_root}"]
+
+unit_sources:
+  - dir: "{run.dir}/queue"
+    track: item
+    vars: [worktree_path, branch, handoff_path, base_sha]
+
+# The lane seat fills the queue. It runs again after each group of items is done.
+seeds:
+  - id: lane
+    group: lane
+    order: 1
+    track: lane
+    vars: {}
+    repeat:
+      when_units_done: item
+      until_file: "{run.dir}/rounds.done"
+      max: 12
+
+tracks:
+  lane:
+    stages:
+      - name: lane
+        role: lane
+        brief: [briefs/common.md, briefs/lane.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/lane.md, and follow them.
+          Spine: {param.spine}. Queue directory: {run.dir}/queue.
+          OUT: {run.dir}/out/{unit.id}. Lane done file: {run.dir}/out/{unit.id}/lane.done.
+          Rounds done file: {run.dir}/rounds.done. Stop file: {run.dir}/out/{unit.id}/stop.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{param.method_root}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 15
+        first_turn_seconds: 180
+        skills: [run-spine]
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - file: "{run.dir}/out/{unit.id}/lane.done"
+
+  item:
+    stages:
+      - name: implement
+        role: implementer
+        brief: [briefs/common.md, briefs/implement.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/implement.md, and follow them.
+          Work item: {unit.id}. Handoff: {unit.vars.handoff_path}.
+          Report: {param.spine_dir}/work-{unit.id}/report.md.
+          OUT: {run.dir}/out/{unit.id}. Gaps file: {run.dir}/out/{unit.id}/gaps.json.
+          Stop file: {run.dir}/out/{unit.id}/stop.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        # `before` only reads the dispatch count. The count itself is written after the first turn.
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - - jq
+            - -e
+            - --arg
+            - w
+            - "{unit.id}"
+            - "any(.work_items[]; .id == $w and (.dispatches // 0) < 3)"
+            - "{param.state_file}"
+          - [rm, -f, "{run.dir}/out/{unit.id}/gaps.json"]
+        after_first_turn:
+          - [env, -C, "{param.method_root}", "{param.oss}", work_item_dispatched, "{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        skills: [work-item]
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - file: "{param.spine_dir}/work-{unit.id}/report.md"
+        park_on:
+          - file: "{run.dir}/out/{unit.id}/gaps.json"
+            reason: "gaps surfaced for {unit.id}: answer them in the handoff, then start a new run to clear this park"
+
+      - name: verify
+        role: verifier
+        brief: [briefs/common.md, briefs/verify.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/verify.md, and follow them.
+          Work item: {unit.id}. Handoff: {unit.vars.handoff_path}.
+          Report: {param.spine_dir}/work-{unit.id}/report.md.
+          Worktree: {unit.vars.worktree_path}. Base SHA: {unit.vars.base_sha}.
+          Verdict file: {run.dir}/out/{unit.id}/verdict.json.
+          OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/verdict.json"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        skills: [close]
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.OSSIFY_VERIFY_WORKTREE: "{unit.vars.worktree_path}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/verdict.json"
+
+      - name: close
+        role: close
+        brief: [briefs/common.md, briefs/close.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/close.md, and follow them.
+          Work item: {unit.id}. Handoff: {unit.vars.handoff_path}.
+          Worktree: {unit.vars.worktree_path}. Branch: {unit.vars.branch}.
+          Base SHA: {unit.vars.base_sha}.
+          Verdict file: {run.dir}/out/{unit.id}/verdict.json.
+          Correction packet: {run.dir}/out/{unit.id}/correction.txt.
+          OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{param.method_root}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        skills: [close]
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+        done:
+          - pr:
+              argv:
+                - env
+                - -C
+                - "{param.method_root}"
+                - "{param.oss}"
+                - get
+                - ".work_items[] | select(.id == \"{unit.id}\") | .pr_url"
+              test: url
+        park_on:
+          - file: "{run.dir}/out/{unit.id}/correction.txt"
+            reason: "the close gate for {unit.id} is red and needs a correction: fix it, then start a new run to clear this park"
+
+    merge:
+      rule: green_checks_in_declared_order
+      repo: "{param.repo}"
+      base: "{param.spine_branch}"
+      pr:
+        - env
+        - -C
+        - "{param.method_root}"
+        - "{param.oss}"
+        - get
+        - ".work_items[] | select(.id == \"{unit.id}\") | .pr_url"
+      head_check: true
+      after_merge:
+        - [git, -C, "{param.repo}", fetch, origin, "{param.spine_branch}"]
+        - [git, -C, "{param.repo}", merge, --ff-only, "origin/{param.spine_branch}"]
+        - [env, -C, "{param.method_root}", "{param.oss}", work_item_status, "{unit.id}", complete]

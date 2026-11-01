@@ -44,6 +44,9 @@ impl Signal {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitDetail {
     pub record: UnitRecord,
+    /// The track whose stages the unit runs. It comes from the source or seed that admitted it.
+    #[serde(default)]
+    pub track: String,
     /// Where this unit came in, counting from 1. Merge order uses it to rank groups.
     pub ingest_seq: u32,
     /// How many stages have ended `done`.

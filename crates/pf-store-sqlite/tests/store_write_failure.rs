@@ -107,14 +107,16 @@ fn fixture_in(dir: tempfile::TempDir) -> Fixture {
     let store = Arc::new(SqliteStore::open(dir.path().join("run.db")).unwrap());
     let cfg = EngineConfig {
         run_id: "run-1".to_string(),
-        workflow: Workflow {
-            name: "test-flow".to_string(),
-            stages: vec![StageDef::new("build", "build-role", "model-a")],
-            merge: Some(MergeRule::GreenChecksInDeclaredOrder),
-            settings: Settings::default(),
-        },
+        workflow: Workflow::single_track(
+            "test-flow",
+            vec![StageDef::new("build", "build-role", "model-a")],
+            Some(MergeRule::GreenChecksInDeclaredOrder),
+            Settings::default(),
+        ),
         ledger_path: dir.path().join("ledger.md"),
         state_dir: dir.path().join("state"),
+        run_dir: dir.path().join("run"),
+        params: Default::default(),
     };
     let engine = Engine::start(cfg, store.clone(), Arc::new(IdleAgent), Arc::new(NoForge)).unwrap();
     engine.ingest(&mut OneUnit).unwrap();
@@ -236,14 +238,16 @@ fn a_restart_after_the_failure_recovers_the_ledger_line_and_admits_again() {
 
     let cfg = EngineConfig {
         run_id: "run-1".to_string(),
-        workflow: Workflow {
-            name: "test-flow".to_string(),
-            stages: vec![StageDef::new("build", "build-role", "model-a")],
-            merge: Some(MergeRule::GreenChecksInDeclaredOrder),
-            settings: Settings::default(),
-        },
+        workflow: Workflow::single_track(
+            "test-flow",
+            vec![StageDef::new("build", "build-role", "model-a")],
+            Some(MergeRule::GreenChecksInDeclaredOrder),
+            Settings::default(),
+        ),
         ledger_path: f.dir.path().join("ledger.md"),
         state_dir: f.dir.path().join("state"),
+        run_dir: f.dir.path().join("run"),
+        params: Default::default(),
     };
     let restarted =
         Engine::start(cfg, f.store.clone(), Arc::new(IdleAgent), Arc::new(NoForge)).unwrap();

@@ -89,12 +89,12 @@ impl UnitSource for Records {
 // ------------------------------------------------------------------ helpers
 
 fn workflow() -> Workflow {
-    Workflow {
-        name: "test-flow".to_string(),
-        stages: vec![StageDef::new("build", "build-role", "model-a")],
-        merge: Some(MergeRule::GreenChecksInDeclaredOrder),
-        settings: Settings::default(),
-    }
+    Workflow::single_track(
+        "test-flow",
+        vec![StageDef::new("build", "build-role", "model-a")],
+        Some(MergeRule::GreenChecksInDeclaredOrder),
+        Settings::default(),
+    )
 }
 
 fn config(dir: &Path, run_id: &str) -> EngineConfig {
@@ -103,6 +103,8 @@ fn config(dir: &Path, run_id: &str) -> EngineConfig {
         workflow: workflow(),
         ledger_path: dir.join("ledger.md"),
         state_dir: dir.join("state"),
+        run_dir: dir.join("run"),
+        params: Default::default(),
     }
 }
 

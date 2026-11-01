@@ -6,6 +6,7 @@
 
 mod decide;
 
+pub(crate) use decide::unknown_track;
 pub use decide::{Decision, decide};
 
 use serde::{Deserialize, Serialize};
@@ -33,8 +34,8 @@ pub enum CommandBody {
         workflow: String,
         ledger_file: String,
     },
-    /// Admit one unit from a unit record.
-    AdmitUnit { unit: UnitRecord },
+    /// Admit one unit from a unit record, onto a track.
+    AdmitUnit { unit: UnitRecord, track: String },
     /// Launch the unit's next stage. One admitted launch writes one launch record.
     Launch {
         unit_id: String,
@@ -78,8 +79,28 @@ pub enum CommandBody {
         outcome: String,
         landed: bool,
     },
+    /// A seat's push, reported at the push boundary. It is recorded in every run state, even
+    /// after `halt`: the push happened, and the audit trail must show it.
+    Push {
+        unit_id: String,
+        /// The adapter's ID for this push. A repeat of one ID is a replay.
+        event_id: String,
+        repo: String,
+        branch: String,
+        sha: String,
+        outcome: PushOutcome,
+    },
     /// End the run.
     EndRun { reason: String },
+}
+
+/// How a push ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PushOutcome {
+    Pushed,
+    /// The push failed, with a one-line reason.
+    Failed(String),
 }
 
 impl CommandBody {
@@ -97,6 +118,7 @@ impl CommandBody {
             CommandBody::Halt { .. } => "halt",
             CommandBody::Merge { .. } => "merge",
             CommandBody::MergeResult { .. } => "merge_result",
+            CommandBody::Push { .. } => "push",
             CommandBody::EndRun { .. } => "end_run",
         }
     }
@@ -117,6 +139,12 @@ pub fn canonical_content(run_id: &str, command: &Command) -> String {
         body: &command.body,
     })
     .expect("a command always serializes")
+}
+
+/// Read the body of a stored command back from its canonical content.
+pub fn body_of_content(content: &str) -> Option<CommandBody> {
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    serde_json::from_value(value.get("body")?.clone()).ok()
 }
 
 /// The receipt for one command.
