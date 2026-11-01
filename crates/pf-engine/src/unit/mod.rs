@@ -69,3 +69,48 @@ impl UnitDetail {
 pub fn stage_node_id(unit_id: &str, stage: &str, attempt: u32) -> String {
     format!("{unit_id}/{stage}#{attempt}")
 }
+
+/// What the stall rule decides for one running seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StallDecision {
+    /// A turn, a file, a commit or a PR changed within the limit.
+    Active,
+    /// No such change within the limit, and no earlier stall: launch the seat again, once.
+    Relaunch,
+    /// No such change within the limit, and an earlier stall: park the unit.
+    Park,
+}
+
+/// The stall rule of ADR-0006: a seat is stalled when no new turn, file, commit or PR has
+/// appeared within `limit`. A stalled seat gets one relaunch, then a park.
+///
+/// Every time is a number of seconds on one clock, such as the Unix time. `None` means the
+/// signal has never been seen. A seat with no signal at all is stalled. A time after `now` counts
+/// as now. The elapsed time must pass `limit` to count: exactly `limit` is still active.
+///
+/// The controller reads the file, commit and PR times. A read-only tool call changes none of
+/// them and starts no turn, so it is not a signal; a long tool call that writes files is.
+pub fn stall_decision(
+    last_turn: Option<u64>,
+    last_file_change: Option<u64>,
+    last_commit: Option<u64>,
+    last_pr: Option<u64>,
+    prior_stalls: u32,
+    limit: u64,
+    now: u64,
+) -> StallDecision {
+    let latest = [last_turn, last_file_change, last_commit, last_pr]
+        .into_iter()
+        .flatten()
+        .max();
+    if let Some(t) = latest
+        && now.saturating_sub(t) <= limit
+    {
+        return StallDecision::Active;
+    }
+    if prior_stalls == 0 {
+        StallDecision::Relaunch
+    } else {
+        StallDecision::Park
+    }
+}

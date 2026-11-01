@@ -268,6 +268,7 @@ impl AgentPort for FakeAgent {
         Ok(SessionStatus {
             state: SessionState::Working,
             turn_ended: false,
+            first_turn_started: true,
         })
     }
     fn deliver(&self, _s: &SessionRef, _m: &str) -> Result<(), AgentError> {
@@ -297,6 +298,12 @@ impl AgentPort for FakeAgent {
     }
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         Ok(!self.dead.lock().unwrap().contains(&session.0))
+    }
+    fn resolve_plugin(&self, name: &str, _min: &str) -> Result<ResolvedPlugin, AgentError> {
+        Err(AgentError::Refused(format!("no plugin {name}")))
+    }
+    fn drain_events(&self, _s: &SessionRef) -> Result<Vec<SessionEvent>, AgentError> {
+        Ok(Vec::new())
     }
 }
 

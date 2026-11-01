@@ -15,7 +15,7 @@ pub struct StageDef {
     pub name: String,
     pub role: String,
     pub model: String,
-    /// The agent runtime of the stage's role, a free name such as `omp`. The engine knows no
+    /// The agent runtime of the stage's role, a free name such as `default`. The engine knows no
     /// runtime: it hands the name to the launch plan, and the adapter router reads it.
     pub runtime: String,
     pub rules: RuleSet,
