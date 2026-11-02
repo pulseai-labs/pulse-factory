@@ -236,7 +236,7 @@ impl Parser<'_> {
                     }
                     cur = None;
                     pipe_from = None;
-                    if arm_end && in_case > 0 && paren_depth == 0 {
+                    if arm_end && in_case > 0 {
                         // `;;`, `;&` and `;;&` end an arm. The next words are patterns.
                         in_pattern = true;
                     }
@@ -290,6 +290,19 @@ impl Parser<'_> {
                         // `name=( … )`: an array. Its words are values, not commands.
                         self.i += 1;
                         self.array_literal(depth)?;
+                        // The variable now holds values the rules do not read. Mark its assign
+                        // word so that `name=(` is not the empty string.
+                        if let Some(idx) = cur {
+                            let c = &mut self.cmds[idx];
+                            let last = if c.words.is_empty() {
+                                c.assigns.last_mut()
+                            } else {
+                                c.words.last_mut()
+                            };
+                            if let Some(w) = last {
+                                w.raw.push('(');
+                            }
+                        }
                     } else if self.peek_at(1) == Some('(') && cur.is_none() {
                         // `(( … ))` arithmetic command.
                         self.i += 2;
@@ -528,6 +541,16 @@ impl Parser<'_> {
                 cmd.header = true;
                 return Action::CaseHeader;
             }
+        } else if plain
+            && word.text == "case"
+            && cmd.words[0].text == "time"
+            && !cmd.words[0].any_quote
+            && !cmd.words[0].dynamic
+            && cmd.words[1..].iter().all(|w| w.text.starts_with('-'))
+        {
+            // `time case …`, `time -p case …`: the `case` header holds no command.
+            cmd.header = true;
+            return Action::CaseHeader;
         }
         cmd.words.push(word);
         Action::Nothing
@@ -1133,7 +1156,8 @@ fn sequence(inside: &str) -> Option<Option<Vec<String>>> {
     let step: i128 = match parts.get(2) {
         None => 1,
         Some(t) if looks_whole(t) => match whole(t) {
-            Some(0) => return None,
+            // The shell takes a step of 0 as 1.
+            Some(0) => 1,
             Some(n) => n.abs(),
             None => return Some(None),
         },
@@ -1347,9 +1371,12 @@ mod brace_tests {
             assert_eq!(expand_braces(&src), Expansion::TooMany, "{src}");
         }
         // A step that is not a whole number, and a step of nothing, are text.
-        for src in ["{1..3..x}", "{1..3..0}", "{a..z..}"] {
+        for src in ["{1..3..x}", "{a..z..}"] {
             assert_eq!(expand_braces(src), Expansion::None, "{src}");
         }
+        // A step of 0 acts as 1, as it does in the shell.
+        assert_eq!(expand("{1..3..0}"), ["1", "2", "3"]);
+        assert_eq!(expand("{a..c..0}"), ["a", "b", "c"]);
         assert_eq!(expand("{a..e..2}"), ["a", "c", "e"]);
         assert_eq!(expand("{5..1..-2}"), ["5", "3", "1"]);
     }

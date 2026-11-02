@@ -322,6 +322,10 @@ fn a_variable_from_mktemp_or_empty_is_deletable_only_for_delete_own_scratch() {
         "x=\"$(mktemp)\"; printf -v x %s ../o; rm -rf \"$x\"",
         "x=\"$(mktemp)\"; declare -n y=x; y=../o; rm -rf \"$x\"",
         "x=\"$(mktemp)\"; eval 'x=../o'; rm -rf \"$x\"",
+        // An array literal holds values the rules do not read.
+        "d=(/home/dev/.ssh); rm -rf \"$d\"",
+        "declare -a d=(/x); rm -rf \"$d\"",
+        "x=\"$(mktemp)\"; x=(../o); rm -rf \"$x\"",
         "x=\"$(mktemp)\"; sh -c 'x=../o; rm -rf \"$x\"'",
         // Never assigned in the call: the variable may hold anything.
         "rm -rf \"$x\"",

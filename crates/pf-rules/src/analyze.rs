@@ -297,7 +297,7 @@ impl<'a> Analyzer<'a> {
     /// key in it cannot be read.
     fn git_config_env(&mut self, cmd: &Cmd) {
         for w in cmd.assigns.iter().chain(&cmd.words) {
-            if let Some((name, _, _)) = split_assign(&w.raw)
+            if let Some((name, _, _)) = split_assign(&w.text)
                 && is_git_config_env(&name)
             {
                 self.deny(
@@ -1563,11 +1563,6 @@ fn after_opts(args: &[Word], takes_arg: &[&str], positional: usize) -> Vec<Word>
     args[i..].to_vec()
 }
 
-/// True for `alias.name=value` and `alias.name`: a git config key that defines an alias.
-fn sets_alias(text: &str) -> bool {
-    text.trim_start().to_ascii_lowercase().starts_with("alias.")
-}
-
 /// Git config keys whose value is a command that git runs.
 const COMMAND_KEYS: [&str; 14] = [
     "core.fsmonitor",
@@ -1627,7 +1622,8 @@ fn config_runs_command(setting: &str, value_unread: bool) -> bool {
 }
 
 /// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,
-/// listing and removing one do not.
+/// listing and removing one do not. A key the rules cannot read, in a write, counts as one that
+/// does.
 fn config_writes_command(rest: &[Word]) -> bool {
     let reads = rest.iter().any(|w| {
         matches!(
@@ -1649,13 +1645,46 @@ fn config_writes_command(rest: &[Word]) -> bool {
     let writes_more = rest
         .iter()
         .any(|w| matches!(w.text.as_str(), "--add" | "--replace-all"));
-    let positional: Vec<&Word> = rest
-        .iter()
-        .filter(|w| !(w.text.starts_with('-') && w.text.len() > 1))
-        .collect();
-    // `git config alias.x` reads the key. A value after it, or `--add`, writes it.
-    let writing = writes_more || positional.len() > 1;
-    writing && positional.iter().any(|w| sets_alias(&w.text))
+    // The positional words. An option that takes a value hides that value from them.
+    let mut positional: Vec<&Word> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let t = rest[i].text.as_str();
+        if matches!(
+            t,
+            "-f" | "--file" | "--blob" | "--default" | "--comment" | "-t" | "--type"
+        ) {
+            i += 2;
+            continue;
+        }
+        if !(t.starts_with('-') && t.len() > 1) {
+            positional.push(&rest[i]);
+        }
+        i += 1;
+    }
+    // `git config get|list|unset …` read or remove. `git config set` writes.
+    match positional.first().map(|w| w.text.as_str()) {
+        Some("get" | "list" | "unset" | "edit" | "rename-section" | "remove-section") => {
+            return false;
+        }
+        Some("set") => {
+            positional.remove(0);
+        }
+        _ => {}
+    }
+    // `git config key` reads the key. A value after it, or `--add`, writes it.
+    if !(writes_more || positional.len() > 1) {
+        return false;
+    }
+    let Some(key) = positional.first() else {
+        return false;
+    };
+    if key.dynamic {
+        return true;
+    }
+    let value = positional.get(1);
+    let setting = format!("{}={}", key.text, value.map_or("", |v| v.text.as_str()));
+    config_runs_command(&setting, value.is_some_and(|v| v.dynamic))
 }
 
 /// Is this env name one that gives git config without a `-c`?

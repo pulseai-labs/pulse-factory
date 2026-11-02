@@ -184,6 +184,18 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config alias.x status",
         "git config --add alias.x status",
         "git config --file f alias.x status",
+        "git config set alias.x status",
+        // A write of a key that runs a command, or of a key the rules cannot read.
+        "git config core.fsmonitor 'gh pr merge 1'",
+        "git config --global credential.helper '!gh pr merge 1'",
+        "git config --file f core.sshCommand 'sh -c x'",
+        "git config diff.x.textconv 'gh pr merge 1'",
+        "git config set core.pager 'sh -c x'",
+        "git config \"$k\" v",
+        "git config core.pager \"$v\"",
+        // A quoted name is still the name.
+        "env \"GIT_CONFIG_COUNT=1\" \"GIT_CONFIG_KEY_0=alias.x\" \"GIT_CONFIG_VALUE_0=!gh pr merge 1\" git x",
+        "\"GIT_CONFIG_COUNT\"=1 git x",
     ] {
         denied_for_every_role(c, "unparsed-command");
     }
@@ -203,6 +215,16 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config --global --unset-all alias.x",
         "git config --list",
         "git config alias.x",
+        "git config get alias.x",
+        "git config --file f alias.x",
+        "git config --file alias.x core.pager",
+        "git config list",
+        "git config unset alias.x",
+        "git config core.pager",
+        "git config \"$k\"",
+        "git config user.name x",
+        "git config core.pager cat",
+        "git config core.fsmonitor ''",
         "GIT_CONFIG_GLOBAL=/dev/null git log",
         "GIT_PAGER=cat git log",
     ] {
@@ -241,9 +263,23 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "local -a f=(src/*.rs)",
         "files+=(*.rs)",
         "for f in *.c; do echo $f; done",
+        // A `case` in a subshell, and one after `time`.
+        "(case \"$f\" in *.c) echo c ;; *.h) echo h ;; esac)",
+        "(case $f in a*) echo x ;; b*) echo y ;;& *) echo z ;; esac); echo done",
+        "case $f in a*) (case $g in *.c) echo c ;; *.h) echo h ;; esac) ;; *.o) echo o ;; esac",
+        "time case $f in\n *.c) echo c ;;\n *.h) echo h ;;\nesac",
+        "time -p case $f in *.c) echo c ;; *.h) echo h ;; esac",
     ] {
         allowed_for_every_role(c);
     }
+    denied_for_every_role(
+        "(case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac)",
+        "gh-pr-merge",
+    );
+    denied_for_every_role(
+        "time case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
+        "gh-pr-merge",
+    );
     // The body of an arm and a substitution inside an array are still judged.
     denied_for_every_role(
         "case \"$f\" in\n *.c|*.h) gh pr merge 1 ;;\nesac",
@@ -272,4 +308,12 @@ fn a_brace_sequence_of_any_size_ends() {
     ] {
         allowed_for_every_role(c);
     }
+}
+
+#[test]
+fn a_brace_step_of_zero_acts_as_one() {
+    // The shell expands `{m..m..0}erge` to `merge`, so the rule for the command must fire.
+    denied_for_every_role("gh pr {m..m..0}erge 1", "gh-pr-merge");
+    denied_for_every_role("git commit --no-verif{y..y..0}", "no-verify");
+    allowed_for_every_role("echo {1..3..0}");
 }
