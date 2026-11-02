@@ -552,13 +552,13 @@ impl Parser<'_> {
                         && !w.dynamic
                         && matches!(
                             w.text.as_str(),
-                            "{" | "!" | "while" | "until" | "if" | "time"
+                            "{" | "!" | "while" | "until" | "if" | "time" | "coproc"
                         ))
             })
         {
             // `time case …`, `time -p case …`, and `case` after `time { `, `time ! `,
-            // `time while `, `time until `, `time if ` and a second `time`: the `case` header holds
-            // no command.
+            // `time while `, `time until `, `time if `, a second `time` and `time coproc `: the
+            // `case` header holds no command.
             cmd.header = true;
             return Action::CaseHeader;
         }

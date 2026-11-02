@@ -128,9 +128,10 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
     variables, when the call spells the name as `NAME=` (a quoted name too); and a `git -c` value that
     is a variable. Not read: a `git config` option written as an abbreviation (`--fil`), a variable
     as the value of an option that takes one when it may hold a key and a value (`--file "$@"`,
-    `--comment "$@"`, `-t "$@"`), a `--value` option that hides the key, a value-taking option that
-    reads as `--get` (`--comment --get key v`), a `GIT_CONFIG_*` name built from an expansion
-    (`"GIT_CONFIG_$a=1"`) and one set by `printf -v`, `read` or `declare -x`. The variables that name a
+    `--comment "$@"`, `-t "$@"`), a `--value` option that hides the key, a value-taking option whose
+    value reads as a read word (`--get`, `--list`, `--unset` and the like: `--comment --get key v`), a
+    `GIT_CONFIG_*` name built from an expansion (`"GIT_CONFIG_$a=1"`) and one set by `printf -v`,
+    `read` or `declare -x NAME` with no `=`. The variables that name a
     command directly (`GIT_PAGER`, `GIT_SSH_COMMAND`, `GIT_EDITOR`, `GIT_EXTERNAL_DIFF`,
     `GIT_ASKPASS`, `GIT_SEQUENCE_EDITOR`) are not read;
   - an alias set by `gh alias set` or `gh alias import`.

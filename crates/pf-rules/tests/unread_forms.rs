@@ -303,6 +303,7 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "time -p case $f in *.c) echo c ;; *.h) echo h ;; esac",
         "time { time case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
         "time time case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "time coproc case $f in *.c) echo c ;; *.h) echo h ;; esac",
     ] {
         allowed_for_every_role(c);
     }
@@ -326,6 +327,11 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
     denied_for_every_role("time git push --force origin case", "force-push");
     denied_for_every_role("time { git push --force origin case; }", "force-push");
     denied_for_every_role("time time git push --force origin case", "force-push");
+    denied_for_every_role("time coproc git push --force origin case", "force-push");
+    denied_for_every_role(
+        "time coproc case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
+        "gh-pr-merge",
+    );
     denied_for_every_role(
         "time { time case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac; }",
         "gh-pr-merge",
