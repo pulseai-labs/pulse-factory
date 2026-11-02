@@ -11,5 +11,5 @@ You judge one work item before its close, in a context that did not build it. Ju
    `t="$(git -C "$wt" write-tree)" && s="$(git -C "$wt" status --porcelain)" && d="$(git -C "$wt" diff --binary)" && printf '%s\n%s\n%s\n' "$t" "$s" "$d" | git hash-object --stdin`
    The output is `identity`, and it must equal `before`. A different value means a mutation is still in place: restore it from your saved copy and run the command again. If the value still differs, that is a stop, never a verdict.
 5. **Write the verdict file**, one JSON object, through a temp name in the same directory, then `mv`:
-   `{"mode":"verified","model":"<the model you run>","work_item_id":"<work item>","identity":"<step 4's output>","rule":[{"file","line","pattern","claim"}],"lenses":[<section 4b findings>],"mutation":[{"test","mutation","result","evidence"}]}`
-   `result` is exactly one of `red | stayed-green | undetermined`. Empty arrays are valid. `mutation` is `[]` when the diff adds or changes no test. Then end.
+   `{"mode":"verified","model":"<the model you run>","agent":"pulse-factory verify stage","work_item_id":"<work item>","identity":"<step 4's output>","rule":[{"file","line","pattern","claim"}],"lenses":[<section 4b findings>],"mutation":[{"test","mutation","result","evidence"}]}`
+   `agent` is that exact text: the close prints it as the verifier. `result` is exactly one of `red | stayed-green | undetermined`. Empty arrays are valid. `mutation` is `[]` when the diff adds or changes no test. Then end.

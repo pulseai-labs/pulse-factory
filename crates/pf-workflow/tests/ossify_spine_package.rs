@@ -388,3 +388,41 @@ fn the_package_check_fires_on_inline_bad_samples() {
         assert_eq!(forbidden_in(sample), Vec::<String>::new(), "{sample}");
     }
 }
+
+/// The keys ossify's work-item close reads from a caller's verdict (`close --verdict`). A missing
+/// key halts the close: `close: verdict missing key '<key>' - halt`.
+const VERDICT_KEYS: [&str; 8] = [
+    "mode",
+    "model",
+    "agent",
+    "work_item_id",
+    "identity",
+    "rule",
+    "lenses",
+    "mutation",
+];
+
+#[test]
+fn the_verify_brief_writes_every_verdict_key_the_close_reads() {
+    let text = std::fs::read_to_string(package_dir().join("briefs/verify.md")).unwrap();
+    let shape = text
+        .lines()
+        .find(|l| l.contains(r#"{"mode":"verified""#))
+        .expect("the verify brief states the verdict's shape");
+    for key in VERDICT_KEYS {
+        assert!(
+            shape.contains(&format!("\"{key}\":")),
+            "verdict key {key} missing from: {shape}"
+        );
+    }
+}
+
+#[test]
+fn the_minimum_ossify_version_is_one_whose_close_reads_that_verdict() {
+    let file = load().file;
+    let plugin = file.plugins.iter().find(|p| p.name == "ossify").unwrap();
+    let mut parts = plugin.min_version.split('.').map(|p| p.parse::<u32>().unwrap());
+    let version = (parts.next().unwrap(), parts.next().unwrap());
+    // ossify 1.30.0 is the first close that requires the `agent` key.
+    assert!(version >= (1, 30), "min_version {}", plugin.min_version);
+}
