@@ -104,13 +104,20 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
   branch is one quoted variable is allowed only for a role that may push its own branch, with the rule
   `own-branch-unverified`. The adapter's push check (see "Push events") guards the default branch after
   the fact.
-- The rules read a brace expansion of plain text as the words it makes. They read a `function`,
-  `coproc` or `time { … }` body, and a compound command after `time`, as commands. A `case` pattern
+- The rules read a brace expansion of plain text as the words it makes. They read a `function`
+  body, a `coproc { … }`, `coproc ( … )` or `coproc <compound command>` body, a `time { … }` body,
+  and a compound command after `time` (also `time coproc case …`), as commands. A `case` pattern
   and the values of an array literal are not commands. A variable that is set to an array literal
   counts as unread, so it is never safe to delete (an element assignment such as `d[0]=/etc` is not
   read). These are denied with `unparsed-command`, except
   where one item below names another rule:
   - a glob or an expansion in a command name or a `gh` or `git` subcommand;
+  - `coproc` followed by any word other than `{`, `(`, `while`, `until`, `if`, `for`, `select` or
+    `case`: a plain word there is a name or a command, and the rules do not tell which. This
+    denies `coproc NAME <compound>`, `coproc NAME { … }` and `coproc cmd args` alike. Also
+    `function` or `coproc` after a wrapper that the rules remove (`time`, `nice`, `timeout`, `env`
+    and the others in the wrapper list), such as `time coproc { … }` and `time function f { … }`.
+    `function NAME { … }` with no wrapper in front is read;
   - a brace expansion that mixes quoted text with other parts, in any command (`"--no-ver"{ify,}`).
     A brace beside a variable only makes the word unread, which is denied in a command name and a
     `gh` or `git` subcommand with `unparsed-command`, and in the arguments of a push with

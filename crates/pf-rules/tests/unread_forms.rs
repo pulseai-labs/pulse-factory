@@ -12,9 +12,7 @@ fn a_function_or_group_keyword_does_not_hide_its_body() {
         "function f { gh pr merge 1; }; f",
         "function f() { gh pr merge 1; }; f",
         "function f ( ) { gh pr merge 1; }",
-        "coproc n { gh pr merge 1; }",
         "coproc { gh pr merge 1; }",
-        "coproc gh pr merge 1",
         "time { gh pr merge 1; }",
         "time -p { gh pr merge 1; }",
         "nice { gh pr merge 1; }",
@@ -23,80 +21,113 @@ fn a_function_or_group_keyword_does_not_hide_its_body() {
     }
     denied_for_every_role("function f { git push --force origin x; }", "force-push");
     allowed_for_every_role("function f { echo hi; }; f");
-    allowed_for_every_role("coproc n { echo hi; }");
+    allowed_for_every_role("coproc { echo hi; }");
     allowed_for_every_role("time { echo hi; }");
     allowed_for_every_role("time echo hi");
 }
 
 #[test]
-fn a_coproc_name_before_a_compound_command_does_not_hide_its_body() {
-    // `coproc NAME <compound>`: the word after `coproc` is the name, and the compound command
-    // after it is read as commands.
+fn a_coproc_with_a_word_the_parser_does_not_model_is_denied_as_unread() {
+    // A plain word after `coproc` is a name or a simple command, and the parser cannot tell which
+    // for every spelling. Only `{`, `(` and a compound-command keyword may follow `coproc`: any
+    // other word is denied. This covers `coproc NAME <compound>` and `coproc cmd args` alike.
     for c in [
+        // `coproc NAME <compound>` (round 10, class C2, site 1).
         "coproc N while gh pr merge 1; do :; done",
         "coproc N until gh pr merge 1; do :; done",
         "coproc N if gh pr merge 1; then :; fi",
         "coproc N for i in 1; do gh pr merge 1; done",
         "coproc N select i in 1; do gh pr merge 1; done",
-        "coproc N case $f in *.c) gh pr merge 1 ;; esac",
         "coproc N [[ -f x ]] && gh pr merge 1",
-        // No name: the reserved word starts the compound command.
-        "coproc while gh pr merge 1; do :; done",
-        "coproc while if gh pr merge 1; then :; fi; do :; done",
-    ] {
-        denied_for_every_role(c, "gh-pr-merge");
-    }
-    denied_for_every_role(
-        "coproc N while git push --force origin x; do :; done",
-        "force-push",
-    );
-    for c in [
-        "coproc N while read l; do echo $l; done",
-        "coproc N until false; do echo x; done",
-        "coproc N if true; then echo hi; fi",
-        "coproc N for i in 1 2; do echo $i; done",
-        "coproc N case $f in *.c) echo c ;; esac",
-        "coproc N [[ -f x ]]",
-        // The name may spell a command: it is the name, not a command.
+        "coproc n { gh pr merge 1; }",
+        "coproc n { echo hi; }",
         "coproc git while read l; do echo $l; done",
+        // `coproc NAME case …` and `time coproc NAME case …` (class C2, site 3).
+        "coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "coproc N case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
+        "time coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "time coproc N case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
+        "time -p coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "time coproc N { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
+        "coproc N { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
+        // A simple command after `coproc`.
+        "coproc rm -rf x",
+        "coproc gh pr merge 1",
+        "coproc git push --force origin x",
+        "coproc \"n\" { echo hi; }",
+        "coproc $n { echo hi; }",
+        // Class C13: a command after `coproc` that a `case` argument must not hide.
+        "time coproc rm -rf case /etc/passwd",
+        "time ! coproc rm -rf case x",
+        "time coproc env --split-string='gh pr merge 1' case",
+        // Class C14: a word that a brace expansion makes must not pass for a keyword.
+        "time coproc rm {if,/etc/passwd}",
     ] {
-        allowed_for_every_role(c);
+        denied_for_every_role(c, "unparsed-command");
     }
-    // A word that is not followed by a compound command is the command, as before.
-    denied_for_every_role("coproc gh pr merge 1 while", "gh-pr-merge");
-    denied_for_every_role("coproc git push --force origin while", "force-push");
 }
 
 #[test]
-fn a_wrapper_before_function_or_coproc_does_not_hide_the_body() {
+fn a_wrapper_before_function_or_coproc_is_denied_as_unread() {
+    // A wrapper that `unwrap` removes, followed by `function` or `coproc` (class C2, site 2).
     for c in [
         "time coproc n { gh pr merge 1; }",
         "time -p coproc n { gh pr merge 1; }",
         "nice coproc n { gh pr merge 1; }",
         "nice -n 5 coproc n { gh pr merge 1; }",
-        "time function f { gh pr merge 1; }; f",
-        "nice function f { gh pr merge 1; }; f",
+        "time coproc n { echo hi; }",
+        "time coproc { gh pr merge 1; }",
+        "time coproc { echo hi; }",
         "time coproc n while gh pr merge 1; do :; done",
         "time coproc n if gh pr merge 1; then :; fi",
-        "time coproc { gh pr merge 1; }",
-        "time coproc gh pr merge 1",
+        "time coproc git { echo hi; }",
+        "time function f { gh pr merge 1; }; f",
+        "nice function f { gh pr merge 1; }; f",
+        "time function f { echo hi; }; f",
+        "time function git { echo hi; }",
+        "timeout 5 coproc { echo hi; }",
+        "timeout 5 function f { echo hi; }",
+        "env coproc { echo hi; }",
+        "env function f { echo hi; }",
+        "time coproc git push --force origin x",
+    ] {
+        denied_for_every_role(c, "unparsed-command");
+    }
+}
+
+#[test]
+fn a_coproc_group_or_compound_command_is_still_read() {
+    // `coproc { … }`, `coproc ( … )` and `coproc <compound>` stay read, and so does `function`
+    // with no wrapper in front.
+    for c in [
+        "coproc { gh pr merge 1; }",
+        "coproc ( gh pr merge 1 )",
+        "coproc while gh pr merge 1; do :; done",
+        "coproc until gh pr merge 1; do :; done",
+        "coproc if gh pr merge 1; then :; fi",
+        "coproc for i in 1; do gh pr merge 1; done",
+        "coproc select i in 1; do gh pr merge 1; done",
+        "coproc while if gh pr merge 1; then :; fi; do :; done",
+        "coproc case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
+        "function f { gh pr merge 1; }; f",
     ] {
         denied_for_every_role(c, "gh-pr-merge");
     }
-    denied_for_every_role("time coproc n { git push --force origin x; }", "force-push");
+    denied_for_every_role("coproc { git push --force origin x; }", "force-push");
+    denied_for_every_role("coproc ( git push --force origin x )", "force-push");
     for c in [
-        "time coproc n { echo hi; }",
-        "nice coproc n { echo hi; }",
-        "time function f { echo hi; }; f",
-        "time coproc n while read l; do echo $l; done",
-        // The name may spell a command: it is the name, not a command.
-        "time coproc git { echo hi; }",
-        "time function git { echo hi; }",
+        "coproc { echo hi; }",
+        "coproc ( echo hi )",
+        "coproc while read l; do echo $l; done",
+        "coproc until false; do echo x; done",
+        "coproc if true; then echo hi; fi",
+        "coproc for i in 1 2; do echo $i; done",
+        "coproc case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "function f { echo hi; }; f",
+        "function git { echo hi; }",
     ] {
         allowed_for_every_role(c);
     }
-    // A word that is not followed by a body is the command, as before.
-    denied_for_every_role("time coproc git push --force origin x", "force-push");
 }
 
 #[test]
@@ -375,12 +406,6 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "time { time case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
         "time time case $f in *.c) echo c ;; *.h) echo h ;; esac",
         "time coproc case $f in *.c) echo c ;; *.h) echo h ;; esac",
-        // A name after `coproc`, with the `case` as the compound command or inside the group.
-        "coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
-        "time coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
-        "time -p coproc N case $f in *.c) echo c ;; *.h) echo h ;; esac",
-        "time coproc N { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
-        "coproc N { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
     ] {
         allowed_for_every_role(c);
     }
@@ -404,21 +429,12 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
     denied_for_every_role("time git push --force origin case", "force-push");
     denied_for_every_role("time { git push --force origin case; }", "force-push");
     denied_for_every_role("time time git push --force origin case", "force-push");
-    denied_for_every_role("time coproc git push --force origin case", "force-push");
+    denied_for_every_role(
+        "time coproc git push --force origin case",
+        "unparsed-command",
+    );
     denied_for_every_role(
         "time coproc case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
-        "gh-pr-merge",
-    );
-    denied_for_every_role(
-        "coproc N case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
-        "gh-pr-merge",
-    );
-    denied_for_every_role(
-        "time coproc N case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
-        "gh-pr-merge",
-    );
-    denied_for_every_role(
-        "time coproc N { case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac; }",
         "gh-pr-merge",
     );
     denied_for_every_role(

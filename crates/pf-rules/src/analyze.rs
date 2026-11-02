@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use pf_workflow::rules::{Allow, RoleRules};
 
-use crate::shell::{COMPOUND_START, Cmd, Parsed, Word, is_keyword, parse};
+use crate::shell::{Cmd, Parsed, Word, is_keyword, parse};
 use crate::{Context, Part, PushIntent};
 
 /// The most levels of `bash -c` inside `bash -c` that are read.
@@ -322,22 +322,17 @@ impl<'a> Analyzer<'a> {
             if !first.any_quote && !first.dynamic && is_keyword(&first.text) {
                 // `time { cmd; }`, `time while cmd; do …; done`: the keyword that follows a
                 // wrapper starts a group or a compound command. The command is inside it.
-                w.remove(0);
-                // The name after `function`, or after `coproc` when a body follows it, is not the
-                // command: the body is. The same rule as the parser's, for a keyword after a wrapper.
-                let starts_body = |x: &Word| {
-                    !x.any_quote && !x.dynamic && COMPOUND_START.contains(&x.text.as_str())
-                };
-                let drop_name = match first.text.as_str() {
-                    "function" => w
-                        .first()
-                        .is_some_and(|n| !(n.text == "{" && !n.any_quote && !n.dynamic)),
-                    "coproc" => w.len() >= 2 && !starts_body(&w[0]) && starts_body(&w[1]),
-                    _ => false,
-                };
-                if drop_name {
-                    w.remove(0);
+                if matches!(first.text.as_str(), "function" | "coproc") {
+                    // The parser leaves `function` and `coproc` out of a command when they start
+                    // it, so one that reaches here follows a wrapper. Its name word cannot be told
+                    // from a command, so the call is denied rather than guessed.
+                    self.deny(
+                        "unparsed-command",
+                        format!("`{}` after a wrapper is not read", first.text),
+                    );
+                    return Vec::new();
                 }
+                w.remove(0);
                 continue;
             }
             // `[` is the test command. Any other glob in a command name may match any file.

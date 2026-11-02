@@ -94,40 +94,10 @@ const RESERVED: [&str; 13] = [
     "coproc",
 ];
 
-/// Words that start the compound command after `coproc NAME`. `(` is not a word: the parser
-/// reads it as a subshell.
-pub const COMPOUND_START: [&str; 8] = ["{", "while", "until", "if", "for", "select", "case", "[["];
-
-/// True when the words before a `case` are `time`, its options, and words that only lead into a
-/// compound command: `{`, `!`, `while`, `until`, `if`, `time`, and `coproc` with its name.
-fn time_prefix_only(words: &[Word]) -> bool {
-    let mut name_next = false;
-    for w in &words[1..] {
-        let plain = !w.any_quote && !w.dynamic;
-        if name_next {
-            // The word after `coproc` is its name, as it is when the body follows.
-            name_next = false;
-            if plain {
-                continue;
-            }
-            return false;
-        }
-        if w.text.starts_with('-') {
-            continue;
-        }
-        if plain && w.text == "coproc" {
-            name_next = true;
-        } else if !(plain
-            && matches!(
-                w.text.as_str(),
-                "{" | "!" | "while" | "until" | "if" | "time"
-            ))
-        {
-            return false;
-        }
-    }
-    true
-}
+/// The words that may follow `coproc`: a group, or a compound command that the parser reads
+/// (`(` is not a word: the parser reads it as a subshell). Any other word after `coproc` is
+/// denied as unread.
+const COPROC_BODY: [&str; 7] = ["{", "while", "until", "if", "for", "select", "case"];
 
 /// Is this word a shell keyword that starts a compound command or a group? After a wrapper such
 /// as `time`, the command that the keyword introduces is the one that runs.
@@ -453,7 +423,7 @@ impl Parser<'_> {
                             .collect()
                     };
                     for word in words {
-                        match self.add_word(idx, word, &case_headers) {
+                        match self.add_word(idx, word, &case_headers)? {
                             Action::Nothing => {}
                             Action::CaseHeader => case_headers.push(idx),
                             Action::CaseIn => {
@@ -507,28 +477,13 @@ impl Parser<'_> {
         }
     }
 
-    /// True when the next thing after blanks is `{`, `(` or a word that starts a compound
-    /// command (`while`, `until`, `if`, `for`, `select`, `case`, `[[`).
+    /// True when the next thing after blanks is `{` or `(`.
     fn body_follows(&self) -> bool {
         let mut k = 0;
         while matches!(self.peek_at(k), Some(' ' | '\t')) {
             k += 1;
         }
-        if matches!(self.peek_at(k), Some('(')) {
-            return true;
-        }
-        let mut word = String::new();
-        while let Some(c) = self.peek_at(k) {
-            if matches!(
-                c,
-                ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')'
-            ) {
-                break;
-            }
-            word.push(c);
-            k += 1;
-        }
-        COMPOUND_START.contains(&word.as_str())
+        matches!(self.peek_at(k), Some('{' | '('))
     }
 
     fn new_cmd(&mut self, piped_from: Option<usize>) -> usize {
@@ -540,72 +495,93 @@ impl Parser<'_> {
     }
 
     /// Put a word into a command, treating assignments and reserved words at the start.
-    fn add_word(&mut self, idx: usize, word: Word, case_headers: &[usize]) -> Action {
+    fn add_word(
+        &mut self,
+        idx: usize,
+        word: Word,
+        case_headers: &[usize],
+    ) -> Result<Action, String> {
         let plain = !word.any_quote && !word.dynamic;
         let body_follows = self.body_follows();
         let cmd = &mut self.cmds[idx];
         if cmd.header {
             // The rest of a `for`, `select` or `case` header holds no command.
             if plain && word.text == "in" && case_headers.contains(&idx) {
-                return Action::CaseIn;
+                return Ok(Action::CaseIn);
             }
             if cmd.loop_header {
                 cmd.head.push(word);
             }
-            return Action::Nothing;
+            return Ok(Action::Nothing);
         }
         if cmd.words.is_empty() {
             if cmd.name_next != 0 {
                 // The name after `function`, or after `coproc` when a body follows it. The body
                 // is read as commands, so the name must not become the command name.
                 let mode = std::mem::take(&mut cmd.name_next);
+                if mode == 2 && !(plain && COPROC_BODY.contains(&word.text.as_str())) {
+                    // A plain word after `coproc` is a name or a simple command, and no lookahead
+                    // tells them apart for every spelling. Deny what is not modelled.
+                    return Err(format!(
+                        "the word {:?} after `coproc` may be a name or a command",
+                        word.raw
+                    ));
+                }
                 if !(plain && word.text == "{") && (mode == 1 || body_follows) {
-                    return Action::Nothing;
+                    return Ok(Action::Nothing);
                 }
             }
             if plain && word.text == "function" {
                 cmd.name_next = 1;
-                return Action::Nothing;
+                return Ok(Action::Nothing);
             }
             if plain && word.text == "coproc" {
                 cmd.name_next = 2;
-                return Action::Nothing;
+                return Ok(Action::Nothing);
             }
             if assignment_prefix(&word.raw) {
                 cmd.assigns.push(word);
-                return Action::Nothing;
+                return Ok(Action::Nothing);
             }
             if plain && word.text == "esac" {
-                return Action::Esac;
+                return Ok(Action::Esac);
             }
             if plain && (RESERVED.contains(&word.text.as_str()) || word.text == "}") {
                 // Skip the reserved word. The command that follows it uses the same slot.
-                return Action::Nothing;
+                return Ok(Action::Nothing);
             }
             if plain && matches!(word.text.as_str(), "for" | "select") {
                 cmd.header = true;
                 cmd.loop_header = true;
-                return Action::Nothing;
+                return Ok(Action::Nothing);
             }
             if plain && word.text == "case" {
                 cmd.header = true;
-                return Action::CaseHeader;
+                return Ok(Action::CaseHeader);
             }
         } else if plain
             && word.text == "case"
             && cmd.words[0].text == "time"
             && !cmd.words[0].any_quote
             && !cmd.words[0].dynamic
-            && time_prefix_only(&cmd.words)
+            && cmd.words[1..].iter().all(|w| {
+                w.text.starts_with('-')
+                    || (!w.any_quote
+                        && !w.dynamic
+                        && matches!(
+                            w.text.as_str(),
+                            "{" | "!" | "while" | "until" | "if" | "time" | "coproc"
+                        ))
+            })
         {
             // `time case …`, `time -p case …`, and `case` after `time { `, `time ! `,
-            // `time while `, `time until `, `time if `, a second `time`, `time coproc ` and
-            // `time coproc NAME `: the `case` header holds no command.
+            // `time while `, `time until `, `time if `, a second `time` and `time coproc `: the
+            // `case` header holds no command.
             cmd.header = true;
-            return Action::CaseHeader;
+            return Ok(Action::CaseHeader);
         }
         cmd.words.push(word);
-        Action::Nothing
+        Ok(Action::Nothing)
     }
 
     /// Read heredoc bodies that wait for a line break.
@@ -1445,8 +1421,6 @@ mod brace_tests {
         for (src, want) in [
             ("function f { gh pr merge 1; }", "gh pr merge 1"),
             ("function f() { gh pr merge 1; }", "gh pr merge 1"),
-            ("coproc n { gh pr merge 1; }", "gh pr merge 1"),
-            ("coproc gh pr merge 1", "gh pr merge 1"),
             ("coproc { gh pr merge 1; }", "gh pr merge 1"),
         ] {
             let p = parse(src).unwrap();
@@ -1463,6 +1437,27 @@ mod brace_tests {
                 })
                 .collect();
             assert_eq!(all, [want], "{src}");
+        }
+    }
+
+    #[test]
+    fn a_word_after_coproc_that_is_not_a_body_start_is_not_parsed() {
+        for src in [
+            "coproc n { gh pr merge 1; }",
+            "coproc gh pr merge 1",
+            "coproc rm -rf x",
+            "coproc N while read l; do :; done",
+            "coproc \"n\" { :; }",
+            "coproc $n { :; }",
+        ] {
+            assert!(parse(src).is_err(), "{src}");
+        }
+        for src in [
+            "coproc { :; }",
+            "coproc ( : )",
+            "coproc while :; do :; done",
+        ] {
+            assert!(parse(src).is_ok(), "{src}");
         }
     }
 }
