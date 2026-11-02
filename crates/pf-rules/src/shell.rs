@@ -94,6 +94,41 @@ const RESERVED: [&str; 13] = [
     "coproc",
 ];
 
+/// Words that start the compound command after `coproc NAME`. `(` is not a word: the parser
+/// reads it as a subshell.
+pub const COMPOUND_START: [&str; 8] = ["{", "while", "until", "if", "for", "select", "case", "[["];
+
+/// True when the words before a `case` are `time`, its options, and words that only lead into a
+/// compound command: `{`, `!`, `while`, `until`, `if`, `time`, and `coproc` with its name.
+fn time_prefix_only(words: &[Word]) -> bool {
+    let mut name_next = false;
+    for w in &words[1..] {
+        let plain = !w.any_quote && !w.dynamic;
+        if name_next {
+            // The word after `coproc` is its name, as it is when the body follows.
+            name_next = false;
+            if plain {
+                continue;
+            }
+            return false;
+        }
+        if w.text.starts_with('-') {
+            continue;
+        }
+        if plain && w.text == "coproc" {
+            name_next = true;
+        } else if !(plain
+            && matches!(
+                w.text.as_str(),
+                "{" | "!" | "while" | "until" | "if" | "time"
+            ))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Is this word a shell keyword that starts a compound command or a group? After a wrapper such
 /// as `time`, the command that the keyword introduces is the one that runs.
 pub fn is_keyword(text: &str) -> bool {
@@ -472,13 +507,28 @@ impl Parser<'_> {
         }
     }
 
-    /// True when the next thing after blanks is `{` or `(`.
+    /// True when the next thing after blanks is `{`, `(` or a word that starts a compound
+    /// command (`while`, `until`, `if`, `for`, `select`, `case`, `[[`).
     fn body_follows(&self) -> bool {
         let mut k = 0;
         while matches!(self.peek_at(k), Some(' ' | '\t')) {
             k += 1;
         }
-        matches!(self.peek_at(k), Some('{' | '('))
+        if matches!(self.peek_at(k), Some('(')) {
+            return true;
+        }
+        let mut word = String::new();
+        while let Some(c) = self.peek_at(k) {
+            if matches!(
+                c,
+                ' ' | '\t' | '\r' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')'
+            ) {
+                break;
+            }
+            word.push(c);
+            k += 1;
+        }
+        COMPOUND_START.contains(&word.as_str())
     }
 
     fn new_cmd(&mut self, piped_from: Option<usize>) -> usize {
@@ -546,19 +596,11 @@ impl Parser<'_> {
             && cmd.words[0].text == "time"
             && !cmd.words[0].any_quote
             && !cmd.words[0].dynamic
-            && cmd.words[1..].iter().all(|w| {
-                w.text.starts_with('-')
-                    || (!w.any_quote
-                        && !w.dynamic
-                        && matches!(
-                            w.text.as_str(),
-                            "{" | "!" | "while" | "until" | "if" | "time" | "coproc"
-                        ))
-            })
+            && time_prefix_only(&cmd.words)
         {
             // `time case …`, `time -p case …`, and `case` after `time { `, `time ! `,
-            // `time while `, `time until `, `time if `, a second `time` and `time coproc `: the
-            // `case` header holds no command.
+            // `time while `, `time until `, `time if `, a second `time`, `time coproc ` and
+            // `time coproc NAME `: the `case` header holds no command.
             cmd.header = true;
             return Action::CaseHeader;
         }
