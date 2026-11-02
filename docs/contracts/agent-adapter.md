@@ -107,7 +107,8 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
 - The rules read a brace expansion of plain text as the words it makes. They read a `function`,
   `coproc` or `time { … }` body, and a compound command after `time`, as commands. A `case` pattern
   and the values of an array literal are not commands. A variable that is set to an array literal
-  counts as unread, so it is never safe to delete. These are denied with `unparsed-command`, except
+  counts as unread, so it is never safe to delete (an element assignment such as `d[0]=/etc` is not
+  read). These are denied with `unparsed-command`, except
   where one item below names another rule:
   - a glob or an expansion in a command name or a `gh` or `git` subcommand;
   - a brace expansion that mixes quoted text with other parts, in any command (`"--no-ver"{ify,}`).
@@ -120,11 +121,13 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
   - a git config that runs a command the rules cannot read: an alias, or a key such as
     `core.fsmonitor`, `core.sshCommand` or `credential.helper` with more than a bare program name,
     given by `git -c`, `git --config-env`, `git config` (a write of such a key, or of a key that is a
-    variable; a read, `get`, `list` or an `--unset` is allowed), or the `GIT_CONFIG_COUNT`,
-    `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n` and `GIT_CONFIG_PARAMETERS` variables, in any word of
-    the call; and a `git -c` value that is a variable. The variables that name a command directly
-    (`GIT_PAGER`, `GIT_SSH_COMMAND`, `GIT_EDITOR`, `GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`,
-    `GIT_SEQUENCE_EDITOR`) are not read;
+    variable, or a lone variable such as `"$@"`; a read, `get`, `list` or an `--unset` is allowed),
+    or the `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n` and `GIT_CONFIG_PARAMETERS`
+    variables, when the call spells the name (a quoted name too); and a `git -c` value that is a
+    variable. Not read: a `git config` option written as an abbreviation (`--fil`), and a
+    `GIT_CONFIG_*` name built from an expansion (`"GIT_CONFIG_$a=1"`). The variables that name a
+    command directly (`GIT_PAGER`, `GIT_SSH_COMMAND`, `GIT_EDITOR`, `GIT_EXTERNAL_DIFF`,
+    `GIT_ASKPASS`, `GIT_SEQUENCE_EDITOR`) are not read;
   - an alias set by `gh alias set` or `gh alias import`.
   A brace sequence of more than 256 words, or with a number beyond 64 bits, is not expanded. Its word
   counts as unread, like a variable.

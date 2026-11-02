@@ -193,6 +193,11 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config set core.pager 'sh -c x'",
         "git config \"$k\" v",
         "git config core.pager \"$v\"",
+        // A lone variable may hold a key and a value.
+        "git config \"$@\"",
+        "git config --global \"$@\"",
+        "git config $x",
+        "git config \"$k\"",
         // A quoted name is still the name.
         "env \"GIT_CONFIG_COUNT=1\" \"GIT_CONFIG_KEY_0=alias.x\" \"GIT_CONFIG_VALUE_0=!gh pr merge 1\" git x",
         "\"GIT_CONFIG_COUNT\"=1 git x",
@@ -221,7 +226,6 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config list",
         "git config unset alias.x",
         "git config core.pager",
-        "git config \"$k\"",
         "git config user.name x",
         "git config core.pager cat",
         "git config core.fsmonitor ''",
@@ -268,6 +272,12 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "(case $f in a*) echo x ;; b*) echo y ;;& *) echo z ;; esac); echo done",
         "case $f in a*) (case $g in *.c) echo c ;; *.h) echo h ;; esac) ;; *.o) echo o ;; esac",
         "time case $f in\n *.c) echo c ;;\n *.h) echo h ;;\nesac",
+        "time { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
+        "time -p { case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
+        "time ! case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "time while case $f in *.c) true ;; *.h) false ;; esac; do echo x; done",
+        "time until case $f in *.c) true ;; *.h) false ;; esac; do echo x; done",
+        "time if case $f in *.c) true ;; *.h) false ;; esac; then echo x; fi",
         "time -p case $f in *.c) echo c ;; *.h) echo h ;; esac",
     ] {
         allowed_for_every_role(c);
@@ -280,6 +290,17 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "time case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac",
         "gh-pr-merge",
     );
+    denied_for_every_role(
+        "time { case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac; }",
+        "gh-pr-merge",
+    );
+    denied_for_every_role(
+        "time if case $f in *.c) true ;; *.h) false ;; esac; then gh pr merge 1; fi",
+        "gh-pr-merge",
+    );
+    // A `case` that is only an argument of `time`'s command does not make a header.
+    denied_for_every_role("time git push --force origin case", "force-push");
+    denied_for_every_role("time { git push --force origin case; }", "force-push");
     // The body of an arm and a substitution inside an array are still judged.
     denied_for_every_role(
         "case \"$f\" in\n *.c|*.h) gh pr merge 1 ;;\nesac",

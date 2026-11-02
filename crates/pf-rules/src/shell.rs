@@ -546,9 +546,15 @@ impl Parser<'_> {
             && cmd.words[0].text == "time"
             && !cmd.words[0].any_quote
             && !cmd.words[0].dynamic
-            && cmd.words[1..].iter().all(|w| w.text.starts_with('-'))
+            && cmd.words[1..].iter().all(|w| {
+                w.text.starts_with('-')
+                    || (!w.any_quote
+                        && !w.dynamic
+                        && matches!(w.text.as_str(), "{" | "!" | "while" | "until" | "if"))
+            })
         {
-            // `time case …`, `time -p case …`: the `case` header holds no command.
+            // `time case …`, `time -p case …`, and `case` after `time { `, `time ! `,
+            // `time while `, `time until ` and `time if `: the `case` header holds no command.
             cmd.header = true;
             return Action::CaseHeader;
         }

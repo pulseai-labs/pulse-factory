@@ -1672,8 +1672,10 @@ fn config_writes_command(rest: &[Word]) -> bool {
         }
         _ => {}
     }
-    // `git config key` reads the key. A value after it, or `--add`, writes it.
-    if !(writes_more || positional.len() > 1) {
+    // `git config key` reads the key. A value after it, or `--add`, writes it. A lone positional
+    // that is a variable (`"$@"`, `$x`) may expand to a key and a value, so it counts as a write.
+    let lone_dynamic = positional.len() == 1 && positional[0].dynamic;
+    if !(writes_more || positional.len() > 1 || lone_dynamic) {
         return false;
     }
     let Some(key) = positional.first() else {
