@@ -390,7 +390,7 @@ fn the_package_check_fires_on_inline_bad_samples() {
 }
 
 /// The keys ossify's work-item close reads from a caller's verdict (`close --verdict`). A missing
-/// key halts the close: `close: verdict missing key '<key>' - halt`.
+/// key halts the close with a halt that names the key.
 const VERDICT_KEYS: [&str; 8] = [
     "mode",
     "model",
@@ -426,6 +426,6 @@ fn the_minimum_ossify_version_is_one_whose_close_reads_that_verdict() {
         .split('.')
         .map(|p| p.parse::<u32>().unwrap());
     let version = (parts.next().unwrap(), parts.next().unwrap());
-    // ossify 1.30.0 is the first close that requires the `agent` key.
+    // ossify 1.30.0 is the first close with `--verdict`, and it requires the `agent` key.
     assert!(version >= (1, 30), "min_version {}", plugin.min_version);
 }

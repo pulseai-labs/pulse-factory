@@ -18,7 +18,7 @@ params: [spine, spine_branch, spine_dir, method_root, repo, forge_repo, worktree
 
 plugins:
   - name: ossify
-    # 1.30.0: the first close that reads a caller's verdict with the `agent` key.
+    # 1.30.0: the first close with `--verdict`; it reads a caller's verdict, `agent` key included.
     min_version: 1.30.0
 
 # Cheap models. Every role runs in the OMP runtime.
