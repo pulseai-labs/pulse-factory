@@ -117,7 +117,11 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
     denies `coproc NAME <compound>`, `coproc NAME { … }` and `coproc cmd args` alike. Also
     `function` or `coproc` after a wrapper that the rules remove (`time`, `nice`, `timeout`, `env`
     and the others in the wrapper list), such as `time coproc { … }` and `time function f { … }`.
-    `function NAME { … }` with no wrapper in front is read;
+    `function NAME { … }` with no wrapper in front is read. One exception: when `case` follows
+    `time` and the words between them are only option words that start with `-` and the words `{`,
+    `!`, `while`, `until`, `if`, `time` and `coproc`, in any mix, the `case` reads as a header. The
+    arms are judged as commands, and the call is not denied. So `time coproc { case $f in … esac; }`
+    is read, while `time coproc { echo hi; }` and `time function f { case … }` are denied;
   - a brace expansion that mixes quoted text with other parts, in any command (`"--no-ver"{ify,}`).
     A brace beside a variable only makes the word unread, which is denied in a command name and a
     `gh` or `git` subcommand with `unparsed-command`, and in the arguments of a push with
