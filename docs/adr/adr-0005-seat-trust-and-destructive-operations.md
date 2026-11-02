@@ -75,3 +75,36 @@ Rejected alternatives:
 - **Known limit:** with a shared token, least privilege holds only at the command level. A seat that
   writes a script calling the forge API can merge or delete. A separate seat identity, with a token
   that cannot merge, is on the feature map.
+- **Known limit, a push target the rules cannot read (stated departure, `r0.s1.w3`):** the real push
+  of the `ossify` package is `git push -u origin "$wi_branch"`, so its branch is a shell variable.
+  `pf-rules` allows a push whose branch is one quoted variable only for a role with `push_own_branch`,
+  and it audits the call with the rule `own-branch-unverified`. The rules cannot check the value. The
+  adapter's post-push check of the remote's default branch guards it after the fact. `"+$b"` (force),
+  `":$b"` (delete) and a variable without quotes are denied.
+- **Amended 2026-11-01, `r0.s1.w5`: what the rules read of a delete and a push.** The real `ossify`
+  blocks (`inv="$(mktemp)"`, `rm -f "$inv"`, a `trap` that names a variable, `git -C "$wt" push`) have
+  to pass, because a deny in one parks the seat. These changes follow, and each has a known limit:
+  - **A delete inside the worktree is a seat's normal work** for every role with a worktree. `rm`,
+    `rmdir` and `unlink` of a path under `worktree` are allowed, as `git rm` is. The worktree itself,
+    anything under its `.git`, and a glob that may take most of it (`*`, `.*`) stay denied. `find
+    -delete`, `git clean` and `git worktree remove` still need a target in the scratch or the build
+    target, and the role's listing. A bare `cargo clean` is denied for every role, because it wipes a
+    shared target; `cargo clean -p` is not a delete.
+  - **A variable that the whole call assigns only from `mktemp` or the empty string** is deletable by
+    a role with `delete_own_scratch`, when the word is that variable alone. A `for`, a `read`, an
+    `export`, `printf -v`, `${x:=…}`, `+=` or any other value ends it, wherever it sits in the call.
+    *Known limit:* a script file, `source` and a function body that the call does not contain are
+    not read, and `declare -n` makes every variable unknown.
+  - **A relative path resolves against the working directory and every literal `cd` earlier in the
+    call.** It must hold in all of them, because a subshell is not told apart. After a `cd` to a
+    variable, a relative path is denied.
+  - **A `trap` body is parsed again as a command**, like `eval`.
+  - **A push has a directory and a branch.** The directory is a literal `git -C` or `cd`, else the
+    working directory, and it must lie inside `worktree` or `push_dir`. The branch is a literal
+    refspec, or for a bare push the branch of a literal `git switch` or `git checkout` earlier in the
+    call, else the current branch. A literal half is judged as itself even when the other half is a
+    variable. A directory or branch that is one quoted variable, or that follows a `cd`, `switch` or
+    `checkout` to one, is `own-branch-unverified` for a role with `push_own_branch` and denied for
+    any other. *Known limit:* the rules cannot check the value. The adapter measures the push in git
+    and reads the default branch again after it (`docs/contracts/agent-adapter.md`).
+    `git -C $dir push` with an unquoted variable is denied (`push-unreadable`).

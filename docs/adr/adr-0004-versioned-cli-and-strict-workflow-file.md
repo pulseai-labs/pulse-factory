@@ -4,6 +4,7 @@
 - **Date:** 2026-10-25
 - **Amended:** 2026-10-26, at the planning of spine r0.s1: declared plugins, unit sources and seed
   units.
+- **Amended:** 2026-11-01, at `r0.s1.w2`: `roots` and the role rule files. Nothing above changes.
 
 ## Context
 - Every session acts on a run through the Pulse Factory CLI and its skill.
@@ -25,6 +26,14 @@
     version, and pins the versions it resolved with the run (ADR-0007).
   - It names its unit sources (the queue directory; the record format is ADR-0002's) and the seed
     units that start a run, such as the seat that fills the queue.
+  - It declares `roots`: the directories that a working directory from a unit record may name. A
+    launch parks the unit when such a directory is relative, does not exist, or lies outside every
+    root after the path is made canonical.
+  - It names one rule file per role. A rule file is `{version: 1, role, allow: [...]}`, read as
+    strictly as the workflow file, and `allow` takes a closed set of values. A role gets exactly what
+    it lists. The adapter adds the deny list.
+  - Its field set, its placeholders and the launch settings are in `docs/contracts/workflow-file.md`,
+    `docs/contracts/launch-settings.md` and `docs/contracts/role-rules.md`.
 - **Breaking-change policy** (the project is pre-1.0):
   - A breaking change to the CLI's JSON, the workflow format or the unit record bumps that schema
     version and adds a changelog line.

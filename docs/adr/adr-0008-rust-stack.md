@@ -52,9 +52,11 @@ These were read from crates.io and the host on 2026-10-25, with no build:
 | `yaml-rust2` | 0.13.0 |
 | `rustc` and `cargo` on draco-desk | 1.98.1 |
 
+Plus, verified on 2026-11-01 by `r0.s1.w3`: `portable-pty` can spawn, read, write and resize a PTY from
+Tokio. `crates/pf-adapter-omp/tests/pty_driver.rs` proves it.
+
 ### Unverified claims
 The skeleton spine's first build verifies each of these:
-- portable-pty can spawn, read, write and resize a PTY from Tokio.
 - rusqlite runs WAL with `synchronous=FULL` behind one writer thread.
 - yaml-rust2 rejects duplicate keys, and its markers give `pf-workflow` a position for each
   unknown-field error.

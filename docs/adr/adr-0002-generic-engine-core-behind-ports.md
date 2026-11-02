@@ -4,6 +4,8 @@
 - **Date:** 2026-10-25
 - **Amended:** 2026-10-26, at the planning of spine r0.s1: no planning-method code, a queue unit
   source, and the vocabulary below.
+- **Amended:** 2026-11-01, at `r0.s1.w2`: the vocabulary gains *track* and a seed's *repeat*. Nothing
+  above changes.
 
 ## Context
 Pulse Factory is a registry and driver of workflows. The engine is generic. A workflow is data that
@@ -21,7 +23,10 @@ seats use ossify through the plugin the workflow declares. Each coding agent get
 | App | An MCP connector and the skills that drive it. |
 | Agent | A persona: a name, instructions, a brain (runtime, model, effort) and the plugins it carries. The operator chats with it. |
 | Workflow | Pulse Factory's own recipe: stages, roles, models, briefs, done signals, unit sources, seed units, the merge rule and capacity settings. It is data, not a plugin. It declares the plugins its seats need. |
-| Unit source | Where a run's units come from. |
+| Unit source | Where a run's units come from. Each unit source names the track its units join. |
+| Track | A named list of stages with an optional merge definition (rule, repo, base, head check). A unit moves through the stages of the track it came in on, and it merges only when its track has a merge definition. A workflow with one track behaves as a plain stage list. |
+| Seed unit | A unit that the workflow file declares and the engine admits at the start of a run, with no queue record. It names its track. |
+| Repeat | An optional rule of a seed unit. It admits the seed again under a new ID (`<id>.2`, `<id>.3`) when the previous seed is `done`, a unit on a named track came in after it, every unit on that track is `done`, a named file does not exist, and fewer than a stated maximum of seeds have run. It lets a workflow re-seed a group-by-group step with no engine code that names the step. |
 | Run | One armed instance of a workflow. |
 
 ## Decision

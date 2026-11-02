@@ -1,0 +1,18 @@
+[package]
+name = "pf-forge-bare"
+description = "Paper-env implementation of the pf-engine forge port: real git against a bare local repo, PRs as JSON files."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pf-engine = { path = "../pf-engine" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+pf-adapter-fake = { path = "../pf-adapter-fake" }
+pf-store-sqlite = { path = "../pf-store-sqlite" }
+tempfile.workspace = true
