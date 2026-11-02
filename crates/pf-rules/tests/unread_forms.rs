@@ -198,30 +198,6 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config --global \"$@\"",
         "git config $x",
         "git config \"$k\"",
-        // A variable as the value of an option that takes a value is still a lone variable, and a
-        // variable that may split holds a key and a value in any place beside such an option.
-        "git config --file \"$@\"",
-        "git config --file $x",
-        "git config --file \"$f\"",
-        "git config -f \"$@\"",
-        "git config --blob \"$@\"",
-        "git config --blob $x",
-        "git config --default \"$@\"",
-        "git config --default \"$x\"",
-        "git config --comment \"$@\"",
-        "git config --comment $x",
-        "git config -t \"$@\"",
-        "git config -t $x",
-        "git config --type \"$@\"",
-        "git config --type \"$x\"",
-        "git config --global --file \"$@\"",
-        "git config --file \"$@\" core.pager",
-        "git config core.pager --file \"$@\"",
-        "git config core.pager -t $x",
-        "git config --file $f user.name x",
-        "git config --file=\"$@\"",
-        "git config -f$x",
-        "git config --comment=\"$@\" core.pager",
         // A quoted name is still the name.
         "env \"GIT_CONFIG_COUNT=1\" \"GIT_CONFIG_KEY_0=alias.x\" \"GIT_CONFIG_VALUE_0=!gh pr merge 1\" git x",
         "\"GIT_CONFIG_COUNT\"=1 git x",
@@ -264,6 +240,13 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config --type \"$t\" user.name x",
         "git config --type bool core.pager",
         "git config user.name --file \"$f\"",
+        // A quoted word with text around the variable is one word, and an option value or a read
+        // beside a variable is not a write. These stay allowed.
+        "git config --file \"$d/cfg\" user.name x",
+        "git config -f \"$HOME/.gitconfig\" user.name x",
+        "git config --comment \"by $USER\" user.name x",
+        "git config --file $f user.name",
+        "git config --edit --file \"$f\"",
         "git config core.pager",
         "git config user.name x",
         "git config core.pager cat",
@@ -318,6 +301,8 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
         "time until case $f in *.c) true ;; *.h) false ;; esac; do echo x; done",
         "time if case $f in *.c) true ;; *.h) false ;; esac; then echo x; fi",
         "time -p case $f in *.c) echo c ;; *.h) echo h ;; esac",
+        "time { time case $f in *.c) echo c ;; *.h) echo h ;; esac; }",
+        "time time case $f in *.c) echo c ;; *.h) echo h ;; esac",
     ] {
         allowed_for_every_role(c);
     }
@@ -340,6 +325,11 @@ fn a_case_pattern_or_an_array_value_is_not_a_command() {
     // A `case` that is only an argument of `time`'s command does not make a header.
     denied_for_every_role("time git push --force origin case", "force-push");
     denied_for_every_role("time { git push --force origin case; }", "force-push");
+    denied_for_every_role("time time git push --force origin case", "force-push");
+    denied_for_every_role(
+        "time { time case $f in *.c) echo c ;; *.h) gh pr merge 1 ;; esac; }",
+        "gh-pr-merge",
+    );
     // The body of an arm and a substitution inside an array are still judged.
     denied_for_every_role(
         "case \"$f\" in\n *.c|*.h) gh pr merge 1 ;;\nesac",

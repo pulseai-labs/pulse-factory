@@ -550,11 +550,15 @@ impl Parser<'_> {
                 w.text.starts_with('-')
                     || (!w.any_quote
                         && !w.dynamic
-                        && matches!(w.text.as_str(), "{" | "!" | "while" | "until" | "if"))
+                        && matches!(
+                            w.text.as_str(),
+                            "{" | "!" | "while" | "until" | "if" | "time"
+                        ))
             })
         {
             // `time case …`, `time -p case …`, and `case` after `time { `, `time ! `,
-            // `time while `, `time until ` and `time if `: the `case` header holds no command.
+            // `time while `, `time until `, `time if ` and a second `time`: the `case` header holds
+            // no command.
             cmd.header = true;
             return Action::CaseHeader;
         }

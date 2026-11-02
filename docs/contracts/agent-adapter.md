@@ -121,14 +121,16 @@ Rules reach the runtime through its own hook. The adapter does not enforce them 
   - a git config that runs a command the rules cannot read: an alias, or a key such as
     `core.fsmonitor`, `core.sshCommand` or `credential.helper` with more than a bare program name,
     given by `git -c`, `git --config-env`, `git config` (a write of such a key, or of a key that is a
-    variable, or a lone variable such as `"$@"`, `$x` or `"$k"`, also as the value of an option that
-    takes one (`--file "$@"`, `-t $x`), or a word that may split in any option (`--file="$@"`,
-    `--file $x`); a read, `get`, `list` or an `--unset` is allowed, and so is a one-word `"$f"` as the
-    value of an option beside a key that is not a variable),
+    variable, or a variable as the only word besides options, such as `"$@"`, `$x` or `"$k"`; a read,
+    `get`, `list` or an `--unset` is allowed, and so is a variable as the value of an option, such as
+    `--file "$f"`),
     or the `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n` and `GIT_CONFIG_PARAMETERS`
-    variables, when the call spells the name (a quoted name too); and a `git -c` value that is a
-    variable. Not read: a `git config` option written as an abbreviation (`--fil`), and a
-    `GIT_CONFIG_*` name built from an expansion (`"GIT_CONFIG_$a=1"`). The variables that name a
+    variables, when the call spells the name as `NAME=` (a quoted name too); and a `git -c` value that
+    is a variable. Not read: a `git config` option written as an abbreviation (`--fil`), a variable
+    as the value of an option that takes one when it may hold a key and a value (`--file "$@"`,
+    `--comment "$@"`, `-t "$@"`), a `--value` option that hides the key, a value-taking option that
+    reads as `--get` (`--comment --get key v`), a `GIT_CONFIG_*` name built from an expansion
+    (`"GIT_CONFIG_$a=1"`) and one set by `printf -v`, `read` or `declare -x`. The variables that name a
     command directly (`GIT_PAGER`, `GIT_SSH_COMMAND`, `GIT_EDITOR`, `GIT_EXTERNAL_DIFF`,
     `GIT_ASKPASS`, `GIT_SEQUENCE_EDITOR`) are not read;
   - an alias set by `gh alias set` or `gh alias import`.

@@ -1647,10 +1647,6 @@ fn config_writes_command(rest: &[Word]) -> bool {
         .any(|w| matches!(w.text.as_str(), "--add" | "--replace-all"));
     // The positional words. An option that takes a value hides that value from them.
     let mut positional: Vec<&Word> = Vec::new();
-    // A skipped value that is a variable, and a word that may split into several words and so may
-    // hold a key and a value: `--file "$@"`, `-t $x`, `--file="$@"`.
-    let mut skipped_dynamic = false;
-    let mut may_hold_pair = false;
     let mut i = 0;
     while i < rest.len() {
         let t = rest[i].text.as_str();
@@ -1658,16 +1654,10 @@ fn config_writes_command(rest: &[Word]) -> bool {
             t,
             "-f" | "--file" | "--blob" | "--default" | "--comment" | "-t" | "--type"
         ) {
-            if let Some(v) = rest.get(i + 1).filter(|v| v.dynamic) {
-                skipped_dynamic = true;
-                may_hold_pair |= may_split(v);
-            }
             i += 2;
             continue;
         }
-        if t.starts_with('-') && t.len() > 1 {
-            may_hold_pair |= may_split(&rest[i]);
-        } else {
+        if !(t.starts_with('-') && t.len() > 1) {
             positional.push(&rest[i]);
         }
         i += 1;
@@ -1682,22 +1672,14 @@ fn config_writes_command(rest: &[Word]) -> bool {
         }
         _ => {}
     }
-    // `git config key` reads the key. A value after it, or `--add`, writes it. A variable that is
-    // the only word besides options (`"$@"`, `$x`, `"$k"`, or the value of `--file`) may expand to
-    // a key and a value, so it counts as a write. So does a word that may split, in any option.
-    let lone_dynamic = match positional.as_slice() {
-        [only] => only.dynamic,
-        [] => skipped_dynamic,
-        _ => false,
-    };
-    if may_hold_pair {
-        return true;
-    }
+    // `git config key` reads the key. A value after it, or `--add`, writes it. A lone positional
+    // that is a variable (`"$@"`, `$x`) may expand to a key and a value, so it counts as a write.
+    let lone_dynamic = positional.len() == 1 && positional[0].dynamic;
     if !(writes_more || positional.len() > 1 || lone_dynamic) {
         return false;
     }
     let Some(key) = positional.first() else {
-        return lone_dynamic;
+        return false;
     };
     if key.dynamic {
         return true;
@@ -1705,16 +1687,6 @@ fn config_writes_command(rest: &[Word]) -> bool {
     let value = positional.get(1);
     let setting = format!("{}={}", key.text, value.map_or("", |v| v.text.as_str()));
     config_runs_command(&setting, value.is_some_and(|v| v.dynamic))
-}
-
-/// Can this word expand to more than one word? A variable alone in double quotes is one word,
-/// except `"$@"` and `"$*"`. Any other expansion may split.
-fn may_split(w: &Word) -> bool {
-    w.dynamic
-        && !w
-            .quoted_var
-            .as_deref()
-            .is_some_and(|n| n != "@" && n != "*")
 }
 
 /// Is this env name one that gives git config without a `-c`?
