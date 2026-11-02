@@ -421,7 +421,10 @@ fn the_verify_brief_writes_every_verdict_key_the_close_reads() {
 fn the_minimum_ossify_version_is_one_whose_close_reads_that_verdict() {
     let file = load().file;
     let plugin = file.plugins.iter().find(|p| p.name == "ossify").unwrap();
-    let mut parts = plugin.min_version.split('.').map(|p| p.parse::<u32>().unwrap());
+    let mut parts = plugin
+        .min_version
+        .split('.')
+        .map(|p| p.parse::<u32>().unwrap());
     let version = (parts.next().unwrap(), parts.next().unwrap());
     // ossify 1.30.0 is the first close that requires the `agent` key.
     assert!(version >= (1, 30), "min_version {}", plugin.min_version);
