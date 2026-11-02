@@ -41,9 +41,9 @@ chmod +x "$tmp/bin/gh"
 export PATH="$tmp/bin:$PATH"
 
 # A stub plugin in the layout of a plugin cache, at a version above the workflow's minimum.
-plugin="$tmp/plugins/market/ossify/1.26.1"
+plugin="$tmp/plugins/market/ossify/1.30.1"
 mkdir -p "$plugin/.claude-plugin"
-echo '{"version":"1.26.1"}' > "$plugin/.claude-plugin/plugin.json"
+echo '{"version":"1.30.1"}' > "$plugin/.claude-plugin/plugin.json"
 echo "stub" > "$plugin/SKILL.md"
 
 # A stub git repo whose origin is on GitHub, and a state file with three items for the spine.
@@ -77,7 +77,7 @@ want "caps: one relaunch per stage"
 # 2 x (12 lane launches + 3 items x 3 stages)
 want "most launches: 42"
 want "item PRs merge into spine/s1 on green checks with no ack"
-printf '%s\n' "$out" | grep -q '^plugin.*ossify.*1\.26\.1' || fail "the summary lacks the pinned plugin"
+printf '%s\n' "$out" | grep -q '^plugin.*ossify.*1\.30\.1' || fail "the summary lacks the pinned plugin"
 
 # Nothing changed: no state directory, no socket, no ledger, and no `gh` call but `repo view`.
 [ ! -e "$PF_STATE_DIR" ] || fail "the dry run made the state directory"
