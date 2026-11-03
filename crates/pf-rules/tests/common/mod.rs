@@ -24,7 +24,7 @@ pub fn shipped(name: &str) -> RoleRules {
     RoleRules::parse(&text, &format!("{name}.yaml")).unwrap_or_else(|e| panic!("{path:?}: {e}"))
 }
 
-pub const SHIPPED_ROLES: [&str; 4] = ["lane", "implementer", "verifier", "close"];
+pub const SHIPPED_ROLES: [&str; 5] = ["lane", "implementer", "verifier", "close", "reviewer"];
 
 /// Every role to try a universal deny against: the shipped ones and one that lists nothing.
 pub fn every_role() -> Vec<RoleRules> {

@@ -168,6 +168,18 @@ impl Summary {
                 ),
             );
         }
+        for l in self.caps["loops"].as_array().into_iter().flatten() {
+            line(
+                &mut t,
+                format!(
+                    "caps: loop {} -> {} at most {} times per {} unit",
+                    l["from"].as_str().unwrap_or(""),
+                    l["to"].as_str().unwrap_or(""),
+                    l["max"],
+                    l["track"].as_str().unwrap_or("")
+                ),
+            );
+        }
         line(
             &mut t,
             format!("caps: {}", self.caps["relaunch"].as_str().unwrap_or("")),
@@ -212,13 +224,26 @@ impl Summary {
     }
 }
 
-/// The most launches the plan shows: `2 × (Σ seeds max × stages + Σ unit-source tracks items ×
-/// stages)`. Each session stage counts, and the 2 is each stall's one relaunch.
+/// The most launches the plan shows: `2 × (Σ seeds max × launches(track) + Σ unit-source tracks
+/// items × launches(track))`. The 2 is each stall's one relaunch.
+///
+/// `launches(track)` is the launches of one unit of the track: each stage counts once, except a
+/// stage with `entered_by: outcome`, which counts 0; then every `outcomes` entry adds its `max`,
+/// because each time an entry fires it launches its `to` stage once.
 pub fn most_launches(pkg: &Package, items: Option<u64>) -> Option<u64> {
     let stages = |track: &str| -> u64 {
-        pkg.file
-            .track(track)
-            .map_or(0, |t| u64::try_from(t.stages.len()).unwrap_or(u64::MAX))
+        pkg.file.track(track).map_or(0, |t| {
+            let once = t.stages.iter().filter(|s| !s.entered_by_outcome).count();
+            let looped: u64 = t
+                .stages
+                .iter()
+                .flat_map(|s| &s.outcomes)
+                .map(|o| u64::from(o.max))
+                .sum();
+            u64::try_from(once)
+                .unwrap_or(u64::MAX)
+                .saturating_add(looped)
+        })
     };
     let mut total: u64 = 0;
     for seed in &pkg.file.seeds {
@@ -240,6 +265,21 @@ pub fn most_launches(pkg: &Package, items: Option<u64>) -> Option<u64> {
         }
     }
     Some(total.saturating_mul(2))
+}
+
+/// One entry per `outcomes` entry of every stage: the loop a unit can take, and how often.
+fn loops(pkg: &Package) -> Vec<Value> {
+    pkg.file
+        .tracks
+        .iter()
+        .flat_map(|t| {
+            t.stages.iter().flat_map(move |s| {
+                s.outcomes.iter().map(
+                    move |o| json!({ "track": t.name, "from": s.name, "to": o.to, "max": o.max }),
+                )
+            })
+        })
+        .collect()
 }
 
 fn build_summary(
@@ -285,6 +325,7 @@ fn build_summary(
                 "max": s.repeat.as_ref().map_or(1, |r| u64::from(r.max)),
             })).collect::<Vec<_>>(),
             "relaunch": "one relaunch per stage",
+            "loops": loops(pkg),
         }),
         plugins: plugins
             .iter()

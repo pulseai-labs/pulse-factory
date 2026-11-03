@@ -4,6 +4,8 @@
 //! A **session** runs one stage. A **signal** ends a stage: a done-file, a PR state, a session's
 //! turn end or a command's exit code. The engine records each move as an admitted command.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::port::forge::PrRef;
@@ -57,6 +59,16 @@ pub struct UnitDetail {
     /// merge-result command IDs carry it, so a unit can park, resume and park again.
     #[serde(default)]
     pub park_generation: u32,
+    /// How many times each stage outcome has sent the unit on, by [`visit_key`]. A `clear`
+    /// empties it. A unit that no outcome has moved has no such field in its stored text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub visits: BTreeMap<String, u32>,
+}
+
+/// The key of one outcome entry in [`UnitDetail::visits`]: the stage and the entry's place in
+/// the stage's list, counting from 0.
+pub fn visit_key(stage: &str, entry: usize) -> String {
+    format!("{stage}#{entry}")
 }
 
 impl UnitDetail {

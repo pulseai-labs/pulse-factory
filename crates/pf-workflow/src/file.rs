@@ -76,6 +76,16 @@ pub enum DoneCond {
     Pr { command: CommandSpec, test: PrTest },
 }
 
+/// One entry of a stage's `outcomes`. It is tried after the stage's session ends and its `done`
+/// conditions hold. When every `when` condition holds, the unit goes to the stage `to` of the same
+/// track. The entry sends the unit at most `max` times; one more is a park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeSpec {
+    pub when: Vec<DoneCond>,
+    pub to: String,
+    pub max: u32,
+}
+
 /// A file that parks the unit, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParkOn {
@@ -109,6 +119,12 @@ pub struct StageSpec {
     pub settings: BTreeMap<String, String>,
     pub done: Vec<DoneCond>,
     pub park_on: Vec<ParkOn>,
+    /// Tried in order after the stage is done. The first entry that holds sends the unit on. An
+    /// empty list is a stage that goes on to the next one.
+    pub outcomes: Vec<OutcomeSpec>,
+    /// `entered_by: outcome`: the stage runs only when an outcome sends the unit to it. A unit
+    /// that reaches it in order goes past it.
+    pub entered_by_outcome: bool,
 }
 
 /// The merge definition of a track.
@@ -843,15 +859,32 @@ fn read_tracks(
         }
         let scope = Scope::Unit(&e.key);
         let mut stages: Vec<StageSpec> = Vec::new();
+        let mut targets: Vec<(String, String, Pos)> = Vec::new();
         for s in stage_nodes {
-            let stage = read_stage(s, check, scope, roles)?;
+            let (stage, to_refs) = read_stage(s, check, scope, roles)?;
             if stages.iter().any(|x| x.name == stage.name) {
                 return Err(ParseError::new(
                     s.pos,
                     format!("stage `{}` is defined twice in {what}", stage.name),
                 ));
             }
+            targets.extend(
+                to_refs
+                    .into_iter()
+                    .map(|(to, pos)| (stage.name.clone(), to, pos)),
+            );
             stages.push(stage);
+        }
+        // An outcome sends the unit to a stage of its own track, earlier or later.
+        for (from, to, pos) in targets {
+            if !stages.iter().any(|x| x.name == to) {
+                return Err(ParseError::new(
+                    pos,
+                    format!(
+                        "an outcome of stage `{from}` sends the unit to `{to}`, which {what} does not define"
+                    ),
+                ));
+            }
         }
         let merge = match f.get("merge") {
             None => None,
@@ -882,14 +915,21 @@ const STAGE_FIELDS: &[&str] = &[
     "settings",
     "done",
     "park_on",
+    "outcomes",
+    "entered_by",
 ];
+
+/// A stage, and the `to` of each of its outcomes with the place it was written. The track checks
+/// the targets once it has read every stage.
+type OutcomeTargets = Vec<(String, Pos)>;
+type StageRead = (StageSpec, OutcomeTargets);
 
 fn read_stage(
     node: &Node,
     check: &Checker,
     scope: Scope,
     roles: &[RoleDef],
-) -> Result<StageSpec, ParseError> {
+) -> Result<StageRead, ParseError> {
     let f = Fields::new(node, "a stage", STAGE_FIELDS)?;
     let name = name_of(f.req("name")?, "the stage name")?;
     let role_node = f.req("role")?;
@@ -982,7 +1022,32 @@ fn read_stage(
             })
             .collect::<Result<_, ParseError>>()?,
     };
-    Ok(StageSpec {
+    let (outcomes, targets) = match f.get("outcomes") {
+        None => (Vec::new(), Vec::new()),
+        Some(n) => read_outcomes(n, &name, check, scope)?,
+    };
+    let entered_by_outcome = match f.get("entered_by") {
+        None => false,
+        Some(n) => {
+            let value = text_of(n, "`entered_by`")?;
+            if value != "outcome" {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!("`entered_by` `{value}` is unknown; version 1 accepts: outcome"),
+                ));
+            }
+            if outcomes.is_empty() {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!(
+                        "stage `{name}` is `entered_by: outcome`, so it must hold at least one `outcomes` entry"
+                    ),
+                ));
+            }
+            true
+        }
+    };
+    let spec = StageSpec {
         name,
         role,
         brief,
@@ -999,7 +1064,50 @@ fn read_stage(
         settings,
         done,
         park_on,
-    })
+        outcomes,
+        entered_by_outcome,
+    };
+    Ok((spec, targets))
+}
+
+/// The `outcomes` list of a stage: each entry is `{when, to, max}`. `when` holds `done` entries
+/// and all of them must hold. `max` is at least 1: an entry that may never fire has no use.
+fn read_outcomes(
+    node: &Node,
+    stage: &str,
+    check: &Checker,
+    scope: Scope,
+) -> Result<(Vec<OutcomeSpec>, OutcomeTargets), ParseError> {
+    let list = items(node, "`outcomes`")?;
+    if list.is_empty() {
+        return Err(ParseError::new(
+            node.pos,
+            format!("`outcomes` of stage `{stage}` must hold at least one entry"),
+        ));
+    }
+    let mut outcomes = Vec::new();
+    let mut targets = Vec::new();
+    for entry in list {
+        let f = Fields::new(entry, "an outcome", &["when", "to", "max"])?;
+        let when_node = f.req("when")?;
+        let when_items = items(when_node, "`when`")?;
+        if when_items.is_empty() {
+            return Err(ParseError::new(
+                when_node.pos,
+                format!("`when` of an outcome of stage `{stage}` must hold at least one condition"),
+            ));
+        }
+        let when = when_items
+            .iter()
+            .map(|d| read_done(d, check, scope))
+            .collect::<Result<_, _>>()?;
+        let to_node = f.req("to")?;
+        let to = name_of(to_node, "`to`")?;
+        let max = small_uint(f.req("max")?, "`max`", 1)?;
+        targets.push((to.clone(), to_node.pos));
+        outcomes.push(OutcomeSpec { when, to, max });
+    }
+    Ok((outcomes, targets))
 }
 
 /// The optional `on_answer` list of a `park_on` entry or a `stop_file`. Its commands may use the

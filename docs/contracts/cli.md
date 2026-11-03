@@ -47,11 +47,17 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   earlier run not at an end state that `--replace` does not name; and, without `--paper`, a `repo`
   whose `origin` is not on GitHub or a failed `gh` read.
 - **The summary.** Spine, item count, workflow name and file version, each role with runtime and
-  model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, one relaunch per stage), the
-  pinned plugins, the most launches, `item PRs merge into <base> on green checks with no ack`, the
-  run `--replace` names, and `paper env` when set. The most launches is
-  `2 x (seed max x seed-track stages + items x item-track stages)`, summed over every seed and
-  track. It is what the plan shows. It is not a limit the run enforces.
+  model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, each stage-outcome loop, one
+  relaunch per stage), the pinned plugins, the most launches,
+  `item PRs merge into <base> on green checks with no ack`, the run `--replace` names, and
+  `paper env` when set. A loop is one `outcomes` entry of a stage. Its text line is
+  `caps: loop <stage> -> <to> at most <max> times per <track> unit`. The JSON form holds them as
+  `caps.loops`, an array of `{track, from, to, max}`.
+  The most launches is `2 x (seed max x seed-track launches + items x item-track launches)`, summed
+  over every seed and track. The launches of one unit of a track are its stages, each counted once
+  except a stage with `entered_by: outcome`, which counts 0, plus the `max` of every `outcomes`
+  entry of the track: each time an entry fires, it launches its `to` stage once. The 2 is the one
+  relaunch after a stall. The number is what the plan shows. It is not a limit the run enforces.
 - **Flags.** `--dry-run` prints the summary, exits 0 and records nothing. It needs no controller;
   with none it skips the checks on earlier runs and says so. With neither flag, `arm` prints the
   summary, says `re-run with --yes to start` and exits 2. `--yes` sends the plan to the controller,

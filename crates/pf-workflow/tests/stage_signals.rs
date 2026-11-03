@@ -16,7 +16,7 @@ use pf_engine::port::store::RequestKind;
 use pf_engine::render::{RenderContext, UnitView};
 use pf_engine::unit::Signal;
 use pf_workflow::commands::{CommandFailure, CommandSpec};
-use pf_workflow::file::{DoneCond, ParkOn, PrTest, StageSpec};
+use pf_workflow::file::{DoneCond, OutcomeSpec, ParkOn, PrTest, StageSpec};
 use pf_workflow::signals::{
     ApplyResult, Probe, SessionState, StageVerdict, SystemProbe, apply, evaluate, parse_pr,
 };
@@ -40,6 +40,8 @@ fn stage(dir: &Path, done: Vec<DoneCond>, park_on: Vec<ParkOn>) -> StageSpec {
         settings: BTreeMap::new(),
         done,
         park_on,
+        outcomes: Vec::new(),
+        entered_by_outcome: false,
     }
 }
 
@@ -550,4 +552,178 @@ fn a_park_file_and_a_turn_end_park_a_real_unit() {
             Some("seat ended with no done signal".to_string())
         )
     );
+}
+
+// ------------------------------------------------------------------ outcomes
+
+fn outcome(when: Vec<DoneCond>, to: &str, max: u32) -> OutcomeSpec {
+    OutcomeSpec {
+        when,
+        to: to.to_string(),
+        max,
+    }
+}
+
+/// A stage that is done when `a.done` exists, with two outcomes: `blocked` sends the unit to
+/// `fix`, and `stale` sends it to `build`.
+fn looping_stage(dir: &Path) -> StageSpec {
+    let mut s = stage(dir, vec![file(dir, "a.done")], vec![]);
+    s.outcomes = vec![
+        outcome(vec![exit0_cond("blocked")], "fix", 2),
+        outcome(vec![exit0_cond("stale")], "build", 1),
+    ];
+    s
+}
+
+#[test]
+fn an_outcome_is_tried_only_when_the_session_is_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = looping_stage(dir.path());
+    write(dir.path(), "u1", "a.done", "");
+    let probe = Scripted::default();
+    probe.exit0.borrow_mut().insert("blocked".into(), true);
+
+    // The seat still works: the stage is done, and no `when` command ran.
+    assert!(matches!(v(&s, &probe, &WAITING), StageVerdict::Done { .. }));
+    assert!(probe.ran.borrow().is_empty(), "{:?}", probe.ran.borrow());
+
+    // The turn ended: the first entry that holds wins.
+    let StageVerdict::Outcome { entry, signal, .. } = v(&s, &probe, &TURN_ENDED) else {
+        panic!("an outcome")
+    };
+    assert_eq!(entry, 0);
+    assert!(matches!(signal, Signal::DoneFile { .. }));
+    let ended = SessionState {
+        turn_ended: false,
+        ended: true,
+    };
+    assert!(matches!(
+        v(&s, &probe, &ended),
+        StageVerdict::Outcome { entry: 0, .. }
+    ));
+}
+
+#[test]
+fn the_first_entry_that_holds_wins_and_the_later_ones_are_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = looping_stage(dir.path());
+    write(dir.path(), "u1", "a.done", "");
+    let probe = Scripted::default();
+    probe.exit0.borrow_mut().insert("stale".into(), true);
+    // Entry 1 does not hold, entry 2 does.
+    assert!(matches!(
+        v(&s, &probe, &TURN_ENDED),
+        StageVerdict::Outcome { entry: 1, .. }
+    ));
+    probe.ran.borrow_mut().clear();
+    probe.exit0.borrow_mut().insert("blocked".into(), true);
+    assert!(matches!(
+        v(&s, &probe, &TURN_ENDED),
+        StageVerdict::Outcome { entry: 0, .. }
+    ));
+    assert_eq!(
+        probe
+            .ran
+            .borrow()
+            .iter()
+            .map(|a| a[0].as_str())
+            .collect::<Vec<_>>(),
+        ["blocked"],
+        "entry 2 is not read once entry 1 holds"
+    );
+}
+
+#[test]
+fn a_stage_whose_outcomes_match_nothing_is_done_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = looping_stage(dir.path());
+    write(dir.path(), "u1", "a.done", "");
+    let probe = Scripted::default();
+    assert!(matches!(
+        v(&s, &probe, &TURN_ENDED),
+        StageVerdict::Done { .. }
+    ));
+    // The done conditions still decide first: with no done file there is no outcome.
+    let dir2 = tempfile::tempdir().unwrap();
+    let s2 = looping_stage(dir2.path());
+    probe.exit0.borrow_mut().insert("blocked".into(), true);
+    assert_eq!(
+        v(&s2, &probe, &TURN_ENDED),
+        StageVerdict::Park {
+            reason: "seat ended with no done signal".to_string(),
+            kind: RequestKind::Park,
+        }
+    );
+}
+
+#[test]
+fn every_when_condition_of_an_entry_must_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![]);
+    s.outcomes = vec![outcome(
+        vec![file(dir.path(), "extra.flag"), exit0_cond("yes")],
+        "build",
+        1,
+    )];
+    write(dir.path(), "u1", "a.done", "");
+    let probe = Scripted::default();
+    probe.exit0.borrow_mut().insert("yes".into(), true);
+    assert!(matches!(
+        v(&s, &probe, &TURN_ENDED),
+        StageVerdict::Done { .. }
+    ));
+    write(dir.path(), "u1", "extra.flag", "");
+    assert!(matches!(
+        v(&s, &probe, &TURN_ENDED),
+        StageVerdict::Outcome { entry: 0, .. }
+    ));
+}
+
+#[test]
+fn a_when_command_that_cannot_run_parks_with_its_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = looping_stage(dir.path());
+    write(dir.path(), "u1", "a.done", "");
+    let mut probe = Scripted::default();
+    probe.missing.insert("blocked".to_string());
+    let StageVerdict::Park { reason, kind } = v(&s, &probe, &TURN_ENDED) else {
+        panic!("park")
+    };
+    assert_eq!(kind, RequestKind::Park);
+    assert!(
+        reason.contains("outcome 1 condition 1") && reason.contains("blocked"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn applying_an_outcome_sends_a_real_unit_to_the_stage_it_names() {
+    let mut wf = item_workflow(&["build", "fix"], false);
+    wf.tracks[0].stages[0].outcomes = vec![pf_engine::OutcomeDef {
+        to: "fix".to_string(),
+        max: 1,
+    }];
+    let e = env(wf);
+    e.engine
+        .ingest(&mut TrackedSource {
+            track: "item".into(),
+            records: vec![unit("u1", "g1", 1)],
+        })
+        .unwrap();
+    e.engine.start_stage("u1").unwrap();
+    let verdict = StageVerdict::Outcome {
+        pr: None,
+        signal: Signal::DoneFile {
+            path: "x".to_string(),
+        },
+        entry: 0,
+    };
+    assert_eq!(
+        apply(&e.engine, "u1", "build", &verdict).unwrap(),
+        ApplyResult::Signalled
+    );
+    let view = e.engine.view().unwrap();
+    let detail = view.unit_detail(view.node("u1").unwrap()).unwrap();
+    assert_eq!(detail.stages_done, 1);
+    assert_eq!(detail.visits.get("build#0"), Some(&1));
 }

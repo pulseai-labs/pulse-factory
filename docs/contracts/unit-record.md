@@ -34,7 +34,9 @@ All five fields are required. The engine refuses a record with any other field.
 The engine keeps more about a unit than its record: the track, the stages done, the PR and the park
 generation. This is the unit's detail in the store, not a field of the record, and a producer never
 writes it. `park_generation` counts the times a claim resumed the unit (from 0; a detail written
-before `r0.s2` reads as 0). Command IDs that are unique per unit end with it (`park:<unit>:<gen>`,
+before `r0.s2` reads as 0). `visits` counts, for each `outcomes` entry of the workflow file, the times
+the entry sent the unit (key `<stage>#<entry number from 0>`; absent when empty, so a detail written
+before stage outcomes reads the same). A `clear` resets it (`workflow-file.md`, "`outcomes`"). Command IDs that are unique per unit end with it (`park:<unit>:<gen>`,
 `merge:<unit>:<gen>`, `merge-result:<unit>:<gen>`; see `requests.md`).
 
 ## Example

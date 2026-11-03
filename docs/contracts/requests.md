@@ -35,7 +35,7 @@ the reason text to find it.
 
 | Kind | Opened by |
 |---|---|
-| `park` | Any park whose source is not one of the others. |
+| `park` | Any park whose source is not one of the others. It includes the park of a stage-outcome cap: `<stage>: <to> cap <max> reached` (`workflow-file.md`, "`outcomes`"). |
 | `gaps` | A stage's `park_on` file named `gaps.json`. |
 | `stop` | A stage's stop file. |
 | `red_gate` | A stage's `park_on` file named `correction.txt`. |

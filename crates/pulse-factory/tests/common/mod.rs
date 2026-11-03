@@ -38,6 +38,10 @@ pub struct Options {
     pub item_vars: String,
     /// A directory whose files become the package's `scripts/` directory.
     pub scripts_from: Option<PathBuf>,
+    /// Add the `reviewer` role and the stages `review` and `fix` after `close`, like the shipped
+    /// package. The two scripts the stages call come from `scripts_from`; set it to
+    /// `real_scripts_dir()`.
+    pub review_loop: bool,
 }
 
 impl Default for Options {
@@ -55,9 +59,77 @@ impl Default for Options {
             implement_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
             item_vars: "[worktree_path, branch]".to_string(),
             scripts_from: None,
+            review_loop: false,
         }
     }
 }
+
+/// The shipped package's `scripts/` directory.
+pub fn real_scripts_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/ossify-spine/scripts")
+}
+
+const REVIEWER_ROLE: &str = "  reviewer:
+    runtime: omp
+    model: model-e
+    rules: rules/reviewer.yaml
+";
+
+/// The stages `review` and `fix`, indented as the stages of the item track. They mirror the
+/// shipped package: a block sends the unit to `fix`, a pass whose head is not the PR's head sends
+/// it to `review` again, and `fix` goes back to `review`. Each loop is capped at 2.
+const REVIEW_STAGES: &str = r#"      - name: review
+        role: reviewer
+        brief: [briefs/common.md]
+        message: "/review {param.forge_repo} {unit.vars.branch} previous: {run.dir}/out/{unit.id}/review-prev.md"
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [sh, "{run.package}/scripts/review-prep.sh", "{run.dir}/out/{unit.id}/review.md", "{run.dir}/out/{unit.id}/review-prev.md"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          report_dir: "{run.dir}/out/{unit.id}"
+        done:
+          - exit0: [grep, -Eq, "^verdict: (pass|block)$", "{run.dir}/out/{unit.id}/review.md"]
+        outcomes:
+          - when:
+              - exit0: [grep, -qx, "verdict: block", "{run.dir}/out/{unit.id}/review.md"]
+            to: fix
+            max: 2
+          - when:
+              - exit0: [sh, "{run.package}/scripts/stale-pass.sh", "{run.dir}/out/{unit.id}/review.md", "{param.forge_repo}", "{unit.vars.branch}"]
+            to: review
+            max: 2
+      - name: fix
+        role: close
+        entered_by: outcome
+        brief: [briefs/common.md]
+        message: "Fix {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/fix-done"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/fix-done"
+        outcomes:
+          - when:
+              - file: "{run.dir}/out/{unit.id}/fix-done"
+            to: review
+            max: 2
+"#;
 
 pub fn write_script(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -91,7 +163,7 @@ roles:
     runtime: omp
     model: model-d
     rules: rules/close.yaml
-settings:
+{review_role}settings:
   model_sessions: {model_sessions}
   cold_builds: {cold_builds}
 plan_check: {plan_check}
@@ -176,7 +248,7 @@ tracks:
           - pr:
               argv: [cat, "{{run.dir}}/out/{{unit.id}}/pr.url"]
               test: url
-    merge:
+{review_stages}    merge:
       rule: green_checks_in_declared_order
       repo: "{{param.forge_repo}}"
       base: "{{param.spine_branch}}"
@@ -195,6 +267,8 @@ tracks:
         model_sessions = o.model_sessions,
         cold_builds = o.cold_builds,
         implement_stall = o.implement_stall,
+        review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
+        review_stages = if o.review_loop { REVIEW_STAGES } else { "" },
     )
 }
 
@@ -210,7 +284,7 @@ pub fn write_package(dir: &Path, o: &Options) {
         }
     }
     std::fs::write(dir.join("briefs/common.md"), "# Common\nDo the work.\n").unwrap();
-    let rules: [(&str, &[&str]); 4] = [
+    let rules: [(&str, &[&str]); 5] = [
         (
             "lane",
             &["delete_own_scratch", "write_own_report_and_run_files"],
@@ -231,6 +305,7 @@ pub fn write_package(dir: &Path, o: &Options) {
                 "write_own_report_and_run_files",
             ],
         ),
+        ("reviewer", &["write_own_report_and_run_files"]),
     ];
     for (role, allow) in rules {
         let list: String = allow.iter().map(|a| format!("  - {a}\n")).collect();

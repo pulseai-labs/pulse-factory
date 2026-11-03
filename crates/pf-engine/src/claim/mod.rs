@@ -333,6 +333,8 @@ pub(crate) fn withdraw_all(view: &RunView, reason: &str, now: &str) -> Vec<Effec
 /// The unit becomes `running` with no running session. Its park generation rises, so each resume
 /// uses new command IDs. A unit that parked after its PR was recorded keeps its PR. On a halted
 /// run the unit carries the reason "run halted", and the driver launches and merges nothing.
+/// `reset_visits` empties the unit's outcome counters: a `clear` is the operator's grant of a new
+/// budget, so every counter starts again.
 #[allow(clippy::too_many_arguments)]
 fn resume_effects(
     view: &RunView,
@@ -341,6 +343,7 @@ fn resume_effects(
     request: &RequestRow,
     to_stage: Option<&str>,
     generation: u64,
+    reset_visits: bool,
     answer: impl FnOnce(&str) -> Value,
     now: &str,
 ) -> Result<(Vec<Effect>, String), Rejected> {
@@ -376,6 +379,9 @@ fn resume_effects(
         ));
     }
     detail.park_generation += 1;
+    if reset_visits {
+        detail.visits.clear();
+    }
     let mut resumed = unit.clone();
     resumed.status = Status::Running;
     resumed.reason = view.is_halted().then(|| REASON_RUN_HALTED.to_string());
@@ -439,6 +445,7 @@ pub(crate) fn decide_answer(
                         request,
                         None,
                         generation,
+                        false,
                         |_| answer.clone(),
                         now,
                     )?
@@ -586,6 +593,7 @@ pub(crate) fn decide_clear(
         request,
         to_stage,
         generation,
+        true,
         |resolved| json!({ "verb": VERB_CLEAR, "to_stage": resolved }),
         now,
     )?;
