@@ -78,11 +78,28 @@ a command. A rule name is what the audit line and a deny's reason show.
 | a push whose directory or branch is one quoted variable, or follows a `cd`, `git switch` or `git checkout` to one | `own-branch-unverified` | `push_own_branch` |
 | a push from a directory outside the worktree and the push directory | `push-outside-worktree` (deny) | every role |
 | a push of another branch | `push-other-branch` (deny) | every role |
+| `gh pr review`, `gh pr comment`, `gh pr edit`, `gh pr close`, `gh pr reopen`, `gh pr ready`, `gh pr lock`, `gh pr unlock` | `gh-pr-write` (deny) | every role |
 
 A relative path means the working directory and the directory of every literal `cd` earlier in the
 call. The `push_dir` of the seat's context is a second place a push may run from. A literal half of a
 push is judged as itself: `git -C "$wt" push origin other` is a push of `other`, and
 `git switch main && git push` is a push to `main`.
+
+## The `reviewer` role
+
+The `reviewer` role reads an item PR and writes its verdict (`workflows/ossify-spine/rules/reviewer.yaml`).
+It lists one value, `write_own_report_and_run_files`, and no push value. Its stage sets no `worktree`,
+so the seat's worktree is empty and matches no path: a write tool inside the item's worktree is
+denied (`write-outside-worktree`), although the seat's working directory is that worktree, for
+reading. A write tool to its report under `<run>/out/<unit>/` is allowed. Every denial of every seat
+holds for it: a merge, a push, a branch delete, `--no-verify`, an AI trailer and every forge write,
+which includes `gh pr review` and `gh pr comment`.
+
+**Known limit (ADR-0005): shell redirection is not guarded by path.** The rules read the words of a
+command, not the file a `>` or `>>` opens, so `echo x > <worktree>/file` is allowed for the
+`reviewer` as it is for every role. The reviewer's brief (`briefs/review.md`) forbids a redirection
+into the worktree. A test (`reviewer_role.rs`) fails if the rules start to guard redirection, so this
+paragraph is corrected then.
 
 ## The grammar of the shell that `pf-rules` reads
 

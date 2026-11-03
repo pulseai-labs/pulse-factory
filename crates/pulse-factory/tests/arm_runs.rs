@@ -79,6 +79,69 @@ fn most_launches_follows_the_formula() {
     assert_eq!(v["most_launches"], 28);
 }
 
+fn review_loop_sandbox() -> Sandbox {
+    Sandbox::with(&Options {
+        review_loop: true,
+        scripts_from: Some(real_scripts_dir()),
+        ..Options::default()
+    })
+}
+
+#[test]
+fn most_launches_counts_each_loops_cap() {
+    // Per item: implement, verify, close and review once (4), `fix` counts 0, then the three
+    // outcome caps 2 + 2 + 2 = 10. 2 x (seed max 3 x 1 lane stage + 2 items x 10) = 46.
+    let sb = review_loop_sandbox();
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["items"], 2);
+    assert_eq!(v["most_launches"], 46);
+}
+
+#[test]
+fn the_summary_names_the_review_loop() {
+    let sb = review_loop_sandbox();
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    for want in [
+        "role reviewer: runtime omp, model model-e",
+        "caps: loop review -> fix at most 2 times per item unit",
+        "caps: loop review -> review at most 2 times per item unit",
+        "caps: loop fix -> review at most 2 times per item unit",
+        "most launches: 46",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+
+    let v = json_summary(&sb, &[]);
+    let loops = v["caps"]["loops"].as_array().unwrap();
+    assert_eq!(loops.len(), 3, "{loops:?}");
+    let has = |from: &str, to: &str| {
+        loops
+            .iter()
+            .any(|l| l["from"] == from && l["to"] == to && l["max"] == 2 && l["track"] == "item")
+    };
+    assert!(has("review", "fix") && has("review", "review") && has("fix", "review"));
+}
+
+#[test]
+fn a_workflow_with_no_outcomes_shows_no_loop_and_the_old_count() {
+    let sb = Sandbox::new();
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["caps"]["loops"].as_array().unwrap().len(), 0);
+    assert_eq!(v["most_launches"], 18);
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert!(!stdout(&out).contains("caps: loop"), "{}", stdout(&out));
+}
+
 #[test]
 fn with_no_flag_arm_exits_2_and_records_nothing() {
     let sb = Sandbox::new();

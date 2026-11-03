@@ -59,6 +59,17 @@ pub enum CommandBody {
         signal: Signal,
         pr: Option<PrRef>,
     },
+    /// A signal ends a stage, and entry `entry` of the stage's outcomes holds: the unit goes to
+    /// the entry's stage, or parks when the entry has sent it as often as its cap allows.
+    /// `signal` is the one that ended the stage, and it must be a success.
+    Outcome {
+        unit_id: String,
+        stage: String,
+        /// The place of the entry in the stage's list of outcomes, counting from 0.
+        entry: u32,
+        signal: Signal,
+        pr: Option<PrRef>,
+    },
     /// Add token usage and cost to a session.
     Usage { session_id: String, usage: Usage },
     /// End a node with `done`, `failed` or `stopped`.
@@ -195,6 +206,7 @@ impl CommandBody {
             CommandBody::Launch { .. } => "launch",
             CommandBody::Attach { .. } => "attach",
             CommandBody::Signal { .. } => "signal",
+            CommandBody::Outcome { .. } => "outcome",
             CommandBody::Usage { .. } => "usage",
             CommandBody::End { .. } => "end",
             CommandBody::Park { .. } => "park",

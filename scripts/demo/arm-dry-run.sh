@@ -71,11 +71,16 @@ want "workflow: ossify-spine (file version 1)"
 for role in lane implementer verifier close; do
   want "role $role: runtime omp, model zai/glm-5.3-flash"
 done
+want "role reviewer: runtime omp, model zai/glm-5.3"
 want "caps: model_sessions 2, cold_builds 1"
 want "caps: seed lane runs at most 12 times"
+want "caps: loop review -> fix at most 2 times per item unit"
+want "caps: loop review -> review at most 2 times per item unit"
+want "caps: loop fix -> review at most 2 times per item unit"
 want "caps: one relaunch per stage"
-# 2 x (12 lane launches + 3 items x 3 stages)
-want "most launches: 42"
+# Per item: implement, verify, close and review once (4), `fix` counts 0, and the three loop caps
+# 2 + 2 + 2 (6): 10. 2 x (12 lane launches + 3 items x 10)
+want "most launches: 84"
 want "item PRs merge into spine/s1 on green checks with no ack"
 printf '%s\n' "$out" | grep -q '^plugin.*ossify.*1\.30\.1' || fail "the summary lacks the pinned plugin"
 

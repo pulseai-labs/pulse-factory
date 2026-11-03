@@ -46,6 +46,12 @@ roles:
     runtime: omp
     model: zai/glm-5.3-flash
     rules: rules/close.yaml
+  # The item PR reviewer. It reads the PR and writes one review file. The operator ruled the
+  # model (G10): zai/glm-5.3 now, DeepSeek V4.1 Flash when the Z.AI quota ends.
+  reviewer:
+    runtime: omp
+    model: zai/glm-5.3
+    rules: rules/reviewer.yaml
 
 settings:
   model_sessions: 2
@@ -278,6 +284,126 @@ tracks:
         park_on:
           - file: "{run.dir}/out/{unit.id}/correction.txt"
             reason: "the close gate for {unit.id} is red and needs a correction: fix it, then answer with `pulse-factory answer` or resume with `pulse-factory clear`"
+
+      # The reviewer reads the item PR at its head and writes `review.md`. A block sends the unit to
+      # `fix`; a pass whose head is not the PR's head sends it to `review` again. A pass on the PR
+      # head ends the stage, and the merge rule takes over. Each loop is capped at 2.
+      - name: review
+        role: reviewer
+        brief: [briefs/common.md, briefs/review.md]
+        # The forge has no placeholder for the PR URL, so the message names the repo and the branch.
+        message: >-
+          /review {param.forge_repo} {unit.vars.branch}
+          previous: {run.dir}/out/{unit.id}/review-prev.md
+          Read {param.briefs}/common.md, then {param.briefs}/review.md, and follow them.
+          Work item: {unit.id}. Worktree: {unit.vars.worktree_path}. Branch: {unit.vars.branch}.
+          Forge repo: {param.forge_repo}.
+          OUT: {run.dir}/out/{unit.id}. Review file: {run.dir}/out/{unit.id}/review.md.
+          Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        # `review-prep.sh` keeps the last well-formed review as `review-prev.md`, then clears `review.md`.
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - - sh
+            - "{run.package}/scripts/review-prep.sh"
+            - "{run.dir}/out/{unit.id}/review.md"
+            - "{run.dir}/out/{unit.id}/review-prev.md"
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - review
+        stall_minutes: 20
+        first_turn_seconds: 180
+        # No `worktree` setting: the reviewer has no worktree write. It reads the worktree through `cwd`.
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          report_dir: "{run.dir}/out/{unit.id}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - exit0:
+              - grep
+              - -Eq
+              - "^verdict: (pass|block)$"
+              - "{run.dir}/out/{unit.id}/review.md"
+        outcomes:
+          - when:
+              - exit0:
+                  - grep
+                  - -qx
+                  - "verdict: block"
+                  - "{run.dir}/out/{unit.id}/review.md"
+            to: fix
+            max: 2
+          - when:
+              - exit0:
+                  - sh
+                  - "{run.package}/scripts/stale-pass.sh"
+                  - "{run.dir}/out/{unit.id}/review.md"
+                  - "{param.forge_repo}"
+                  - "{unit.vars.branch}"
+            to: review
+            max: 2
+
+      # The fixer runs only when a review blocks. It fixes the blocking findings, pushes once, and
+      # sends the unit back to `review`.
+      - name: fix
+        role: close
+        entered_by: outcome
+        brief: [briefs/common.md, briefs/fix.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/fix.md, and follow them.
+          Work item: {unit.id}. Handoff: {unit.vars.handoff_path}.
+          Worktree: {unit.vars.worktree_path}. Branch: {unit.vars.branch}.
+          Review file: {run.dir}/out/{unit.id}/review.md.
+          Fix done file: {run.dir}/out/{unit.id}/fix-done.
+          OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/fix-done"]
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - fix
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - file: "{run.dir}/out/{unit.id}/fix-done"
+        outcomes:
+          - when:
+              - file: "{run.dir}/out/{unit.id}/fix-done"
+            to: review
+            max: 2
 
     merge:
       rule: green_checks_in_declared_order

@@ -112,6 +112,8 @@ Each stage of a track has these fields:
 | `settings` | no | A mapping with `env.<NAME>`, `push_dir`, `push_branch`, `report_dir`, `worktree`, `own_branch` and `decisions_file` keys. |
 | `done` | yes | One or more conditions. All of them must hold. |
 | `park_on` | no | A list of `{file, reason, on_answer}`. `on_answer` is optional. |
+| `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
+| `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
 
 `before` holds the checks that cap launches. `after_first_turn` holds the count of dispatches. The
 count runs after a first turn, not after a launch, so a launch that sits at a trust prompt does not
@@ -132,6 +134,54 @@ A condition is a mapping with exactly one key:
 - `file: <path>`: the file exists.
 - `exit0: <command>`: the command exits 0. A non-zero exit means "not yet" and does not park.
 - `pr: {argv, test}`: the `argv` command prints a PR URL. `test` is `url`, the only test in version 1.
+
+### `outcomes`
+
+A stage can send its unit back to an earlier stage, or on to a later one, up to a cap. This is how a
+reviewer's block becomes a fix and a new review. The loop is a construct of the workflow file. The
+engine knows no review.
+
+`outcomes` is a list of one or more entries. Each entry has these fields, all required:
+
+| Field | Meaning |
+|---|---|
+| `when` | A list of one or more conditions, in the form of `done` conditions (`file`, `exit0`, `pr`). All of them must hold. |
+| `to` | A stage of the same track. It may be the stage itself, an earlier stage or a later one. |
+| `max` | A whole number of 1 or more. The entry sends the unit at most this many times. |
+
+The engine tries the entries when every `done` condition of the stage holds and the stage's session is
+over (its turn ended, or it ended). It tries them in order, and the first entry whose `when`
+conditions all hold sends the unit to `to`:
+
+- The unit's stages done becomes the place of `to`, so the unit runs `to` next, through the normal
+  launch path. The stage that sent the unit ends `done`.
+- The engine keeps one **visit counter** per entry with the unit (`unit-record.md`). It adds 1 each
+  time the entry sends the unit, and the ledger line reads
+  `stage <stage> done (<signal>); outcome <n> sends the unit to <to> (visit <v> of <max>)`.
+- When the counter would go above `max`, the entry does not send the unit. The unit parks with the
+  reason `<stage>: <to> cap <max> reached`, and the park opens a request of kind `park`
+  (`requests.md`). The stage ends `done` and the unit's place does not change.
+- When no entry holds, the stage is done as it was before: the unit goes to the next stage, or to its
+  merge. A `when` condition that is a command is `exit0` like a `done` condition: a non-zero exit means
+  "this entry does not hold" and does not park.
+
+Every `clear` resets all of the unit's visit counters to 0. A clear is the operator's grant of a new
+budget. An `answer` that resumes the unit does not reset them. A restart of the stage by a stall does
+not reset them either.
+
+`entered_by: outcome` marks a stage that only an outcome enters. When the unit reaches it in order, the
+engine passes it over: the stage never runs, and the merge rule counts it as done. It runs only when
+an outcome sends the unit there. Such a stage must hold at least one `outcomes` entry, or the file is
+refused.
+
+Load-time checks, each refused with the position of the entry: `to` names a stage of the same track
+(an unknown stage, or a stage of another track, is refused); `max` is present and at least 1;
+`when` is present and not empty; `entered_by` has the value `outcome` and the stage holds
+`outcomes`. A file with no `outcomes` and no `entered_by` loads and runs as before: version 1 does not
+change for it.
+
+Each time an entry sends a unit it launches its `to` stage once. `arm` counts that, so its most
+launches adds every entry's `max` (`cli.md`).
 
 ### `park_on`
 

@@ -742,7 +742,7 @@ impl Driver {
                     let facts = self.park_facts(stage, &ctx, *kind);
                     self.park_running(st, t, session, &r, *kind, reason, facts.as_ref())
                 }
-                StageVerdict::Done { .. } => {
+                StageVerdict::Done { .. } | StageVerdict::Outcome { .. } => {
                     // A done signal seen mid-turn can come before the push it belongs to.
                     if status.turn_ended || ended {
                         if let Err(e) = self.cfg.agent.stop(&r) {

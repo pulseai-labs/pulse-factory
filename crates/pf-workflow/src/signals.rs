@@ -7,7 +7,9 @@
 //! The order of the checks:
 //! 1. The stop file parks, with its text as the reason. It wins over every other condition.
 //! 2. A `park_on` file parks, with its reason.
-//! 3. When every `done` condition holds, the stage is done.
+//! 3. When every `done` condition holds, the stage is done. Once its session is over, the
+//!    stage's `outcomes` are tried in order, and the first entry whose `when` conditions all hold
+//!    makes the verdict an outcome. No entry that holds leaves the verdict a plain done.
 //! 4. A session whose turn ended, with none of the above, parks with "seat ended with no done signal".
 //! 5. Otherwise the stage keeps waiting.
 //!
@@ -50,6 +52,14 @@ pub enum StageVerdict {
         pr: Option<PrRef>,
         /// The signal that the engine records for the stage.
         signal: Signal,
+    },
+    /// The stage is done, its session is over, and entry `entry` of its outcomes holds. The
+    /// engine sends the unit where the entry says, or parks it when the entry is at its cap.
+    Outcome {
+        pr: Option<PrRef>,
+        signal: Signal,
+        /// The place of the entry in the stage's `outcomes`, counting from 0.
+        entry: usize,
     },
     Park {
         reason: String,
@@ -216,67 +226,126 @@ pub fn evaluate(
     let mut pr: Option<PrRef> = None;
     let mut signal: Option<Signal> = None;
     for (i, cond) in stage.done.iter().enumerate() {
-        let place = i + 1;
-        let command_failed = |spec: &CommandSpec, f: CommandFailure| {
-            let program = spec.argv.first().map_or("", String::as_str);
-            park(
-                RequestKind::Park,
-                format!(
-                    "stage {} done condition {place} ({program}) {f}",
-                    stage.name
-                ),
-            )
-        };
-        match cond {
-            DoneCond::File(template) => {
-                let path = match text(template) {
-                    Ok(p) => p,
-                    Err(e) => return broken(&format!("done condition {place} cannot render"), &e),
-                };
-                if !probe.file_exists(&path) {
-                    return not_done(session);
+        let what = format!("done condition {}", i + 1);
+        match probe_cond(stage, &what, cond, ctx, probe) {
+            Probed::Holds(found_pr, found) => {
+                if let Some(p) = found_pr {
+                    pr.get_or_insert(p);
                 }
-                signal.get_or_insert(Signal::DoneFile { path });
+                signal.get_or_insert(found);
             }
-            DoneCond::Exit0(spec) => {
-                let argv = match render_argv(spec, ctx) {
-                    Ok(a) => a,
-                    Err(f) => return command_failed(spec, f),
-                };
-                match probe.exit0(&argv, spec.timeout_seconds) {
-                    Ok(true) => {
-                        signal.get_or_insert(Signal::ExitCode { code: 0 });
+            // A non-zero exit, a missing file and a PR that is not there yet mean "not yet".
+            Probed::No => return not_done(session),
+            Probed::Park(verdict) => return verdict,
+        }
+    }
+    let Some(signal) = signal else {
+        // A stage with no done condition cannot be done by its signals. The file parser refuses it.
+        return not_done(session);
+    };
+
+    // 4. The outcomes. They are tried when the session is over, because the engine acts on a done
+    // stage only then, and a condition may read a forge. The first entry whose every `when`
+    // condition holds sends the unit on. No entry that holds leaves the stage done as it is.
+    if session.turn_ended || session.ended {
+        for (n, entry) in stage.outcomes.iter().enumerate() {
+            let mut holds = true;
+            for (i, cond) in entry.when.iter().enumerate() {
+                let what = format!("outcome {} condition {}", n + 1, i + 1);
+                match probe_cond(stage, &what, cond, ctx, probe) {
+                    Probed::Holds(..) => {}
+                    Probed::No => {
+                        holds = false;
+                        break;
                     }
-                    // A non-zero exit means "not yet".
-                    Ok(false) => return not_done(session),
-                    Err(f) => return command_failed(spec, f),
+                    Probed::Park(verdict) => return verdict,
                 }
             }
-            DoneCond::Pr { command, .. } => {
-                let argv = match render_argv(command, ctx) {
-                    Ok(a) => a,
-                    Err(f) => return command_failed(command, f),
+            if holds {
+                return StageVerdict::Outcome {
+                    pr,
+                    signal,
+                    entry: n,
                 };
-                match probe.stdout(&argv, command.timeout_seconds) {
-                    Ok(Some(printed)) => match parse_pr(&printed) {
-                        Some(found) => {
-                            pr.get_or_insert(found);
-                            signal.get_or_insert(Signal::PrState {
-                                state: "recorded".to_string(),
-                            });
-                        }
-                        None => return not_done(session),
-                    },
-                    Ok(None) => return not_done(session),
-                    Err(f) => return command_failed(command, f),
-                }
             }
         }
     }
-    match signal {
-        Some(signal) => StageVerdict::Done { pr, signal },
-        // A stage with no done condition cannot be done by its signals. The file parser refuses it.
-        None => not_done(session),
+    StageVerdict::Done { pr, signal }
+}
+
+/// What one condition of a `done` or `when` list says now.
+enum Probed {
+    /// The condition holds. It may carry the PR a `pr` condition printed, and it names the signal.
+    Holds(Option<PrRef>, Signal),
+    /// It does not hold yet.
+    No,
+    /// It cannot be read at all: the unit parks.
+    Park(StageVerdict),
+}
+
+/// Read one condition. `what` names it in a park reason, such as `done condition 2`.
+fn probe_cond(
+    stage: &StageSpec,
+    what: &str,
+    cond: &DoneCond,
+    ctx: &RenderContext,
+    probe: &dyn Probe,
+) -> Probed {
+    let text = |template: &str| render(template, ctx).map(|r| r.text);
+    let command_failed = |spec: &CommandSpec, f: CommandFailure| {
+        let program = spec.argv.first().map_or("", String::as_str);
+        Probed::Park(park(
+            RequestKind::Park,
+            format!("stage {} {what} ({program}) {f}", stage.name),
+        ))
+    };
+    match cond {
+        DoneCond::File(template) => {
+            let path = match text(template) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Probed::Park(park(
+                        RequestKind::Park,
+                        format!("stage {} {what} cannot render: {e}", stage.name),
+                    ));
+                }
+            };
+            if probe.file_exists(&path) {
+                Probed::Holds(None, Signal::DoneFile { path })
+            } else {
+                Probed::No
+            }
+        }
+        DoneCond::Exit0(spec) => {
+            let argv = match render_argv(spec, ctx) {
+                Ok(a) => a,
+                Err(f) => return command_failed(spec, f),
+            };
+            match probe.exit0(&argv, spec.timeout_seconds) {
+                Ok(true) => Probed::Holds(None, Signal::ExitCode { code: 0 }),
+                Ok(false) => Probed::No,
+                Err(f) => command_failed(spec, f),
+            }
+        }
+        DoneCond::Pr { command, .. } => {
+            let argv = match render_argv(command, ctx) {
+                Ok(a) => a,
+                Err(f) => return command_failed(command, f),
+            };
+            match probe.stdout(&argv, command.timeout_seconds) {
+                Ok(Some(printed)) => match parse_pr(&printed) {
+                    Some(found) => Probed::Holds(
+                        Some(found),
+                        Signal::PrState {
+                            state: "recorded".to_string(),
+                        },
+                    ),
+                    None => Probed::No,
+                },
+                Ok(None) => Probed::No,
+                Err(f) => command_failed(command, f),
+            }
+        }
     }
 }
 
@@ -310,6 +379,10 @@ pub fn apply(
         StageVerdict::Wait => Ok(ApplyResult::Waiting),
         StageVerdict::Done { pr, signal } => {
             engine.signal(unit_id, stage, signal.clone(), pr.clone())?;
+            Ok(ApplyResult::Signalled)
+        }
+        StageVerdict::Outcome { pr, signal, entry } => {
+            engine.outcome(unit_id, stage, *entry, signal.clone(), pr.clone())?;
             Ok(ApplyResult::Signalled)
         }
         StageVerdict::Park { reason, kind } => {

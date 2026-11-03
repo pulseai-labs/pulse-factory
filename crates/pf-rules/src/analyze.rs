@@ -1227,6 +1227,21 @@ impl<'a> Analyzer<'a> {
                     "gh pr merge is denied for every seat: only the workflow's merge rule merges",
                 );
             }
+            (
+                Some("pr"),
+                Some(
+                    "review" | "comment" | "edit" | "close" | "reopen" | "ready" | "lock"
+                    | "unlock",
+                ),
+            ) => {
+                self.deny(
+                    "gh-pr-write",
+                    format!(
+                        "gh pr {} writes to the forge: a seat reports through its files, and the operator speaks on the forge",
+                        second.unwrap_or_default()
+                    ),
+                );
+            }
             (Some("api"), _) => self.gh_api(args),
             _ => {}
         }

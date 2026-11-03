@@ -416,6 +416,40 @@ impl Engine {
         })
     }
 
+    /// A signal ends the unit's running stage `stage`, and entry `entry` of the stage's outcomes
+    /// holds: the unit goes to the entry's stage. An entry that has sent the unit as often as its
+    /// cap allows parks it instead, and opens a `park` request. The ID is that of the stage
+    /// attempt, so a repeat of the same call is a replay.
+    pub fn outcome(
+        &self,
+        unit_id: &str,
+        stage: &str,
+        entry: usize,
+        signal: Signal,
+        pr: Option<PrRef>,
+    ) -> Result<Admission, EngineError> {
+        let view = self.view()?;
+        let node = view
+            .stages_of(unit_id)
+            .into_iter()
+            .rfind(|n| n.detail == stage)
+            .ok_or_else(|| {
+                EngineError::Rejected(format!("unit {unit_id} has no stage {stage} yet"))
+            })?;
+        let entry = u32::try_from(entry)
+            .map_err(|_| EngineError::Rejected(format!("outcome {entry} is out of range")))?;
+        self.submit(Command {
+            id: format!("outcome:{}", node.id),
+            body: CommandBody::Outcome {
+                unit_id: unit_id.to_string(),
+                stage: stage.to_string(),
+                entry,
+                signal,
+                pr,
+            },
+        })
+    }
+
     /// Add one reading of token usage and cost to a session. `reading_id` makes a retry safe.
     pub fn record_usage(
         &self,
