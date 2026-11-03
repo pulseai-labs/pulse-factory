@@ -83,3 +83,79 @@ A relative path means the working directory and the directory of every literal `
 call. The `push_dir` of the seat's context is a second place a push may run from. A literal half of a
 push is judged as itself: `git -C "$wt" push origin other` is a push of `other`, and
 `git switch main && git push` is a push to `main`.
+
+## The grammar of the shell that `pf-rules` reads
+
+`pf-rules` reads a closed set of shell forms (ADR-0005, `SPINE.md` grill lock G11). A command line
+reaches the guards only when each part of it is a form in the first table. A form that is not listed
+is denied with the rule `unparsed-command`, and the reason names the form. So a shell form that
+nobody has seen yet fails closed with no new code. The list is `pf_rules::grammar::ALLOWED` in code,
+and a test keeps this page and that list in step.
+
+**The guards run first.** A line that a guard denies keeps the rule of that guard (`gh-pr-merge`,
+`force-push`, `delete-outside-own-paths`, and the others). The grammar deny applies only when no
+guard denied the line, and it applies before any capability allow. So `git push origin work/u1;
+echo ${x:=y}` is denied although the push alone is allowed. The inner text of a `$(…)`, a backtick pair, a `<(…)` or `>(…)`, a `trap` body,
+an `eval` string and a `sh -c` string is a command line under the same grammar, and passes the same
+guards. A `( … )` subshell, a function body and a `coproc` body are checked the same way.
+
+### Allowed forms
+
+| Form | Shape |
+|---|---|
+| `simple command` | words, NAME=value and NAME+=value before it, and redirections |
+| `pipeline` | simple or compound commands joined by \| or \|&, and ! before a pipeline |
+| `list` | pipelines joined by &&, \|\|, ;, a newline or a trailing & |
+| `if` | if, then, elif, else, fi |
+| `for` | for NAME in WORDS; do …; done |
+| `while and until` | while …; do …; done and until …; do …; done |
+| `case` | case WORD in PATTERN) …;; esac, with ;& and ;;& |
+| `group` | { …; } |
+| `subshell` | ( … ), with a body in the grammar |
+| `function` | function NAME { … } and NAME() { … }, with a body in the grammar |
+| `coproc` | coproc followed by { … }, ( … ), while, until, if, for or case |
+| `array literal` | NAME=(…), NAME+=(…), declare -a NAME=(…) and local -a NAME=(…) |
+| `conditional` | [[ … ]] |
+| `test` | [ … ], test … and every other builtin as a simple command |
+| `time` | time and time -p before any command, simple or compound |
+| `wrapper` | timeout, nice, ionice, nohup, setsid, stdbuf, command, builtin, sudo, doas, env, xargs, flock and find -exec |
+| `literal word` | literal text, single quotes, double quotes, brace expansion and globs |
+| `variable` | $NAME, ${NAME}, ${#NAME} and the parameters $? $$ $! $# $@ $* $- $0 to $9 |
+| `default word` | ${NAME:-word}, ${NAME-word}, ${NAME:+word} and ${NAME+word} |
+| `arithmetic expansion` | $((…)) holding only names, numbers, spaces and + - * / % < > = ! & \| ( ) |
+| `command substitution` | $(…) and backticks, with an inner text in the grammar |
+| `process substitution` | <(…) and >(…), with an inner text in the grammar |
+| `comment` | # to the end of the line |
+| `redirection` | > >> >\| < <> <& >& &> &>> with an optional file descriptor, and a word as the target |
+| `heredoc` | <<WORD, <<-WORD and <<<WORD fed to a command that is not an interpreter |
+| `trap` | trap 'body' SIGNAL, with a body in the grammar |
+| `eval` | eval with literal arguments, read as a command line |
+
+### Denied forms
+
+Each of these is denied as `unparsed-command`, with the form named, unless a guard denied the line
+first. A form that is in neither table is denied the same way.
+
+| Form | Shape |
+|---|---|
+| `$[…]` | the old arithmetic expansion |
+| `((…))` | the arithmetic command, and the C-style for ((…;…;…)) |
+| `$((…)) outside its list` | $((…)) holding $, [ ], a command substitution or another character |
+| `other ${…}` | ${x:=y}, ${x/a/b}, ${!x}, ${x%y}, ${x:1:2}, ${x[1]}, ${x@P} and every other form |
+| `$'…'` | ANSI-C quoting |
+| `$"…"` | locale quoting |
+| `select` | select NAME in WORDS; do …; done |
+| `exec` | exec, with or without a command |
+| `source` | source FILE and . FILE |
+| `heredoc to an interpreter` | <<WORD or <<<WORD fed to python, perl, ruby, node and the like |
+| `unread wrapper` | taskset, chrt, strace, su, watch, parallel and the like |
+| `parse error` | an unclosed quote or substitution, coproc without a body, a redirection without a target, and any text the parser cannot read |
+
+### Long options by unique prefix
+
+Git reads a long option by its exact name or by any unique prefix of it, so `git push --forc` is a
+force push. `pf-rules` writes a prefix in full before any guard reads it, for each option a guard
+reads (`crate::options`, one constant per command with the man page section as its source). A prefix
+that two guarded options share, such as `git push --f`, is denied as `unparsed-command`, because git
+refuses it too. `gh` and `cargo` read long options by exact name, and no guard reads a long option of
+`curl`, `wget`, `rm` or `find`, so they need no list.

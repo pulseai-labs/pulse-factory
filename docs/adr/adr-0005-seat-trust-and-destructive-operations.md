@@ -93,8 +93,9 @@ Rejected alternatives:
   - **A variable that the whole call assigns only from `mktemp` or the empty string** is deletable by
     a role with `delete_own_scratch`, when the word is that variable alone. A `for`, a `read`, an
     `export`, `printf -v`, `${x:=…}`, `+=` or any other value ends it, wherever it sits in the call.
-    *Known limit:* a script file, `source` and a function body that the call does not contain are
-    not read, and `declare -n` makes every variable unknown.
+    *Known limit:* a script file and a function body that the call does not contain are not read,
+    and `declare -n` makes every variable unknown. (`source` and `.` are denied since
+    2026-11-03; see the amendment below.)
   - **A relative path resolves against the working directory and every literal `cd` earlier in the
     call.** It must hold in all of them, because a subshell is not told apart. After a `cd` to a
     variable, a relative path is denied.
@@ -108,3 +109,18 @@ Rejected alternatives:
     any other. *Known limit:* the rules cannot check the value. The adapter measures the push in git
     and reads the default branch again after it (`docs/contracts/agent-adapter.md`).
     `git -C $dir push` with an unquoted variable is denied (`push-unreadable`).
+- **Amended 2026-11-03, `r0.s2.w5`: the rule set reads a closed grammar of shell forms (grill lock
+  G11).** The guards used to allow whatever no guard denied, so each shell form that the parser read
+  wrongly needed its own denial, and the next spelling opened the same gap. Now the parser accepts a
+  closed list of forms (`pf_rules::grammar`, `docs/contracts/role-rules.md`), and every other form is
+  denied as `unparsed-command` with the form named. The guards run first, so a line that a guard
+  denies keeps that guard's rule. These known limits close:
+  - `${x:=y}`, `${x/a/b}`, `${!x}`, `$'…'`, `$"…"`, `$[…]`, `((…))`, a C-style `for`, `select`,
+    `exec`, `source`, `.`, and a heredoc that feeds an interpreter are denied, and so is `$((…))`
+    that holds anything but names, numbers, spaces and `+ - * / % < > = ! & | ( )`.
+  - The word of `${x:-word}` and the body of an unquoted heredoc are read for commands and
+    expansions, as a double-quoted word is. A `$(…)` in either was not read before.
+  - A long option that git reads by a unique prefix (`--forc`, `--no-verif`) is read as the option.
+    A prefix that two guarded options share is denied (canonical issue #8).
+  *Still a known limit:* the rails stop mistakes, not an attacker. A script file that the seat
+  wrote and then runs, and a program in a file or a `-c` string of an interpreter, are not read.

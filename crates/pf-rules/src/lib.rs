@@ -5,9 +5,13 @@
 //! words. It sees through quotes, heredocs, compound commands, substitutions and wrappers. It
 //! does not match words inside quoted text, heredocs or `grep` patterns, with two exceptions: a
 //! string that a shell will run is parsed again, and a commit message is checked for AI trailers.
-//! A command it cannot parse is denied with the rule `unparsed-command`.
+//! A command it cannot parse is denied with the rule `unparsed-command`. So is a command that holds
+//! a form outside the grammar (`grammar`): the guards run first, and the grammar denies what no
+//! guard denied.
 
 mod analyze;
+pub mod grammar;
+pub mod options;
 pub mod shell;
 
 use std::path::PathBuf;
@@ -178,7 +182,9 @@ fn allow(rule: &str, reason: &str) -> Decision {
 pub fn decide(rules: &RoleRules, ctx: &Context, call: &ToolCall) -> Decision {
     if let Some(command) = &call.command {
         let walk = Analyzer::judged(rules, ctx, command).walk;
-        if let Some(d) = walk.denies.first() {
+        // A guard's deny comes first, so the rule of the guard stays. A form outside the grammar
+        // denies the line when no guard did, whatever a capability would allow.
+        if let Some(d) = walk.denies.first().or_else(|| walk.outside.first()) {
             return Decision {
                 outcome: Outcome::Deny,
                 rule: d.rule.clone(),
@@ -197,7 +203,10 @@ pub fn decide(rules: &RoleRules, ctx: &Context, call: &ToolCall) -> Decision {
                 return allow(&f.rule, &f.reason);
             }
         }
-        return allow("allowed", "no rule denies it, and seats need a shell");
+        return allow(
+            "allowed",
+            "every form is in the grammar, no rule denies it, and seats need a shell",
+        );
     }
     let tool = call.tool.to_ascii_lowercase();
     if let (Some(path), true) = (&call.path, WRITE_TOOLS.contains(&tool.as_str())) {
