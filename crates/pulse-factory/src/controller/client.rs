@@ -258,6 +258,28 @@ pub fn show_text(v: &Value) -> String {
         line(format!("blocks: {}", blocks.join(" ")));
     }
     line(format!("body: {}", v["body"]));
+    // The facts a seat's file added. They are seat-written text: every control character is
+    // replaced before it reaches the terminal, so the text is shown and never acted on.
+    if let Some(gaps) = v["body"]["gaps"].as_array() {
+        for (i, g) in gaps.iter().enumerate() {
+            line(format!(
+                "gap {}: [{}] {}: {}",
+                i + 1,
+                tame(&s(&g["severity"])),
+                tame(&s(&g["section"])),
+                tame(&s(&g["question"]))
+            ));
+        }
+    }
+    if let Some(why) = v["body"]["gaps_error"].as_str() {
+        line(format!("gaps_error: {}", tame(why)));
+    }
+    if let Some(text) = v["body"]["stop_text"].as_str() {
+        line("stop text:".to_string());
+        for l in text.lines() {
+            line(format!("  | {}", tame(l)));
+        }
+    }
     if !v["answer"].is_null() {
         line(format!(
             "answer: {} (claim {}, {})",
@@ -288,6 +310,15 @@ pub fn show_text(v: &Value) -> String {
         }
     }
     t
+}
+
+/// A seat's text for the terminal: line breaks become ` / `, and any other control character
+/// (an escape sequence starts with one) becomes `?`.
+fn tame(text: &str) -> String {
+    let flat = text.replace("\r\n", " / ").replace(['\n', '\r'], " / ");
+    flat.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 /// The default path of the claim token: `<state dir>/claim-token`.
@@ -395,10 +426,14 @@ pub fn answer(a: &AnswerArgs) -> i32 {
             if a.json {
                 print_json(&v);
             } else {
-                let unit = v["unit"]
-                    .as_str()
-                    .map(|u| format!("; unit {u} resumes"))
-                    .unwrap_or_default();
+                let unit = match (v["unit"].as_str(), v["hook_failure"].as_str()) {
+                    (Some(u), Some(why)) => format!(
+                        "; the answer hook failed, so unit {u} is parked again with a new request: {}",
+                        tame(why)
+                    ),
+                    (Some(u), None) => format!("; unit {u} resumes"),
+                    (None, _) => String::new(),
+                };
                 println!(
                     "answered {}@{} by claim {}{unit}",
                     v["request"].as_str().unwrap_or(""),

@@ -429,3 +429,245 @@ fn the_minimum_ossify_version_is_one_whose_close_reads_that_verdict() {
     // ossify 1.30.0 is the first close with `--verdict`, and it requires the `agent` key.
     assert!(version >= (1, 30), "min_version {}", plugin.min_version);
 }
+
+// ------------------------------------------------------------------ answers that resume (r0.s2.w2)
+
+/// What is wrong with the way a package routes an answer. Each line is one defect.
+fn answer_route_problems(package: &Package, common_brief: &str) -> Vec<String> {
+    let mut p = Vec::new();
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            if !stage
+                .message
+                .contains("Rulings: {run.dir}/out/{unit.id}/rulings.md")
+            {
+                p.push(format!("stage {} does not name `Rulings:`", stage.name));
+            }
+            let rule = stage
+                .stop_on_answer
+                .iter()
+                .find(|c| c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh"));
+            match rule {
+                None => p.push(format!("stage {} has no rule.sh stop hook", stage.name)),
+                Some(c) => {
+                    if c.argv.last().map(String::as_str) != Some(stage.name.as_str()) {
+                        p.push(format!(
+                            "the stop hook of stage {} does not name its stage",
+                            stage.name
+                        ));
+                    }
+                }
+            }
+            for entry in &stage.park_on {
+                if entry.reason.contains("start a new run") {
+                    p.push(format!(
+                        "a park_on reason of stage {} says to start a new run",
+                        stage.name
+                    ));
+                }
+            }
+        }
+    }
+    let implement = package
+        .file
+        .track("item")
+        .and_then(|t| t.stages.iter().find(|s| s.name == "implement"));
+    let gaps_hook = implement
+        .and_then(|s| s.park_on.iter().find(|e| e.file.ends_with("/gaps.json")))
+        .map(|e| &e.on_answer);
+    match gaps_hook {
+        Some(h)
+            if h.iter().any(|c| {
+                c.argv
+                    .iter()
+                    .any(|a| a == "{run.package}/scripts/clarify.sh")
+            }) => {}
+        _ => p.push("implement's gaps.json park has no clarify.sh hook".to_string()),
+    }
+    if !common_brief.contains("rulings.md")
+        || !common_brief.contains("Its last entry answers your last stop")
+    {
+        p.push("common.md holds no rulings rule".to_string());
+    }
+    p
+}
+
+#[test]
+fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
+    let package = load();
+    for script in ["scripts/clarify.sh", "scripts/rule.sh"] {
+        assert!(
+            package.scripts.contains(&PathBuf::from(script)),
+            "{script} in {:?}",
+            package.scripts
+        );
+        assert!(package.pinned_files().contains(&PathBuf::from(script)));
+    }
+    let item = package.file.track("item").unwrap();
+    let implement = &item.stages[0];
+    let gaps = &implement.park_on[0];
+    assert!(gaps.file.ends_with("/gaps.json"));
+    assert_eq!(gaps.on_answer.len(), 1);
+    // clarify.sh <handoff> <body_file> <answer_file> <request> <generation> <spine_dir>
+    assert_eq!(
+        gaps.on_answer[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/clarify.sh",
+            "{unit.vars.handoff_path}",
+            "{request.body_file}",
+            "{answer.file}",
+            "{answer.request}",
+            "{answer.generation}",
+            "{param.spine_dir}",
+        ]
+    );
+    // rule.sh <rulings_file> <stop_file> <answer_file> <request> <generation> <stage>
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            assert_eq!(
+                stage.stop_on_answer.len(),
+                1,
+                "stage {} has a stop hook",
+                stage.name
+            );
+            assert_eq!(
+                stage.stop_on_answer[0].argv,
+                [
+                    "sh",
+                    "{run.package}/scripts/rule.sh",
+                    "{run.dir}/out/{unit.id}/rulings.md",
+                    "{run.dir}/out/{unit.id}/stop",
+                    "{answer.file}",
+                    "{answer.request}",
+                    "{answer.generation}",
+                    stage.name.as_str(),
+                ]
+            );
+            // The hook retires the file that the stage's stop_file names.
+            assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop");
+        }
+    }
+    // The redispatch counts toward the cap of 3 that `before` already checks.
+    assert!(
+        implement
+            .before
+            .iter()
+            .any(|c| flatten(&c.argv).contains("(.dispatches // 0) < 3")),
+        "implement's before keeps the dispatch cap"
+    );
+    assert!(
+        implement
+            .before
+            .iter()
+            .any(|c| c.argv == ["rm", "-f", "{run.dir}/out/{unit.id}/gaps.json"]),
+        "implement's before removes gaps.json, so the park file does not park the unit again"
+    );
+}
+
+#[test]
+fn every_session_stage_names_the_rulings_file_and_no_park_says_start_a_new_run() {
+    let package = load();
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    assert_eq!(
+        answer_route_problems(&package, &common),
+        Vec::<String>::new()
+    );
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            assert!(
+                stage
+                    .message
+                    .contains("Rulings: {run.dir}/out/{unit.id}/rulings.md."),
+                "stage {}",
+                stage.name
+            );
+        }
+    }
+    // The close gate's park names the verbs that answer or clear it.
+    let close = &package.file.track("item").unwrap().stages[2];
+    let reason = &close.park_on[0].reason;
+    assert!(
+        reason.contains("pulse-factory answer") && reason.contains("pulse-factory clear"),
+        "{reason}"
+    );
+    let gaps = &package.file.track("item").unwrap().stages[0].park_on[0].reason;
+    assert!(gaps.contains("pulse-factory answer"), "{gaps}");
+    // The rule reads as the spec words it.
+    assert!(common.contains(
+        "If `<your OUT>/rulings.md` exists, read it first. Its last entry answers your last stop; earlier entries still bind. Never edit it."
+    ));
+}
+
+#[test]
+fn the_answer_route_check_fires_on_inline_bad_samples() {
+    let package = load();
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    // A stage message with no `Rulings:`.
+    let mut bad = package.clone();
+    bad.file.tracks[0].stages[0].message = "Read the brief.".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("does not name `Rulings:`"))
+    );
+    // A stage with no stop hook, and one whose hook names another stage.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[1].stop_on_answer.clear();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("no rule.sh stop hook"))
+    );
+    let mut bad = package.clone();
+    let hook = &mut bad.file.tracks[1].stages[1].stop_on_answer[0];
+    *hook.argv.last_mut().unwrap() = "implement".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("does not name its stage"))
+    );
+    // A park reason that sends the operator to a new run.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[2].park_on[0].reason =
+        "fix it, then start a new run to clear this park".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("start a new run"))
+    );
+    // No gaps hook.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[0].park_on[0].on_answer.clear();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("no clarify.sh hook"))
+    );
+    // A common brief without the rule.
+    assert!(
+        answer_route_problems(&package, "# Every seat\n")
+            .iter()
+            .any(|m| m.contains("no rulings rule"))
+    );
+}
+
+#[test]
+fn the_two_scripts_are_posix_sh_and_call_no_method_tool() {
+    for name in ["clarify.sh", "rule.sh"] {
+        let path = package_dir().join("scripts").join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("#!/bin/sh\n"), "{name}: POSIX sh");
+        for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let words: Vec<&str> = line
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .collect();
+            assert!(!words.contains(&"oss"), "{name} calls `oss`: {line}");
+            assert!(
+                !words.contains(&"bash") && !words.contains(&"eval"),
+                "{name}: {line}"
+            );
+        }
+        assert!(text.contains("set -eu"), "{name} stops on an error");
+    }
+}

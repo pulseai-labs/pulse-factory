@@ -77,7 +77,9 @@ pulse-factory status          # every unit and every session, with tokens and co
 pulse-factory halt --reason "stop for now"    # running seats finish; nothing new launches or merges
 ```
 
-A parked unit needs a new run until `r0.s2` (`arm --replace <run>`).
+A parked unit has an open request. Read it with `pulse-factory requests` and `pulse-factory show <R-n>`,
+make a claim with `pulse-factory claim`, then resume the unit in the same run with
+`pulse-factory answer <R-n> --rev <k> --text "<ruling>"` or `pulse-factory clear <run> <item>`.
 
 ## Remove
 

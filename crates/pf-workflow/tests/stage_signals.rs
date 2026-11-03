@@ -33,6 +33,7 @@ fn stage(dir: &Path, done: Vec<DoneCond>, park_on: Vec<ParkOn>) -> StageSpec {
         before: Vec::new(),
         after_first_turn: Vec::new(),
         stop_file: format!("{d}/{{unit.id}}/stop"),
+        stop_on_answer: Vec::new(),
         stall_minutes: 10,
         first_turn_seconds: 60,
         skills: Vec::new(),
@@ -298,6 +299,7 @@ fn a_park_file_parks_with_its_reason() {
     let park = ParkOn {
         file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
         reason: "gaps surfaced for {unit.id}".to_string(),
+        on_answer: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     assert_eq!(v(&s, &SystemProbe, &WAITING), StageVerdict::Wait);
@@ -326,6 +328,7 @@ fn a_park_file_wins_over_a_done_file() {
     let park = ParkOn {
         file: format!("{}/{{unit.id}}/correction.txt", dir.path().display()),
         reason: "correction needed".to_string(),
+        on_answer: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     write(dir.path(), "u1", "a.done", "");
@@ -518,6 +521,7 @@ fn a_park_file_and_a_turn_end_park_a_real_unit() {
     let park = ParkOn {
         file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
         reason: "gaps surfaced\nanswer them".to_string(),
+        on_answer: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     let e = running_unit();

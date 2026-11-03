@@ -12,17 +12,23 @@ use std::sync::{Arc, Mutex};
 use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
+use pf_engine::claim::{gaps_detail, stop_detail};
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
     AgentPort, SessionEvent, SessionRef, SessionState as AdapterState, SessionStatus, Usage,
 };
-use pf_engine::port::store::{NodeRow, RequestKind, RunState, SessionRow};
+use pf_engine::port::store::{
+    NodeRow, RequestKind, RequestRow, RequestStatus, RunState, SessionRow,
+};
 use pf_engine::render::{RenderContext, UnitView, render};
 use pf_engine::status::Status;
 use pf_engine::unit::{StallDecision, UnitDetail, stall_decision};
 use pf_engine::{EndStatus, Engine};
-use pf_workflow::commands::{HookOutcome, run_after_merge, run_unit_hook};
+use pf_workflow::CommandSpec;
+use pf_workflow::commands::{
+    AnswerOutcome, HookOutcome, answer_through_hook, run_after_merge, run_unit_hook,
+};
 use pf_workflow::file::{SeedDef, StageSpec};
 use pf_workflow::package::Package;
 use pf_workflow::pin::{self, Pin};
@@ -30,6 +36,7 @@ use pf_workflow::queue::{QueuePoll, QueueSource, ingest_queue};
 use pf_workflow::seeds::{SeedAction, advance_seed};
 use pf_workflow::signals::{
     ApplyResult, SessionState as SignalState, StageVerdict, SystemProbe, apply, evaluate,
+    park_on_kind,
 };
 
 /// Seconds on the controller's clock. Tests inject their own.
@@ -51,6 +58,16 @@ pub const DECISIONS_MAX_BYTES: u64 = 1 << 20;
 
 /// The reason of a stall that left no screen text.
 pub const NO_SCREEN_TEXT: &str = "no screen text";
+
+/// What an answer did besides record the ruling.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answered {
+    /// The workflow declared an answer hook for the request, and it ran.
+    pub hook_ran: bool,
+    /// The hook's cause, when it failed. The request is answered, and the unit is parked again
+    /// with a new request. `None` for a hook that passed, and for a request with no hook.
+    pub hook_failed: Option<String>,
+}
 
 /// What a driver runs on.
 pub struct DriverConfig {
@@ -441,7 +458,9 @@ impl Driver {
         t.absorb("end of session", res);
     }
 
-    /// Park a unit whose stage is running: park, stop, read, end the session.
+    /// Park a unit whose stage is running: park, stop, read, end the session. `facts` is more
+    /// for the request body: the gap list or the stop text a seat's file holds.
+    #[allow(clippy::too_many_arguments)]
     fn park_running(
         &self,
         st: &mut DState,
@@ -450,6 +469,7 @@ impl Driver {
         r: &SessionRef,
         kind: RequestKind,
         reason: &str,
+        facts: Option<&serde_json::Value>,
     ) {
         let running = self
             .cfg
@@ -464,8 +484,47 @@ impl Driver {
         if !running {
             return;
         }
-        self.park_kind(t, &session.unit_id, kind, reason);
+        match self
+            .cfg
+            .engine
+            .park_with(&session.unit_id, kind, reason, facts)
+        {
+            Ok(_) => {}
+            Err(e) => t.note(format!("park of {} not recorded: {e}", session.unit_id)),
+        }
         self.end_session(st, t, session, r, reason, false);
+    }
+
+    /// The facts a seat's file adds to the request its park opens: the gap list of a `gaps.json`,
+    /// or the text of the stop file. The kind says which file parked the unit.
+    fn park_facts(
+        &self,
+        stage: &StageSpec,
+        ctx: &RenderContext,
+        kind: RequestKind,
+    ) -> Option<serde_json::Value> {
+        match kind {
+            RequestKind::Stop => {
+                let path = render(&stage.stop_file, ctx).ok()?;
+                stop_detail(Path::new(&path.text))
+            }
+            RequestKind::Gaps => {
+                let paths: Vec<String> = stage
+                    .park_on
+                    .iter()
+                    .filter_map(|entry| render(&entry.file, ctx).ok())
+                    .map(|r| r.text)
+                    .filter(|p| park_on_kind(p) == RequestKind::Gaps)
+                    .collect();
+                // The file that parked the unit exists. If it went away since, the facts say so.
+                let path = paths
+                    .iter()
+                    .find(|p| Path::new(p).exists())
+                    .or_else(|| paths.first())?;
+                Some(gaps_detail(Path::new(path)))
+            }
+            _ => None,
+        }
     }
 
     // 4. `after_first_turn`, once for each session.
@@ -598,7 +657,7 @@ impl Driver {
             match decision {
                 StallDecision::Relaunch => self.end_session(st, t, session, &r, &reason, true),
                 StallDecision::Park => {
-                    self.park_running(st, t, session, &r, RequestKind::Stall, &reason)
+                    self.park_running(st, t, session, &r, RequestKind::Stall, &reason, None)
                 }
                 StallDecision::Active => {}
             }
@@ -680,7 +739,8 @@ impl Driver {
             match &verdict {
                 StageVerdict::Wait => {}
                 StageVerdict::Park { reason, kind } => {
-                    self.park_running(st, t, session, &r, *kind, reason)
+                    let facts = self.park_facts(stage, &ctx, *kind);
+                    self.park_running(st, t, session, &r, *kind, reason, facts.as_ref())
                 }
                 StageVerdict::Done { .. } => {
                     // A done signal seen mid-turn can come before the push it belongs to.
@@ -933,27 +993,118 @@ impl Driver {
 
     /// Answer a request with a ruling. An answer that resumes a unit checks the pins first, as
     /// a clear does.
+    ///
+    /// When the workflow declares an `on_answer` hook for the request, the hook runs first, before
+    /// the unit can become `running`, and the whole answer holds the tick still, so no launch
+    /// comes between the hook and the resume. A hook that fails leaves the request answered and
+    /// the unit parked again with a new request (`answer hook failed: <cause>`): never a silent
+    /// resume. A `clear` runs no hook.
     pub fn answer_request(
         &self,
         request_id: &str,
         revision: u32,
         generation: u64,
         text: &str,
-    ) -> Result<Admission, String> {
-        let resumes = self
-            .cfg
-            .engine
+    ) -> Result<Answered, String> {
+        let engine = &self.cfg.engine;
+        let request = engine
             .requests()
             .map_err(|e| e.to_string())?
-            .iter()
-            .any(|r| r.id == request_id && r.unit_id.is_some());
+            .into_iter()
+            .find(|r| r.id == request_id);
+        let resumes = request.as_ref().is_some_and(|r| r.unit_id.is_some());
         if resumes {
             self.check_pins()?;
         }
-        self.cfg
-            .engine
+        if let Some(request) = request.filter(|r| resumes && r.status == RequestStatus::Open) {
+            // One tick at a time: the stage must not launch between the hook and the resume.
+            let _held = locked(&self.state);
+            if let Some(answered) = self.answer_with_hook(&request, revision, generation, text)? {
+                return Ok(answered);
+            }
+        }
+        engine
             .answer_request(request_id, revision, generation, text)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok(Answered::default())
+    }
+
+    /// Answer a request through its hook. `None` when the workflow declares no hook for it.
+    fn answer_with_hook(
+        &self,
+        request: &RequestRow,
+        revision: u32,
+        generation: u64,
+        text: &str,
+    ) -> Result<Option<Answered>, String> {
+        let engine = &self.cfg.engine;
+        let view = engine.view().map_err(|e| e.to_string())?;
+        let Some(unit) = request.unit_id.as_deref().and_then(|id| view.node(id)) else {
+            return Ok(None);
+        };
+        let Ok(detail) = view.unit_detail(unit) else {
+            return Ok(None);
+        };
+        let run_dir = self.run_dir_text();
+        let ctx = self.ctx(&run_dir, Some((&unit.id, &detail.record.vars)));
+        let hook = self.answer_hook(&detail.track, request, &ctx);
+        if hook.is_empty() {
+            return Ok(None);
+        }
+        let outcome = answer_through_hook(
+            engine,
+            request,
+            revision,
+            generation,
+            text,
+            &hook,
+            &ctx,
+            &self.cfg.run_dir.join("answers"),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Some(Answered {
+            hook_ran: true,
+            hook_failed: match outcome {
+                AnswerOutcome::Resumed => None,
+                AnswerOutcome::HookFailed(cause) => Some(cause),
+            },
+        }))
+    }
+
+    /// The `on_answer` commands the workflow declares for a request, or none. The stop file's
+    /// hook goes with a `stop` request. A `park_on` entry's hook goes with the request its file
+    /// opens: the entry whose file name gives the request's kind (`park_on_kind`), and for the
+    /// generic `park` kind also the entry whose reason is the request's reason. The first such
+    /// entry wins.
+    fn answer_hook(
+        &self,
+        track: &str,
+        request: &RequestRow,
+        ctx: &RenderContext,
+    ) -> Vec<CommandSpec> {
+        let Some(stage) = self.stage_spec(track, &request.stage) else {
+            return Vec::new();
+        };
+        if request.kind == RequestKind::Stop {
+            return stage.stop_on_answer.clone();
+        }
+        stage
+            .park_on
+            .iter()
+            .find(|entry| {
+                let Ok(file) = render(&entry.file, ctx) else {
+                    return false;
+                };
+                if park_on_kind(&file.text) != request.kind {
+                    return false;
+                }
+                request.kind != RequestKind::Park
+                    || render(&entry.reason, ctx).is_ok_and(|reason| {
+                        pf_engine::status::one_line_reason(&reason.text) == request.reason
+                    })
+            })
+            .map(|entry| entry.on_answer.clone())
+            .unwrap_or_default()
     }
 
     /// End each session still open under a unit that is not running (start-up, and a replaced run).

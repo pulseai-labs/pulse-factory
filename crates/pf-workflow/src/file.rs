@@ -81,6 +81,9 @@ pub enum DoneCond {
 pub struct ParkOn {
     pub file: String,
     pub reason: String,
+    /// Commands that run when an answer resumes a unit parked by this file, before the unit
+    /// becomes `running`. Empty declares no hook.
+    pub on_answer: Vec<CommandSpec>,
 }
 
 /// One stage of a track.
@@ -96,6 +99,9 @@ pub struct StageSpec {
     pub before: Vec<CommandSpec>,
     pub after_first_turn: Vec<CommandSpec>,
     pub stop_file: String,
+    /// Commands that run when an answer resumes a unit parked by the stop file, before the unit
+    /// becomes `running`. Empty declares no hook.
+    pub stop_on_answer: Vec<CommandSpec>,
     pub stall_minutes: u32,
     pub first_turn_seconds: u32,
     pub skills: Vec<String>,
@@ -349,8 +355,10 @@ pub(crate) fn is_version(text: &str) -> bool {
 /// Where a template is used, and so which placeholders it may hold.
 #[derive(Clone, Copy)]
 enum Scope<'a> {
-    /// A unit on this track exists: every placeholder is allowed.
+    /// A unit on this track exists: every placeholder is allowed, except the answer ones.
     Unit(&'a str),
+    /// An answer hook of a unit on this track: the unit placeholders and the answer ones.
+    Answer(&'a str),
     /// A run exists, a unit does not.
     Run,
     /// Only the parameters exist.
@@ -364,11 +372,16 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn template(&self, text: &str, pos: Pos, scope: Scope) -> Result<(), ParseError> {
+        // The track of a unit placeholder, when a unit exists here.
+        let track = match scope {
+            Scope::Unit(t) | Scope::Answer(t) => Some(t),
+            Scope::Run | Scope::Params => None,
+        };
         for name in placeholder_names(text) {
             let hole = Placeholder::parse(&name).map_err(|m| ParseError::new(pos, m))?;
             let shown = format!("{{{}}}", hole.name());
-            match (&hole, scope) {
-                (Placeholder::Param(k), _) => {
+            match &hole {
+                Placeholder::Param(k) => {
                     if !self.params.iter().any(|p| p == k) {
                         return Err(ParseError::new(
                             pos,
@@ -378,27 +391,45 @@ impl Checker<'_> {
                         ));
                     }
                 }
-                (Placeholder::RunId | Placeholder::RunDir, Scope::Params) => {
-                    return Err(ParseError::new(
-                        pos,
-                        format!("placeholder `{shown}` needs a run, and no run exists here"),
-                    ));
+                Placeholder::RunId | Placeholder::RunDir | Placeholder::RunPackage => {
+                    if matches!(scope, Scope::Params) {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a run, and no run exists here"),
+                        ));
+                    }
                 }
-                (Placeholder::RunId | Placeholder::RunDir, _) => {}
-                (Placeholder::UnitId | Placeholder::UnitVar(_), Scope::Params | Scope::Run) => {
-                    return Err(ParseError::new(
-                        pos,
-                        format!("placeholder `{shown}` needs a unit, and no unit exists here"),
-                    ));
+                Placeholder::UnitId => {
+                    if track.is_none() {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a unit, and no unit exists here"),
+                        ));
+                    }
                 }
-                (Placeholder::UnitId, Scope::Unit(_)) => {}
-                (Placeholder::UnitVar(k), Scope::Unit(track)) => {
+                Placeholder::UnitVar(k) => {
+                    let Some(track) = track else {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a unit, and no unit exists here"),
+                        ));
+                    };
                     let declared = self.vars.get(track).is_some_and(|v| v.contains(k));
                     if !declared {
                         return Err(ParseError::new(
                             pos,
                             format!(
                                 "placeholder `{shown}`: variable `{k}` is not declared by a unit source or seed of track `{track}`"
+                            ),
+                        ));
+                    }
+                }
+                Placeholder::Answer(_) => {
+                    if !matches!(scope, Scope::Answer(_)) {
+                        return Err(ParseError::new(
+                            pos,
+                            format!(
+                                "placeholder `{shown}` is allowed only in an `on_answer` command"
                             ),
                         ));
                     }
@@ -900,7 +931,21 @@ fn read_stage(
         None => Vec::new(),
         Some(n) => check.commands(n, "`after_first_turn`", scope)?,
     };
-    let stop_file = check.text_node(f.req("stop_file")?, "`stop_file`", scope)?;
+    // The stop file is a path, or a mapping `{file, on_answer}` that adds an answer hook.
+    let stop_node = f.req("stop_file")?;
+    let (stop_file, stop_on_answer) = match &stop_node.value {
+        Value::Map(_) => {
+            let sf = Fields::new(stop_node, "`stop_file`", &["file", "on_answer"])?;
+            (
+                check.text_node(sf.req("file")?, "`file`", scope)?,
+                read_on_answer(&sf, check, scope)?,
+            )
+        }
+        _ => (
+            check.text_node(stop_node, "`stop_file`", scope)?,
+            Vec::new(),
+        ),
+    };
     let stall_minutes = small_uint(f.req("stall_minutes")?, "`stall_minutes`", 1)?;
     let first_turn_seconds = small_uint(f.req("first_turn_seconds")?, "`first_turn_seconds`", 1)?;
     let skills = match f.get("skills") {
@@ -928,10 +973,11 @@ fn read_stage(
         Some(n) => items(n, "`park_on`")?
             .iter()
             .map(|p| {
-                let pf = Fields::new(p, "a `park_on` entry", &["file", "reason"])?;
+                let pf = Fields::new(p, "a `park_on` entry", &["file", "reason", "on_answer"])?;
                 Ok(ParkOn {
                     file: check.text_node(pf.req("file")?, "`file`", scope)?,
                     reason: check.text_node(pf.req("reason")?, "`reason`", scope)?,
+                    on_answer: read_on_answer(&pf, check, scope)?,
                 })
             })
             .collect::<Result<_, ParseError>>()?,
@@ -946,6 +992,7 @@ fn read_stage(
         before,
         after_first_turn,
         stop_file,
+        stop_on_answer,
         stall_minutes,
         first_turn_seconds,
         skills,
@@ -953,6 +1000,22 @@ fn read_stage(
         done,
         park_on,
     })
+}
+
+/// The optional `on_answer` list of a `park_on` entry or a `stop_file`. Its commands may use the
+/// answer placeholders, so they are checked in the answer scope.
+fn read_on_answer(
+    f: &Fields,
+    check: &Checker,
+    scope: Scope,
+) -> Result<Vec<CommandSpec>, ParseError> {
+    let Some(node) = f.get("on_answer") else {
+        return Ok(Vec::new());
+    };
+    let Scope::Unit(track) = scope else {
+        unreachable!("a stage is read in the scope of its track");
+    };
+    check.commands(node, "`on_answer`", Scope::Answer(track))
 }
 
 /// The keys other than `env.<NAME>` that a stage's `settings` admits. Each is a template that

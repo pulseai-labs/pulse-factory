@@ -74,6 +74,10 @@ pub enum CommandBody {
         reason: String,
         #[serde(default)]
         request_kind: RequestKind,
+        /// More facts for the request body, a JSON object: the gap list of a `gaps` park, or
+        /// the text of a `stop` park. A park with none has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<serde_json::Value>,
     },
     /// The operator's kill switch: the run admits no further launch and no further merge.
     Halt { reason: String },
@@ -126,6 +130,21 @@ pub enum CommandBody {
         generation: u64,
         /// `{"verb":"answer","text":…}`.
         answer: serde_json::Value,
+        /// Set when the workflow's answer hook failed. The request is answered, and the unit
+        /// parks again with this cause and a new request, instead of resuming.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hook_failed: Option<String>,
+    },
+    /// Record that an answer hook ran, for the ledger. `rc` is the exit code of the last command
+    /// the hook ran, `None` when it ended without one (a timeout, a signal, a refused value).
+    /// `attempt` counts the runs for this request and revision.
+    AnswerHook {
+        id: String,
+        revision: u32,
+        attempt: u32,
+        rc: Option<i32>,
+        /// A short cause, empty for a hook that passed.
+        note: String,
     },
     /// Close an open request that nothing will answer: the run ended, or the unit moved on.
     WithdrawRequest { id: String, reason: String },
@@ -188,6 +207,7 @@ impl CommandBody {
             CommandBody::OpenRequest { .. } => "open_request",
             CommandBody::ReviseRequest { .. } => "revise_request",
             CommandBody::AnswerRequest { .. } => "answer_request",
+            CommandBody::AnswerHook { .. } => "answer_hook",
             CommandBody::WithdrawRequest { .. } => "withdraw_request",
             CommandBody::Claim { .. } => "claim",
             CommandBody::ClearUnit { .. } => "clear_unit",

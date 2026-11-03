@@ -18,7 +18,7 @@ One row in the store's `requests` table (migration `0002_requests.sql`).
 | `stage` | string | The stage the unit parked in, `merge` for a unit parked at its merge with every stage done, or empty. |
 | `kind` | string | One of the kinds below. |
 | `reason` | string | One line. It is redacted and cut like a park reason. |
-| `body` | JSON object | The facts of the request. `gaps` and `stop` hold `{"reason":…}` only. The other park kinds hold `reason`, `stage` and `park_generation`. |
+| `body` | JSON object | The facts of the request. `gaps` and `stop` hold `reason`, and the facts of the seat's file (see "The body of a `gaps` and a `stop` request"). The other park kinds hold `reason`, `stage` and `park_generation`. |
 | `status` | string | `open`, `answered` or `withdrawn`. |
 | `opened_at` | string | UTC time, to the millisecond. |
 | `answered_at` | string or null | When the request left `open`. |
@@ -44,6 +44,21 @@ the reason text to find it.
 | `seat_lost` | Start-up's reconcile, for a running unit whose seat is gone (ADR-0007). |
 | `merge_ack` | The spine merge waits on the claim. A later work item opens it. |
 
+### The body of a `gaps` and a `stop` request
+
+The controller reads the seat's file when it opens the request. The text is seat-written, so it is
+data: redacted, bounded, stored as JSON strings, and never rendered or run (ADR-0005).
+
+- `gaps`: the `park_on` file, read to at most 1 MiB, as JSON. The gap list is at
+  `external_execution_gaps.implementer_return.gaps` (the shape `briefs/implement.md` asks for), or in
+  a top-level `gaps` array. The body gains `"gaps": [{"section", "question", "severity"}, …]`, each
+  string cut to 2,000 characters. A file that is missing, over 1 MiB, not JSON or not that shape
+  leaves `{"reason":…}` and adds `"gaps_error": "<cause>"`.
+- `stop`: the body gains `"stop_text"`, the stop file's text, at most 64 KiB. A stop file that cannot
+  be read adds nothing.
+- `show` prints both, one line for a gap and an indented block for the stop text, with every control
+  character replaced.
+
 ### The revision rule
 
 `answer` names the request ID and the revision it read with `show`. The engine admits the answer
@@ -62,6 +77,7 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Revise a request | `revise:<id>:<revision>` |
 | Answer a request | `answer:<id>:<revision>` |
 | Withdraw a request | `withdraw:<id>` |
+| Record a run of an answer hook | `answer-hook:<id>:<revision>:<n>` (n counts the runs for the request and revision) |
 | Claim | `claim:<generation>` |
 | Clear a unit | `clear:<unit>:<park generation>` |
 | Park a unit | `park:<unit>:<park generation>` |
@@ -119,10 +135,16 @@ Any read that fails refuses, and so does a chain that does not end. The client r
 - the pins of the run's whole manifest are checked first, and a changed file refuses the resume,
   names the file and changes nothing.
 
+An `answer` (not a `clear`) first runs the workflow's `on_answer` hook for the request, if it
+declares one (`workflow-file.md`, "Answer hooks"). If the hook fails, the request is answered and
+the unit parks again with a new `park` request whose reason is `answer hook failed: <cause>`; the
+unit does not resume. The hook's run is a ledger line, `answer hook <R-n>: rc <n>`.
+
 The unit becomes `running` at that stage with no session, and its park generation rises. The next
 tick launches the stage through the normal path (capacity, pins, `before`). A unit that parked
 after its PR was recorded keeps its PR. A halted run accepts the resume and launches nothing. The
-resume does not remove a stop file: the operator does.
+resume does not remove a stop file. The operator does, or the workflow's stop hook retires it
+(`workflow-file.md`, "Answer hooks"): the `ossify-spine` hook renames it to `stop.answered-<R-n>`.
 
 An answer's text is data. The engine stores it and shows it, and never runs or renders it as a
 template.

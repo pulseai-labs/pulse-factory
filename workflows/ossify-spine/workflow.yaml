@@ -1,5 +1,12 @@
 # The ossify-spine workflow: arm a spine, and its item PRs merge into the spine branch with no
 # operator present. Every path is a placeholder. The arm step supplies the parameters.
+#
+# An answer reaches the seat that needs it through two hooks (`on_answer`), both POSIX `sh`
+# scripts in `scripts/`. The controller runs a hook when an answer resumes a unit, before the
+# unit runs again. The scripts call no method tool.
+#   gaps.json   `clarify.sh` appends the answer to the work item handoff's `## Clarifications`.
+#   stop file   `rule.sh` appends the ruling to {run.dir}/out/{unit.id}/rulings.md, which every
+#               brief tells a seat to read first, and renames the stop file.
 version: 1
 name: ossify-spine
 
@@ -85,12 +92,23 @@ tracks:
           Spine: {param.spine}. Queue directory: {run.dir}/queue.
           OUT: {run.dir}/out/{unit.id}. Lane done file: {run.dir}/out/{unit.id}/lane.done.
           Rounds done file: {run.dir}/rounds.done. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{param.method_root}"
         slots: [session]
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
-        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - lane
         stall_minutes: 15
         first_turn_seconds: 180
         skills: [run-spine]
@@ -113,6 +131,7 @@ tracks:
           Report: {param.spine_dir}/work-{unit.id}/report.md.
           OUT: {run.dir}/out/{unit.id}. Gaps file: {run.dir}/out/{unit.id}/gaps.json.
           Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{unit.vars.worktree_path}"
         slots: [session, build]
@@ -129,7 +148,17 @@ tracks:
           - [rm, -f, "{run.dir}/out/{unit.id}/gaps.json"]
         after_first_turn:
           - [env, -C, "{param.method_root}", "{param.oss}", work_item_dispatched, "{unit.id}"]
-        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - implement
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [work-item]
@@ -144,7 +173,18 @@ tracks:
           - file: "{param.spine_dir}/work-{unit.id}/report.md"
         park_on:
           - file: "{run.dir}/out/{unit.id}/gaps.json"
-            reason: "gaps surfaced for {unit.id}: answer them in the handoff, then start a new run to clear this park"
+            reason: "gaps surfaced for {unit.id}: answer them with `pulse-factory answer`"
+            # The answer goes into the handoff's `## Clarifications`, which ossify reads again on
+            # every dispatch. The unit then runs `implement` again. `before` counts that dispatch.
+            on_answer:
+              - - sh
+                - "{run.package}/scripts/clarify.sh"
+                - "{unit.vars.handoff_path}"
+                - "{request.body_file}"
+                - "{answer.file}"
+                - "{answer.request}"
+                - "{answer.generation}"
+                - "{param.spine_dir}"
 
       - name: verify
         role: verifier
@@ -156,12 +196,23 @@ tracks:
           Worktree: {unit.vars.worktree_path}. Base SHA: {unit.vars.base_sha}.
           Verdict file: {run.dir}/out/{unit.id}/verdict.json.
           OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
         cwd: "{unit.vars.worktree_path}"
         slots: [session, build]
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
           - [rm, -f, "{run.dir}/out/{unit.id}/verdict.json"]
-        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - verify
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [close]
@@ -185,12 +236,23 @@ tracks:
           Verdict file: {run.dir}/out/{unit.id}/verdict.json.
           Correction packet: {run.dir}/out/{unit.id}/correction.txt.
           OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{param.method_root}"
         slots: [session]
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
-        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - close
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [close]
@@ -215,7 +277,7 @@ tracks:
               test: url
         park_on:
           - file: "{run.dir}/out/{unit.id}/correction.txt"
-            reason: "the close gate for {unit.id} is red and needs a correction: fix it, then start a new run to clear this park"
+            reason: "the close gate for {unit.id} is red and needs a correction: fix it, then answer with `pulse-factory answer` or resume with `pulse-factory clear`"
 
     merge:
       rule: green_checks_in_declared_order

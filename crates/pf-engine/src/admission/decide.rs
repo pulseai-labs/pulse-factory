@@ -143,7 +143,16 @@ pub fn decide(
             unit_id,
             reason,
             request_kind,
-        } => park_unit(view, workflow, unit_id, *request_kind, reason, now),
+            detail,
+        } => park_unit(
+            view,
+            workflow,
+            unit_id,
+            *request_kind,
+            reason,
+            detail.as_ref(),
+            now,
+        ),
         CommandBody::Halt { reason } => launch::decide_halt(view, workflow, reason, now),
         CommandBody::Merge { unit_id } => merge::decide_merge(view, workflow, unit_id, now),
         CommandBody::MergeResult {
@@ -200,7 +209,20 @@ pub fn decide(
             revision,
             generation,
             answer,
-        } => claim::decide_answer(view, workflow, id, *revision, *generation, answer, now),
+            hook_failed,
+        } => claim::decide_answer(
+            view,
+            workflow,
+            id,
+            *revision,
+            *generation,
+            answer,
+            hook_failed.as_deref(),
+            now,
+        ),
+        CommandBody::AnswerHook { id, rc, note, .. } => {
+            claim::decide_answer_hook(view, id, *rc, note)
+        }
         CommandBody::WithdrawRequest { id, reason } => {
             claim::decide_withdraw(view, id, reason, now)
         }
@@ -455,13 +477,14 @@ fn park_unit(
     unit_id: &str,
     kind: RequestKind,
     reason: &str,
+    detail: Option<&serde_json::Value>,
     now: &str,
 ) -> Result<Decision, Rejected> {
     let reason = check_reason(reason).map_err(|e| e.to_string())?;
     let unit = running_unit(view, unit_id)?;
     let mut d = Decision::admitted();
     d.unit_id = Some(unit_id.to_string());
-    d.effects = claim::park_effects(view, workflow, unit, kind, reason, now)?;
+    d.effects = claim::park_effects(view, workflow, unit, kind, reason, detail, now)?;
     d.ledger = Some(format!("unit {unit_id} parked: {reason}"));
     Ok(d)
 }

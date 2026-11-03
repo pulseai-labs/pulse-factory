@@ -105,13 +105,13 @@ Each stage of a track has these fields:
 | `slots` | no | A list of `session` and `build`. Default `[session]`. |
 | `before` | no | Commands that run before each launch. A failure parks the unit. |
 | `after_first_turn` | no | Commands that run once, after the seat's first turn ended. |
-| `stop_file` | yes | The file whose text, when present, parks the unit. |
+| `stop_file` | yes | The file whose text, when present, parks the unit. A path, or `{file, on_answer}` (see "Answer hooks"). |
 | `stall_minutes` | yes | Minutes without output before the seat counts as stalled. 1 or more. |
 | `first_turn_seconds` | yes | Seconds the seat has to finish a first turn. 1 or more. |
 | `skills` | no | The skill names the seat may use. |
 | `settings` | no | A mapping with `env.<NAME>`, `push_dir`, `push_branch`, `report_dir`, `worktree`, `own_branch` and `decisions_file` keys. |
 | `done` | yes | One or more conditions. All of them must hold. |
-| `park_on` | no | A list of `{file, reason}`. |
+| `park_on` | no | A list of `{file, reason, on_answer}`. `on_answer` is optional. |
 
 `before` holds the checks that cap launches. `after_first_turn` holds the count of dispatches. The
 count runs after a first turn, not after a launch, so a launch that sits at a trust prompt does not
@@ -142,6 +142,39 @@ The park opens a request (`requests.md`). Its kind comes from the file's name: `
 `gaps` request, `correction.txt` a `red_gate` request, and any other name a `park` request. The
 stop file opens a `stop` request. A turn that ends with no `done`
 condition, no `park_on` file and no stop file parks with "seat ended with no done signal".
+
+### Answer hooks
+
+A `park_on` entry and the stage's `stop_file` take an optional `on_answer`: a list of commands, in the
+form of "Commands". `stop_file` is then a mapping `{file, on_answer}`; a plain path declares no hook.
+`on_answer` is refused anywhere else.
+
+```yaml
+stop_file:
+  file: "{run.dir}/out/{unit.id}/stop"
+  on_answer:
+    - [sh, "{run.package}/scripts/rule.sh", "{run.dir}/out/{unit.id}/rulings.md", ...]
+```
+
+- The hook runs when an `answer` resumes the unit, before the unit becomes `running`. The hook is
+  the one of the file that opened the request: the stop file's for a `stop` request; for any other
+  kind, the first `park_on` entry whose file name gives that kind (for the kind `park` the entry's
+  reason must also be the request's reason). A `clear` runs no hook.
+- The commands run in order and the first failure stops the hook. Each has the usual bounds: 60
+  seconds by default and at most 600, no retry. The answer placeholders hold controller-made values
+  only, and each reaches the argv as one word. Nothing renders a value twice.
+- A command may run a file of the package as `{run.package}/<path>`. The file must be one the run
+  pins: the package pins every plain file of its `scripts/` directory, with the workflow file, the
+  briefs and the rule files. A package whose hook names another file is refused at load.
+- The engine is asked first whether it would admit the answer. A refusal (a stale revision, a
+  fenced claim, an empty text, a changed pin) runs no hook.
+- Rc 0 of every command resumes the unit. Any failure (a non-zero exit, a timeout, a command that
+  cannot start or render) leaves the request answered and the unit `parked`, with the reason
+  `answer hook failed: <cause>` and a new `park` request. Both happen in one commit.
+- Each run writes a ledger line, `answer hook <R-n>: rc <n>`, with `rc none` for a hook that ended
+  with no exit code, and the cause after it for a failure.
+- Hooks run in the controller, as the user who runs it. The workflow file is pinned, so a hook cannot
+  change after `arm`.
 
 ## Commands
 
@@ -176,7 +209,13 @@ A placeholder is `{name}`. The names are a closed set:
 | `{unit.vars.<k>}` | A variable of the unit's record. | Where a unit exists, and only when a source or seed of the unit's track declares `<k>`. |
 | `{run.id}` | The run's ID. | Where a run exists. |
 | `{run.dir}` | The run's directory. | Where a run exists. |
+| `{run.package}` | The run's own copy of the workflow package, `<run dir>/package`. | Where a run exists. |
 | `{param.<k>}` | A parameter. | Everywhere, and only when `<k>` is in `params`. |
+| `{answer.file}` | A file the controller writes (mode 0600) that holds the answer text. | An `on_answer` command only. |
+| `{answer.request}` | The request ID, `R-<n>`. | An `on_answer` command only. |
+| `{answer.revision}` | The revision the answer is bound to. | An `on_answer` command only. |
+| `{answer.generation}` | The claim generation that answered. | An `on_answer` command only. |
+| `{request.body_file}` | A file the controller writes (mode 0600) that holds the request body as JSON. | An `on_answer` command only. |
 
 A placeholder with an undeclared name is an error at parse time. A record that lacks a declared
 variable parks the unit at run time.

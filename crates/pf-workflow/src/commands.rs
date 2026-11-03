@@ -7,6 +7,11 @@
 //! - A command has a timeout: 60 s by default and at most 600 s. A timed-out process is killed.
 //! - Stdout and stderr are each kept to 64 KiB. The runner drains the rest.
 //! - A failure is never retried.
+//!
+//! An answer hook (`on_answer`) is a list of such commands. It runs when an answer resumes a
+//! unit, under the same bounds. Its argv may use the answer placeholders, which hold a request ID,
+//! a revision, a claim generation and the paths of two files the controller wrote (see
+//! [`answer_through_hook`]).
 
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -17,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use pf_engine::Engine;
 use pf_engine::admission::EngineError;
-use pf_engine::render::{RenderContext, render};
+use pf_engine::port::store::RequestRow;
+use pf_engine::render::{AnswerView, RenderContext, render, render_with};
 
 /// The timeout of a command that sets none.
 pub const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -239,9 +245,20 @@ pub fn run_argv(
 
 /// Render each argv item of a command. A placeholder becomes one piece of text inside its item.
 pub fn render_argv(spec: &CommandSpec, ctx: &RenderContext) -> Result<Vec<String>, CommandFailure> {
+    render_argv_with(spec, ctx, None)
+}
+
+/// [`render_argv`] for an answer hook: `answer` gives the answer placeholders their values. A
+/// value is one argv word whatever it holds, and nothing renders it a second time.
+pub fn render_argv_with(
+    spec: &CommandSpec,
+    ctx: &RenderContext,
+    answer: Option<&AnswerView>,
+) -> Result<Vec<String>, CommandFailure> {
     let mut argv = Vec::with_capacity(spec.argv.len());
     for (i, template) in spec.argv.iter().enumerate() {
-        let rendered = render(template, ctx).map_err(|e| CommandFailure::Render(e.to_string()))?;
+        let rendered = render_with(template, ctx, answer)
+            .map_err(|e| CommandFailure::Render(e.to_string()))?;
         if rendered.from_record {
             if i == 0 {
                 return Err(CommandFailure::ProgramFromRecord);
@@ -429,4 +446,179 @@ pub fn run_plan_check(spec: &CommandSpec, ctx: &RenderContext) -> Result<u64, Pl
     }
     word.parse::<u64>()
         .map_err(|_| PlanCheckError(format!("the count {word} is too large")))
+}
+
+// ------------------------------------------------------------------ the answer hook
+
+/// The hook name in a failure's text.
+pub const ANSWER_HOOK: &str = "on_answer";
+
+/// What an answer hook did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerHookRun {
+    /// The exit code of the last command that ran, `None` when it ended without one: it did not
+    /// start, ran past its timeout, or a signal ended it, or a value was refused.
+    pub rc: Option<i32>,
+    /// The first failure, with the hook's command and its program named. `None` when every
+    /// command exited 0.
+    pub failure: Option<HookFailure>,
+}
+
+impl AnswerHookRun {
+    /// A short text for the ledger line, which already carries the exit code.
+    pub fn note(&self) -> String {
+        match &self.failure {
+            None => String::new(),
+            Some(HookFailure {
+                failure: CommandFailure::Exit { stderr_line, .. },
+                ..
+            }) => stderr_line.clone(),
+            Some(f) => f.failure.to_string(),
+        }
+    }
+}
+
+/// Run an answer hook: its commands in order, the first failure stops it, nothing retries.
+pub fn run_answer_hook(
+    specs: &[CommandSpec],
+    ctx: &RenderContext,
+    answer: &AnswerView,
+) -> AnswerHookRun {
+    let mut rc = None;
+    for (i, spec) in specs.iter().enumerate() {
+        let fail = |failure| HookFailure {
+            hook: ANSWER_HOOK.to_string(),
+            place: i + 1,
+            program: program_name(spec, ctx),
+            failure,
+        };
+        let ran = render_argv_with(spec, ctx, Some(answer))
+            .and_then(|argv| run_argv(&argv, None, spec.timeout_seconds));
+        match ran {
+            Err(failure) => {
+                return AnswerHookRun {
+                    rc: None,
+                    failure: Some(fail(failure)),
+                };
+            }
+            Ok(out) => match out.exit_code {
+                Some(0) => rc = Some(0),
+                Some(code) => {
+                    return AnswerHookRun {
+                        rc: Some(code),
+                        failure: Some(fail(CommandFailure::Exit {
+                            code,
+                            stderr_line: first_line(&out.stderr),
+                        })),
+                    };
+                }
+                None => {
+                    return AnswerHookRun {
+                        rc: None,
+                        failure: Some(fail(CommandFailure::Signal)),
+                    };
+                }
+            },
+        }
+    }
+    AnswerHookRun { rc, failure: None }
+}
+
+/// What an answer through its hook did to the unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnswerOutcome {
+    /// Every hook command exited 0, or there was none. The unit resumed.
+    Resumed,
+    /// A hook command failed. The request is answered and the unit parked again, with a new
+    /// request, `answer hook failed: <this cause>`.
+    HookFailed(String),
+}
+
+/// Answer a request of a parked unit through its `on_answer` hook, in this order:
+///
+/// `revision` is the one the caller read: the answer binds to it, as every answer does.
+///
+/// 1. The engine is asked whether it would admit the answer. A refusal returns the engine's
+///    error and runs nothing, so a stale revision or a fenced claim never runs a hook.
+/// 2. The controller writes two files in a fresh directory under `files_dir`, mode 0600 in a
+///    directory of mode 0700: the answer text, and the request body as JSON.
+/// 3. The hook runs, before the unit can become `running`.
+/// 4. The run is a ledger line, `answer hook <R-n>: rc <n>`, whether it passed or failed.
+/// 5. The engine admits the answer. When the hook failed, the same commit leaves the request
+///    answered, keeps the unit parked and opens a new request with the hook's cause.
+///
+/// The files are removed at the end. `ctx` renders for the request's unit.
+#[allow(clippy::too_many_arguments)]
+pub fn answer_through_hook(
+    engine: &Engine,
+    request: &RequestRow,
+    revision: u32,
+    generation: u64,
+    text: &str,
+    hook: &[CommandSpec],
+    ctx: &RenderContext,
+    files_dir: &std::path::Path,
+) -> Result<AnswerOutcome, EngineError> {
+    engine.check_answer(&request.id, revision, generation, text)?;
+
+    let dir = files_dir.join(&request.id);
+    let files = AnswerFiles::write(&dir, text, &request.body)
+        .map_err(|e| EngineError::Port(format!("cannot write the answer files: {e}")))?;
+    let view = AnswerView {
+        file: &files.answer,
+        request: &request.id,
+        revision,
+        generation,
+        body_file: &files.body,
+    };
+    let run = run_answer_hook(hook, ctx, &view);
+    drop(files);
+
+    engine.record_answer_hook(&request.id, revision, run.rc, &run.note())?;
+    let cause = run.failure.as_ref().map(ToString::to_string);
+    engine.answer_request_after_hook(&request.id, revision, generation, text, cause.as_deref())?;
+    Ok(match cause {
+        None => AnswerOutcome::Resumed,
+        Some(cause) => AnswerOutcome::HookFailed(cause),
+    })
+}
+
+/// The two files of an answer hook. They are removed when this is dropped.
+struct AnswerFiles {
+    dir: std::path::PathBuf,
+    answer: String,
+    body: String,
+}
+
+impl AnswerFiles {
+    fn write(dir: &std::path::Path, text: &str, body: &str) -> std::io::Result<AnswerFiles> {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        // A directory left by an earlier run of this request is not reused.
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        // From here the directory is this value's to remove, also when a write fails.
+        let files = AnswerFiles {
+            dir: dir.to_path_buf(),
+            answer: dir.join("answer.txt").display().to_string(),
+            body: dir.join("request-body.json").display().to_string(),
+        };
+        for (path, content) in [(&files.answer, text), (&files.body, body)] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(content.as_bytes())?;
+        }
+        Ok(files)
+    }
+}
+
+impl Drop for AnswerFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }

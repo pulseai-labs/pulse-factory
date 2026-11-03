@@ -100,7 +100,8 @@ pulse-factory show <R-n> [--json]
 ```
 
 Prints every field of one request: the body, the answer if there is one, and the verbs that answer
-it (`answer`, and `clear` for a request that has a unit). The JSON adds `body`, `answer`,
+it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
+holds and the text of a `stop` request. The JSON adds `body`, `answer`,
 `answer_generation` and `verbs` to the fields of `requests`. An unknown ID exits 1 and names it. It
 needs no claim.
 
@@ -135,7 +136,11 @@ never run. `--rev` must be the request's current revision.
   empty (the message names the path); a token that matches no claim; a fenced token
   (`claim <old> was fenced by claim <new>`); an unknown request; a request that is not open; another
   revision (the message names the current one); a changed pinned file (the message names it).
-- The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation` and `resumed`.
+- When the workflow declares an `on_answer` hook for the request, it runs first (`workflow-file.md`,
+  "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
+  parks again with a new request, and `resumed` is `false`.
+- The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `resumed`,
+  `hook` (`none`, `passed` or `failed`) and `hook_failure` (the cause, or null).
 
 ## `clear`
 
