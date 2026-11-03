@@ -4,6 +4,12 @@
 //! process substitution, `if … fi`, `for`, `while`, `case`, `{ …; }`, subshells, assignments,
 //! environment prefixes and redirections. It never runs anything and expands nothing: a variable
 //! stays a variable. A text it cannot read is an `Err`, and the caller denies it.
+//!
+//! The parser also keeps the grammar (`crate::grammar`). A form that it passes over without
+//! modelling it, such as `${x:=y}` or `$'…'`, is not an `Err`: its source text goes in
+//! `Parsed::outside`, and the caller denies the line after the guards have had their say. A
+//! parameter expansion is read by a closed rule (`param`), so a form that the rule does not list
+//! lands in `outside` with no new code.
 
 /// What one part of a word is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +93,9 @@ pub struct Cmd {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub cmds: Vec<Cmd>,
+    /// The forms outside the grammar that the parser passed over, each as its source text with a
+    /// name. The caller denies the line as `unparsed-command` when no guard denied it.
+    pub outside: Vec<String>,
 }
 
 const RESERVED: [&str; 13] = [
@@ -112,16 +121,22 @@ pub fn parse(src: &str) -> Result<Parsed, String> {
         chars: &chars,
         i: 0,
         cmds: Vec::new(),
+        outside: Vec::new(),
         closers: Vec::new(),
     };
     p.list(None, 0)?;
-    Ok(Parsed { cmds: p.cmds })
+    Ok(Parsed {
+        cmds: p.cmds,
+        outside: p.outside,
+    })
 }
 
 struct Parser<'a> {
     chars: &'a [char],
     i: usize,
     cmds: Vec<Cmd>,
+    /// Forms outside the grammar that were passed over (see `Parsed::outside`).
+    outside: Vec<String>,
     /// The closing character of each open `list`, innermost last.
     closers: Vec<Option<char>>,
 }
@@ -178,6 +193,35 @@ impl Parser<'_> {
         s.chars()
             .enumerate()
             .all(|(k, c)| self.peek_at(k) == Some(c))
+    }
+
+    /// The source text from `start` up to the current position.
+    fn since(&self, start: usize) -> String {
+        self.chars[start..self.i.min(self.chars.len())]
+            .iter()
+            .collect()
+    }
+
+    /// Record a form outside the grammar. The line is denied after the guards have run.
+    fn note(&mut self, form: String) {
+        self.outside.push(form);
+    }
+
+    /// Find the commands in text that the parser passed over, such as the inside of `${x:=…}`, so
+    /// that a guard still sees them.
+    fn scan_text(&mut self, text: &str, depth: usize) -> Result<(), String> {
+        let sub: Vec<char> = text.chars().collect();
+        let mut inner = Parser {
+            chars: &sub,
+            i: 0,
+            cmds: Vec::new(),
+            outside: Vec::new(),
+            closers: Vec::new(),
+        };
+        inner.scan_expansions(depth + 1)?;
+        self.cmds.extend(inner.cmds);
+        self.outside.extend(inner.outside);
+        Ok(())
     }
 
     /// Read commands until the end, or until the `)` or backtick that closes a substitution.
@@ -309,9 +353,26 @@ impl Parser<'_> {
                             }
                         }
                     } else if self.peek_at(1) == Some('(') && cur.is_none() {
-                        // `(( … ))` arithmetic command.
+                        // `(( … ))` arithmetic command: its text is not read, so it is outside the
+                        // grammar. A command substitution in it is still found.
+                        let start = self.i;
                         self.i += 2;
-                        self.skip_arith()?;
+                        let (inner, _) = self.arith()?;
+                        let raw = self.since(start);
+                        self.note(format!("`{raw}` (the arithmetic command)"));
+                        self.scan_text(&inner, depth)?;
+                    } else if cur.is_some_and(|k| {
+                        self.cmds[k].loop_header
+                            && self.cmds[k].head.is_empty()
+                            && self.peek_at(1) == Some('(')
+                    }) {
+                        // `for ((i=0; i<3; i++))`: the text is not read.
+                        let start = self.i;
+                        self.i += 2;
+                        let (inner, _) = self.arith()?;
+                        let raw = self.since(start);
+                        self.note(format!("`{raw}` (a C-style `for` loop)"));
+                        self.scan_text(&inner, depth)?;
                     } else if let Some(idx) = cur
                         .filter(|k| self.cmds[*k].words.len() == 1 && self.peek_at(1) == Some(')'))
                     {
@@ -553,6 +614,9 @@ impl Parser<'_> {
             if plain && matches!(word.text.as_str(), "for" | "select") {
                 cmd.header = true;
                 cmd.loop_header = true;
+                if word.text == "select" {
+                    self.outside.push("`select` (a menu loop)".to_string());
+                }
                 return Ok(Action::Nothing);
             }
             if plain && word.text == "case" {
@@ -612,30 +676,25 @@ impl Parser<'_> {
             }
             let _ = found; // A body without its delimiter runs to the end of the text.
             if !h.quoted {
-                // An unquoted heredoc expands `$(…)` and backticks in its body.
-                let sub: Vec<char> = body.chars().collect();
-                let mut inner = Parser {
-                    chars: &sub,
-                    i: 0,
-                    cmds: Vec::new(),
-                    closers: Vec::new(),
-                };
-                inner.scan_expansions(depth + 1)?;
-                self.cmds.extend(inner.cmds);
+                // An unquoted heredoc expands its body: each expansion is read as it is in a
+                // double-quoted word.
+                self.scan_text(&body, depth)?;
             }
             self.cmds[h.cmd].heredocs.push(body);
         }
         Ok(())
     }
 
-    /// Find `$(…)` and backticks in text that the shell would expand, and parse them.
+    /// Read the expansions in text that the shell would expand, as a double-quoted word has them:
+    /// `$(…)` and backticks are parsed as commands, and `${…}` and `$((…))` are read by the rules
+    /// of a word.
     fn scan_expansions(&mut self, depth: usize) -> Result<(), String> {
         while let Some(c) = self.peek() {
             match c {
                 '\\' => self.i += 2,
-                '$' if self.peek_at(1) == Some('(') && self.peek_at(2) != Some('(') => {
-                    self.i += 2;
-                    self.list(Some(')'), depth)?;
+                '$' => {
+                    let mut scratch: Vec<Seg> = Vec::new();
+                    self.dollar(&mut scratch, true, depth)?;
                 }
                 '`' => {
                     self.i += 1;
@@ -668,6 +727,9 @@ impl Parser<'_> {
                 self.i += 1;
             }
             let w = self.word(depth)?;
+            if w.raw.is_empty() {
+                return Err("a here-string has no word".to_string());
+            }
             let idx = *cur.get_or_insert_with(|| {
                 let v = self.cmds.len();
                 self.cmds.push(Cmd {
@@ -689,6 +751,9 @@ impl Parser<'_> {
                 self.i += 1;
             }
             let w = self.word(depth)?;
+            if w.raw.is_empty() {
+                return Err("a heredoc has no delimiter word".to_string());
+            }
             let idx = *cur.get_or_insert_with(|| {
                 let v = self.cmds.len();
                 self.cmds.push(Cmd {
@@ -726,15 +791,23 @@ impl Parser<'_> {
         while self.peek().is_some_and(|c| c == ' ' || c == '\t') {
             self.i += 1;
         }
-        if matches!(self.peek(), None | Some('\n' | ';' | '&' | '|' | ')')) {
+        if matches!(self.peek(), Some('<' | '>')) && self.peek_at(1) == Some('(') {
+            // `cmd > >(tee x)`: the target is a process substitution, which the caller reads.
             return Ok(());
         }
-        self.word(depth).map(|_| ())
+        let w = self.word(depth)?;
+        if w.raw.is_empty() {
+            return Err("a redirection has no target word".to_string());
+        }
+        Ok(())
     }
 
-    /// Skip `… ))` of an arithmetic expression.
-    fn skip_arith(&mut self) -> Result<(), String> {
+    /// Read `… ))` of an arithmetic expression, after its two opening parentheses. The text comes
+    /// back with a flag: false when a single `)` closed it, which a shell may read as a command
+    /// substitution that holds a subshell.
+    fn arith(&mut self) -> Result<(String, bool), String> {
         let mut depth = 0usize;
+        let mut text = String::new();
         while let Some(c) = self.peek() {
             match c {
                 '(' => depth += 1,
@@ -742,15 +815,16 @@ impl Parser<'_> {
                     if depth == 0 {
                         if self.peek_at(1) == Some(')') {
                             self.i += 2;
-                            return Ok(());
+                            return Ok((text, true));
                         }
                         self.i += 1;
-                        return Ok(());
+                        return Ok((text, false));
                     }
                     depth -= 1;
                 }
                 _ => {}
             }
+            text.push(c);
             self.i += 1;
         }
         Err("an arithmetic expression is not closed".to_string())
@@ -822,19 +896,8 @@ impl Parser<'_> {
                 }
                 '$' => {
                     flush!();
-                    match self.peek_at(1) {
-                        Some('\'') => {
-                            self.i += 2;
-                            any_quote = true;
-                            let s = self.ansi_c()?;
-                            segs.push(Seg::Quoted(s));
-                        }
-                        Some('"') => {
-                            self.i += 2;
-                            any_quote = true;
-                            self.double_quoted(&mut segs, depth)?;
-                        }
-                        _ => self.dollar(&mut segs, false, depth)?,
+                    if self.dollar_word(&mut segs, depth)? {
+                        any_quote = true;
                     }
                 }
                 '*' | '?' | '[' => {
@@ -956,8 +1019,18 @@ impl Parser<'_> {
     fn dollar(&mut self, segs: &mut Vec<Seg>, quoted: bool, depth: usize) -> Result<(), String> {
         match self.peek_at(1) {
             Some('(') if self.peek_at(2) == Some('(') => {
+                // `$(( … ))`. Only names, numbers, spaces and the listed operators are read. Any
+                // other text could hold an array index with a substitution in it.
+                let start = self.i;
                 self.i += 3;
-                self.skip_arith()?;
+                let (inner, closed) = self.arith()?;
+                if !closed || !crate::grammar::arithmetic_ok(&inner) {
+                    let raw = self.since(start);
+                    self.note(format!(
+                        "`{raw}` (an arithmetic expansion that holds more than names, numbers and operators)"
+                    ));
+                    self.scan_text(&inner, depth)?;
+                }
                 segs.push(Seg::Subst);
             }
             Some('(') => {
@@ -967,40 +1040,24 @@ impl Parser<'_> {
             }
             Some('{') => {
                 self.i += 2;
-                let mut name = String::new();
-                let mut nest = 1usize;
-                let mut simple = true;
-                loop {
-                    match self.peek() {
-                        None => return Err("a ${…} is not closed".to_string()),
-                        Some('}') => {
-                            self.i += 1;
-                            nest -= 1;
-                            if nest == 0 {
-                                break;
-                            }
-                        }
-                        Some('{') => {
-                            nest += 1;
-                            simple = false;
-                            self.i += 1;
-                        }
-                        Some(ch) => {
-                            if !is_name_char(ch) {
-                                simple = false;
-                            }
-                            if simple {
-                                name.push(ch);
-                            }
-                            self.i += 1;
-                        }
+                self.param(segs, quoted, depth)?;
+            }
+            Some('[') => {
+                // `$[ … ]`, the old arithmetic expansion.
+                let start = self.i;
+                self.i += 2;
+                let mut inner = String::new();
+                while let Some(c) = self.peek() {
+                    self.i += 1;
+                    if c == ']' {
+                        break;
                     }
+                    inner.push(c);
                 }
-                if simple && !name.is_empty() {
-                    segs.push(Seg::Var { name, quoted });
-                } else {
-                    segs.push(Seg::Subst);
-                }
+                let raw = self.since(start);
+                self.note(format!("`{raw}` (the old arithmetic expansion)"));
+                self.scan_text(&inner, depth)?;
+                segs.push(Seg::Subst);
             }
             Some(c) if is_name_start(c) => {
                 self.i += 1;
@@ -1031,6 +1088,172 @@ impl Parser<'_> {
             }
         }
         Ok(())
+    }
+
+    /// A `$` in an unquoted word. `$'…'` and `$"…"` are outside the grammar and are noted; any
+    /// other `$` is `dollar`. Gives true when the form was a quoted string.
+    fn dollar_word(&mut self, segs: &mut Vec<Seg>, depth: usize) -> Result<bool, String> {
+        let start = self.i;
+        match self.peek_at(1) {
+            Some('\'') => {
+                self.i += 2;
+                let s = self.ansi_c()?;
+                let raw = self.since(start);
+                self.note(format!("`{raw}` (ANSI-C quoting)"));
+                segs.push(Seg::Quoted(s));
+                Ok(true)
+            }
+            Some('"') => {
+                self.i += 2;
+                self.double_quoted(segs, depth)?;
+                let raw = self.since(start);
+                self.note(format!("`{raw}` (locale quoting)"));
+                Ok(true)
+            }
+            _ => {
+                self.dollar(segs, false, depth)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// A `${` after its two characters. The grammar lists `${NAME}`, `${#NAME}` and the four
+    /// default forms `${NAME:-word}`, `${NAME-word}`, `${NAME:+word}` and `${NAME+word}`, where
+    /// `NAME` is a name, a number or one of `? $ ! # @ * -`. Any other text is outside the
+    /// grammar: it is noted with its source, and its inside is still searched for commands.
+    fn param(&mut self, segs: &mut Vec<Seg>, quoted: bool, depth: usize) -> Result<(), String> {
+        if depth > 24 {
+            return Err("substitutions nest too deep".to_string());
+        }
+        let start = self.i - 2;
+        let body = self.i;
+        let length = self.peek() == Some('#') && self.peek_at(1).is_some_and(|c| c != '}');
+        if length {
+            self.i += 1;
+        }
+        let mut name = String::new();
+        match self.peek() {
+            Some(c) if is_name_start(c) => {
+                while let Some(ch) = self.peek().filter(|ch| is_name_char(*ch)) {
+                    name.push(ch);
+                    self.i += 1;
+                }
+            }
+            Some(c) if c.is_ascii_digit() => {
+                while let Some(ch) = self.peek().filter(char::is_ascii_digit) {
+                    name.push(ch);
+                    self.i += 1;
+                }
+            }
+            Some(c) if matches!(c, '?' | '$' | '!' | '#' | '@' | '*' | '-') => {
+                name.push(c);
+                self.i += 1;
+            }
+            _ => {}
+        }
+        if !name.is_empty() {
+            match (self.peek(), self.peek_at(1)) {
+                (Some('}'), _) => {
+                    self.i += 1;
+                    segs.push(if length {
+                        Seg::Subst
+                    } else {
+                        Seg::Var { name, quoted }
+                    });
+                    return Ok(());
+                }
+                (Some(':'), Some('-' | '+')) if !length => {
+                    self.i += 2;
+                    self.param_word(quoted, depth + 1)?;
+                    segs.push(Seg::Subst);
+                    return Ok(());
+                }
+                (Some('-' | '+'), _) if !length => {
+                    self.i += 1;
+                    self.param_word(quoted, depth + 1)?;
+                    segs.push(Seg::Subst);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        // Not a listed form. Read to the closing brace, and find the commands inside.
+        self.i = body;
+        let mut nest = 1usize;
+        let mut inner = String::new();
+        loop {
+            match self.peek() {
+                None => return Err("a ${…} is not closed".to_string()),
+                Some('}') => {
+                    self.i += 1;
+                    nest -= 1;
+                    if nest == 0 {
+                        break;
+                    }
+                    inner.push('}');
+                }
+                Some(ch) => {
+                    if ch == '{' {
+                        nest += 1;
+                    }
+                    inner.push(ch);
+                    self.i += 1;
+                }
+            }
+        }
+        let raw = self.since(start);
+        self.note(format!(
+            "`{raw}` (a parameter expansion that the grammar does not list)"
+        ));
+        self.scan_text(&inner, depth)?;
+        segs.push(Seg::Subst);
+        Ok(())
+    }
+
+    /// The word of `${NAME:-word}`, up to the brace that closes it. It is read as a word is: a
+    /// quote, a variable or a substitution in it is found, and a `}` inside one does not close it.
+    /// `quoted` is true when the expansion stands in double quotes, where a single quote is text.
+    fn param_word(&mut self, quoted: bool, depth: usize) -> Result<(), String> {
+        let mut scratch: Vec<Seg> = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err("a ${…} is not closed".to_string()),
+                Some('}') => {
+                    self.i += 1;
+                    return Ok(());
+                }
+                Some('\\') => self.i += 2,
+                Some('\'') if !quoted => {
+                    self.i += 1;
+                    loop {
+                        match self.peek() {
+                            None => return Err("a single quote is not closed".to_string()),
+                            Some('\'') => {
+                                self.i += 1;
+                                break;
+                            }
+                            Some(_) => self.i += 1,
+                        }
+                    }
+                }
+                Some('"') => {
+                    self.i += 1;
+                    self.double_quoted(&mut scratch, depth)?;
+                }
+                Some('`') if self.closers.last() == Some(&Some('`')) => {
+                    return Err("a ${…} is not closed".to_string());
+                }
+                Some('`') => {
+                    self.i += 1;
+                    self.list(Some('`'), depth + 1)?;
+                }
+                Some('$') if quoted => self.dollar(&mut scratch, true, depth)?,
+                Some('$') => {
+                    self.dollar_word(&mut scratch, depth)?;
+                }
+                Some(_) => self.i += 1,
+            }
+        }
     }
 
     /// The inside of `$'…'`, after the opening quote.
@@ -1536,5 +1759,133 @@ mod arm_and_array_tests {
         assert!(p.cmds[0].words.iter().any(|w| w.dynamic));
         let p = parse("echo '{a,b}' {a,b}").unwrap();
         assert!(p.cmds[0].words.iter().all(|w| !w.brace_quoted));
+    }
+}
+
+#[cfg(test)]
+mod grammar_tests {
+    use super::*;
+
+    fn outside(src: &str) -> Vec<String> {
+        parse(src).unwrap().outside
+    }
+
+    fn commands(src: &str) -> Vec<String> {
+        parse(src)
+            .unwrap()
+            .cmds
+            .iter()
+            .filter(|c| !c.header && !c.words.is_empty())
+            .map(|c| {
+                c.words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_listed_parameter_forms_are_inside_the_grammar() {
+        for src in [
+            "echo $x ${x} ${#x} ${x:-a} ${x-a} ${x:+a} ${x+a} $? ${?} ${10} ${#}",
+            "echo \"${x:-a b}\" ${x:-'a b'} \"${x:-\"a b\"}\" ${x:-${y:-z}} ${x:-}",
+            "echo $((n+1)) $(( (1 + 2) * 3 )) $((a<b&&c!=d))",
+        ] {
+            assert_eq!(outside(src), Vec::<String>::new(), "{src}");
+        }
+    }
+
+    #[test]
+    fn every_other_parameter_form_is_outside_with_its_source_text() {
+        for (src, form) in [
+            ("echo ${x:=y}", "${x:=y}"),
+            ("echo ${x=y}", "${x=y}"),
+            ("echo ${x:?m}", "${x:?m}"),
+            ("echo ${x/a/b}", "${x/a/b}"),
+            ("echo ${!x}", "${!x}"),
+            ("echo ${x%y} ${x#y} ${x^^} ${x,,}", "${x%y}"),
+            ("echo ${x:1:2}", "${x:1:2}"),
+            ("echo ${x[1]}", "${x[1]}"),
+            ("echo ${x[@]}", "${x[@]}"),
+            ("echo ${x@P}", "${x@P}"),
+            ("echo ${#x:-a}", "${#x:-a}"),
+            ("echo ${@:2}", "${@:2}"),
+            ("echo \"${x:=y}\"", "${x:=y}"),
+            ("echo $'a'", "$'a'"),
+            ("echo $\"a\"", "$\"a\""),
+            ("echo ${x:-$'a'}", "$'a'"),
+            ("echo $[1+2]", "$[1+2]"),
+            ("echo $((a[1]))", "$((a[1]))"),
+            ("echo $(( $x + 1 ))", "$(( $x + 1 ))"),
+            ("echo $((a,b))", "$((a,b))"),
+            ("((x++))", "((x++))"),
+            ("for ((i=0; i<3; i++)); do :; done", "for"),
+            ("select x in a; do :; done", "select"),
+        ] {
+            let o = outside(src);
+            assert!(
+                o.iter().any(|f| f.contains(form)),
+                "{src:?} gave {o:?}, want {form:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_form_outside_the_grammar_still_shows_its_commands() {
+        let c = commands("echo ${x:=$(gh pr merge 1)}");
+        assert!(c.contains(&"gh pr merge 1".to_string()), "{c:?}");
+        let c = commands("echo $(( $(gh pr merge 2) + 1 ))");
+        assert!(c.contains(&"gh pr merge 2".to_string()), "{c:?}");
+        let c = commands("((a[$(gh pr merge 3)]++))");
+        assert!(c.contains(&"gh pr merge 3".to_string()), "{c:?}");
+        let c = commands("echo $[$(gh pr merge 4)]");
+        assert!(c.contains(&"gh pr merge 4".to_string()), "{c:?}");
+    }
+
+    #[test]
+    fn the_word_of_a_default_form_is_read_as_a_word() {
+        let c = commands("echo ${x:-$(gh pr merge 1)}");
+        assert!(c.contains(&"gh pr merge 1".to_string()), "{c:?}");
+        // A brace inside a substitution, a quote or a nested default does not close the word.
+        let c = commands("echo \"${x:-$(echo }; gh pr merge 2)}\"");
+        assert!(c.contains(&"gh pr merge 2".to_string()), "{c:?}");
+        let c = commands("echo ${x:-\"}\"}; gh pr merge 3");
+        assert!(c.contains(&"gh pr merge 3".to_string()), "{c:?}");
+        let c = commands("echo ${x:-${y:-}}; gh pr merge 4");
+        assert!(c.contains(&"gh pr merge 4".to_string()), "{c:?}");
+        assert!(parse("echo ${x:-a").is_err());
+        assert!(parse("echo ${x:-'a}").is_err());
+    }
+
+    #[test]
+    fn a_default_word_that_nests_without_end_is_an_error_not_a_stack_overflow() {
+        let deep = format!("echo {}x{}", "${a:-".repeat(500), "}".repeat(500));
+        assert!(parse(&deep).is_err());
+    }
+
+    #[test]
+    fn an_unquoted_heredoc_body_is_read_for_its_expansions() {
+        assert!(!outside("cat <<EOF\n${x@P}\nEOF").is_empty());
+        assert!(outside("cat <<'EOF'\n${x@P}\nEOF").is_empty());
+        assert!(outside("cat <<EOF\n${x:-a} $((1+2)) \\${x@P}\nEOF").is_empty());
+        let c = commands("cat <<EOF\n${x:-$(gh pr merge 1)}\nEOF");
+        assert!(c.contains(&"gh pr merge 1".to_string()), "{c:?}");
+    }
+
+    #[test]
+    fn a_redirection_or_a_heredoc_without_a_word_is_an_error() {
+        for src in ["echo >", "echo > ;", "cat <<(ls)", "cat <<<", "echo 2>&"] {
+            assert!(parse(src).is_err(), "{src}");
+        }
+        for src in [
+            "cat < <(echo x)",
+            "echo a > >(cat)",
+            "echo a 2>&1",
+            "echo >&2",
+        ] {
+            assert!(parse(src).is_ok(), "{src}");
+        }
     }
 }
