@@ -29,6 +29,14 @@ All five fields are required. The engine refuses a record with any other field.
   of equal records is equal.
 - **No plan copy.** A record holds only what launches a unit. It does not copy the planner's state.
 
+## Engine-owned unit detail
+
+The engine keeps more about a unit than its record: the track, the stages done, the PR and the park
+generation. This is the unit's detail in the store, not a field of the record, and a producer never
+writes it. `park_generation` counts the times a claim resumed the unit (from 0; a detail written
+before `r0.s2` reads as 0). Command IDs that are unique per unit end with it (`park:<unit>:<gen>`,
+`merge:<unit>:<gen>`, `merge-result:<unit>:<gen>`; see `requests.md`).
+
 ## Example
 
 ```json

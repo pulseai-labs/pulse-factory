@@ -53,6 +53,7 @@ fn facts(dir: &std::path::Path) -> SeatFacts {
         plugins: vec![dir.join("plugins/methodkit")],
         rules,
         binary: PathBuf::from("/bin/pf"),
+        random_device: PathBuf::from(pulse_factory::controller::seat::RANDOM_DEVICE),
     }
 }
 
@@ -87,6 +88,7 @@ fn port(
         inner: fake.clone(),
         plans: plans.clone(),
         gate: Arc::new(Gate::default()),
+        pids: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
     });
     let _ = dir;
     (

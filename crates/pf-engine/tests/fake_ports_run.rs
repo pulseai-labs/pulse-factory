@@ -91,7 +91,7 @@ fn the_engine_runs_two_units_on_fake_ports() {
             "launch:u1:build:1",
             "attach:u1/build#1",
             "launch:u2:build:1",
-            "park:u2",
+            "park:u2:0",
             "end:u2/build#1",
             "signal:u1/build#1",
         ]

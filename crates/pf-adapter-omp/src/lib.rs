@@ -879,6 +879,10 @@ impl AgentPort for OmpAdapter {
         Ok(next)
     }
 
+    fn process_id(&self, session: &SessionRef) -> Option<u32> {
+        self.pid(session)
+    }
+
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let Ok(s) = self.find(session) else {
             return Ok(false);

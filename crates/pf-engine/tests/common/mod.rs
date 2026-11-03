@@ -17,13 +17,15 @@ use pf_engine::{Clock, Engine, EngineConfig, MergeRule, StageDef, Workflow};
 
 // ---------------------------------------------------------------- store
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct StoreState {
     runs: BTreeMap<String, RunRow>,
     nodes: Vec<NodeRow>,
     sessions: Vec<SessionRow>,
     admissions: Vec<AdmissionRow>,
     outbox: Vec<LedgerLine>,
+    requests: Vec<RequestRow>,
+    claims: Vec<ClaimRow>,
 }
 
 /// An in-memory store that keeps the port's promises: one unique command ID per run, content
@@ -32,6 +34,9 @@ struct StoreState {
 pub struct FakeStore {
     state: Mutex<StoreState>,
     pub fail_writes: AtomicBool,
+    /// Fail a commit at its `OpenRequest` effect, after the effects before it were applied. The
+    /// commit then restores the state it found, as a database rolls back.
+    pub fail_on_open_request: AtomicBool,
 }
 
 impl FakeStore {
@@ -52,6 +57,14 @@ impl FakeStore {
         }
     }
 
+    pub fn all_requests(&self) -> Vec<RequestRow> {
+        self.state.lock().unwrap().requests.clone()
+    }
+
+    pub fn all_claims(&self) -> Vec<ClaimRow> {
+        self.state.lock().unwrap().claims.clone()
+    }
+
     pub fn node(&self, run: &str, id: &str) -> Option<NodeRow> {
         self.state
             .lock()
@@ -69,6 +82,7 @@ impl Store for FakeStore {
             return Err(StoreError("forced write failure".to_string()));
         }
         let mut s = self.state.lock().unwrap();
+        let snapshot = s.clone();
         if let Some(existing) = s
             .admissions
             .iter()
@@ -118,6 +132,53 @@ impl Store for FakeStore {
                     {
                         Some(slot) => *slot = n,
                         None => s.sessions.push(n),
+                    }
+                }
+                Effect::OpenRequest(n) => {
+                    let taken = n.unit_id.is_some()
+                        && s.requests.iter().any(|r| {
+                            r.run_id == n.run_id
+                                && r.unit_id == n.unit_id
+                                && r.status == RequestStatus::Open
+                        });
+                    if taken || self.fail_on_open_request.load(Ordering::SeqCst) {
+                        *s = snapshot;
+                        return Err(StoreError("request write failed".to_string()));
+                    }
+                    let next = s
+                        .requests
+                        .iter()
+                        .filter_map(|r| r.id.strip_prefix("R-")?.parse::<u64>().ok())
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    s.requests.push(RequestRow {
+                        id: format!("R-{next}"),
+                        revision: 1,
+                        run_id: n.run_id,
+                        unit_id: n.unit_id,
+                        stage: n.stage,
+                        kind: n.kind,
+                        reason: n.reason,
+                        body: n.body,
+                        status: RequestStatus::Open,
+                        opened_at: n.opened_at,
+                        answered_at: None,
+                        answer: None,
+                        answer_generation: None,
+                    });
+                }
+                Effect::PutRequest(r) => match s.requests.iter_mut().find(|x| x.id == r.id) {
+                    Some(slot) => *slot = r,
+                    None => {
+                        *s = snapshot;
+                        return Err(StoreError("no such request".to_string()));
+                    }
+                },
+                Effect::PutClaim(c) => {
+                    match s.claims.iter_mut().find(|x| x.generation == c.generation) {
+                        Some(slot) => *slot = c,
+                        None => s.claims.push(c),
                     }
                 }
             }
@@ -173,6 +234,33 @@ impl Store for FakeStore {
             .filter(|n| n.run_id == run_id)
             .cloned()
             .collect())
+    }
+
+    fn requests(&self, run_id: &str) -> Result<Vec<RequestRow>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .filter(|r| r.run_id == run_id)
+            .cloned()
+            .collect())
+    }
+
+    fn request(&self, id: &str) -> Result<Option<RequestRow>, StoreError> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .requests
+            .iter()
+            .find(|r| r.id == id)
+            .cloned())
+    }
+
+    fn claims(&self) -> Result<Vec<ClaimRow>, StoreError> {
+        Ok(self.state.lock().unwrap().claims.clone())
     }
 
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError> {

@@ -2,9 +2,12 @@
 //!
 //! Given the workflow's rule (green checks, declared order), the engine asks the forge port to
 //! merge the next unit's PR, checks that the merge landed, and records the result. A failed
-//! check, a conflict or a merge that did not land parks the unit with its reason. Each merge
-//! result writes a ledger line with repo, branch, SHA and outcome, from what the forge port
-//! reports.
+//! check, a conflict or a merge that did not land parks the unit with its reason, through the
+//! Park command, which opens a `merge_failed` request. Each merge result writes a ledger line
+//! with repo, branch, SHA and outcome, from what the forge port reports.
+//!
+//! The merge and merge-result command IDs carry the unit's park generation
+//! (`merge:<unit>:<gen>`), so a cleared unit merges again under new IDs.
 //!
 //! Declared order: units rank by the order their group first appeared, then by `order`, then by
 //! ID. A unit that is not merged yet holds back every later unit.
@@ -12,7 +15,7 @@
 use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::forge::{Checks, ForgeEffect, ForgeOutcome, Mergeable};
-use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow};
+use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow, RequestKind};
 use crate::render::{RenderContext, UnitView, render};
 use crate::status::{REASON_RUN_HALTED, Status, check_reason, one_line_reason};
 use crate::unit::UnitDetail;
@@ -145,22 +148,21 @@ pub(crate) fn decide_merge_result(
         .filter(|n| n.kind == NodeKind::Unit)
         .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
     merge_ready(view, workflow, unit)?;
-    let mut u = unit.clone();
-    u.updated_at = now.to_string();
+    let mut d = Decision::admitted();
+    d.unit_id = Some(unit_id.to_string());
+    // A merge that did not land only records its result. The park that follows goes through
+    // `Engine::park_as`, so it opens the `merge_failed` request like every other park.
     if landed {
+        let mut u = unit.clone();
+        u.updated_at = now.to_string();
         u.status = Status::Done;
         u.reason = Some(if sha.is_empty() {
             "merged".to_string()
         } else {
             format!("merged at {sha}")
         });
-    } else {
-        u.status = Status::Parked;
-        u.reason = Some(outcome.to_string());
+        d.effects.push(Effect::PutNode(u));
     }
-    let mut d = Decision::admitted();
-    d.unit_id = Some(unit_id.to_string());
-    d.effects.push(Effect::PutNode(u));
     d.ledger = Some(format!(
         "merge of unit {unit_id}: repo={repo} branch={branch} sha={sha} outcome={outcome}"
     ));
@@ -180,12 +182,10 @@ pub enum Next {
     Blocked(String),
 }
 
-/// Find the first unit in the declared order that has not merged.
-pub fn next_in_order(view: &RunView, workflow: &Workflow) -> Next {
-    let mut ranked: Vec<(u32, u32, &str, &NodeRow, UnitDetail)> = Vec::new();
+/// The units that take part in the merge order, in the declared order: groups rank by their
+/// first appearance, then `order`, then ID. A unit on a track with no merge rule takes no part.
+fn merge_order<'a>(view: &'a RunView, workflow: &Workflow) -> Vec<(&'a NodeRow, UnitDetail)> {
     let mut group_rank: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
-    // Only units on a track with a merge rule take part. A unit on another track never waits on
-    // a merge, and never holds one back.
     let mut units: Vec<(&NodeRow, UnitDetail)> = view
         .units()
         .filter_map(|n| UnitDetail::from_text(&n.detail).ok().map(|d| (n, d)))
@@ -196,13 +196,40 @@ pub fn next_in_order(view: &RunView, workflow: &Workflow) -> Next {
         let next = u32::try_from(group_rank.len()).unwrap_or(u32::MAX);
         group_rank.entry(d.record.group.clone()).or_insert(next);
     }
-    for (n, d) in units {
-        let rank = group_rank[&d.record.group];
-        let order = d.record.order;
-        ranked.push((rank, order, n.id.as_str(), n, d));
+    units.sort_by(|(an, ad), (bn, bd)| {
+        let a = (
+            group_rank[&ad.record.group],
+            ad.record.order,
+            an.id.as_str(),
+        );
+        let b = (
+            group_rank[&bd.record.group],
+            bd.record.order,
+            bn.id.as_str(),
+        );
+        a.cmp(&b)
+    });
+    units
+}
+
+/// What a halted unit holds back: the unit itself, and each later unit in the declared order that
+/// has not merged. A unit that is not merged yet holds back every later unit.
+pub fn blocked_by(view: &RunView, workflow: &Workflow, unit_id: &str) -> Vec<String> {
+    let order = merge_order(view, workflow);
+    match order.iter().position(|(n, _)| n.id == unit_id) {
+        Some(at) => order[at..]
+            .iter()
+            .filter(|(n, _)| n.id == unit_id || n.status != Status::Done)
+            .map(|(n, _)| n.id.clone())
+            .collect(),
+        None => vec![unit_id.to_string()],
     }
-    ranked.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
-    for (_, _, id, node, detail) in ranked {
+}
+
+/// Find the first unit in the declared order that has not merged.
+pub fn next_in_order(view: &RunView, workflow: &Workflow) -> Next {
+    for (node, detail) in merge_order(view, workflow) {
+        let id = node.id.as_str();
         match node.status {
             Status::Done => continue,
             Status::Running => {
@@ -332,7 +359,7 @@ impl Engine {
         }
 
         let admission = self.submit(Command {
-            id: format!("merge:{unit_id}"),
+            id: format!("merge:{unit_id}:{}", detail.park_generation),
             body: CommandBody::Merge {
                 unit_id: unit_id.to_string(),
             },
@@ -444,8 +471,16 @@ impl Engine {
     ) -> Result<MergeStep, EngineError> {
         // The outcome can hold text from the forge. It is one clean line before it is recorded.
         let outcome = one_line_reason(outcome);
-        self.submit(Command {
-            id: format!("merge-result:{unit_id}"),
+        let view = self.view()?;
+        let node = view
+            .node(unit_id)
+            .ok_or_else(|| EngineError::Rejected(format!("unit {unit_id} is unknown")))?;
+        let generation = view
+            .unit_detail(node)
+            .map_err(EngineError::Rejected)?
+            .park_generation;
+        let recorded = self.submit(Command {
+            id: format!("merge-result:{unit_id}:{generation}"),
             body: CommandBody::MergeResult {
                 unit_id: unit_id.to_string(),
                 repo: repo.to_string(),
@@ -454,7 +489,14 @@ impl Engine {
                 outcome: outcome.clone(),
                 landed,
             },
-        })?;
+        });
+        match recorded {
+            Ok(_) => {}
+            // A stop between the result and the park left the result recorded with another
+            // outcome text. The park below still has to happen.
+            Err(EngineError::Conflict { .. }) if !landed => {}
+            Err(e) => return Err(e),
+        }
         if landed {
             Ok(MergeStep::Merged {
                 unit: unit_id.to_string(),
@@ -466,6 +508,7 @@ impl Engine {
                 },
             })
         } else {
+            self.park_as(unit_id, RequestKind::MergeFailed, &outcome)?;
             Ok(MergeStep::Parked {
                 unit: unit_id.to_string(),
                 reason: outcome,

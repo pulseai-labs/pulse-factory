@@ -351,14 +351,11 @@ fn a_restart_parks_a_running_unit_relaunches_nothing_and_ends_a_stale_session() 
         fake: fake.clone(),
         plans: Default::default(),
         gate: Default::default(),
+        pids: Default::default(),
         block_run_json: Default::default(),
     });
     let second = pulse_factory::controller::Controller::open(
-        pulse_factory::controller::Config {
-            state_dir: live.sb.state.clone(),
-            tick_ms: 3_600_000,
-            binary: BIN.into(),
-        },
+        pulse_factory::controller::Config::new(live.sb.state.clone(), 3_600_000, BIN.into()),
         ports,
     )
     .unwrap();

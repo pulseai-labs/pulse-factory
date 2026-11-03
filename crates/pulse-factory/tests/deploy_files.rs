@@ -135,7 +135,21 @@ fn install_sh_sets_no_profile_and_writes_no_cargo_config() {
 #[test]
 fn the_skill_names_every_verb_and_waits_for_nothing() {
     let verbs = verbs_of_cli_contract(&read("docs/contracts/cli.md"));
-    assert_eq!(verbs, vec!["arm", "status", "halt", "hook", "controller"]);
+    assert_eq!(
+        verbs,
+        vec![
+            "arm",
+            "status",
+            "halt",
+            "requests",
+            "show",
+            "claim",
+            "answer",
+            "clear",
+            "hook",
+            "controller"
+        ]
+    );
     assert_eq!(
         skill_problems(&read("skill/SKILL.md"), &verbs),
         Vec::<String>::new()

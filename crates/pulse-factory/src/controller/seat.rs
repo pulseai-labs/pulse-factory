@@ -140,16 +140,44 @@ pub fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-fn fresh_key() -> String {
-    let mut bytes = [0u8; 24];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
+/// The system's source of random bytes.
+pub const RANDOM_DEVICE: &str = "/dev/urandom";
+
+/// Read exactly `n` random bytes from `device`. It fails closed: a device that cannot be opened,
+/// a short read, and a source that gives only zeros are each an error that names the cause.
+/// Nothing falls back to a buffer of zeros, so no key and no token is ever made from one.
+pub fn random_bytes(device: &Path, n: usize) -> Result<Vec<u8>, String> {
+    let shown = device.display();
+    let mut file = std::fs::File::open(device)
+        .map_err(|e| format!("cannot open the random source {shown}: {e}"))?;
+    let mut bytes = vec![0u8; n];
+    let mut got = 0;
+    while got < n {
+        match file.read(&mut bytes[got..]) {
+            Ok(0) => {
+                return Err(format!(
+                    "the random source {shown} gave {got} bytes, and {n} are needed"
+                ));
+            }
+            Ok(k) => got += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("cannot read the random source {shown}: {e}")),
+        }
     }
-    let mut key = String::from("pfk_");
-    for b in bytes {
-        key.push_str(&format!("{b:02x}"));
+    if bytes.iter().all(|b| *b == 0) {
+        return Err(format!("the random source {shown} gave only zeros"));
     }
-    key
+    Ok(bytes)
+}
+
+/// Lower-case hex of bytes.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A fresh session key from the random source at `device`.
+fn fresh_key(device: &Path) -> Result<String, String> {
+    Ok(format!("pfk_{}", hex(&random_bytes(device, 24)?)))
 }
 
 /// What a run gives its seats.
@@ -168,6 +196,9 @@ pub struct SeatFacts {
     pub rules: BTreeMap<String, (PathBuf, RoleRules)>,
     /// The binary's canonical path.
     pub binary: PathBuf,
+    /// The source of random bytes for the session keys: `/dev/urandom`. A test points it
+    /// elsewhere.
+    pub random_device: PathBuf,
 }
 
 pub struct SeatPort {
@@ -247,7 +278,8 @@ impl SeatPort {
             let v = get(&plan, name);
             plan.settings.insert(name.to_string(), v);
         }
-        let key = fresh_key();
+        let key = fresh_key(&f.random_device)
+            .map_err(|why| refused(format!("no session key can be made: {why}")))?;
         let hook = format!("{} hook", shell_quote(&f.binary.display().to_string()));
         plan.settings.insert("env.PF_HOOK_CMD".to_string(), hook);
         plan.settings
@@ -343,6 +375,9 @@ impl AgentPort for SeatPort {
     }
     fn is_alive(&self, s: &SessionRef) -> Result<bool, AgentError> {
         self.inner.is_alive(s)
+    }
+    fn process_id(&self, s: &SessionRef) -> Option<u32> {
+        self.inner.process_id(s)
     }
     fn stop(&self, s: &SessionRef) -> Result<(), AgentError> {
         self.inner.stop(s)

@@ -136,7 +136,11 @@ A condition is a mapping with exactly one key:
 ### `park_on`
 
 Each entry is `{file, reason}`. When the file exists, the unit parks with the reason. The stop file
-parks with its own text and wins over every other condition. A turn that ends with no `done`
+parks with its own text and wins over every other condition.
+
+The park opens a request (`requests.md`). Its kind comes from the file's name: `gaps.json` opens a
+`gaps` request, `correction.txt` a `red_gate` request, and any other name a `park` request. The
+stop file opens a `stop` request. A turn that ends with no `done`
 condition, no `park_on` file and no stop file parks with "seat ended with no done signal".
 
 ## Commands

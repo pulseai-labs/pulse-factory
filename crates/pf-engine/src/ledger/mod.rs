@@ -9,11 +9,13 @@
 //! a store write failure does.
 //!
 //! **Recovery at start-up.** The engine truncates a torn last line (one with no newline), reads
-//! the sequence numbers left in the file, appends each unwritten outbox line that is missing, in
-//! order, and marks it written. A stop before the append loses no line. A stop after the append
+//! the lines left in the file, appends each unwritten outbox line that is missing, in order, and
+//! marks it written. An outbox line counts as present only when a line with its sequence number
+//! and its exact text is in the file. A line with the same number and other text is foreign: the
+//! real line is appended and the report names the number. A stop before the append loses no line. A stop after the append
 //! and before the mark adds no second line. A line can never precede its commit.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -46,8 +48,9 @@ pub fn parse_seq(line: &str) -> Option<u64> {
 pub trait LedgerFile: Send {
     /// Cut a last line that has no newline. Returns true when something was cut.
     fn truncate_torn_tail(&mut self) -> std::io::Result<bool>;
-    /// The sequence numbers of the whole lines in the file.
-    fn seqs(&mut self) -> std::io::Result<BTreeSet<u64>>;
+    /// The whole lines in the file (without their newline), by sequence number. One number can
+    /// hold more than one line when a foreign line carries it.
+    fn lines(&mut self) -> std::io::Result<BTreeMap<u64, Vec<String>>>;
     /// Append one whole line (it ends with a newline) and flush it to disk with `sync_all`.
     fn append(&mut self, line: &str) -> std::io::Result<()>;
 }
@@ -93,10 +96,16 @@ impl LedgerFile for FsLedger {
         Ok(true)
     }
 
-    fn seqs(&mut self) -> std::io::Result<BTreeSet<u64>> {
+    fn lines(&mut self) -> std::io::Result<BTreeMap<u64, Vec<String>>> {
         let bytes = self.read_bytes()?;
         let text = String::from_utf8_lossy(&bytes);
-        Ok(text.lines().filter_map(parse_seq).collect())
+        let mut by_seq: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        for line in text.lines() {
+            if let Some(seq) = parse_seq(line) {
+                by_seq.entry(seq).or_default().push(line.to_string());
+            }
+        }
+        Ok(by_seq)
     }
 
     fn append(&mut self, line: &str) -> std::io::Result<()> {
@@ -119,13 +128,26 @@ pub struct RecoveryReport {
     /// Sequence numbers of the unwritten outbox lines that the file held already. They are marked
     /// written, and no second line is added.
     pub already_present: Vec<u64>,
+    /// Sequence numbers of the unwritten outbox lines whose number the file held with other text.
+    /// The real line is appended for each one.
+    pub foreign: Vec<u64>,
+}
+
+impl RecoveryReport {
+    /// One note per foreign line, for the tick notes.
+    pub fn notes(&self) -> Vec<String> {
+        self.foreign
+            .iter()
+            .map(|seq| format!("ledger line #{seq} appeared with foreign text"))
+            .collect()
+    }
 }
 
 impl Engine {
     /// Recover the ledger file after a stop. Run it before any other work at start-up.
     ///
-    /// It cuts a torn last line, reads the sequence numbers left in the file, appends each
-    /// unwritten outbox line that is missing, in order, and marks it written. A failure here
+    /// It cuts a torn last line, reads the lines left in the file, appends each unwritten outbox
+    /// line that is missing (or present only with foreign text), in order, and marks it written. A failure here
     /// stops admission, as a failed append does.
     pub fn recover_ledger(&self) -> Result<RecoveryReport, EngineError> {
         let mut inner = self.lock();
@@ -137,7 +159,7 @@ impl Engine {
         let cut = inner.ledger.truncate_torn_tail();
         report.truncated_torn_tail =
             cut.map_err(|e| self.degrade(&mut inner, format!("ledger recovery failed: {e}")))?;
-        let present = inner.ledger.seqs();
+        let present = inner.ledger.lines();
         let mut present = present
             .map_err(|e| self.degrade(&mut inner, format!("ledger recovery failed: {e}")))?;
 
@@ -149,7 +171,10 @@ impl Engine {
             )
         })?;
         for line in pending {
-            if present.contains(&line.seq) {
+            let want = format_line(line.seq, &line.body);
+            let want = want.trim_end_matches('\n');
+            let held = present.get(&line.seq);
+            if held.is_some_and(|texts| texts.iter().any(|t| t == want)) {
                 self.store
                     .mark_ledger_written(&line.ledger_file, line.seq)
                     .map_err(|e| {
@@ -160,10 +185,13 @@ impl Engine {
                     })?;
                 report.already_present.push(line.seq);
             } else {
+                if held.is_some() {
+                    report.foreign.push(line.seq);
+                }
                 self.append_and_mark(&mut inner, &line).map_err(|why| {
                     self.degrade(&mut inner, format!("ledger recovery failed: {why}"))
                 })?;
-                present.insert(line.seq);
+                present.entry(line.seq).or_default().push(want.to_string());
                 report.appended.push(line.seq);
             }
         }
