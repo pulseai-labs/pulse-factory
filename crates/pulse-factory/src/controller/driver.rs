@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
 use pf_engine::launch::LaunchStep;
@@ -16,7 +17,7 @@ use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
     AgentPort, SessionEvent, SessionRef, SessionState as AdapterState, SessionStatus, Usage,
 };
-use pf_engine::port::store::{NodeRow, RunState, SessionRow};
+use pf_engine::port::store::{NodeRow, RequestKind, RunState, SessionRow};
 use pf_engine::render::{RenderContext, UnitView, render};
 use pf_engine::status::Status;
 use pf_engine::unit::{StallDecision, UnitDetail, stall_decision};
@@ -88,6 +89,8 @@ pub struct Driver {
     cfg: DriverConfig,
     state: Mutex<DState>,
     notes: Mutex<Vec<String>>,
+    /// Notes from start-up. The first tick takes them into its own notes.
+    startup_notes: Mutex<Vec<String>>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -124,7 +127,15 @@ impl Driver {
             cfg,
             state: Mutex::new(DState::default()),
             notes: Mutex::new(Vec::new()),
+            startup_notes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Keep notes from start-up (the ledger recovery's foreign lines). The notes show at once, and
+    /// the first tick carries them too.
+    pub fn note_startup(&self, notes: Vec<String>) {
+        *locked(&self.notes) = notes.clone();
+        *locked(&self.startup_notes) = notes;
     }
 
     /// The notes of the last tick.
@@ -164,7 +175,7 @@ impl Driver {
     pub fn tick(&self) {
         let mut state = locked(&self.state);
         let mut t = Tick {
-            notes: Vec::new(),
+            notes: std::mem::take(&mut *locked(&self.startup_notes)),
             now: (self.cfg.clock)(),
         };
         self.tick_inner(&mut state, &mut t);
@@ -398,7 +409,12 @@ impl Driver {
     }
 
     fn park(&self, t: &mut Tick, unit_id: &str, reason: &str) -> bool {
-        match self.cfg.engine.park(unit_id, reason) {
+        self.park_kind(t, unit_id, RequestKind::Park, reason)
+    }
+
+    /// Park a unit and open the request of `kind` with it. The kind is the park's source.
+    fn park_kind(&self, t: &mut Tick, unit_id: &str, kind: RequestKind, reason: &str) -> bool {
+        match self.cfg.engine.park_as(unit_id, kind, reason) {
             Ok(_) => true,
             Err(e) => {
                 t.note(format!("park of {unit_id} not recorded: {e}"));
@@ -432,6 +448,7 @@ impl Driver {
         t: &mut Tick,
         session: &SessionRow,
         r: &SessionRef,
+        kind: RequestKind,
         reason: &str,
     ) {
         let running = self
@@ -447,7 +464,7 @@ impl Driver {
         if !running {
             return;
         }
-        self.park(t, &session.unit_id, reason);
+        self.park_kind(t, &session.unit_id, kind, reason);
         self.end_session(st, t, session, r, reason, false);
     }
 
@@ -580,7 +597,9 @@ impl Driver {
             let r = SessionRef(process_ref.clone());
             match decision {
                 StallDecision::Relaunch => self.end_session(st, t, session, &r, &reason, true),
-                StallDecision::Park => self.park_running(st, t, session, &r, &reason),
+                StallDecision::Park => {
+                    self.park_running(st, t, session, &r, RequestKind::Stall, &reason)
+                }
                 StallDecision::Active => {}
             }
         }
@@ -660,7 +679,9 @@ impl Driver {
             );
             match &verdict {
                 StageVerdict::Wait => {}
-                StageVerdict::Park { reason } => self.park_running(st, t, session, &r, reason),
+                StageVerdict::Park { reason, kind } => {
+                    self.park_running(st, t, session, &r, *kind, reason)
+                }
                 StageVerdict::Done { .. } => {
                     // A done signal seen mid-turn can come before the push it belongs to.
                     if status.turn_ended || ended {
@@ -882,11 +903,64 @@ impl Driver {
         }
     }
 
+    // ------------------------------------------------------------------ resumes
+
+    /// The run's copies must be as they were at arm. A mismatch names the file.
+    pub fn check_pins(&self) -> Result<(), String> {
+        match self.cfg.pins.iter().find_map(|p| pin::check(p).err()) {
+            Some(mismatch) => Err(mismatch.to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// Resume a parked unit at `to_stage` (default: the stage it parked in), in the name of the
+    /// claim `generation`. The pins of the run's whole manifest are checked first: a mismatch
+    /// refuses the clear, names the file and changes nothing. The next tick launches the stage
+    /// through the normal path (capacity, pins, `before`); a halted run launches nothing.
+    pub fn clear_unit(
+        &self,
+        unit_id: &str,
+        to_stage: Option<&str>,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Admission, String> {
+        self.check_pins()?;
+        self.cfg
+            .engine
+            .clear_unit(unit_id, to_stage, generation, request_id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Answer a request with a ruling. An answer that resumes a unit checks the pins first, as
+    /// a clear does.
+    pub fn answer_request(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        text: &str,
+    ) -> Result<Admission, String> {
+        let resumes = self
+            .cfg
+            .engine
+            .requests()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|r| r.id == request_id && r.unit_id.is_some());
+        if resumes {
+            self.check_pins()?;
+        }
+        self.cfg
+            .engine
+            .answer_request(request_id, revision, generation, text)
+            .map_err(|e| e.to_string())
+    }
+
     /// End each session still open under a unit that is not running (start-up, and a replaced run).
     pub fn sweep(&self) {
         let mut state = locked(&self.state);
         let mut t = Tick {
-            notes: Vec::new(),
+            notes: locked(&self.startup_notes).clone(),
             now: (self.cfg.clock)(),
         };
         self.step3_sessions(&mut state, &mut t);

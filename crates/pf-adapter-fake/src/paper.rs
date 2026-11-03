@@ -324,6 +324,12 @@ impl AgentPort for PaperAdapter {
         Ok(next)
     }
 
+    fn process_id(&self, session: &SessionRef) -> Option<u32> {
+        let s = self.find(session)?;
+        let s = locked(&s);
+        (!s.exited).then(|| s.child.id())
+    }
+
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let Some(s) = self.find(session) else {
             return Ok(false);

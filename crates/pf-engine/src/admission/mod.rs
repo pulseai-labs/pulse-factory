@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::port::agent::Usage;
 use crate::port::forge::PrRef;
-use crate::port::store::{AdmissionRow, NodeKind, NodeRow, RunRow, SessionRow};
+use crate::port::store::{
+    AdmissionRow, ClaimRow, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus, RunRow,
+    SessionRow,
+};
 use crate::port::unit_source::UnitRecord;
 use crate::status::{EndStatus, Status};
 use crate::unit::{Signal, UnitDetail};
@@ -64,8 +67,14 @@ pub enum CommandBody {
         status: EndStatus,
         reason: String,
     },
-    /// Park a unit that is `running`, with its reason.
-    Park { unit_id: String, reason: String },
+    /// Park a unit that is `running`, with its reason. The same commit opens the unit's request,
+    /// of the kind the park's source names.
+    Park {
+        unit_id: String,
+        reason: String,
+        #[serde(default)]
+        request_kind: RequestKind,
+    },
     /// The operator's kill switch: the run admits no further launch and no further merge.
     Halt { reason: String },
     /// Ask to merge a unit's PR.
@@ -98,8 +107,55 @@ pub enum CommandBody {
         line_number: u64,
         text: String,
     },
-    /// End the run.
+    /// End the run. Its open requests are withdrawn in the same commit.
     EndRun { reason: String },
+    /// Open a request. A park opens its own, so this is for a request that no park carries.
+    OpenRequest { request: OpenRequestBody },
+    /// Change the facts of an open request. `revision` is the one the caller read; the request
+    /// moves to the next one.
+    ReviseRequest {
+        id: String,
+        revision: u32,
+        /// JSON text.
+        body: String,
+    },
+    /// Answer a request, bound to its exact ID and revision and to the claim generation.
+    AnswerRequest {
+        id: String,
+        revision: u32,
+        generation: u64,
+        /// `{"verb":"answer","text":…}`.
+        answer: serde_json::Value,
+    },
+    /// Close an open request that nothing will answer: the run ended, or the unit moved on.
+    WithdrawRequest { id: String, reason: String },
+    /// Take the claim. `generation` is the next one; the old claim is fenced out.
+    Claim {
+        generation: u64,
+        holder: String,
+        /// SHA-256 of the token, as 64 hex digits.
+        token_hash: String,
+    },
+    /// Resume a parked unit at a stage, in the claim's name (G9).
+    ClearUnit {
+        unit_id: String,
+        /// `None` is the stage the unit parked in.
+        to_stage: Option<String>,
+        generation: u64,
+        request_id: String,
+    },
+}
+
+/// What an `OpenRequest` command asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenRequestBody {
+    /// `None` for a run-level request.
+    pub unit_id: Option<String>,
+    pub stage: String,
+    pub kind: RequestKind,
+    pub reason: String,
+    /// JSON text.
+    pub body: String,
 }
 
 /// How a push ended.
@@ -129,6 +185,12 @@ impl CommandBody {
             CommandBody::Push { .. } => "push",
             CommandBody::Decision { .. } => "decision",
             CommandBody::EndRun { .. } => "end_run",
+            CommandBody::OpenRequest { .. } => "open_request",
+            CommandBody::ReviseRequest { .. } => "revise_request",
+            CommandBody::AnswerRequest { .. } => "answer_request",
+            CommandBody::WithdrawRequest { .. } => "withdraw_request",
+            CommandBody::Claim { .. } => "claim",
+            CommandBody::ClearUnit { .. } => "clear_unit",
         }
     }
 }
@@ -171,6 +233,10 @@ pub struct RunView {
     pub nodes: Vec<NodeRow>,
     pub sessions: Vec<SessionRow>,
     pub admissions: Vec<AdmissionRow>,
+    /// The run's requests, in the order they were opened.
+    pub requests: Vec<RequestRow>,
+    /// Every claim of the store, by generation.
+    pub claims: Vec<ClaimRow>,
 }
 
 impl RunView {
@@ -200,6 +266,37 @@ impl RunView {
         self.stages_of(unit_id)
             .into_iter()
             .find(|n| n.status == Status::Running)
+    }
+
+    pub fn request(&self, id: &str) -> Option<&RequestRow> {
+        self.requests.iter().find(|r| r.id == id)
+    }
+
+    /// The unit's open request, when it has one. A unit has at most one.
+    pub fn open_request_of(&self, unit_id: &str) -> Option<&RequestRow> {
+        self.requests
+            .iter()
+            .find(|r| r.status == RequestStatus::Open && r.unit_id.as_deref() == Some(unit_id))
+    }
+
+    /// The requests that are still open.
+    pub fn open_requests(&self) -> impl Iterator<Item = &RequestRow> {
+        self.requests
+            .iter()
+            .filter(|r| r.status == RequestStatus::Open)
+    }
+
+    /// The current claim: the highest generation with no `fenced_at`.
+    pub fn current_claim(&self) -> Option<&ClaimRow> {
+        self.claims
+            .iter()
+            .filter(|c| c.fenced_at.is_none())
+            .max_by_key(|c| c.generation)
+    }
+
+    /// The highest generation any claim has had, fenced or not. 0 before the first claim.
+    pub fn last_claim_generation(&self) -> u64 {
+        self.claims.iter().map(|c| c.generation).max().unwrap_or(0)
     }
 
     pub fn is_halted(&self) -> bool {

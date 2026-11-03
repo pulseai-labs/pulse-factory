@@ -12,6 +12,7 @@ use common::{Env, TrackedSource, env, item_workflow, unit};
 use pf_engine::Status;
 use pf_engine::launch::LaunchStep;
 use pf_engine::port::forge::PrRef;
+use pf_engine::port::store::RequestKind;
 use pf_engine::render::{RenderContext, UnitView};
 use pf_engine::unit::Signal;
 use pf_workflow::commands::{CommandFailure, CommandSpec};
@@ -285,7 +286,8 @@ fn the_stop_file_wins_over_a_done_file() {
     assert_eq!(
         v(&s, &SystemProbe, &WAITING),
         StageVerdict::Park {
-            reason: "the plan has no spec".to_string()
+            reason: "the plan has no spec".to_string(),
+            kind: RequestKind::Stop,
         }
     );
 }
@@ -303,7 +305,8 @@ fn a_park_file_parks_with_its_reason() {
     assert_eq!(
         v(&s, &SystemProbe, &WAITING),
         StageVerdict::Park {
-            reason: "gaps surfaced for u1".to_string()
+            reason: "gaps surfaced for u1".to_string(),
+            kind: RequestKind::Gaps,
         }
     );
     // The stop file still wins over it.
@@ -311,7 +314,8 @@ fn a_park_file_parks_with_its_reason() {
     assert_eq!(
         v(&s, &SystemProbe, &WAITING),
         StageVerdict::Park {
-            reason: "stopped".to_string()
+            reason: "stopped".to_string(),
+            kind: RequestKind::Stop,
         }
     );
 }
@@ -329,7 +333,8 @@ fn a_park_file_wins_over_a_done_file() {
     assert_eq!(
         v(&s, &SystemProbe, &WAITING),
         StageVerdict::Park {
-            reason: "correction needed".to_string()
+            reason: "correction needed".to_string(),
+            kind: RequestKind::RedGate,
         }
     );
 }
@@ -340,6 +345,7 @@ fn a_turn_end_with_no_done_condition_parks() {
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![]);
     let expected = StageVerdict::Park {
         reason: "seat ended with no done signal".to_string(),
+        kind: RequestKind::Park,
     };
     assert_eq!(v(&s, &SystemProbe, &TURN_ENDED), expected);
     // A session that ended without a turn end counts too.
@@ -370,7 +376,8 @@ fn an_exit0_that_says_not_yet_waits_and_parks_only_at_the_turn_end() {
     assert_eq!(
         v(&s, &SystemProbe, &TURN_ENDED),
         StageVerdict::Park {
-            reason: "seat ended with no done signal".to_string()
+            reason: "seat ended with no done signal".to_string(),
+            kind: RequestKind::Park,
         }
     );
     let s = stage(dir.path(), vec![exit0_cond("true")], vec![]);
@@ -391,7 +398,7 @@ fn a_command_that_cannot_run_parks_with_its_failure() {
         vec![exit0_cond("definitely-not-a-program-xyz")],
         vec![],
     );
-    let StageVerdict::Park { reason } = v(&s, &SystemProbe, &WAITING) else {
+    let StageVerdict::Park { reason, .. } = v(&s, &SystemProbe, &WAITING) else {
         panic!("park")
     };
     assert!(
@@ -409,13 +416,13 @@ fn a_command_that_cannot_run_parks_with_its_failure() {
         vec![],
     );
     let vars = BTreeMap::from([("x".to_string(), "--evil".to_string())]);
-    let StageVerdict::Park { reason } = verdict(&s, &vars, &SystemProbe, &WAITING) else {
+    let StageVerdict::Park { reason, .. } = verdict(&s, &vars, &SystemProbe, &WAITING) else {
         panic!("park")
     };
     assert!(reason.contains("starts with"), "{reason}");
 
     // A record that lacks a variable parks too.
-    let StageVerdict::Park { reason } = verdict(&s, &BTreeMap::new(), &SystemProbe, &WAITING)
+    let StageVerdict::Park { reason, .. } = verdict(&s, &BTreeMap::new(), &SystemProbe, &WAITING)
     else {
         panic!("park")
     };

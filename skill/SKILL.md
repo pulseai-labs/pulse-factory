@@ -7,8 +7,9 @@ description: Arm a Pulse Factory run for a planned spine, read its status, and h
 
 Pulse Factory runs the seats of a planned spine with no model session watching. You arm a run once.
 A controller (a systemd user service) then drives the seats until each item PR has merged into the
-spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the five verbs: `arm`,
-`status`, `halt`, `hook` and `controller`.
+spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
+`status`, `halt`, `hook` and `controller`, and the verbs of requests and the claim: `requests`,
+`show`, `claim`, `answer` and `clear`.
 
 ## Arm a run
 

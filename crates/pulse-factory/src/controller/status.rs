@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 
 use pf_engine::admission::{CommandBody, body_of_content};
-use pf_engine::port::store::{NodeKind, Store};
+use pf_engine::port::store::{NodeKind, RequestStatus, Store};
 use pf_engine::unit::UnitDetail;
 use serde_json::{Value, json};
 
@@ -19,6 +19,13 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
     let nodes = c.store.nodes(id).unwrap_or_default();
     let sessions = c.store.sessions(id).unwrap_or_default();
     let admissions = c.store.admissions(id).unwrap_or_default();
+    let open_requests: Vec<_> = c
+        .store
+        .requests(id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.status == RequestStatus::Open)
+        .collect();
     let end_reason = admissions
         .iter()
         .rev()
@@ -54,6 +61,11 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
                 "stage": current,
                 "stages_done": detail.as_ref().map_or(0, |d| d.stages_done),
                 "reason": u.reason,
+                // The unit's open request, when it has one: the way past a park.
+                "request": open_requests
+                    .iter()
+                    .find(|r| r.unit_id.as_deref() == Some(u.id.as_str()))
+                    .map(|r| r.id.clone()),
                 "pr": detail.and_then(|d| d.pr).map(|p| format!("{}#{}", p.repo, p.number)),
             })
         })
@@ -102,6 +114,7 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
         "halted_reason": run.as_ref().and_then(|r| r.halted_reason.clone()),
         "degraded": h.engine.degraded(),
         "end_reason": end_reason,
+        "open_requests": open_requests.len(),
         "notes": h.driver.notes(),
         "units": units,
         "sessions": session_rows,

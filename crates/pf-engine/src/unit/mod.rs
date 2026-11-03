@@ -53,6 +53,10 @@ pub struct UnitDetail {
     pub stages_done: u32,
     /// The unit's PR, once a signal has named it.
     pub pr: Option<PrRef>,
+    /// How many times a claim has resumed the unit after a park. The park, merge and
+    /// merge-result command IDs carry it, so a unit can park, resume and park again.
+    #[serde(default)]
+    pub park_generation: u32,
 }
 
 impl UnitDetail {

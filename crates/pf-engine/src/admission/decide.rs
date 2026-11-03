@@ -4,9 +4,12 @@
 //! returns `Err` and records nothing. A command the run refuses on purpose, such as a launch after
 //! `halt`, returns a `Refused` decision, and the store records the refusal with its reason.
 
+use crate::claim;
 use crate::launch;
 use crate::merge;
-use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow, RunRow, RunState};
+use crate::port::store::{
+    AdmissionOutcome, Effect, NodeKind, NodeRow, RequestKind, RunRow, RunState,
+};
 use crate::status::{EndStatus, Status, check_reason};
 use crate::unit::{Signal, UnitDetail};
 use crate::workflow::Workflow;
@@ -136,7 +139,11 @@ pub fn decide(
             status,
             reason,
         } => end_node(view, node_id, *status, reason, now),
-        CommandBody::Park { unit_id, reason } => park_unit(view, unit_id, reason, now),
+        CommandBody::Park {
+            unit_id,
+            reason,
+            request_kind,
+        } => park_unit(view, workflow, unit_id, *request_kind, reason, now),
         CommandBody::Halt { reason } => launch::decide_halt(view, workflow, reason, now),
         CommandBody::Merge { unit_id } => merge::decide_merge(view, workflow, unit_id, now),
         CommandBody::MergeResult {
@@ -173,9 +180,49 @@ pub fn decide(
             r.updated_at = now.to_string();
             let mut d = Decision::admitted();
             d.effects.push(Effect::PutRun(r));
+            // Nothing answers a request of an ended run.
+            d.effects.extend(claim::withdraw_all(
+                view,
+                &format!("run ended: {reason}"),
+                now,
+            ));
             d.ledger = Some(format!("run ended: {reason}"));
             Ok(d)
         }
+        CommandBody::OpenRequest { request } => {
+            claim::decide_open_request(view, run_id, request, now)
+        }
+        CommandBody::ReviseRequest { id, revision, body } => {
+            claim::decide_revise(view, id, *revision, body)
+        }
+        CommandBody::AnswerRequest {
+            id,
+            revision,
+            generation,
+            answer,
+        } => claim::decide_answer(view, workflow, id, *revision, *generation, answer, now),
+        CommandBody::WithdrawRequest { id, reason } => {
+            claim::decide_withdraw(view, id, reason, now)
+        }
+        CommandBody::Claim {
+            generation,
+            holder,
+            token_hash,
+        } => claim::decide_claim(view, *generation, holder, token_hash, now),
+        CommandBody::ClearUnit {
+            unit_id,
+            to_stage,
+            generation,
+            request_id,
+        } => claim::decide_clear(
+            view,
+            workflow,
+            unit_id,
+            to_stage.as_deref(),
+            *generation,
+            request_id,
+            now,
+        ),
     }
 }
 
@@ -231,6 +278,7 @@ fn admit_unit(
         ingest_seq,
         stages_done: 0,
         pr: None,
+        park_generation: 0,
     };
     let mut d = Decision::admitted();
     d.unit_id = Some(unit.id.clone());
@@ -400,16 +448,20 @@ fn end_node(
     Ok(d)
 }
 
-fn park_unit(view: &RunView, unit_id: &str, reason: &str, now: &str) -> Result<Decision, Rejected> {
+/// Park a unit that is `running`. The same commit opens the unit's request (ADR-0006).
+fn park_unit(
+    view: &RunView,
+    workflow: &Workflow,
+    unit_id: &str,
+    kind: RequestKind,
+    reason: &str,
+    now: &str,
+) -> Result<Decision, Rejected> {
     let reason = check_reason(reason).map_err(|e| e.to_string())?;
     let unit = running_unit(view, unit_id)?;
-    let mut u = unit.clone();
-    u.status = Status::Parked;
-    u.reason = Some(reason.to_string());
-    u.updated_at = now.to_string();
     let mut d = Decision::admitted();
     d.unit_id = Some(unit_id.to_string());
-    d.effects.push(Effect::PutNode(u));
+    d.effects = claim::park_effects(view, workflow, unit, kind, reason, now)?;
     d.ledger = Some(format!("unit {unit_id} parked: {reason}"));
     Ok(d)
 }

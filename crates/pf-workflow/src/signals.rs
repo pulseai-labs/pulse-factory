@@ -11,14 +11,17 @@
 //! 4. A session whose turn ended, with none of the above, parks with "seat ended with no done signal".
 //! 5. Otherwise the stage keeps waiting.
 //!
-//! In this version a gap, a correction packet and a red gate all park. Requests that answer them
-//! come later.
+//! Every park carries the kind of the request it opens (ADR-0006). The kind comes from the
+//! condition that parked the unit, in code, and never from the reason text: the stop file is
+//! `stop`, a `park_on` file named `gaps.json` is `gaps`, one named `correction.txt` is
+//! `red_gate`, and every other park is `park`.
 
 use std::io::Read;
 
 use pf_engine::Engine;
 use pf_engine::admission::EngineError;
 use pf_engine::port::forge::PrRef;
+use pf_engine::port::store::RequestKind;
 use pf_engine::render::{RenderContext, render};
 use pf_engine::status::one_line_reason;
 use pf_engine::unit::Signal;
@@ -50,7 +53,26 @@ pub enum StageVerdict {
     },
     Park {
         reason: String,
+        /// The kind of the request the park opens.
+        kind: RequestKind,
     },
+}
+
+/// The file name of a `park_on` file that carries a gap list.
+pub const GAPS_FILE: &str = "gaps.json";
+/// The file name of a `park_on` file that carries a correction packet (a red gate).
+pub const CORRECTION_FILE: &str = "correction.txt";
+
+/// The request kind of a `park_on` file, by the file's name.
+pub fn park_on_kind(path: &str) -> RequestKind {
+    match std::path::Path::new(path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some(GAPS_FILE) => RequestKind::Gaps,
+        Some(CORRECTION_FILE) => RequestKind::RedGate,
+        _ => RequestKind::Park,
+    }
 }
 
 /// The file system and the commands, as a stage's signals see them.
@@ -139,9 +161,10 @@ pub fn parse_pr(text: &str) -> Option<PrRef> {
     Some(PrRef { repo, number })
 }
 
-fn park(reason: impl AsRef<str>) -> StageVerdict {
+fn park(kind: RequestKind, reason: impl AsRef<str>) -> StageVerdict {
     StageVerdict::Park {
         reason: one_line_reason(reason.as_ref()),
+        kind,
     }
 }
 
@@ -154,7 +177,10 @@ pub fn evaluate(
 ) -> StageVerdict {
     let text = |template: &str| render(template, ctx).map(|r| r.text);
     let broken = |what: &str, why: &dyn std::fmt::Display| {
-        park(format!("stage {} {what}: {why}", stage.name))
+        park(
+            RequestKind::Park,
+            format!("stage {} {what}: {why}", stage.name),
+        )
     };
 
     // 1. The stop file.
@@ -164,10 +190,11 @@ pub fn evaluate(
     };
     if probe.file_exists(&stop) {
         return match probe.read_text(&stop) {
-            Ok(content) => park(content),
-            Err(e) => park(format!(
-                "the stop file {stop} exists and cannot be read: {e}"
-            )),
+            Ok(content) => park(RequestKind::Stop, content),
+            Err(e) => park(
+                RequestKind::Stop,
+                format!("the stop file {stop} exists and cannot be read: {e}"),
+            ),
         };
     }
 
@@ -179,7 +206,7 @@ pub fn evaluate(
         };
         if probe.file_exists(&path) {
             return match text(&entry.reason) {
-                Ok(reason) => park(reason),
+                Ok(reason) => park(park_on_kind(&path), reason),
                 Err(e) => broken("park_on reason cannot render", &e),
             };
         }
@@ -192,10 +219,13 @@ pub fn evaluate(
         let place = i + 1;
         let command_failed = |spec: &CommandSpec, f: CommandFailure| {
             let program = spec.argv.first().map_or("", String::as_str);
-            park(format!(
-                "stage {} done condition {place} ({program}) {f}",
-                stage.name
-            ))
+            park(
+                RequestKind::Park,
+                format!(
+                    "stage {} done condition {place} ({program}) {f}",
+                    stage.name
+                ),
+            )
         };
         match cond {
             DoneCond::File(template) => {
@@ -253,7 +283,7 @@ pub fn evaluate(
 /// No done condition holds yet: wait, or park when the session is over.
 fn not_done(session: &SessionState) -> StageVerdict {
     if session.turn_ended || session.ended {
-        park(REASON_NO_DONE_SIGNAL)
+        park(RequestKind::Park, REASON_NO_DONE_SIGNAL)
     } else {
         StageVerdict::Wait
     }
@@ -282,8 +312,8 @@ pub fn apply(
             engine.signal(unit_id, stage, signal.clone(), pr.clone())?;
             Ok(ApplyResult::Signalled)
         }
-        StageVerdict::Park { reason } => {
-            engine.park(unit_id, reason)?;
+        StageVerdict::Park { reason, kind } => {
+            engine.park_as(unit_id, *kind, reason)?;
             let stored = one_line_reason(reason);
             Ok(ApplyResult::Parked(stored))
         }

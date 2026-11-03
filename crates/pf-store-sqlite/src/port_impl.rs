@@ -4,8 +4,9 @@
 //! writes and the outbox line, together or not at all.
 
 use pf_engine::port::store::{
-    AdmissionOutcome, AdmissionRow, Commit, Committed, Effect, LedgerLine, NodeKind, NodeRow,
-    RunRow, RunState, SessionRow, Store, StoreError,
+    AdmissionOutcome, AdmissionRow, ClaimRow, Commit, Committed, Effect, LedgerLine, NewRequest,
+    NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow, Store,
+    StoreError,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -111,6 +112,97 @@ fn put_session(tx: &Transaction<'_>, s: &SessionRow) -> rusqlite::Result<()> {
     Ok(())
 }
 
+const REQUEST_COLUMNS: &str = "id, revision, run_id, unit_id, stage, kind, reason, body, status, opened_at, answered_at, answer, answer_generation";
+
+fn request_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<RequestRow> {
+    let kind: String = r.get(5)?;
+    let status: String = r.get(8)?;
+    Ok(RequestRow {
+        id: r.get(0)?,
+        revision: u32::try_from(r.get::<_, i64>(1)?).unwrap_or(u32::MAX),
+        run_id: r.get(2)?,
+        unit_id: r.get(3)?,
+        stage: r.get(4)?,
+        kind: RequestKind::parse(&kind).ok_or_else(|| bad("request kind", &kind))?,
+        reason: r.get(6)?,
+        body: r.get(7)?,
+        status: RequestStatus::parse(&status).ok_or_else(|| bad("request status", &status))?,
+        opened_at: r.get(9)?,
+        answered_at: r.get(10)?,
+        answer: r.get(11)?,
+        answer_generation: r.get::<_, Option<i64>>(12)?.map(to_u64),
+    })
+}
+
+/// Give a new request the next `R-<n>` of the store and insert it, open at revision 1.
+fn open_request(tx: &Transaction<'_>, n: &NewRequest) -> rusqlite::Result<()> {
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM requests",
+        [],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO requests (id, revision, run_id, unit_id, stage, kind, reason, body, status, opened_at) \
+         VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8)",
+        params![
+            format!("R-{next}"),
+            n.run_id,
+            n.unit_id,
+            n.stage,
+            n.kind.as_str(),
+            n.reason,
+            n.body,
+            n.opened_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Replace the request with this ID. A request that does not exist is an error: the commit
+/// rolls back.
+fn put_request(tx: &Transaction<'_>, r: &RequestRow) -> rusqlite::Result<()> {
+    let changed = tx.execute(
+        "UPDATE requests SET revision = ?2, run_id = ?3, unit_id = ?4, stage = ?5, kind = ?6, reason = ?7, \
+             body = ?8, status = ?9, opened_at = ?10, answered_at = ?11, answer = ?12, answer_generation = ?13 \
+         WHERE id = ?1",
+        params![
+            r.id,
+            i64::from(r.revision),
+            r.run_id,
+            r.unit_id,
+            r.stage,
+            r.kind.as_str(),
+            r.reason,
+            r.body,
+            r.status.as_str(),
+            r.opened_at,
+            r.answered_at,
+            r.answer,
+            r.answer_generation.map(to_i64)
+        ],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+fn put_claim(tx: &Transaction<'_>, c: &ClaimRow) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO claims (generation, token_hash, holder, claimed_at, fenced_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT (generation) DO UPDATE SET fenced_at = excluded.fenced_at",
+        params![
+            to_i64(c.generation),
+            c.token_hash,
+            c.holder,
+            c.claimed_at,
+            c.fenced_at
+        ],
+    )?;
+    Ok(())
+}
+
 fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = find_admission(&tx, &c.run_id, &c.command_id)? {
@@ -136,6 +228,9 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
             Effect::PutRun(r) => put_run(&tx, r)?,
             Effect::PutNode(n) => put_node(&tx, n)?,
             Effect::PutSession(s) => put_session(&tx, s)?,
+            Effect::OpenRequest(n) => open_request(&tx, n)?,
+            Effect::PutRequest(r) => put_request(&tx, r)?,
+            Effect::PutClaim(c) => put_claim(&tx, c)?,
         }
     }
     let ledger = match &c.ledger {
@@ -261,6 +356,52 @@ impl Store for SqliteStore {
                         cost_micros: to_u64(r.get(10)?),
                         created_at: r.get(11)?,
                         updated_at: r.get(12)?,
+                    })
+                },
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn requests(&self, run_id: &str) -> Result<Vec<RequestRow>, StoreError> {
+        let run_id = run_id.to_string();
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!("SELECT {REQUEST_COLUMNS} FROM requests WHERE run_id = ?1 ORDER BY rowid"),
+                [&run_id],
+                request_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn request(&self, id: &str) -> Result<Option<RequestRow>, StoreError> {
+        let id = id.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                &format!("SELECT {REQUEST_COLUMNS} FROM requests WHERE id = ?1"),
+                [&id],
+                request_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn claims(&self) -> Result<Vec<ClaimRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                "SELECT generation, token_hash, holder, claimed_at, fenced_at FROM claims ORDER BY generation",
+                [],
+                |r| {
+                    Ok(ClaimRow {
+                        generation: to_u64(r.get(0)?),
+                        token_hash: r.get(1)?,
+                        holder: r.get(2)?,
+                        claimed_at: r.get(3)?,
+                        fenced_at: r.get(4)?,
                     })
                 },
             )

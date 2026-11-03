@@ -2,13 +2,14 @@
 //!
 //! Every unit in `running`, which includes a unit that waits on a seat's next signal, whose
 //! session process the agent port reports as gone becomes `parked`, with the reason "seat lost
-//! across a controller restart". A live session, and a unit already done, failed, stopped or
-//! parked, is left alone. Nothing is relaunched. (ADR-0006 also opens a request here; requests
-//! come in a later item.)
+//! across a controller restart", and a `seat_lost` request opens in the same commit. A live
+//! session, and a unit already done, failed, stopped or parked, is left alone. Nothing is
+//! relaunched: the claim decides each relaunch (ADR-0007), with `clear`.
 
 use crate::admission::EngineError;
 use crate::engine::Engine;
 use crate::port::agent::SessionRef;
+use crate::port::store::RequestKind;
 use crate::status::{EndStatus, REASON_SEAT_LOST, Status};
 
 /// What `reconcile` found.
@@ -56,7 +57,7 @@ impl Engine {
             }
             // Park first: a stop between the two leaves a parked unit, never a running unit with
             // no session.
-            self.park(&unit.id, REASON_SEAT_LOST)?;
+            self.park_as(&unit.id, RequestKind::SeatLost, REASON_SEAT_LOST)?;
             self.end(&session.id, EndStatus::Failed, REASON_SEAT_LOST)?;
             report.parked.push(unit.id.clone());
         }

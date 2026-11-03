@@ -425,6 +425,38 @@ impl Rig {
         })
     }
 
+    /// A restart on a new adapter instance: a new engine and driver over the same store and
+    /// ledger. The new adapter knows none of the sessions the first one launched, so start-up's
+    /// reconcile finds each running unit's seat gone.
+    pub fn restart_on(&self, fake: Arc<FakeAdapter>) -> (Arc<Engine>, Driver) {
+        let now = self.now.clone();
+        let agent: Arc<dyn AgentPort> = fake;
+        let engine = Arc::new(
+            Engine::new(
+                self.cfg.clone(),
+                self.store.clone() as Arc<dyn Store>,
+                agent.clone(),
+                Arc::new(self.forge.clone()),
+                system_clock(),
+                Box::new(pf_engine::ledger::FsLedger::new(self.ledger.clone())),
+            )
+            .unwrap(),
+        );
+        engine.start_up().unwrap();
+        let driver = Driver::new(DriverConfig {
+            engine: engine.clone(),
+            agent,
+            package: self.package.clone(),
+            pins: self.pins.clone(),
+            params: self.params.clone(),
+            run_dir: self.run_dir.clone(),
+            target_dir: String::new(),
+            clock: Arc::new(move || now.load(Ordering::SeqCst)),
+            walk_limit: pulse_factory::controller::driver::WALK_LIMIT,
+        });
+        (engine, driver)
+    }
+
     /// The test clock now.
     pub fn clock(&self) -> u64 {
         self.now.load(Ordering::SeqCst)
