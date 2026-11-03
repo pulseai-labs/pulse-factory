@@ -233,14 +233,22 @@ impl Controller {
             Err(why) => return err(format!("answer refused: {why}")),
         };
         match handle.driver.answer_request(id, rev, generation, body) {
-            Ok(_) => Response::ok(json!({
+            Ok(answered) => Response::ok(json!({
                 "schema_version": SCHEMA_VERSION,
                 "request": id,
                 "revision": rev,
                 "run": request.run_id,
                 "unit": request.unit_id,
                 "generation": generation,
-                "resumed": request.unit_id.is_some(),
+                // A failed answer hook parks the unit again: the answer is recorded and the
+                // unit does not resume.
+                "resumed": request.unit_id.is_some() && answered.hook_failed.is_none(),
+                "hook": match (answered.hook_ran, &answered.hook_failed) {
+                    (false, _) => "none",
+                    (true, None) => "passed",
+                    (true, Some(_)) => "failed",
+                },
+                "hook_failure": answered.hook_failed,
             })),
             Err(why) => err(format!("answer refused: {why}")),
         }

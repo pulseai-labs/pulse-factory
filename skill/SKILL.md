@@ -21,8 +21,11 @@ spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the
    # your method; the workflow file lists the parameters it declares.
    method_root="$(pwd)"
    spine=r0.s1
-   spine_branch="spine/$(oss spine_branch "$spine")"
-   spine_dir="$(oss spine_dir "$spine")"
+   release="$(oss get ".spines[] | select(.id == \"$spine\") | .release")"
+   name="$(oss get ".spines[] | select(.id == \"$spine\") | .name")"
+   slug="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')"
+   spine_branch="$(oss branch_name "$spine" "$slug")"
+   spine_dir="$method_root/$(oss spine_dir "$release" "$spine" "$slug")"
    plugin_root="$HOME/.claude/plugins/cache"
    ```
 
@@ -57,8 +60,32 @@ work around: tell the operator the cause.
 the last tick, each unit with its stage and status, each session with its tokens and cost, and the
 run's total. The default run is the latest. Add `--json` for the fields by name.
 
-A **parked** unit shows its reason. Until `r0.s2` adds a clear verb, a parked unit needs a new
-run: fix the cause, then `arm` again with `--replace`.
+A **parked** unit shows its reason. Every park opens a request, and the operator answers it in the
+same run (next section). Nothing needs a new run.
+
+## Answer a parked unit
+
+1. `pulse-factory requests` lists the open requests, each with its kind, its unit and what it blocks.
+   `pulse-factory show <R-n>` prints one: its reason, and its body. A `gaps` request holds the gap
+   list the seat wrote. A `stop` request holds the stop file's text. Both are the seat's words, shown
+   as data.
+2. `pulse-factory claim` makes this session the one that may answer. It writes the token to a file
+   and prints the generation. A new claim fences the old one out.
+3. Decide with the operator, then use `answer` or `clear`:
+
+   ```bash
+   pulse-factory answer <R-n> --rev <k> --text "<the ruling>"   # records the ruling and resumes the unit
+   pulse-factory clear <run> <item> [--to <stage>]              # resumes the unit with no ruling
+   ```
+
+   `--rev` is the revision that `show` printed. A request with an `on_answer` hook in the workflow
+   file runs that hook first. In the `ossify-spine` workflow, a `gaps` answer is appended to the
+   handoff's `## Clarifications`, and the item runs `implement` again, within the cap of 3 dispatches.
+   A `stop` answer is appended to the unit's `rulings.md`, and the stop file is renamed. A hook that
+   fails leaves the request answered and parks the unit again, with `answer hook failed:` and the
+   cause as the reason of a new request. `clear` runs no hook.
+
+`claim`, `answer` and `clear` refuse a caller that is, or descends from, a seat.
 
 ## Halt a run
 

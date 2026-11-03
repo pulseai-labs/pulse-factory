@@ -1,7 +1,10 @@
-//! A workflow package: a directory that holds `workflow.yaml`, the briefs and the rule files.
+//! A workflow package: a directory that holds `workflow.yaml`, the briefs, the rule files and an
+//! optional `scripts/` directory.
 //!
 //! Loading a package checks that every brief and rule file the workflow names exists inside the
-//! package, and that each rule file parses and belongs to its role.
+//! package, and that each rule file parses and belongs to its role. A command of an `on_answer`
+//! hook that names a file of the package, as `{run.package}/<path>`, must name a file that the
+//! package pins. The files in `scripts/` are the scripts that such hooks run.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -42,7 +45,16 @@ pub struct Package {
     pub rules: BTreeMap<String, RoleRules>,
     /// The brief files the stages name, relative to the package, sorted, without repeats.
     pub briefs: Vec<PathBuf>,
+    /// The files in the package's `scripts/` directory, relative to the package, sorted. A
+    /// run pins them like the briefs. The directory is optional.
+    pub scripts: Vec<PathBuf>,
 }
+
+/// The directory of a package that holds the scripts the workflow's commands run.
+pub const SCRIPTS_DIR: &str = "scripts";
+
+/// The placeholder prefix that names a file of the run's copy of the package.
+const PACKAGE_REF: &str = "{run.package}/";
 
 fn inside(path: &str) -> Result<PathBuf, PackageError> {
     let p = Path::new(path);
@@ -63,6 +75,43 @@ fn read(path: &Path) -> Result<String, PackageError> {
         path: path.to_path_buf(),
         why: e.to_string(),
     })
+}
+
+/// The plain files of `<dir>/scripts`, as paths relative to the package, sorted. A directory,
+/// a symbolic link or any other entry in it refuses the package: a pin hashes plain files.
+fn list_scripts(dir: &Path) -> Result<Vec<PathBuf>, PackageError> {
+    let scripts_dir = dir.join(SCRIPTS_DIR);
+    let entries = match std::fs::read_dir(&scripts_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(PackageError::Io {
+                path: scripts_dir,
+                why: e.to_string(),
+            });
+        }
+    };
+    let mut scripts = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| PackageError::Io {
+            path: scripts_dir.clone(),
+            why: e.to_string(),
+        })?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let kind = entry.file_type().map_err(|e| PackageError::Io {
+            path: entry.path(),
+            why: e.to_string(),
+        })?;
+        if !kind.is_file() {
+            return Err(PackageError::Bad {
+                path: format!("{SCRIPTS_DIR}/{name}"),
+                why: "a script must be a plain file: not a directory and not a link".to_string(),
+            });
+        }
+        scripts.push(PathBuf::from(SCRIPTS_DIR).join(name));
+    }
+    scripts.sort();
+    Ok(scripts)
 }
 
 impl Package {
@@ -124,19 +173,57 @@ impl Package {
         briefs.sort();
         briefs.dedup();
 
-        Ok(Package {
+        let scripts = list_scripts(dir)?;
+        let package = Package {
             dir: dir.to_path_buf(),
             file,
             rules,
             briefs,
-        })
+            scripts,
+        };
+        package.check_hook_files()?;
+        Ok(package)
     }
 
-    /// Every file a run pins (ADR-0007): the workflow file, the briefs and the rule files, as
-    /// paths relative to the package, sorted.
+    /// A command of an `on_answer` hook may run a file of the package. The file must be one the
+    /// run pins, or the run would run a file that nothing checks.
+    fn check_hook_files(&self) -> Result<(), PackageError> {
+        let pinned = self.pinned_files();
+        for track in &self.file.tracks {
+            for stage in &track.stages {
+                let hooks = stage
+                    .park_on
+                    .iter()
+                    .map(|p| &p.on_answer)
+                    .chain(std::iter::once(&stage.stop_on_answer));
+                for command in hooks.flatten() {
+                    for item in &command.argv {
+                        let Some(rest) = item.strip_prefix(PACKAGE_REF) else {
+                            continue;
+                        };
+                        let named = inside(rest)?;
+                        if !pinned.contains(&named) {
+                            return Err(PackageError::Bad {
+                                path: item.clone(),
+                                why: format!(
+                                    "the `on_answer` hook of stage `{}` runs a file the package does not pin; put it in `{SCRIPTS_DIR}/`",
+                                    stage.name
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every file a run pins (ADR-0007): the workflow file, the briefs, the rule files and the
+    /// scripts, as paths relative to the package, sorted.
     pub fn pinned_files(&self) -> Vec<PathBuf> {
         let mut files = vec![PathBuf::from("workflow.yaml")];
         files.extend(self.briefs.iter().cloned());
+        files.extend(self.scripts.iter().cloned());
         files.extend(self.file.roles.iter().map(|r| PathBuf::from(&r.rules)));
         files.sort();
         files.dedup();

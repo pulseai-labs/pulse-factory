@@ -139,6 +139,7 @@ fn a_replay_at_an_old_generation_returns_the_stored_receipt_and_changes_nothing(
                 unit_id: "u1".to_string(),
                 reason: "stalled".to_string(),
                 request_kind: RequestKind::Park,
+                detail: None,
             },
         })
         .unwrap();

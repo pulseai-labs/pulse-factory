@@ -31,6 +31,13 @@ pub struct Options {
     pub cold_builds: u32,
     /// The `stall_minutes` of the stage `implement`.
     pub implement_stall: u32,
+    /// The `stop_file:` entry of the stage `implement`, indented by 8 spaces, with a final
+    /// newline. The default is a plain path. A mapping adds an `on_answer` hook.
+    pub implement_stop: String,
+    /// The unit variables that the queue records of the item track carry, as a YAML flow list.
+    pub item_vars: String,
+    /// A directory whose files become the package's `scripts/` directory.
+    pub scripts_from: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -45,6 +52,9 @@ impl Default for Options {
             model_sessions: 2,
             cold_builds: 1,
             implement_stall: 20,
+            implement_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
+            item_vars: "[worktree_path, branch]".to_string(),
+            scripts_from: None,
         }
     }
 }
@@ -89,7 +99,7 @@ roots: ["{{param.spine_dir}}"]
 unit_sources:
   - dir: "{{run.dir}}/queue"
     track: item
-    vars: [worktree_path, branch]
+    vars: {item_vars}
 seeds:
   - id: lane
     group: lane
@@ -124,8 +134,7 @@ tracks:
         message: "Implement {{unit.id}}."
         cwd: "{{unit.vars.worktree_path}}"
         slots: [session, build]
-{implement_extra}        stop_file: "{{run.dir}}/out/{{unit.id}}/stop"
-        stall_minutes: {implement_stall}
+{implement_extra}{implement_stop}        stall_minutes: {implement_stall}
         first_turn_seconds: 180
         settings:
           report_dir: "{{param.spine_dir}}/work-{{unit.id}}"
@@ -181,6 +190,8 @@ tracks:
         seed_max = o.seed_max,
         lane_settings = o.lane_settings,
         implement_extra = o.implement_extra,
+        implement_stop = o.implement_stop,
+        item_vars = o.item_vars,
         model_sessions = o.model_sessions,
         cold_builds = o.cold_builds,
         implement_stall = o.implement_stall,
@@ -191,6 +202,13 @@ pub fn write_package(dir: &Path, o: &Options) {
     std::fs::create_dir_all(dir.join("briefs")).unwrap();
     std::fs::create_dir_all(dir.join("rules")).unwrap();
     std::fs::write(dir.join("workflow.yaml"), workflow_yaml(o)).unwrap();
+    if let Some(from) = &o.scripts_from {
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.join("scripts").join(entry.file_name())).unwrap();
+        }
+    }
     std::fs::write(dir.join("briefs/common.md"), "# Common\nDo the work.\n").unwrap();
     let rules: [(&str, &[&str]); 4] = [
         (

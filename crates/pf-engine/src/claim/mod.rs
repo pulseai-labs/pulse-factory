@@ -13,8 +13,13 @@
 //! **The claim token** never reaches the engine. The controller makes it, hashes it and sends the
 //! hash. The engine stores the hash and compares generations.
 
+mod detail;
 mod sha256;
 
+pub use detail::{
+    GAP_TEXT_MAX_CHARS, GAPS_FILE_MAX_BYTES, KEY_GAPS, KEY_GAPS_ERROR, KEY_STOP_TEXT,
+    STOP_TEXT_MAX_BYTES, gaps_detail, gaps_of, stop_detail,
+};
 pub use sha256::sha256_hex;
 
 use serde_json::{Value, json};
@@ -142,13 +147,18 @@ pub(crate) fn parked_stage(view: &RunView, workflow: &Workflow, unit: &NodeRow) 
     }
 }
 
+/// The keys of a request body that the engine sets. A park's `detail` may not set them.
+const RESERVED_BODY_KEYS: [&str; 3] = ["reason", "stage", "park_generation"];
+
 /// The effects of a park: the unit becomes `parked` and its request opens, in one commit.
+/// `detail` holds more facts for the request body, such as a gap list or a stop file's text.
 pub(crate) fn park_effects(
     view: &RunView,
     workflow: &Workflow,
     unit: &NodeRow,
     kind: RequestKind,
     reason: &str,
+    detail_facts: Option<&Value>,
     now: &str,
 ) -> Result<Vec<Effect>, Rejected> {
     if kind == RequestKind::MergeAck {
@@ -162,8 +172,8 @@ pub(crate) fn park_effects(
     }
     let detail = view.unit_detail(unit)?;
     let stage = parked_stage(view, workflow, unit);
-    let body = match kind {
-        // Their structure comes with the answers that use it.
+    let mut body = match kind {
+        // A gaps or a stop request holds its reason, and the facts of its seat's file.
         RequestKind::Gaps | RequestKind::Stop => json!({ "reason": reason }),
         _ => json!({
             "reason": reason,
@@ -171,6 +181,17 @@ pub(crate) fn park_effects(
             "park_generation": detail.park_generation,
         }),
     };
+    if let Some(facts) = detail_facts {
+        let facts = facts
+            .as_object()
+            .ok_or_else(|| "a park's facts are not a JSON object".to_string())?;
+        if let Some(key) = RESERVED_BODY_KEYS.iter().find(|k| facts.contains_key(**k)) {
+            return Err(format!("a park's facts may not set the body key {key:?}"));
+        }
+        if let Some(object) = body.as_object_mut() {
+            object.extend(facts.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+    }
     let mut parked = unit.clone();
     parked.status = Status::Parked;
     parked.reason = Some(reason.to_string());
@@ -371,6 +392,7 @@ fn resume_effects(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_answer(
     view: &RunView,
     workflow: &Workflow,
@@ -378,6 +400,7 @@ pub(crate) fn decide_answer(
     revision: u32,
     generation: u64,
     answer: &Value,
+    hook_failed: Option<&str>,
     now: &str,
 ) -> Result<Decision, Rejected> {
     check_claim(view, generation)?;
@@ -407,17 +430,24 @@ pub(crate) fn decide_answer(
                 .node(unit_id)
                 .filter(|n| n.kind == NodeKind::Unit)
                 .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
-            let (effects, _) = resume_effects(
-                view,
-                workflow,
-                unit,
-                request,
-                None,
-                generation,
-                |_| answer.clone(),
-                now,
-            )?;
-            d.effects = effects;
+            d.effects = match hook_failed {
+                None => {
+                    resume_effects(
+                        view,
+                        workflow,
+                        unit,
+                        request,
+                        None,
+                        generation,
+                        |_| answer.clone(),
+                        now,
+                    )?
+                    .0
+                }
+                Some(cause) => {
+                    parked_again_effects(view, unit, request, generation, answer, cause, now)?
+                }
+            };
         }
         None => {
             let mut closed = request.clone();
@@ -428,9 +458,93 @@ pub(crate) fn decide_answer(
             d.effects.push(Effect::PutRequest(closed));
         }
     }
-    d.ledger = Some(format!(
-        "answer {id}@{revision} by claim {generation}: {brief}"
-    ));
+    d.ledger = Some(match hook_failed {
+        None => format!("answer {id}@{revision} by claim {generation}: {brief}"),
+        Some(_) => format!(
+            "answer {id}@{revision} by claim {generation}: {brief} (the answer hook failed; the unit parked again)"
+        ),
+    });
+    Ok(d)
+}
+
+/// The effects of an answer whose hook failed. The request is answered, as it would be for a
+/// resume. The unit stays parked and a new `park` request opens for it, in the same commit, with
+/// the hook's cause. The park generation rises, as it does for a resume, so the new request has
+/// its own command IDs.
+fn parked_again_effects(
+    view: &RunView,
+    unit: &NodeRow,
+    request: &RequestRow,
+    generation: u64,
+    answer: &Value,
+    cause: &str,
+    now: &str,
+) -> Result<Vec<Effect>, Rejected> {
+    if unit.status != Status::Parked {
+        return Err(format!(
+            "unit {} is {}, not parked",
+            unit.id,
+            unit.status.as_str()
+        ));
+    }
+    if view.running_stage_of(&unit.id).is_some() {
+        return Err(format!(
+            "unit {} still has a running session; the controller ends it on its next tick",
+            unit.id
+        ));
+    }
+    let reason = check_reason(&one_line_reason(&format!("answer hook failed: {cause}")))
+        .map_err(|e| format!("the hook's cause: {e}"))?
+        .to_string();
+    let mut detail = view.unit_detail(unit)?;
+    detail.park_generation += 1;
+    let mut parked = unit.clone();
+    parked.status = Status::Parked;
+    parked.reason = Some(reason.clone());
+    parked.detail = detail.to_text();
+    parked.updated_at = now.to_string();
+    let mut closed = request.clone();
+    closed.status = RequestStatus::Answered;
+    closed.answered_at = Some(now.to_string());
+    closed.answer = Some(answer.to_string());
+    closed.answer_generation = Some(generation);
+    Ok(vec![
+        Effect::PutNode(parked),
+        Effect::PutRequest(closed),
+        Effect::OpenRequest(NewRequest {
+            run_id: unit.run_id.clone(),
+            unit_id: Some(unit.id.clone()),
+            stage: request.stage.clone(),
+            kind: RequestKind::Park,
+            reason: reason.clone(),
+            body: json!({
+                "reason": reason,
+                "stage": request.stage,
+                "park_generation": detail.park_generation,
+            })
+            .to_string(),
+            opened_at: now.to_string(),
+        }),
+    ])
+}
+
+/// An answer hook ran: write its ledger line. It changes no state, so it is recorded whether the
+/// hook passed or failed. The request must exist in this run.
+pub(crate) fn decide_answer_hook(
+    view: &RunView,
+    id: &str,
+    rc: Option<i32>,
+    note: &str,
+) -> Result<Decision, Rejected> {
+    let request = run_request(view, id)?;
+    let mut d = Decision::admitted();
+    d.unit_id = request.unit_id.clone();
+    d.ledger = Some(match (rc, note.is_empty()) {
+        (Some(code), true) => format!("answer hook {id}: rc {code}"),
+        (Some(code), false) => format!("answer hook {id}: rc {code}: {note}"),
+        (None, true) => format!("answer hook {id}: rc none"),
+        (None, false) => format!("answer hook {id}: rc none: {note}"),
+    });
     Ok(d)
 }
 
@@ -514,6 +628,19 @@ impl Engine {
         kind: RequestKind,
         reason: &str,
     ) -> Result<Admission, EngineError> {
+        self.park_with(unit_id, kind, reason, None)
+    }
+
+    /// [`Engine::park_as`], with more facts for the request body: a JSON object, such as the
+    /// result of [`gaps_detail`] or [`stop_detail`]. The facts are data and may not set `reason`,
+    /// `stage` or `park_generation`.
+    pub fn park_with(
+        &self,
+        unit_id: &str,
+        kind: RequestKind,
+        reason: &str,
+        detail: Option<&Value>,
+    ) -> Result<Admission, EngineError> {
         let view = self.view()?;
         let generation = self.park_generation_of(&view, unit_id)?;
         self.submit(Command {
@@ -522,6 +649,7 @@ impl Engine {
                 unit_id: unit_id.to_string(),
                 reason: one_line_reason(reason),
                 request_kind: kind,
+                detail: detail.cloned(),
             },
         })
     }
@@ -591,6 +719,20 @@ impl Engine {
         generation: u64,
         text: &str,
     ) -> Result<Admission, EngineError> {
+        self.answer_request_after_hook(id, revision, generation, text, None)
+    }
+
+    /// [`Engine::answer_request`] after the workflow's answer hook ran. With `hook_failed` set,
+    /// the request is answered, the unit stays parked, and a new `park` request opens with
+    /// `answer hook failed: <cause>`, all in one commit.
+    pub fn answer_request_after_hook(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        text: &str,
+        hook_failed: Option<&str>,
+    ) -> Result<Admission, EngineError> {
         self.submit(Command {
             id: format!("answer:{id}:{revision}"),
             body: CommandBody::AnswerRequest {
@@ -598,6 +740,66 @@ impl Engine {
                 revision,
                 generation,
                 answer: json!({ "verb": VERB_ANSWER, "text": text }),
+                hook_failed: hook_failed.map(one_line_reason),
+            },
+        })
+    }
+
+    /// Would [`Engine::answer_request`] admit this answer now? It decides against the stored
+    /// state and records nothing. The controller asks before it runs a hook, so a refused
+    /// answer never runs one.
+    pub fn check_answer(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        text: &str,
+    ) -> Result<(), EngineError> {
+        let view = self.view()?;
+        let answer = json!({ "verb": VERB_ANSWER, "text": text });
+        decide_answer(
+            &view,
+            &self.cfg.workflow,
+            id,
+            revision,
+            generation,
+            &answer,
+            None,
+            &self.now(),
+        )
+        .map(|_| ())
+        .map_err(EngineError::Rejected)
+    }
+
+    /// Write the ledger line of one run of an answer hook: `answer hook <R-n>: rc <n>`. Each run
+    /// has its own command ID, so a second answer attempt on the same request is a new line.
+    pub fn record_answer_hook(
+        &self,
+        id: &str,
+        revision: u32,
+        rc: Option<i32>,
+        note: &str,
+    ) -> Result<Admission, EngineError> {
+        let view = self.view()?;
+        let prefix = format!("answer-hook:{id}:{revision}:");
+        let attempt = view
+            .admissions
+            .iter()
+            .filter(|a| a.command_id.starts_with(&prefix))
+            .count() as u32;
+        self.submit(Command {
+            id: format!("{prefix}{attempt}"),
+            body: CommandBody::AnswerHook {
+                id: id.to_string(),
+                revision,
+                attempt,
+                rc,
+                // An empty note stays empty: `one_line_reason` would fill it in.
+                note: if note.trim().is_empty() {
+                    String::new()
+                } else {
+                    one_line_reason(note)
+                },
             },
         })
     }

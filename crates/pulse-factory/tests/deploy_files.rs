@@ -77,6 +77,32 @@ fn skill_problems(skill: &str, verbs: &[String]) -> Vec<String> {
             p.push(format!("a wait or polling instruction: {l}"));
         }
     }
+    // `oss` has no `spine_branch` verb (`oss branch_name <id> <slug>` prints the branch), and
+    // `oss spine_dir` takes `<release> <spine> <slug>`.
+    if skill.contains("oss spine_branch") {
+        p.push("calls `oss spine_branch`, which is no verb".into());
+    }
+    if skill.contains("oss spine_dir \"$spine\"") {
+        p.push("calls `oss spine_dir \"$spine\"` with one argument".into());
+    }
+    p
+}
+
+/// A guide that tells the operator what to do with a parked unit: answer it or clear it, in the
+/// same run. A guide that sends them to a new run is out of date since `r0.s2`.
+fn parked_problems(doc: &str) -> Vec<String> {
+    let mut p = Vec::new();
+    for l in doc.lines() {
+        if l.contains("parked") && l.contains("new run") {
+            p.push(format!("a parked unit needs a new run: {l}"));
+        }
+    }
+    let names = |verb: &str| {
+        doc.contains(&format!("`{verb}`")) || doc.contains(&format!("pulse-factory {verb}"))
+    };
+    if !doc.contains("parked") || !names("answer") || !names("clear") {
+        p.push("does not name `answer` and `clear` for a parked unit".into());
+    }
     p
 }
 
@@ -130,6 +156,24 @@ fn install_sh_sets_no_profile_and_writes_no_cargo_config() {
         install_problems(&read("scripts/install.sh")),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn the_skill_and_the_install_guide_say_how_to_answer_a_parked_unit() {
+    for file in ["skill/SKILL.md", "docs/install.md"] {
+        assert_eq!(parked_problems(&read(file)), Vec::<String>::new(), "{file}");
+    }
+    let skill = read("skill/SKILL.md");
+    for want in [
+        "pulse-factory requests",
+        "pulse-factory show",
+        "pulse-factory claim",
+    ] {
+        assert!(skill.contains(want), "SKILL.md names {want}");
+    }
+    // The branch and the directory come from verbs that exist.
+    assert!(skill.contains("oss branch_name \"$spine\" \"$slug\""));
+    assert!(skill.contains("oss spine_dir \"$release\" \"$spine\" \"$slug\""));
 }
 
 #[test]
@@ -198,4 +242,29 @@ fn each_check_fires_on_a_bad_sample() {
         assert!(!p.is_empty(), "{bad:?} must fire");
     }
     assert!(skill_problems("`arm` `status` and a watchful eye", &verbs).is_empty());
+    for (bad, want) in [
+        (
+            "spine_branch=\"spine/$(oss spine_branch \"$spine\")\"",
+            "spine_branch",
+        ),
+        ("spine_dir=\"$(oss spine_dir \"$spine\")\"", "spine_dir"),
+    ] {
+        let p = skill_problems(&format!("`arm` `status`\n{bad}\n"), &verbs);
+        assert!(
+            p.iter().any(|m| m.contains(want)),
+            "{bad:?} must fire: {p:?}"
+        );
+    }
+    let fixed =
+        "`arm` `status`\nspine_dir=\"$(oss spine_dir \"$release\" \"$spine\" \"$slug\")\"\n";
+    assert!(skill_problems(fixed, &verbs).is_empty());
+    for bad in [
+        "A parked unit needs a new run until r0.s2.",
+        "A parked unit shows its reason.",
+        "Use `answer` to resume it.",
+        "A parked unit: `answer` it, or start a new run.",
+    ] {
+        assert!(!parked_problems(bad).is_empty(), "{bad:?} must fire");
+    }
+    assert!(parked_problems("A parked unit: use `answer` or `clear` in the same run.").is_empty());
 }

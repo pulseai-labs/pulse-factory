@@ -230,12 +230,20 @@ impl Rig {
 
     /// Make an item's worktree (a git repo under the spine directory) and publish its record.
     pub fn queue_item(&self, id: &str, order: u32) -> PathBuf {
+        self.queue_item_with(id, order, &[])
+    }
+
+    /// [`Rig::queue_item`], with more unit variables in the record.
+    pub fn queue_item_with(&self, id: &str, order: u32, more: &[(&str, &str)]) -> PathBuf {
         let wt = self.spine_dir.join(format!("wt-{id}"));
         std::fs::create_dir_all(&wt).unwrap();
         git(&wt, &["init", "-q", "-b", &format!("work/{id}")]);
         let mut vars = BTreeMap::new();
         vars.insert("worktree_path".to_string(), wt.display().to_string());
         vars.insert("branch".to_string(), format!("work/{id}"));
+        for (k, v) in more {
+            vars.insert((*k).to_string(), (*v).to_string());
+        }
         let rec = UnitRecord::new(id, "g1", order, vars);
         self.publish(&format!("{id}.json"), &rec.to_json());
         wt
