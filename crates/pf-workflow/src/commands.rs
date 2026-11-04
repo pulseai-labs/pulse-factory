@@ -175,6 +175,16 @@ pub fn run_argv(
     stdin: Option<Vec<u8>>,
     timeout_seconds: u64,
 ) -> Result<RunOutput, CommandFailure> {
+    run_argv_env(argv, &[], stdin, timeout_seconds)
+}
+
+/// [`run_argv`] with extra environment variables for the process, each a `(name, value)` pair.
+pub fn run_argv_env(
+    argv: &[String],
+    env: &[(&str, &str)],
+    stdin: Option<Vec<u8>>,
+    timeout_seconds: u64,
+) -> Result<RunOutput, CommandFailure> {
     if timeout_seconds == 0 || timeout_seconds > MAX_TIMEOUT_SECONDS {
         return Err(CommandFailure::BadTimeout(timeout_seconds));
     }
@@ -184,6 +194,7 @@ pub fn run_argv(
     let mut command = Command::new(program);
     command
         .args(args)
+        .envs(env.iter().copied())
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {

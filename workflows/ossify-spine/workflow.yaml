@@ -263,6 +263,14 @@ tracks:
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{param.method_root}"
         slots: [session]
+        # ossify's PR-mode item close (work-item-close.md §4a) needs the spine branch on `origin`,
+        # and pushes it itself when `ls-remote` finds it absent. This seat's own branch is the work
+        # branch, so its rules deny that push. The controller puts the spine branch on `origin`
+        # before this stage launches, when `origin` lacks it, so no seat pushes a branch that is
+        # not its own.
+        base_push:
+          dir: "{param.repo}"
+          branch: "{param.spine_branch}"
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
         stop_file:

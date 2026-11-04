@@ -146,6 +146,7 @@ Each stage of a track has these fields:
 | `park_on` | no | A list of `{file, reason, on_answer}`. `on_answer` is optional. |
 | `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
 | `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
+| `base_push` | no | `{dir, branch}`, both templates: a branch the controller puts on `origin` before the stage launches, when `origin` lacks it (see "`base_push`"). |
 
 `before` holds the checks that cap launches. `after_first_turn` holds the count of dispatches. The
 count runs after a first turn, not after a launch, so a launch that sits at a trust prompt does not
@@ -214,6 +215,91 @@ change for it.
 
 Each time an entry sends a unit it launches its `to` stage once. `arm` counts that, so its most
 launches adds every entry's `max` (`cli.md`).
+
+### `base_push`
+
+A stage can name a branch that must be on `origin` before the stage launches. The seat of the stage
+may not own that branch, so its rules deny it the push. The controller does the push, in its launch
+step (ADR-0001). The key is a construct of the workflow file. The engine and the controller know no
+method (ADR-0002).
+
+`base_push` is a mapping with two fields, both required and both templates in the stage's scope (the
+same placeholders as `cwd`):
+
+| Field | Meaning |
+|---|---|
+| `dir` | The local repository that holds the branch. Its `origin` receives the push. |
+| `branch` | The branch name, without `refs/heads/`. |
+
+Any other field in the mapping is refused with its position, and so is an empty value or a
+placeholder the file does not declare. The file version stays 1 (ADR-0004): a file without the key
+loads and runs as before, and unknown keys are still refused. A run armed before a package gained the
+key keeps its pinned package copy (ADR-0007), so it never gains a base push.
+
+**The order of the steps.** For a stage with `base_push`, the launch step does these after the
+pin check and before the stage's `before` commands:
+
+1. It renders `dir` and `branch` for the unit.
+2. It refuses the branch when it is empty, starts with `-`, fails `git check-ref-format --branch`,
+   or is the run's default branch. It refuses the `dir` when its `origin` is not the run's forge: on
+   GitHub the `owner/name` of `git -C <dir> remote get-url origin` must be the run's forge
+   repository (the case is not compared), and in the paper env the canonical path of that URL must
+   be the canonical path of `forge.git`. A workflow file can so make the controller push only to the
+   forge the operator armed against.
+3. It runs `git -C <dir> ls-remote --exit-code origin refs/heads/<branch>`, as an argv with no
+   shell, with `GIT_TERMINAL_PROMPT=0` and the 60 s command timeout.
+4. **Exit 0:** `origin` holds the branch, at any SHA. Nothing is pushed, there is no ledger line,
+   and the launch goes on.
+5. **Exit 2:** `origin` lacks the branch. The controller reads the local SHA with
+   `git -C <dir> rev-parse --verify refs/heads/<branch>`, then runs
+   `git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>`. It never adds a force flag or
+   a `+`. It records the result with the unit's push record, and a successful push goes on to
+   `before` and the launch in the same tick.
+6. **Any other exit code, or a timeout:** the controller pushes nothing.
+
+**The ledger line.** Every push is an admitted `Push` command, so it writes
+`push: repo=<forge> branch=<branch> sha=<sha> outcome=pushed` or `outcome=failed: <cause>`. The
+command ID is `push:base-push:<unit>:<park generation>`. A repeat of one ID is a replay and writes no
+second line. A `clear` gives the unit a new park generation, so a new attempt has a new ID and a new
+line. A refusal in step 2 and a failed read in step 6 write no push line, because nothing was tried.
+A missing local branch writes `outcome=failed: no local branch <branch>` with an empty SHA, and tries
+no push.
+
+**The park reasons.** Each parks the unit and opens a `park` request (`requests.md`). A reason that
+comes from git ends with the first line of git's stderr, cleaned to one line and redacted, so an
+authentication failure names itself.
+
+| Case | Reason |
+|---|---|
+| A template does not render | `cannot render the <field> of base_push of stage <stage> for unit <unit>: <why>` |
+| The branch is refused | `base push of branch <branch> refused: <rule>` |
+| The `origin` is another forge | `base push of branch <branch> refused: origin of <dir> is <origin>, which is not the run's forge <forge>` |
+| `ls-remote` fails | `cannot read <branch> on origin of <dir> (ls-remote rc <n>)`, or `(ls-remote timed out)` |
+| The push fails | `base push of <branch> to origin failed: <cause>` |
+
+When `origin` cannot be read (no `origin` remote), the read in step 3 fails and names its exit code.
+The check blocks the tick for at most the timeout, as an `exit0` condition does.
+
+**What it never does.**
+
+- A halted run pushes nothing: the launch step returns before the check.
+- It never overwrites. A branch that `origin` holds at any SHA is exit 0, and nothing is pushed.
+- It never pushes the default branch, and never to another forge than the run's.
+- It does not change `head_check`. The base push is recorded under the unit before the stage's seat
+  launches, so the seat's own push stays the unit's newest push, and `head_check` reads that one. If
+  `origin` loses the branch after the seat pushed, the next launch of the stage pushes the base again,
+  and `head_check` then refuses the merge and parks the unit: it fails closed.
+- It changes no seat's rule set or own branch.
+
+**Credentials.** The controller pushes with the git credentials of the user unit, the same ones the
+seats it launches push with (`docs/install.md`). No new secret is read, and none reaches a ledger line
+or a reason.
+
+**Known limit (ADR-0007).** The push has no record before it runs. If the controller dies between the
+push and its record, the push has no ledger line, and after a restart `ls-remote` returns exit 0, so
+nothing repairs the line.
+
+`arm` names each base push before the run starts (`cli.md`).
 
 ### `park_on`
 

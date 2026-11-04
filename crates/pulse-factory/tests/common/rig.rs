@@ -167,6 +167,9 @@ impl Rig {
             params: params.clone(),
             run_dir: run_dir.clone(),
             target_dir: String::new(),
+            forge_repo: forge.repo().to_string(),
+            default_branch: BASE.to_string(),
+            paper: true,
             clock: Arc::new(move || clock_now.load(Ordering::SeqCst)),
             walk_limit: pulse_factory::controller::driver::WALK_LIMIT,
         });
@@ -428,6 +431,9 @@ impl Rig {
             params: self.params.clone(),
             run_dir: self.run_dir.clone(),
             target_dir: target_dir.to_string(),
+            forge_repo: self.forge.repo().to_string(),
+            default_branch: BASE.to_string(),
+            paper: true,
             clock: Arc::new(move || now.load(Ordering::SeqCst)),
             walk_limit,
         })
@@ -459,6 +465,9 @@ impl Rig {
             params: self.params.clone(),
             run_dir: self.run_dir.clone(),
             target_dir: String::new(),
+            forge_repo: self.forge.repo().to_string(),
+            default_branch: BASE.to_string(),
+            paper: true,
             clock: Arc::new(move || now.load(Ordering::SeqCst)),
             walk_limit: pulse_factory::controller::driver::WALK_LIMIT,
         });

@@ -110,6 +110,8 @@ pub struct Summary {
     pub plugins: Vec<Value>,
     pub most_launches: Option<u64>,
     pub merges: Vec<Value>,
+    /// One `{track, stage, dir, branch}` for each stage with `base_push`.
+    pub base_pushes: Vec<Value>,
     pub replaces: Option<String>,
     pub paper: Option<String>,
     pub forge_repo: String,
@@ -203,6 +205,17 @@ impl Summary {
         );
         for m in &self.merges {
             line(&mut t, m["sentence"].as_str().unwrap_or("").to_string());
+        }
+        for b in &self.base_pushes {
+            line(
+                &mut t,
+                format!(
+                    "base push: before {}.{}, push {} to origin when origin lacks it",
+                    b["track"].as_str().unwrap_or(""),
+                    b["stage"].as_str().unwrap_or(""),
+                    b["branch"].as_str().unwrap_or("")
+                ),
+            );
         }
         line(
             &mut t,
@@ -317,6 +330,29 @@ fn build_summary(
             })
         })
         .collect();
+    // Like a merge base, a base push renders with the run's values and no unit. A value that
+    // needs a unit shows as written.
+    let shown = |template: &str| {
+        pf_engine::render::render(template, ctx).map_or_else(|_| template.to_string(), |r| r.text)
+    };
+    let base_pushes = pkg
+        .file
+        .tracks
+        .iter()
+        .flat_map(|t| {
+            t.stages
+                .iter()
+                .filter_map(move |s| s.base_push.as_ref().map(|b| (t, s, b)))
+        })
+        .map(|(t, s, b)| {
+            json!({
+                "track": t.name,
+                "stage": s.name,
+                "dir": shown(&b.dir),
+                "branch": shown(&b.branch),
+            })
+        })
+        .collect();
     Summary {
         schema_version: SCHEMA_VERSION,
         spine: plan.spine.clone(),
@@ -344,6 +380,7 @@ fn build_summary(
             .collect(),
         most_launches: most_launches(pkg, items),
         merges,
+        base_pushes,
         replaces: plan.replace.clone(),
         paper: plan.paper.as_ref().map(|p| p.display().to_string()),
         forge_repo: plan.forge_repo.clone(),
