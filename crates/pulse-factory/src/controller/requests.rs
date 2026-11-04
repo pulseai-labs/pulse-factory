@@ -1,8 +1,8 @@
-//! The verbs of requests and the claim: `requests`, `show`, `claim`, `answer` and `clear`
+//! The verbs of requests and the claim: `requests`, `show`, `claim`, `answer`, `clear` and `ack`
 //! (`docs/contracts/cli.md`, `docs/contracts/requests.md`; ADR-0005, ADR-0006, ADR-0009).
 //!
-//! `requests` and `show` read the store and need no claim. `claim`, `answer` and `clear` change
-//! who may act and what runs, so each one first checks who calls: a process that holds
+//! `requests` and `show` read the store and need no claim. `claim`, `answer`, `clear` and `ack`
+//! change who may act and what runs, so each one first checks who calls: a process that holds
 //! `PF_SEAT_TOKEN`, or descends from a seat the controller launched and still tracks, is refused.
 //! A `/proc` read that fails refuses too. The claim token reaches no log, ledger line, status,
 //! request body or error text: the controller hands it out once, and keeps only its hash.
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use pf_engine::claim::{check_claim_in, claim_of_hash, sha256_hex};
 use pf_engine::merge::blocked_by;
 use pf_engine::port::agent::SessionRef;
-use pf_engine::port::store::{RequestRow, RequestStatus, Store};
+use pf_engine::port::store::{RequestKind, RequestRow, RequestStatus, Store};
 use pf_ipc::{Peer, Response};
 use serde_json::{Value, json};
 
@@ -308,6 +308,65 @@ impl Controller {
         }
     }
 
+    /// `ack`: the claim holder acks a `merge_ack` request, and the spine PR merges with the acked
+    /// head SHA pinned (ADR-0005). It takes the claim as `answer` does: the same token, the same
+    /// caller check and the same refusals. The engine reads the PR again before it merges.
+    pub(super) fn verb_ack(&self, args: &Value, peer: Peer) -> Response {
+        if let Err(why) = self.check_caller("ack", peer) {
+            return err(why);
+        }
+        let (Some(id), Some(rev)) = (
+            text(args, "request"),
+            args.get("rev").and_then(Value::as_u64),
+        ) else {
+            return err("ack refused: it needs a request ID and --rev");
+        };
+        let Ok(rev) = u32::try_from(rev) else {
+            return err("ack refused: --rev is too large");
+        };
+        let request = match self.store.request(id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return err(format!("ack refused: request {id} is unknown")),
+            Err(e) => return err(e.to_string()),
+        };
+        let handle = match self.find(Some(&request.run_id)) {
+            Ok(h) => h,
+            Err(why) => return err(format!("ack refused: {why}")),
+        };
+        let _one_at_a_time = lock(&self.claim_lock);
+        let generation = match self.claim_generation(args) {
+            Ok(g) => g,
+            Err(why) => return err(format!("ack refused: {why}")),
+        };
+        match handle.driver.ack_request(id, rev, generation) {
+            Ok(acked) => {
+                let (pr, base) = match self.store.request(id) {
+                    Ok(Some(r)) => {
+                        let body = serde_json::from_str::<Value>(&r.body).unwrap_or(Value::Null);
+                        (body["pr"].clone(), body["base"].clone())
+                    }
+                    _ => (Value::Null, Value::Null),
+                };
+                Response::ok(json!({
+                    "schema_version": SCHEMA_VERSION,
+                    "request": id,
+                    "revision": rev,
+                    "run": request.run_id,
+                    "unit": acked.unit,
+                    "generation": generation,
+                    "verb": "ack",
+                    "pr": pr,
+                    "base": base,
+                    "head_sha": acked.head_sha,
+                    "merged": acked.landed,
+                    "outcome": acked.outcome,
+                    "after_merge_failure": acked.after_merge_failure,
+                }))
+            }
+            Err(why) => err(format!("ack refused: {why}")),
+        }
+    }
+
     // ------------------------------------------------------------------ requests and show
 
     /// What a request holds back: the unit, and each later unit the merge order holds back.
@@ -386,8 +445,10 @@ impl Controller {
             Err(why) => return err(why),
         };
         let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap_or(Value::Null);
-        // The verbs that answer it: a unit's request takes `answer` and `clear`.
+        // The verbs that answer it: a unit's request takes `answer` and `clear`. A `merge_ack`
+        // request takes `ack` and no other verb.
         let verbs: Vec<&str> = match (request.status, &request.unit_id) {
+            (RequestStatus::Open, _) if request.kind == RequestKind::MergeAck => vec!["ack"],
             (RequestStatus::Open, Some(_)) => vec!["answer", "clear"],
             (RequestStatus::Open, None) => vec!["answer"],
             _ => Vec::new(),

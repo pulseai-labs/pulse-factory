@@ -38,6 +38,7 @@ Line and column both count from 1.
 | `roots` | no | The directories a seat's record may name as a working directory. |
 | `unit_sources` | no | A list of `{dir, track, vars}`. Each names the track its units join. |
 | `seeds` | no | A list of seed units (see below). |
+| `end_when` | no | What must hold before the run ends (see "`end_when`"). |
 | `tracks` | yes | A mapping of track name to `{stages, merge}`. |
 
 ### `roles`
@@ -60,7 +61,7 @@ carry. A unit's track comes from the source that admitted it. The unit record fo
 
 A **seed unit** is a unit the file declares. The engine admits it at the start of a run with no queue
 record. Fields: `id`, `group`, `order`, `track`, `vars` (a mapping of name to text) and an optional
-`repeat`.
+`repeat` or `start_when`. A seed carries one of them, never both; the file is refused otherwise.
 
 `repeat` is `{when_units_done: <track>, until_file: <path>, max: <n>}`. All three are required. The
 seed is admitted again under the ID `<id>.2`, then `<id>.3`, only when all of these hold:
@@ -75,6 +76,25 @@ A `done` unit cannot park. So when the previous seed ended `done` and added no u
 reached and the `until_file` is still absent, `pf_workflow::seeds` returns a halt reason, and the
 controller calls `Engine::halt_for`.
 
+`start_when` is `{file: <path>, units_done: <track>}`. Both are required. `file` is a template over
+the run, and `units_done` names a track of this file. A seed with `start_when` is not admitted at
+the start of the run. It is admitted once, on the first tick at which the rendered `file` exists and
+every unit on `units_done` is `done`, and at least one such unit exists. A replayed admission is a
+no-op, like any seed admission. A halted run admits nothing. The run's end check counts such a seed
+as unfinished until its unit exists and is `done`. The `ossify-spine` package uses it to start the
+spine close after the lane wrote `rounds.done` and every item is merged.
+
+### `end_when`
+
+`end_when` is `{when: [<done entries>], waiting: <text>, reason: <text>}`. All three are required,
+and `when` holds one or more entries. An entry is a `file` or an `exit0` condition, as in a stage's
+`done` list. `waiting` and `reason` are templates over the run.
+
+A file with no `end_when` ends as before: when the seeds are finished and every unit is `done`, the
+run ends with the reason `every item merged`. With `end_when`, the run ends with its `reason` only
+when that check holds and every `when` entry holds too. Until then each tick notes `waiting` (one
+line), and `status` shows the note. An entry that cannot be read does not hold, and the tick notes why.
+
 ### `tracks`
 
 A track is `{stages, merge}`. `stages` is a list of one or more stages and runs in the order given.
@@ -84,12 +104,24 @@ A track is `{stages, merge}`. `stages` is a list of one or more stages and runs 
 
 | Field | Required | Meaning |
 |---|---|---|
-| `rule` | yes | `green_checks_in_declared_order` is the only rule in version 1. |
+| `rule` | yes | `green_checks_in_declared_order` or `claim_ack` (see below). Any other value is refused, and the error names both. |
 | `repo` | yes | The repository a unit's PR must be in, a template. The engine renders it for each unit and parks a unit whose PR names another repo. It names the repo on the forge, such as `{param.forge_repo}`, which is the name the forge puts in a PR URL. A local path for `git -C` is a different parameter. |
 | `base` | yes | The branch the unit's PR must merge into, a template. The engine renders it for each unit and parks a unit whose PR has another base. |
+| `head_branch` | no | A template: the branch the unit's PR must come from. Only the rule `claim_ack` takes it. A PR from another branch parks the unit with `merge_failed`. |
 | `pr` | yes | A command that prints the unit's PR URL. |
 | `head_check` | no | `true` or `false`; default `false`. When `true`, the engine's merge step compares the PR head with the last recorded push and parks the unit when there is none. |
 | `after_merge` | no | A list of commands that run after the merge, on a unit already `done`. |
+
+**The rule `claim_ack`.** The merge of a unit on such a track waits for the claim holder's ack
+(ADR-0005). When the unit is next in the declared order and every stage is done, the merge step
+reads the PR and checks the repo, the base and, when `head_branch` is set, the head branch. Pending
+checks wait. Red checks, a conflict or a mismatch park the unit with `merge_failed`, as under the
+other rule. A PR that is green and clean opens one `merge_ack` request for the unit, in one commit
+with the unit's park at the stage `merge` (`requests.md`, "The body of a `merge_ack` request"). The
+merge happens only on `pulse-factory ack`, with the head SHA of the request pinned. `head_check` is
+allowed with `claim_ack`, but the acked SHA replaces it, and the `ossify-spine` package sets it to
+`false` so that an operator's fix commit on the PR is normal. Each ack, refusal and merge writes a
+ledger line.
 
 ## Stages
 

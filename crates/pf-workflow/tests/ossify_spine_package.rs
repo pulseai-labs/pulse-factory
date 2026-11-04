@@ -81,7 +81,7 @@ fn it_has_a_lane_track_and_an_item_track_with_verify_before_close() {
 }
 
 #[test]
-fn only_the_item_track_merges_and_it_checks_the_head() {
+fn only_the_item_track_checks_the_head_of_its_merge() {
     let file = load().file;
     let with_merge: Vec<&str> = file
         .tracks
@@ -89,7 +89,7 @@ fn only_the_item_track_merges_and_it_checks_the_head() {
         .filter(|t| t.merge.is_some())
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(with_merge, ["item"]);
+    assert_eq!(with_merge, ["item", "spine"]);
     let with_head_check: Vec<&str> = file
         .tracks
         .iter()
@@ -885,4 +885,206 @@ fn review_and_fix_carry_the_stop_file_and_the_ruling_hook() {
             "{name} has no rule.sh hook naming itself"
         );
     }
+}
+
+// ------------------------------------------------------------------ the spine close
+
+const PR_ARGV: [&str; 13] = [
+    "gh",
+    "pr",
+    "list",
+    "--repo",
+    "{param.forge_repo}",
+    "--head",
+    "{param.spine_branch}",
+    "--base",
+    "{param.base_branch}",
+    "--state",
+    "open",
+    "--json",
+    "url",
+];
+
+fn spine_close_stage(file: &WorkflowFile) -> pf_workflow::StageSpec {
+    let track = file.track("spine").expect("the spine track");
+    assert_eq!(track.stages.len(), 1, "one stage");
+    let stage = track.stages[0].clone();
+    assert_eq!(stage.name, "spine_close");
+    stage
+}
+
+#[test]
+fn the_package_takes_the_base_branch_of_the_spine_as_a_param() {
+    let file = load().file;
+    assert!(file.params.iter().any(|p| p == "base_branch"));
+}
+
+#[test]
+fn the_spine_seed_starts_when_the_rounds_are_done_and_the_items_are_done() {
+    let file = load().file;
+    let seed = file
+        .seeds
+        .iter()
+        .find(|s| s.id == "spine")
+        .expect("the spine seed");
+    assert_eq!(
+        (seed.group.as_str(), seed.track.as_str()),
+        ("spine", "spine")
+    );
+    assert!(seed.repeat.is_none());
+    let start = seed.start_when.as_ref().expect("start_when");
+    assert_eq!(start.file, "{run.dir}/rounds.done");
+    assert_eq!(start.units_done, "item");
+    // The lane seed is the only repeating one, and it does not start late.
+    let lane = file.seeds.iter().find(|s| s.id == "lane").unwrap();
+    assert!(lane.start_when.is_none() && lane.repeat.is_some());
+}
+
+#[test]
+fn the_spine_close_stage_runs_as_the_close_role_on_the_spine_branch() {
+    let file = load().file;
+    let stage = spine_close_stage(&file);
+    assert_eq!(stage.role, "close");
+    assert_eq!(stage.skills, ["close"]);
+    assert_eq!(stage.brief, ["briefs/common.md", "briefs/spine-close.md"]);
+    assert_eq!(stage.cwd, "{param.method_root}");
+    assert_eq!(stage.slots, ["session"]);
+    assert_eq!(stage.stall_minutes, 30);
+    assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop");
+    assert_eq!(stage.settings["push_dir"], "{param.repo}");
+    assert_eq!(stage.settings["push_branch"], "{param.spine_branch}");
+    assert_eq!(stage.settings["own_branch"], "{param.spine_branch}");
+    assert_eq!(stage.settings["report_dir"], "{param.spine_dir}");
+    assert_eq!(
+        stage.settings["env.SPINE_STOP_FILE"],
+        "{run.dir}/out/{unit.id}/stop"
+    );
+    // The seat never has a worktree write: the close runs from the method's root.
+    assert!(!stage.settings.contains_key("worktree"));
+    assert!(
+        stage.stop_on_answer.iter().any(|c| {
+            c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")
+                && c.argv.last().map(String::as_str) == Some("spine_close")
+        }),
+        "no rule.sh hook naming the stage"
+    );
+    for want in [
+        "{param.spine}",
+        "Stop file: {run.dir}/out/{unit.id}/stop",
+        "Rulings: {run.dir}/out/{unit.id}/rulings.md.",
+        "Decisions file: {run.dir}/out/{unit.id}/decisions.md",
+    ] {
+        assert!(
+            stage.message.contains(want),
+            "{want:?} in {:?}",
+            stage.message
+        );
+    }
+    // The seat's own words never name the PR: the stage reads it from the forge.
+    assert!(!stage.message.contains("pr.url") && !stage.message.contains("PR URL"));
+}
+
+#[test]
+fn the_spine_close_stage_is_done_when_the_forge_lists_an_open_spine_pr() {
+    let file = load().file;
+    let stage = spine_close_stage(&file);
+    assert_eq!(stage.done.len(), 1);
+    let DoneCond::Pr { command, test } = &stage.done[0] else {
+        panic!("{:?}", stage.done);
+    };
+    assert_eq!(*test, pf_workflow::PrTest::Url);
+    assert_eq!(command.argv[..13], PR_ARGV);
+    assert_eq!(command.argv[13], "--jq");
+    assert_eq!(command.argv[14], ".[0].url // \"\"");
+    assert_eq!(command.argv.len(), 15);
+    // The merge reads the same PR.
+    let merge = file.track("spine").unwrap().merge.as_ref().unwrap();
+    assert_eq!(merge.pr.argv, command.argv);
+}
+
+#[test]
+fn the_spine_merge_waits_for_the_ack_and_does_not_check_the_head() {
+    let file = load().file;
+    let merge = file.track("spine").unwrap().merge.as_ref().unwrap();
+    assert_eq!(merge.rule, pf_engine::MergeRule::ClaimAck);
+    assert_eq!(merge.repo, "{param.forge_repo}");
+    assert_eq!(merge.base, "{param.base_branch}");
+    assert_eq!(merge.head_branch.as_deref(), Some("{param.spine_branch}"));
+    assert!(!merge.head_check, "the acked SHA replaces the head check");
+    assert_eq!(merge.after_merge.len(), 1);
+    assert_eq!(
+        merge.after_merge[0].argv,
+        [
+            "git",
+            "-C",
+            "{param.repo}",
+            "fetch",
+            "origin",
+            "{param.base_branch}"
+        ]
+    );
+    // The item merge stays as it was.
+    let item = file.track("item").unwrap().merge.as_ref().unwrap();
+    assert_eq!(item.rule, pf_engine::MergeRule::GreenChecksInDeclaredOrder);
+    assert!(item.head_check && item.head_branch.is_none());
+}
+
+#[test]
+fn the_run_ends_when_the_method_records_the_close() {
+    let file = load().file;
+    let end = file.end_when.as_ref().expect("end_when");
+    assert_eq!(end.when.len(), 1);
+    let DoneCond::Exit0(c) = &end.when[0] else {
+        panic!("{:?}", end.when);
+    };
+    assert_eq!(
+        c.argv,
+        [
+            "jq",
+            "-e",
+            "--arg",
+            "s",
+            "{param.spine}",
+            "any(.spines[]; .id == $s and .status == \"closed\")",
+            "{param.state_file}"
+        ]
+    );
+    assert_eq!(
+        end.waiting,
+        "the spine PR is merged: run /ossify:close {param.spine} in the claim session for the second pass"
+    );
+    assert_eq!(end.reason, "spine {param.spine} closed");
+}
+
+#[test]
+fn the_spine_close_brief_stops_after_the_pr_opens() {
+    let dir = package_dir();
+    let brief = std::fs::read_to_string(dir.join("briefs/spine-close.md")).unwrap();
+    assert!(brief.contains("/ossify:close"), "{brief}");
+    assert!(brief.contains("skill://close"), "{brief}");
+    assert!(brief.contains("work-pr"), "{brief}");
+    for never in ["merge", "review", "demo", "second pass"] {
+        assert!(brief.contains(never), "the brief never says {never:?}");
+    }
+    // A halt before the PR opens is a stop.
+    assert!(brief.contains("stop file"), "{brief}");
+    assert!(
+        load()
+            .briefs
+            .iter()
+            .any(|b| b == Path::new("briefs/spine-close.md"))
+    );
+}
+
+#[test]
+fn the_spine_close_role_may_push_its_branch_and_nothing_else_is_added_to_its_rules() {
+    let package = load();
+    assert_eq!(
+        package.rules["close"].allow,
+        [
+            Allow::DeleteOwnScratch,
+            Allow::PushOwnBranch,
+            Allow::WriteOwnReportAndRunFiles
+        ]
+    );
 }

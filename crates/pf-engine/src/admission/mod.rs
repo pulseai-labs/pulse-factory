@@ -133,6 +133,10 @@ pub enum CommandBody {
         revision: u32,
         /// JSON text.
         body: String,
+        /// The request's new reason, when the revision changes what the reason states. A
+        /// revision with none has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Answer a request, bound to its exact ID and revision and to the claim generation.
     AnswerRequest {
@@ -173,6 +177,32 @@ pub enum CommandBody {
         to_stage: Option<String>,
         generation: u64,
         request_id: String,
+    },
+    /// Park a ready unit at its merge and open its `merge_ack` request, in one commit. The merge
+    /// rule `claim_ack` sends this; a unit park cannot open this kind of request.
+    OpenMergeAck {
+        unit_id: String,
+        reason: String,
+        /// The request body, a JSON object: `pr`, `repo`, `base`, `head_branch` and `head_sha`.
+        facts: serde_json::Value,
+    },
+    /// The claim holder's ack of a `merge_ack` request, bound to its ID and revision and to the
+    /// claim generation. The request is answered and the unit becomes `running`, ready to merge.
+    AckRequest {
+        id: String,
+        revision: u32,
+        generation: u64,
+        /// The head SHA the request names. The merge that follows pins it.
+        head_sha: String,
+    },
+    /// An ack that was refused. It changes no state; it writes the ledger line. `attempt`
+    /// counts the refusals of this request and revision.
+    AckRefused {
+        id: String,
+        revision: u32,
+        generation: u64,
+        attempt: u32,
+        cause: String,
     },
 }
 
@@ -223,6 +253,9 @@ impl CommandBody {
             CommandBody::WithdrawRequest { .. } => "withdraw_request",
             CommandBody::Claim { .. } => "claim",
             CommandBody::ClearUnit { .. } => "clear_unit",
+            CommandBody::OpenMergeAck { .. } => "open_merge_ack",
+            CommandBody::AckRequest { .. } => "ack_request",
+            CommandBody::AckRefused { .. } => "ack_refused",
         }
     }
 }

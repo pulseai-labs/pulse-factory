@@ -562,8 +562,8 @@ impl Handler for Controller {
             "halt" => self.verb_halt(&request.args),
             "requests" => self.verb_requests(&request.args),
             "show" => self.verb_show(&request.args),
-            // These three change who acts and what runs. They need to know who calls.
-            "claim" | "answer" | "clear" => Response::err(format!(
+            // These four change who acts and what runs. They need to know who calls.
+            "claim" | "answer" | "clear" | "ack" => Response::err(format!(
                 "{} refused: the controller cannot tell which process called",
                 request.verb
             )),
@@ -576,6 +576,7 @@ impl Handler for Controller {
             "claim" => self.verb_claim(&request.args, peer),
             "answer" => self.verb_answer(&request.args, peer),
             "clear" => self.verb_clear(&request.args, peer),
+            "ack" => self.verb_ack(&request.args, peer),
             _ => self.handle(request),
         }
     }

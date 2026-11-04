@@ -94,10 +94,10 @@ pub const ALLOWED: &[Form] = &[
         "variable",
         "$NAME, ${NAME}, ${#NAME} and the parameters $? $$ $! $# $@ $* $- $0 to $9",
     ),
-    // A default word whose text is itself a word under this list.
+    // A default word or a trim word, whose text is itself a word under this list.
     form(
         "default word",
-        "${NAME:-word}, ${NAME-word}, ${NAME:+word} and ${NAME+word}",
+        "${NAME:-word}, ${NAME-word}, ${NAME:+word}, ${NAME+word}, ${NAME#word}, ${NAME##word}, ${NAME%word} and ${NAME%%word}",
     ),
     // Arithmetic that holds no command and no array index.
     form(
@@ -153,7 +153,7 @@ pub const DENIED: &[Form] = &[
     // Every other parameter expansion.
     form(
         "other ${…}",
-        "${x:=y}, ${x/a/b}, ${!x}, ${x%y}, ${x:1:2}, ${x[1]}, ${x@P} and every other form",
+        "${x:=y}, ${x/a/b}, ${!x}, ${x:1:2}, ${x[1]}, ${x@P} and every other form",
     ),
     // ANSI-C quoting hides bytes from the reader.
     form("$'…'", "ANSI-C quoting"),

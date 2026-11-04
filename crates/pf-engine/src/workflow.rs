@@ -63,6 +63,9 @@ impl StageDef {
 pub enum MergeRule {
     /// Merge when the checks are green, one unit at a time, in the declared order.
     GreenChecksInDeclaredOrder,
+    /// When the checks are green, open a `merge_ack` request for the unit's PR. The PR merges
+    /// only when the claim holder acks that request, with the head SHA the request names.
+    ClaimAck,
 }
 
 /// The merge definition of a track.
@@ -77,6 +80,10 @@ pub struct MergeDef {
     pub base: String,
     /// Compare the PR head with the last recorded push before the merge ([`crate::merge::head_check`]).
     pub head_check: bool,
+    /// The branch a unit's PR must come from, with placeholders. The engine renders it for each
+    /// unit and parks a unit whose PR has another head branch. Empty declares nothing. Only the
+    /// `ClaimAck` rule reads it.
+    pub head_branch: String,
 }
 
 impl MergeDef {
@@ -87,6 +94,7 @@ impl MergeDef {
             repo: String::new(),
             base: String::new(),
             head_check: false,
+            head_branch: String::new(),
         }
     }
 }

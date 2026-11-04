@@ -9,6 +9,10 @@
 //! (`revise:<id>:<revision>`), `AnswerRequest` (`answer:<id>:<revision>`), `WithdrawRequest`
 //! (`withdraw:<id>`), `Claim` (`claim:<generation>`) and `ClearUnit`
 //! (`clear:<unit>:<park generation>`). A park opens its request in the same commit as the park.
+//! The merge rule `claim_ack` opens a `merge_ack` request the same way (`OpenMergeAck`, with the
+//! ID of an `OpenRequest`), and the claim holder answers it with an `AckRequest`
+//! (`ack:<id>:<revision>`) and never with an answer or a clear. A refused ack leaves an
+//! `AckRefused` ledger line and no other change.
 //!
 //! **The claim token** never reaches the engine. The controller makes it, hashes it and sends the
 //! hash. The engine stores the hash and compares generations.
@@ -43,6 +47,8 @@ pub const VERB_ANSWER: &str = "answer";
 pub const VERB_CLEAR: &str = "clear";
 /// The verb of a withdrawal.
 pub const VERB_WITHDRAW: &str = "withdraw";
+/// The verb of an ack of a `merge_ack` request.
+pub const VERB_ACK: &str = "ack";
 
 /// The stage a request names when the unit parked at its merge, with every stage done.
 pub const STAGE_MERGE: &str = "merge";
@@ -164,6 +170,19 @@ pub(crate) fn park_effects(
     if kind == RequestKind::MergeAck {
         return Err("a unit park cannot open a merge_ack request".to_string());
     }
+    park_with_request(view, workflow, unit, kind, reason, detail_facts, now)
+}
+
+/// [`park_effects`] for any kind. Only the merge rule `claim_ack` calls it with `MergeAck`.
+fn park_with_request(
+    view: &RunView,
+    workflow: &Workflow,
+    unit: &NodeRow,
+    kind: RequestKind,
+    reason: &str,
+    detail_facts: Option<&Value>,
+    now: &str,
+) -> Result<Vec<Effect>, Rejected> {
     if let Some(open) = view.open_request_of(&unit.id) {
         return Err(format!(
             "unit {} has request {} open already",
@@ -275,6 +294,7 @@ pub(crate) fn decide_revise(
     id: &str,
     revision: u32,
     body: &str,
+    reason: Option<&str>,
 ) -> Result<Decision, Rejected> {
     let request = open_at(view, id, revision)?;
     serde_json::from_str::<Value>(body)
@@ -284,6 +304,11 @@ pub(crate) fn decide_revise(
     let mut next = request.clone();
     next.revision += 1;
     next.body = body.to_string();
+    if let Some(reason) = reason {
+        next.reason = check_reason(reason)
+            .map_err(|e| format!("the request's reason: {e}"))?
+            .to_string();
+    }
     let mut d = Decision::admitted();
     d.unit_id = request.unit_id.clone();
     d.effects.push(Effect::PutRequest(next));
@@ -411,6 +436,11 @@ pub(crate) fn decide_answer(
 ) -> Result<Decision, Rejected> {
     check_claim(view, generation)?;
     let request = open_at(view, id, revision)?;
+    if request.kind == RequestKind::MergeAck {
+        return Err(format!(
+            "request {id} is a merge_ack request: answer it with `{VERB_ACK}`, not `{VERB_ANSWER}`"
+        ));
+    }
     let verb = answer.get("verb").and_then(Value::as_str).unwrap_or("");
     if verb != VERB_ANSWER {
         return Err(format!(
@@ -585,6 +615,12 @@ pub(crate) fn decide_clear(
         }
         None => return Err(format!("unit {unit_id} has no open request")),
     };
+    if request.kind == RequestKind::MergeAck {
+        return Err(format!(
+            "unit {unit_id} has merge_ack request {} open: answer it with `{VERB_ACK}`, not `{VERB_CLEAR}`",
+            request.id
+        ));
+    }
     // The stored answer names the stage the unit resumed at, also when the caller left it out.
     let (effects, resolved) = resume_effects(
         view,
@@ -603,6 +639,151 @@ pub(crate) fn decide_clear(
     d.ledger = Some(format!(
         "answer {}@{} by claim {generation}: clear {unit_id} --to {resolved}",
         request.id, request.revision
+    ));
+    Ok(d)
+}
+
+// ------------------------------------------------------------------ the merge ack
+
+/// A string field of a request body. A missing field reads as empty.
+fn body_text(body: &Value, key: &str) -> String {
+    body.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Park a ready unit at its merge, and open its `merge_ack` request in the same commit.
+pub(crate) fn decide_open_merge_ack(
+    view: &RunView,
+    workflow: &Workflow,
+    unit_id: &str,
+    reason: &str,
+    facts: &Value,
+    now: &str,
+) -> Result<Decision, Rejected> {
+    let reason = check_reason(reason).map_err(|e| format!("the request's reason: {e}"))?;
+    let unit = view
+        .node(unit_id)
+        .filter(|n| n.kind == NodeKind::Unit)
+        .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
+    let detail = crate::merge::merge_ready(view, workflow, unit)?;
+    let rule = workflow
+        .track(&detail.track)
+        .and_then(|t| t.merge.as_ref())
+        .map(|m| m.rule);
+    if rule != Some(crate::workflow::MergeRule::ClaimAck) {
+        return Err(format!(
+            "track {:?} does not merge by claim_ack",
+            detail.track
+        ));
+    }
+    let mut d = if view.is_halted() {
+        let mut d = Decision::refused(REASON_RUN_HALTED);
+        if let Some(u) = crate::launch::with_halt_reason(unit, now) {
+            d.effects.push(Effect::PutNode(u));
+        }
+        d.ledger = Some(format!(
+            "merge of unit {unit_id} refused: {REASON_RUN_HALTED}"
+        ));
+        d
+    } else {
+        let mut d = Decision::admitted();
+        d.effects = park_with_request(
+            view,
+            workflow,
+            unit,
+            RequestKind::MergeAck,
+            reason,
+            Some(facts),
+            now,
+        )?;
+        d.ledger = Some(format!(
+            "merge of unit {unit_id}: repo={} branch={} sha={} outcome=waits on the claim's ack",
+            body_text(facts, "repo"),
+            body_text(facts, "head_branch"),
+            body_text(facts, "head_sha"),
+        ));
+        d
+    };
+    d.unit_id = Some(unit_id.to_string());
+    Ok(d)
+}
+
+/// The claim holder's ack: the request is answered and the unit is `running` again, ready for
+/// the merge that pins the acked SHA. A halted run admits no ack.
+pub(crate) fn decide_ack(
+    view: &RunView,
+    workflow: &Workflow,
+    id: &str,
+    revision: u32,
+    generation: u64,
+    head_sha: &str,
+    now: &str,
+) -> Result<Decision, Rejected> {
+    if view.is_halted() {
+        return Err("the run is halted: no merge is admitted".to_string());
+    }
+    check_claim(view, generation)?;
+    let request = open_at(view, id, revision)?;
+    if request.kind != RequestKind::MergeAck {
+        return Err(format!(
+            "request {id} is a {} request: `{VERB_ACK}` answers only a merge_ack request",
+            request.kind.as_str()
+        ));
+    }
+    let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+    let named = body_text(&body, "head_sha");
+    if named.is_empty() || named != head_sha {
+        return Err(format!(
+            "the ack names head {head_sha}, but request {id}@{revision} names {named:?}"
+        ));
+    }
+    let unit_id = request
+        .unit_id
+        .as_deref()
+        .ok_or_else(|| format!("request {id} names no unit"))?;
+    let unit = view
+        .node(unit_id)
+        .filter(|n| n.kind == NodeKind::Unit)
+        .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
+    let (effects, _) = resume_effects(
+        view,
+        workflow,
+        unit,
+        request,
+        None,
+        generation,
+        false,
+        |_| json!({ "verb": VERB_ACK, "head_sha": head_sha }),
+        now,
+    )?;
+    let mut d = Decision::admitted();
+    d.unit_id = Some(unit_id.to_string());
+    d.effects = effects;
+    d.ledger = Some(format!(
+        "ack {id}@{revision} by claim {generation}: verb={VERB_ACK} unit={unit_id} pr={} base={} branch={} sha={head_sha}",
+        body_text(&body, "pr"),
+        body_text(&body, "base"),
+        body_text(&body, "head_branch"),
+    ));
+    Ok(d)
+}
+
+/// Record that an ack was refused. It changes no state: it writes the ledger line.
+pub(crate) fn decide_ack_refused(
+    view: &RunView,
+    id: &str,
+    revision: u32,
+    generation: u64,
+    cause: &str,
+) -> Result<Decision, Rejected> {
+    let request = run_request(view, id)?;
+    let mut d = Decision::admitted();
+    d.unit_id = request.unit_id.clone();
+    d.ledger = Some(format!(
+        "ack {id}@{revision} by claim {generation} refused: {}",
+        one_line_reason(cause)
     ));
     Ok(d)
 }
@@ -709,12 +890,52 @@ impl Engine {
         revision: u32,
         body: &Value,
     ) -> Result<Admission, EngineError> {
+        self.revise_request_as(id, revision, body, None)
+    }
+
+    /// [`Engine::revise_request`], and the request's reason changes with the facts.
+    pub fn revise_request_as(
+        &self,
+        id: &str,
+        revision: u32,
+        body: &Value,
+        reason: Option<&str>,
+    ) -> Result<Admission, EngineError> {
         self.submit(Command {
             id: format!("revise:{id}:{revision}"),
             body: CommandBody::ReviseRequest {
                 id: id.to_string(),
                 revision,
                 body: body.to_string(),
+                reason: reason.map(one_line_reason),
+            },
+        })
+    }
+
+    /// Write the ledger line of a refused ack. Each refusal has its own command ID, so a second
+    /// refusal of the same request and revision is a new line.
+    pub(crate) fn record_ack_refused(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        cause: &str,
+    ) -> Result<Admission, EngineError> {
+        let view = self.view()?;
+        let prefix = format!("ack-refused:{id}:{revision}:");
+        let attempt = view
+            .admissions
+            .iter()
+            .filter(|a| a.command_id.starts_with(&prefix))
+            .count() as u32;
+        self.submit(Command {
+            id: format!("{prefix}{attempt}"),
+            body: CommandBody::AckRefused {
+                id: id.to_string(),
+                revision,
+                generation,
+                attempt,
+                cause: one_line_reason(cause),
             },
         })
     }

@@ -27,13 +27,13 @@ use pf_engine::unit::{StallDecision, UnitDetail, stall_decision};
 use pf_engine::{EndStatus, Engine};
 use pf_workflow::CommandSpec;
 use pf_workflow::commands::{
-    AnswerOutcome, HookOutcome, answer_through_hook, run_after_merge, run_unit_hook,
+    AnswerOutcome, HookOutcome, answer_through_hook, exit0, run_after_merge, run_unit_hook,
 };
-use pf_workflow::file::{SeedDef, StageSpec};
+use pf_workflow::file::{DoneCond, EndWhen, SeedDef, StageSpec};
 use pf_workflow::package::Package;
 use pf_workflow::pin::{self, Pin};
 use pf_workflow::queue::{QueuePoll, QueueSource, ingest_queue};
-use pf_workflow::seeds::{SeedAction, advance_seed};
+use pf_workflow::seeds::{SeedAction, advance_seed_started};
 use pf_workflow::signals::{
     ApplyResult, SessionState as SignalState, StageVerdict, SystemProbe, apply, evaluate,
     park_on_kind,
@@ -67,6 +67,22 @@ pub struct Answered {
     /// The hook's cause, when it failed. The request is answered, and the unit is parked again
     /// with a new request. `None` for a hook that passed, and for a request with no hook.
     pub hook_failed: Option<String>,
+}
+
+/// What an ack did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acked {
+    /// The unit that waited on the ack.
+    pub unit: String,
+    /// The PR merged and the merge landed: the unit is done.
+    pub landed: bool,
+    /// `landed`, or why the merge did not land. A merge that did not land parks the unit with a
+    /// `merge_failed` request.
+    pub outcome: String,
+    /// The head SHA the merge pinned.
+    pub head_sha: String,
+    /// The `after_merge` commands of the track ran and one of them failed: its cause.
+    pub after_merge_failure: Option<String>,
 }
 
 /// What a driver runs on.
@@ -264,7 +280,14 @@ impl Driver {
                     continue;
                 }
             };
-            match advance_seed(&self.cfg.engine, seed, exists) {
+            let started = match self.start_file_exists(seed, run_dir) {
+                Ok(e) => e,
+                Err(why) => {
+                    t.note(why);
+                    continue;
+                }
+            };
+            match advance_seed_started(&self.cfg.engine, seed, exists, started) {
                 Ok(SeedAction::Halted(reason)) => {
                     t.note(format!("seed {} halted the run: {reason}", seed.id))
                 }
@@ -280,6 +303,16 @@ impl Driver {
         };
         let path = render(&repeat.until_file, &self.ctx(run_dir, None))
             .map_err(|e| format!("seed {}: until_file cannot render: {e}", seed.id))?;
+        Ok(Path::new(&path.text).exists())
+    }
+
+    /// Does the rendered `start_when.file` of a seed exist? A seed with none reports true.
+    fn start_file_exists(&self, seed: &SeedDef, run_dir: &str) -> Result<bool, String> {
+        let Some(start) = &seed.start_when else {
+            return Ok(true);
+        };
+        let path = render(&start.file, &self.ctx(run_dir, None))
+            .map_err(|e| format!("seed {}: start_when file cannot render: {e}", seed.id))?;
         Ok(Path::new(&path.text).exists())
     }
 
@@ -839,6 +872,10 @@ impl Driver {
                 Ok(MergeStep::Parked { unit, reason }) => {
                     t.note(format!("unit {unit} parked at merge: {reason}"))
                 }
+                Ok(MergeStep::AckRequested { unit, reason }) => {
+                    t.note(format!("unit {unit} waits on the claim's ack: {reason}"));
+                    return;
+                }
                 Ok(_) => return,
                 Err(e) => {
                     t.note(format!("merge: {e}"));
@@ -947,20 +984,75 @@ impl Driver {
     }
 
     // 10. The end of the run.
+    //
+    // The run is finished when every seed is: a `repeat` seed has its `until_file`, and a
+    // `start_when` seed has its unit. Every unit is done too. Then the run ends with
+    // `every item merged`, or, when the file has `end_when`, with its `reason` once each of its
+    // conditions holds. Until then the tick notes its `waiting` text.
     fn step10_finish(&self, t: &mut Tick, run_dir: &str) {
         let Some(view) = self.view(t) else { return };
-        let seeds_done = self
-            .cfg
-            .package
-            .file
-            .seeds
-            .iter()
-            .all(|s| s.repeat.is_none() || self.until_file_exists(s, run_dir).unwrap_or(false));
+        let seeds_done = self.cfg.package.file.seeds.iter().all(|s| {
+            if s.start_when.is_some() {
+                // The seed's first unit is the seed ID. It exists once the seed started.
+                return view.node(&s.id).is_some();
+            }
+            s.repeat.is_none() || self.until_file_exists(s, run_dir).unwrap_or(false)
+        });
         let units: Vec<&NodeRow> = view.units().collect();
-        if seeds_done && !units.is_empty() && units.iter().all(|u| u.status == Status::Done) {
-            let res = self.cfg.engine.end_run("every item merged");
-            t.absorb("end of run", res);
+        if !(seeds_done && !units.is_empty() && units.iter().all(|u| u.status == Status::Done)) {
+            return;
         }
+        let reason = match &self.cfg.package.file.end_when {
+            None => "every item merged".to_string(),
+            Some(end) => {
+                if !self.end_when_holds(t, end, run_dir) {
+                    match render(&end.waiting, &self.ctx(run_dir, None)) {
+                        Ok(text) => t.note(text.text),
+                        Err(e) => t.note(format!("end_when waiting text cannot render: {e}")),
+                    }
+                    return;
+                }
+                match render(&end.reason, &self.ctx(run_dir, None)) {
+                    Ok(text) => text.text,
+                    Err(e) => {
+                        t.note(format!("end_when reason cannot render: {e}"));
+                        return;
+                    }
+                }
+            }
+        };
+        let res = self.cfg.engine.end_run(&reason);
+        t.absorb("end of run", res);
+    }
+
+    /// Does every condition of `end_when` hold? A condition that cannot be read does not hold, and
+    /// the tick notes why.
+    fn end_when_holds(&self, t: &mut Tick, end: &EndWhen, run_dir: &str) -> bool {
+        let ctx = self.ctx(run_dir, None);
+        for cond in &end.when {
+            let holds = match cond {
+                DoneCond::File(template) => match render(template, &ctx) {
+                    Ok(path) => Path::new(&path.text).exists(),
+                    Err(e) => {
+                        t.note(format!("end_when file cannot render: {e}"));
+                        false
+                    }
+                },
+                DoneCond::Exit0(spec) => match exit0(spec, &ctx) {
+                    Ok(holds) => holds,
+                    Err(e) => {
+                        t.note(format!("end_when command: {e}"));
+                        false
+                    }
+                },
+                // The file parser refuses a `pr` condition here.
+                DoneCond::Pr { .. } => false,
+            };
+            if !holds {
+                return false;
+            }
+        }
+        true
     }
 
     // ------------------------------------------------------------------ resumes
@@ -989,6 +1081,63 @@ impl Driver {
             .engine
             .clear_unit(unit_id, to_stage, generation, request_id)
             .map_err(|e| e.to_string())
+    }
+
+    /// Ack a `merge_ack` request in the name of the claim `generation` (ADR-0005). The engine checks
+    /// the PR again, answers the request and merges with the acked SHA pinned. A merge that lands
+    /// ends the unit `done`, and the track's `after_merge` commands run. The pins of the run's whole
+    /// manifest are checked first, as for a clear, because `after_merge` runs the package's commands.
+    ///
+    /// The ack holds the tick still, so no tick opens a second request for the unit between the
+    /// ack and the merge.
+    pub fn ack_request(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+    ) -> Result<Acked, String> {
+        self.check_pins()?;
+        let _held = locked(&self.state);
+        let step = self
+            .cfg
+            .engine
+            .ack_merge(request_id, revision, generation)
+            .map_err(|e| match e {
+                EngineError::Rejected(why) => why,
+                other => other.to_string(),
+            })?;
+        match step {
+            MergeStep::Merged { unit, effect } => {
+                let mut t = Tick {
+                    notes: Vec::new(),
+                    now: (self.cfg.clock)(),
+                };
+                let run_dir = self.run_dir_text();
+                self.after_merge(&mut t, &run_dir, &unit);
+                Ok(Acked {
+                    unit,
+                    landed: true,
+                    outcome: "landed".to_string(),
+                    head_sha: effect.sha,
+                    after_merge_failure: t.notes.into_iter().next(),
+                })
+            }
+            MergeStep::Parked { unit, reason } => Ok(Acked {
+                unit,
+                landed: false,
+                outcome: reason,
+                head_sha: String::new(),
+                after_merge_failure: None,
+            }),
+            MergeStep::Held { unit, reason } => Ok(Acked {
+                unit,
+                landed: false,
+                outcome: reason,
+                head_sha: String::new(),
+                after_merge_failure: None,
+            }),
+            other => Err(format!("the ack ended in an unexpected step: {other:?}")),
+        }
     }
 
     /// Answer a request with a ruling. An answer that resumes a unit checks the pins first, as

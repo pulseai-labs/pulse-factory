@@ -49,6 +49,7 @@ fn seed(max: u32) -> SeedDef {
             until_file: "{run.dir}/all.done".to_string(),
             max,
         }),
+        start_when: None,
     }
 }
 

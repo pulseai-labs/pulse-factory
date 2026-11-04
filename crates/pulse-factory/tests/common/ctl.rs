@@ -13,7 +13,7 @@ use pulse_factory::arm::ArmPlan;
 use pulse_factory::controller::ports::{Ports, RunPorts, RunSpec};
 use pulse_factory::controller::{Config, Controller, RunHandle};
 
-use super::{BIN, Sandbox, git};
+use super::{BIN, Options, Sandbox, git};
 
 /// A gate a test closes to hold a launch inside the adapter.
 #[derive(Default)]
@@ -169,7 +169,12 @@ impl Live {
     /// Start with the seats told to run this binary, and `tweak` adjusting the controller's config
     /// (the random source and the proc file system are test seams).
     pub fn start_config(binary: PathBuf, tweak: impl FnOnce(&mut Config)) -> Live {
-        let sb = Sandbox::new();
+        Live::start_package(binary, &Options::default(), tweak)
+    }
+
+    /// Start on a fixture package built from `o`.
+    pub fn start_package(binary: PathBuf, o: &Options, tweak: impl FnOnce(&mut Config)) -> Live {
+        let sb = Sandbox::with(o);
         let fake = Arc::new(FakeAdapter::new());
         fake.add_plugin(
             "methodkit",

@@ -1,6 +1,6 @@
 //! The client side of the verbs: one call to the controller, then the print.
 //!
-//! `claim`, `answer` and `clear` refuse here when `PF_SEAT_TOKEN` is set, and the controller
+//! `claim`, `answer`, `clear` and `ack` refuse here when `PF_SEAT_TOKEN` is set, and the controller
 //! checks the caller again (ADR-0005). The claim token lives in a file of mode 0600 and is never
 //! printed.
 
@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::cli::{AnswerArgs, ClaimArgs, ClearArgs, HaltArgs, RequestsArgs, ShowArgs, StatusArgs};
+use crate::cli::{
+    AckArgs, AnswerArgs, ClaimArgs, ClearArgs, HaltArgs, RequestsArgs, ShowArgs, StatusArgs,
+};
 
 /// The file name of the claim token, in the state directory.
 pub const CLAIM_TOKEN_FILE: &str = "claim-token";
@@ -271,6 +273,19 @@ pub fn show_text(v: &Value) -> String {
             ));
         }
     }
+    if v["kind"].as_str() == Some("merge_ack") {
+        // The facts the operator acks. They name the PR, where it merges and the exact head.
+        for (label, key) in [
+            ("pr", "pr"),
+            ("base", "base"),
+            ("head branch", "head_branch"),
+            ("head sha", "head_sha"),
+        ] {
+            if let Some(value) = v["body"][key].as_str() {
+                line(format!("{label}: {}", tame(value)));
+            }
+        }
+    }
     if let Some(why) = v["body"]["gaps_error"].as_str() {
         line(format!("gaps_error: {}", tame(why)));
     }
@@ -294,7 +309,14 @@ pub fn show_text(v: &Value) -> String {
         .flatten()
         .map(&s)
         .collect();
-    if !verbs.is_empty() {
+    if verbs == ["ack"] {
+        line("answered by: ack".to_string());
+        line(format!(
+            "  pulse-factory ack {} --rev {}",
+            s(&v["id"]),
+            v["revision"]
+        ));
+    } else if !verbs.is_empty() {
         line(format!("answered by: {}", verbs.join(", ")));
         line(format!(
             "  pulse-factory answer {} --rev {} --text \"<your ruling>\"",
@@ -484,4 +506,53 @@ pub fn clear(a: &ClearArgs) -> i32 {
             1
         }
     }
+}
+
+pub fn ack(a: &AckArgs) -> i32 {
+    if let Some(code) = refuse_seat("ack") {
+        return code;
+    }
+    let token = match read_token(&a.claim_token_file) {
+        Ok(t) => t,
+        Err(why) => {
+            eprintln!("pulse-factory: ack refused: {why}");
+            return 1;
+        }
+    };
+    let args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    match call("ack", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let merged = if v["merged"].as_bool() == Some(true) {
+                    format!("merged {} at {}", s_of(&v["pr"]), s_of(&v["head_sha"]))
+                } else {
+                    format!(
+                        "the merge did not land ({}); unit {} is parked with a new request",
+                        tame(&s_of(&v["outcome"])),
+                        s_of(&v["unit"])
+                    )
+                };
+                println!(
+                    "acked {}@{} by claim {}; {merged}",
+                    s_of(&v["request"]),
+                    v["revision"],
+                    v["generation"]
+                );
+                if let Some(why) = v["after_merge_failure"].as_str() {
+                    println!("the after-merge commands failed: {}", tame(why));
+                }
+            }
+            0
+        }
+        Err(why) => {
+            eprintln!("pulse-factory: {why}");
+            1
+        }
+    }
+}
+
+fn s_of(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
 }

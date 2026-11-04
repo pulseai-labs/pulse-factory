@@ -33,6 +33,7 @@ impl WorkflowFile {
                 repo: m.repo.clone(),
                 base: m.base.clone(),
                 head_check: m.head_check,
+                head_branch: m.head_branch.clone().unwrap_or_default(),
             }),
         }
     }

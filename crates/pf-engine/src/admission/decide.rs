@@ -226,9 +226,12 @@ pub fn decide(
         CommandBody::OpenRequest { request } => {
             claim::decide_open_request(view, run_id, request, now)
         }
-        CommandBody::ReviseRequest { id, revision, body } => {
-            claim::decide_revise(view, id, *revision, body)
-        }
+        CommandBody::ReviseRequest {
+            id,
+            revision,
+            body,
+            reason,
+        } => claim::decide_revise(view, id, *revision, body, reason.as_deref()),
         CommandBody::AnswerRequest {
             id,
             revision,
@@ -270,6 +273,24 @@ pub fn decide(
             request_id,
             now,
         ),
+        CommandBody::OpenMergeAck {
+            unit_id,
+            reason,
+            facts,
+        } => claim::decide_open_merge_ack(view, workflow, unit_id, reason, facts, now),
+        CommandBody::AckRequest {
+            id,
+            revision,
+            generation,
+            head_sha,
+        } => claim::decide_ack(view, workflow, id, *revision, *generation, head_sha, now),
+        CommandBody::AckRefused {
+            id,
+            revision,
+            generation,
+            cause,
+            ..
+        } => claim::decide_ack_refused(view, id, *revision, *generation, cause),
     }
 }
 

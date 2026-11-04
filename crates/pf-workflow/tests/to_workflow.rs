@@ -31,7 +31,7 @@ fn the_tracks_stages_and_runtime_come_over() {
     assert_eq!(wf.roots, file.roots);
     assert_eq!(wf.settings, file.settings);
     let names: Vec<&str> = wf.tracks.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["lane", "item"]);
+    assert_eq!(names, ["lane", "item", "spine"]);
 
     let item = wf.track("item").unwrap();
     let stages: Vec<&str> = item.stages.iter().map(|s| s.name.as_str()).collect();
@@ -51,7 +51,7 @@ fn the_tracks_stages_and_runtime_come_over() {
 }
 
 #[test]
-fn only_the_item_track_merges_and_it_checks_the_head() {
+fn the_item_track_merges_on_green_checks_and_the_spine_track_on_the_ack() {
     let (_, wf) = converted();
     assert!(wf.track("lane").unwrap().merge.is_none());
     let merge = wf
@@ -66,6 +66,17 @@ fn only_the_item_track_merges_and_it_checks_the_head() {
     assert_eq!(merge.repo, "{param.forge_repo}");
     assert_eq!(merge.base, "{param.spine_branch}");
     assert!(wf.has_merge());
+    // The spine track merges too, only on the claim's ack, with the spine branch as its head.
+    let spine = wf
+        .track("spine")
+        .unwrap()
+        .merge
+        .as_ref()
+        .expect("spine merges");
+    assert_eq!(spine.rule, MergeRule::ClaimAck);
+    assert!(!spine.head_check);
+    assert_eq!(spine.base, "{param.base_branch}");
+    assert_eq!(spine.head_branch, "{param.spine_branch}");
 }
 
 #[test]
