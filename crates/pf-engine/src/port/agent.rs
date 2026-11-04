@@ -173,7 +173,7 @@ pub trait AgentPort: Send + Sync {
     /// Take the neutral events that happened since the last drain, oldest first.
     fn drain_events(&self, session: &SessionRef) -> Result<Vec<SessionEvent>, AgentError>;
     /// The operating-system process ID of the session's process, when the adapter runs one. The
-    /// controller refuses a `claim`, `answer` or `clear` from a process that descends from it
+    /// controller refuses a `claim`, `answer`, `clear` or `ack` from a process that descends from it
     /// (ADR-0005). An adapter with no process of its own keeps the default.
     fn process_id(&self, _session: &SessionRef) -> Option<u32> {
         None

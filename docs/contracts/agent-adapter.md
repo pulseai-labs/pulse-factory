@@ -51,7 +51,7 @@ The engine calls duty 7, then duty 8, then duty 1, in that order, on the same pl
 
 `process_id(session)` is a provided method of `AgentPort`, and it is not one of the nine duties. It
 returns the operating-system process ID of the session's process, or `None` for an adapter that runs
-none (the default). The controller uses it for the caller check of `claim`, `answer` and `clear`: a
+none (the default). The controller uses it for the caller check of `claim`, `answer`, `clear` and `ack`: a
 caller that descends from a process this call returns is a seat and is refused (`requests.md`).
 
 ### `stop`

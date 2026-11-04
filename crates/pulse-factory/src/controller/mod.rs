@@ -72,7 +72,7 @@ pub struct Controller {
     ports: Arc<dyn Ports>,
     runs: Mutex<Vec<Arc<RunHandle>>>,
     seats: Arc<seat::SeatTable>,
-    /// `claim`, `answer` and `clear` run one at a time, so a claim cannot fence between an
+    /// `claim`, `answer`, `clear` and `ack` run one at a time, so a claim cannot fence between an
     /// answer's check of the generation and its commit.
     claim_lock: Mutex<()>,
 }

@@ -92,7 +92,7 @@ same run (next section). Nothing needs a new run.
    fails leaves the request answered and parks the unit again, with `answer hook failed:` and the
    cause as the reason of a new request. `clear` runs no hook.
 
-`claim`, `answer` and `clear` refuse a caller that is, or descends from, a seat.
+`claim`, `answer`, `clear` and `ack` refuse a caller that is, or descends from, a seat.
 
 ## Merge the spine PR
 
