@@ -49,12 +49,19 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
 - **The summary.** Spine, item count, workflow name and file version, each role with runtime and
   model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, each stage-outcome loop, one
   relaunch per stage), the pinned plugins, the most launches,
-  one merge line for each track that merges, the run `--replace` names, and `paper env` when set.
+  one merge line for each track that merges, one base push line for each stage with `base_push`,
+  the run `--replace` names, and `paper env` when set.
   A track with the rule `green_checks_in_declared_order` prints
   `item PRs merge into <base> on green checks with no ack`. A track with the rule `claim_ack`
   prints `the <track> PR merges into <base> only on the claim's ack`. A loop is one `outcomes` entry of a stage. Its text line is
   `caps: loop <stage> -> <to> at most <max> times per <track> unit`. The JSON form holds them as
-  `caps.loops`, an array of `{track, from, to, max}`.
+  `caps.loops`, an array of `{track, from, to, max}`. A stage with `base_push` prints
+  `base push: before <track>.<stage>, push <branch> to origin when origin lacks it`. The branch is
+  rendered with the run's values and no unit, and a branch that needs a unit shows as written, as the
+  base of a merge line does. The JSON form holds them as `base_pushes`, an array of
+  `{track, stage, dir, branch}`. It is additive: `schema_version` stays, and a package with no
+  `base_push` has an empty array and prints no such line. A base push does not change the most
+  launches.
   The most launches is `2 x (seed max x seed-track launches + items x item-track launches)`, summed
   over every seed and track. The launches of one unit of a track are its stages, each counted once
   except a stage with `entered_by: outcome`, which counts 0, plus the `max` of every `outcomes`

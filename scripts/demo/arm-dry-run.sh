@@ -85,6 +85,7 @@ want "caps: one relaunch per stage"
 want "most launches: 86"
 want "item PRs merge into spine/s1 on green checks with no ack"
 want "the spine PR merges into main only on the claim's ack"
+want "base push: before item.close, push spine/s1 to origin when origin lacks it"
 printf '%s\n' "$out" | grep -q '^plugin.*ossify.*1\.30\.1' || fail "the summary lacks the pinned plugin"
 
 # Nothing changed: no state directory, no socket, no ledger, and no `gh` call but `repo view`.

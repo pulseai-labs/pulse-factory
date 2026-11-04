@@ -1,0 +1,6 @@
+version: 1
+role: implementer
+allow:
+  - delete_own_scratch
+  - delete_own_build_target
+  - write_own_report_and_run_files

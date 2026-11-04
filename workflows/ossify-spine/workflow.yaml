@@ -263,6 +263,14 @@ tracks:
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{param.method_root}"
         slots: [session]
+        # ossify's PR-mode item close (work-item-close.md §4a) needs the spine branch on `origin`,
+        # and pushes it itself when `ls-remote` finds it absent. This seat's own branch is the work
+        # branch, so its rules deny that push. The controller puts the spine branch on `origin`
+        # before this stage launches, when `origin` lacks it, so no seat pushes a branch that is
+        # not its own.
+        base_push:
+          dir: "{param.repo}"
+          branch: "{param.spine_branch}"
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
         stop_file:
@@ -313,9 +321,11 @@ tracks:
                 - "{answer.generation}"
                 - close
 
-      # The reviewer reads the item PR at its head and writes `review.md`. A block sends the unit to
-      # `fix`; a pass whose head is not the PR's head sends it to `review` again. A pass on the PR
-      # head ends the stage, and the merge rule takes over. Each loop is capped at 2.
+      # The reviewer reads the item PR at its head and writes `review.md`. The verdict is line 1 of
+      # that file and nothing else counts: `scripts/verdict.sh` reads it for `done` and for the block
+      # outcome. A block sends the unit to `fix`; a pass whose head is not the PR's head sends it to
+      # `review` again. A pass on the PR head ends the stage, and the merge rule takes over. Each
+      # loop is capped at 2.
       - name: review
         role: reviewer
         brief: [briefs/common.md, briefs/review.md]
@@ -360,17 +370,17 @@ tracks:
           decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
         done:
           - exit0:
-              - grep
-              - -Eq
-              - "^verdict: (pass|block)$"
+              - sh
+              - "{run.package}/scripts/verdict.sh"
               - "{run.dir}/out/{unit.id}/review.md"
+              - any
         outcomes:
           - when:
               - exit0:
-                  - grep
-                  - -qx
-                  - "verdict: block"
+                  - sh
+                  - "{run.package}/scripts/verdict.sh"
                   - "{run.dir}/out/{unit.id}/review.md"
+                  - block
             to: fix
             max: 2
           - when:

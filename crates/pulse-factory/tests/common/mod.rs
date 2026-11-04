@@ -46,6 +46,9 @@ pub struct Options {
     /// items are done and `rounds.done` exists, a `spine` track with the stage `spine_close` and a
     /// `claim_ack` merge, and an `end_when` that waits for `{run.dir}/closed.flag`.
     pub spine_close: bool,
+    /// Extra keys of the item stage `close`, indented by 8 spaces, each line with a final newline
+    /// (for example `base_push:` and `before:`).
+    pub close_extra: String,
 }
 
 impl Default for Options {
@@ -65,6 +68,7 @@ impl Default for Options {
             scripts_from: None,
             review_loop: false,
             spine_close: false,
+            close_extra: String::new(),
         }
     }
 }
@@ -98,10 +102,10 @@ const REVIEW_STAGES: &str = r#"      - name: review
         settings:
           report_dir: "{run.dir}/out/{unit.id}"
         done:
-          - exit0: [grep, -Eq, "^verdict: (pass|block)$", "{run.dir}/out/{unit.id}/review.md"]
+          - exit0: [sh, "{run.package}/scripts/verdict.sh", "{run.dir}/out/{unit.id}/review.md", any]
         outcomes:
           - when:
-              - exit0: [grep, -qx, "verdict: block", "{run.dir}/out/{unit.id}/review.md"]
+              - exit0: [sh, "{run.package}/scripts/verdict.sh", "{run.dir}/out/{unit.id}/review.md", block]
             to: fix
             max: 2
           - when:
@@ -286,7 +290,7 @@ seeds:
         brief: [briefs/common.md]
         message: "Close {{unit.id}}."
         cwd: "{{param.repo}}"
-        stop_file: "{{run.dir}}/out/{{unit.id}}/stop"
+{close_extra}        stop_file: "{{run.dir}}/out/{{unit.id}}/stop"
         stall_minutes: 20
         first_turn_seconds: 180
         settings:
@@ -322,6 +326,7 @@ seeds:
         model_sessions = o.model_sessions,
         cold_builds = o.cold_builds,
         implement_stall = o.implement_stall,
+        close_extra = o.close_extra,
         review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
         review_stages = if o.review_loop { REVIEW_STAGES } else { "" },
     )

@@ -42,6 +42,7 @@ fn stage(dir: &Path, done: Vec<DoneCond>, park_on: Vec<ParkOn>) -> StageSpec {
         park_on,
         outcomes: Vec::new(),
         entered_by_outcome: false,
+        base_push: None,
     }
 }
 

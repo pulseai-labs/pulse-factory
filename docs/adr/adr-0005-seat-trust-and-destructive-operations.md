@@ -39,6 +39,10 @@ Pulse Factory parses them as data in strict formats and never executes their tex
 - pushing and merging;
 - deleting worktrees and scratch.
 
+*Amended 2026-11-04, `r0.s3.w1`:* code pushes a base branch only where a stage names it with
+`base_push`, only when `origin` lacks the branch, never with force and never to the forge's default
+branch, and each push has a ledger line (`docs/contracts/workflow-file.md`, `base_push`).
+
 Only code merges, and only under the workflow's merge rule:
 - item PRs merge into the spine branch on green CI, in the declared order;
 - the spine PR merges into `main` only on the claim's ack. The ack binds to the current claim

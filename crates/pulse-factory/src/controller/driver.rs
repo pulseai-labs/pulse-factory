@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use super::base_push;
 use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
@@ -94,6 +95,13 @@ pub struct DriverConfig {
     pub params: BTreeMap<String, String>,
     pub run_dir: PathBuf,
     pub target_dir: String,
+    /// The run's forge, from `run.json`: `owner/name` on GitHub, the canonical path of `forge.git`
+    /// in the paper env. A `base_push` pushes only there.
+    pub forge_repo: String,
+    /// The default branch of the run's forge. A `base_push` never pushes it.
+    pub default_branch: String,
+    /// The run is a paper run: `forge_repo` is a local bare repository.
+    pub paper: bool,
     pub clock: ClockSecs,
     /// The most entries one walk reads for the stall rule. Use [`WALK_LIMIT`].
     pub walk_limit: usize,
@@ -948,6 +956,26 @@ impl Driver {
                 continue;
             }
             let ctx = self.ctx(run_dir, Some((&unit.id, &detail.record.vars)));
+            // A stage that names a base branch finds it on `origin` before it launches.
+            if let Some(base) = &stage.base_push {
+                let forge = base_push::Forge {
+                    repo: &self.cfg.forge_repo,
+                    default_branch: &self.cfg.default_branch,
+                    paper: self.cfg.paper,
+                };
+                if let Err(reason) = base_push::ensure(
+                    engine,
+                    &forge,
+                    stage,
+                    base,
+                    &unit.id,
+                    detail.park_generation,
+                    &ctx,
+                ) {
+                    self.park(t, &unit.id, &reason);
+                    continue;
+                }
+            }
             match run_unit_hook(engine, &unit.id, "before", &stage.before, &ctx) {
                 Ok(HookOutcome::Passed) => {}
                 Ok(HookOutcome::Failed(why)) => {
