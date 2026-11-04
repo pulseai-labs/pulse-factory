@@ -42,6 +42,10 @@ pub struct Options {
     /// package. The two scripts the stages call come from `scripts_from`; set it to
     /// `real_scripts_dir()`.
     pub review_loop: bool,
+    /// Add the spine-close pieces: the param `base_branch`, a `spine` seed that starts when the
+    /// items are done and `rounds.done` exists, a `spine` track with the stage `spine_close` and a
+    /// `claim_ack` merge, and an `end_when` that waits for `{run.dir}/closed.flag`.
+    pub spine_close: bool,
 }
 
 impl Default for Options {
@@ -60,6 +64,7 @@ impl Default for Options {
             item_vars: "[worktree_path, branch]".to_string(),
             scripts_from: None,
             review_loop: false,
+            spine_close: false,
         }
     }
 }
@@ -131,6 +136,53 @@ const REVIEW_STAGES: &str = r#"      - name: review
             max: 2
 "#;
 
+/// The seed of the spine-close pieces, indented as the seeds.
+const SPINE_SEED: &str = r#"  - id: spine
+    group: spine
+    order: 2
+    track: spine
+    vars: {}
+    start_when:
+      file: "{run.dir}/rounds.done"
+      units_done: item
+"#;
+
+/// The track `spine`, and the `end_when` that follows the tracks.
+const SPINE_TRACK: &str = r#"  spine:
+    stages:
+      - name: spine_close
+        role: close
+        brief: [briefs/common.md]
+        message: "Close {param.spine}. OUT {run.dir}/out/{unit.id}."
+        cwd: "{param.repo}"
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 30
+        first_turn_seconds: 180
+        settings:
+          push_dir: "{param.repo}"
+          push_branch: "{param.spine_branch}"
+          own_branch: "{param.spine_branch}"
+          report_dir: "{param.spine_dir}"
+        done:
+          - pr:
+              argv: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+              test: url
+    merge:
+      rule: claim_ack
+      repo: "{param.forge_repo}"
+      base: "{param.base_branch}"
+      head_branch: "{param.spine_branch}"
+      pr: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+      head_check: false
+      after_merge:
+        - [sh, -c, "echo {unit.id} >> {run.dir}/after_merge.log"]
+end_when:
+  when:
+    - file: "{run.dir}/closed.flag"
+  waiting: "the spine PR is merged: close {param.spine} in the claim session"
+  reason: "spine {param.spine} closed"
+"#;
+
 pub fn write_script(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -142,7 +194,7 @@ pub fn workflow_yaml(o: &Options) -> String {
     format!(
         r#"version: 1
 name: fixture-spine
-params: [spine, spine_branch, spine_dir, repo, forge_repo, count, briefs]
+params: [spine, spine_branch, spine_dir, repo, forge_repo, count, briefs{extra_param}]
 plugins:
   - name: methodkit
     min_version: {plugin_min}
@@ -182,7 +234,7 @@ seeds:
       when_units_done: item
       until_file: "{{run.dir}}/rounds.done"
       max: {seed_max}
-tracks:
+{spine_seed}tracks:
   lane:
     stages:
       - name: lane
@@ -256,7 +308,10 @@ tracks:
       head_check: true
       after_merge:
         - [sh, -c, "echo {{unit.id}} >> {{run.dir}}/after_merge.log"]
-"#,
+{spine_track}"#,
+        extra_param = if o.spine_close { ", base_branch" } else { "" },
+        spine_seed = if o.spine_close { SPINE_SEED } else { "" },
+        spine_track = if o.spine_close { SPINE_TRACK } else { "" },
         plugin_min = o.plugin_min,
         plan_check = o.plan_check,
         seed_max = o.seed_max,

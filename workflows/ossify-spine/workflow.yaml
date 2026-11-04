@@ -1,5 +1,8 @@
 # The ossify-spine workflow: arm a spine, and its item PRs merge into the spine branch with no
-# operator present. Every path is a placeholder. The arm step supplies the parameters.
+# operator present. When every item is merged, a spine-close seat opens the spine PR. That PR
+# merges into the base branch only on the claim holder's ack (`pulse-factory ack`). The run ends
+# when the method records the spine as closed. Every path is a placeholder. The arm step supplies
+# the parameters.
 #
 # An answer reaches the seat that needs it through two hooks (`on_answer`), both POSIX `sh`
 # scripts in `scripts/`. The controller runs a hook when an answer resumes a unit, before the
@@ -21,7 +24,8 @@ name: ossify-spine
 #   state_file    the method's state file
 #   oss           the method's command-line tool
 #   briefs        the directory that holds the pinned briefs; `arm` sets it to the run's own copy
-params: [spine, spine_branch, spine_dir, method_root, repo, forge_repo, worktree_root, state_file, oss, briefs]
+#   base_branch   the branch the spine PR merges into (the skill reads it from the method's state)
+params: [spine, spine_branch, spine_dir, method_root, repo, forge_repo, worktree_root, state_file, oss, briefs, base_branch]
 
 plugins:
   - name: ossify
@@ -86,6 +90,15 @@ seeds:
       when_units_done: item
       until_file: "{run.dir}/rounds.done"
       max: 12
+  # The spine close starts once the lane wrote `rounds.done` and every item is done. It runs once.
+  - id: spine
+    group: spine
+    order: 2
+    track: spine
+    vars: {}
+    start_when:
+      file: "{run.dir}/rounds.done"
+      units_done: item
 
 tracks:
   lane:
@@ -421,3 +434,106 @@ tracks:
         - [git, -C, "{param.repo}", fetch, origin, "{param.spine_branch}"]
         - [git, -C, "{param.repo}", merge, --ff-only, "origin/{param.spine_branch}"]
         - [env, -C, "{param.method_root}", "{param.oss}", work_item_status, "{unit.id}", complete]
+
+  # The spine close. The seat runs the first pass of the method's spine close, which pushes the
+  # spine branch and opens the spine PR. It never merges, reviews or runs the second pass. The
+  # controller then opens a `merge_ack` request for the PR and merges it only on the claim's ack.
+  spine:
+    stages:
+      - name: spine_close
+        role: close
+        brief: [briefs/common.md, briefs/spine-close.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/spine-close.md, and follow them.
+          Spine: {param.spine}. Base branch: {param.base_branch}. Spine branch: {param.spine_branch}.
+          OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{param.method_root}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - spine_close
+        stall_minutes: 30
+        first_turn_seconds: 180
+        skills: [close]
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          push_dir: "{param.repo}"
+          push_branch: "{param.spine_branch}"
+          own_branch: "{param.spine_branch}"
+          report_dir: "{param.spine_dir}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
+        # The stage is done when the forge lists an open PR from the spine branch into the base.
+        done:
+          - pr:
+              argv:
+                - gh
+                - pr
+                - list
+                - --repo
+                - "{param.forge_repo}"
+                - --head
+                - "{param.spine_branch}"
+                - --base
+                - "{param.base_branch}"
+                - --state
+                - open
+                - --json
+                - url
+                - --jq
+                - '.[0].url // ""'
+              test: url
+
+    merge:
+      rule: claim_ack
+      repo: "{param.forge_repo}"
+      base: "{param.base_branch}"
+      head_branch: "{param.spine_branch}"
+      pr:
+        - gh
+        - pr
+        - list
+        - --repo
+        - "{param.forge_repo}"
+        - --head
+        - "{param.spine_branch}"
+        - --base
+        - "{param.base_branch}"
+        - --state
+        - open
+        - --json
+        - url
+        - --jq
+        - '.[0].url // ""'
+      # The claim's ack pins the head SHA, so the head check would only refuse an operator's fix
+      # commit on the PR.
+      head_check: false
+      after_merge:
+        - [git, -C, "{param.repo}", fetch, origin, "{param.base_branch}"]
+
+# The run ends when the method records the spine as closed. That is the second pass of the close,
+# which the operator runs in the claim session after the spine PR is merged.
+end_when:
+  when:
+    - exit0:
+        - jq
+        - -e
+        - --arg
+        - s
+        - "{param.spine}"
+        - 'any(.spines[]; .id == $s and .status == "closed")'
+        - "{param.state_file}"
+  waiting: "the spine PR is merged: run /ossify:close {param.spine} in the claim session for the second pass"
+  reason: "spine {param.spine} closed"

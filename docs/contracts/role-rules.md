@@ -138,7 +138,7 @@ guards. A `( … )` subshell, a function body and a `coproc` body are checked th
 | `wrapper` | timeout, nice, ionice, nohup, setsid, stdbuf, command, builtin, sudo, doas, env, xargs, flock and find -exec |
 | `literal word` | literal text, single quotes, double quotes, brace expansion and globs |
 | `variable` | $NAME, ${NAME}, ${#NAME} and the parameters $? $$ $! $# $@ $* $- $0 to $9 |
-| `default word` | ${NAME:-word}, ${NAME-word}, ${NAME:+word} and ${NAME+word} |
+| `default word` | ${NAME:-word}, ${NAME-word}, ${NAME:+word}, ${NAME+word}, ${NAME#word}, ${NAME##word}, ${NAME%word} and ${NAME%%word} |
 | `arithmetic expansion` | $((…)) holding only names, numbers, spaces and + - * / % < > = ! & \| ( ) |
 | `command substitution` | $(…) and backticks, with an inner text in the grammar |
 | `process substitution` | <(…) and >(…), with an inner text in the grammar |
@@ -158,7 +158,7 @@ first. A form that is in neither table is denied the same way.
 | `$[…]` | the old arithmetic expansion |
 | `((…))` | the arithmetic command, and the C-style for ((…;…;…)) |
 | `$((…)) outside its list` | $((…)) holding $, [ ], a command substitution or another character |
-| `other ${…}` | ${x:=y}, ${x/a/b}, ${!x}, ${x%y}, ${x:1:2}, ${x[1]}, ${x@P} and every other form |
+| `other ${…}` | ${x:=y}, ${x/a/b}, ${!x}, ${x:1:2}, ${x[1]}, ${x@P} and every other form |
 | `$'…'` | ANSI-C quoting |
 | `$"…"` | locale quoting |
 | `select` | select NAME in WORDS; do …; done |

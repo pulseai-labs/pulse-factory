@@ -117,6 +117,9 @@ fn each_allowed_form_has_an_allowed_sample() {
         // default word
         "echo \"${OSS_STATE_FILE:-}\" ${a:-b} ${a-b} ${a:+b} ${a+b}",
         "echo ${a:-${b:-c}} \"${a:-$(date)}\"",
+        // The four trim forms, with the word read like a default word.
+        "echo ${a#b} ${a##b} ${a%b} ${a%%b} \"${a##*/}\" \"${a%%.*}\"",
+        "echo ${a#${b:-c}} \"${a%$(date)}\"",
         // arithmetic expansion
         "n=$((n+1))",
         "echo $((1 + 2 * (3 % 2)))",
@@ -162,7 +165,8 @@ fn each_denied_form_is_denied_as_unparsed_command_with_the_form_named() {
         ("source f", "source"),
         (". f", "source"),
         ("echo $[1+2]", "$[1+2]"),
-        ("echo ${x%y}", "${x%y}"),
+        ("echo ${x:1:2}", "${x:1:2}"),
+        ("echo ${x^^}", "${x^^}"),
         ("echo $\"x\"", "$\"x\""),
         ("for ((i=0; i<3; i++)); do :; done", "C-style"),
         ("python3 <<'EOF'\nprint(1)\nEOF", "python3"),
@@ -290,4 +294,58 @@ fn each_form_of_the_grammar_has_a_comment_line() {
         }
     }
     assert_eq!(forms, ALLOWED.len() + DENIED.len());
+}
+
+#[test]
+fn the_trim_words_are_read_as_a_command_line_would_be() {
+    guarded("echo ${x#$(gh pr merge 1)}", "gh-pr-merge");
+    guarded("echo ${x##$(gh pr merge 1)}", "gh-pr-merge");
+    guarded("echo ${x%$(gh pr merge 1)}", "gh-pr-merge");
+    guarded("echo \"${x%%`gh pr merge 1`}\"", "gh-pr-merge");
+    // A form outside the grammar in the word is still named.
+    unread("echo ${x#${y:=z}}", "${y:=z}");
+    unread("echo ${x%%$((a[1]))}", "$((a[1]))");
+}
+
+#[test]
+fn the_default_word_row_lists_the_four_trim_forms_in_code_and_in_the_contract() {
+    let shapes = [
+        "${NAME#word}",
+        "${NAME##word}",
+        "${NAME%word}",
+        "${NAME%%word}",
+    ];
+    let row = ALLOWED
+        .iter()
+        .find(|f| f.name == "default word")
+        .expect("the grammar has a `default word` form");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/contracts/role-rules.md");
+    let doc = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    let doc_row = doc
+        .lines()
+        .find(|l| l.starts_with("| `default word` |"))
+        .expect("the contract has a `default word` row");
+    for shape in shapes {
+        assert!(
+            row.shape.contains(shape),
+            "grammar.rs: {shape} is not in {:?}",
+            row.shape
+        );
+        assert!(
+            doc_row.contains(shape),
+            "role-rules.md: {shape} is not in {doc_row:?}"
+        );
+    }
+    // None of the four is still listed as denied.
+    for f in DENIED {
+        for shape in ["${x#", "${x##", "${x%y}", "${x%%"] {
+            assert!(!f.shape.contains(shape), "{} still lists {shape}", f.name);
+        }
+    }
+    let denied_row = doc
+        .lines()
+        .find(|l| l.starts_with("| `other ${…}` |"))
+        .expect("the contract has an `other ${…}` row");
+    assert!(!denied_row.contains("${x%y}"), "{denied_row}");
 }

@@ -1,5 +1,5 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `hook` and `controller`.
+//! `clear`, `ack`, `hook` and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -38,6 +38,8 @@ pub enum Verb {
     Answer(AnswerArgs),
     /// Resume a parked unit, at the stage it parked in or at `--to`.
     Clear(ClearArgs),
+    /// Ack a merge request: the spine PR merges with the head SHA the request names.
+    Ack(AckArgs),
     /// Judge one tool call of a seat (the extension runs this; stdin holds the call).
     Hook,
     /// Run the controller in the foreground.
@@ -169,6 +171,21 @@ pub struct ClearArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct AckArgs {
+    /// The `merge_ack` request, such as `R-3`.
+    pub id: String,
+    /// The revision you read with `show`. Another revision is refused.
+    #[arg(long, value_name = "N")]
+    pub rev: u32,
+    /// The file that holds the claim token. The default is `<state dir>/claim-token`.
+    #[arg(long, value_name = "FILE")]
+    pub claim_token_file: Option<PathBuf>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ControllerArgs {
     /// Milliseconds between two ticks.
     #[arg(long, default_value_t = 2000)]
@@ -193,6 +210,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Verb::Claim(a) => crate::controller::client::claim(&a),
         Verb::Answer(a) => crate::controller::client::answer(&a),
         Verb::Clear(a) => crate::controller::client::clear(&a),
+        Verb::Ack(a) => crate::controller::client::ack(&a),
         Verb::Hook => crate::hook::run(),
         Verb::Controller(a) => crate::controller::run(&a),
     }

@@ -7,9 +7,10 @@ description: Arm a Pulse Factory run for a planned spine, read its status, and h
 
 Pulse Factory runs the seats of a planned spine with no model session watching. You arm a run once.
 A controller (a systemd user service) then drives the seats until each item PR has merged into the
-spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
+spine branch. A spine-close seat then opens the spine PR, and the PR merges into the base branch
+only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
 `status`, `halt`, `hook` and `controller`, and the verbs of requests and the claim: `requests`,
-`show`, `claim`, `answer` and `clear`.
+`show`, `claim`, `answer`, `clear` and `ack`.
 
 ## Arm a run
 
@@ -27,7 +28,12 @@ spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the
    spine_branch="$(oss branch_name "$spine" "$slug")"
    spine_dir="$method_root/$(oss spine_dir "$release" "$spine" "$slug")"
    plugin_root="$HOME/.claude/plugins/cache"
+   # The branch the spine PR merges into. The method recorded it when the spine started.
+   base_branch="$(oss spine_base_get "$spine" "$(basename "$PWD")")"
    ```
+
+   `spine_base_get` takes the spine and the repo name as the method's state records it. Use that
+   name if it is not the directory name.
 
 2. Show the plan first. A dry run reads and checks. It starts nothing and records nothing:
 
@@ -37,7 +43,7 @@ spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the
      --param spine_branch="$spine_branch" --param spine_dir="$spine_dir" \
      --param repo="$PWD" --param method_root="$method_root" \
      --param worktree_root="$PWD/.worktrees" --param state_file="$method_root/.state.json" \
-     --param oss="$(command -v oss)" \
+     --param oss="$(command -v oss)" --param base_branch="$base_branch" \
      --dry-run
    ```
 
@@ -45,8 +51,9 @@ spine branch. The CLI contract is `docs/contracts/cli.md`. This skill covers the
    directory, so a value that is `.` or starts with `./` or `../` is refused.
 
 3. Read the summary to the operator: the spine, the item count, each role with its model, the caps,
-   the pinned plugins, the most launches the run can make, and the line that says item PRs merge
-   with no ack. The operator approves what they saw.
+   the pinned plugins, the most launches the run can make, and two merge lines: item PRs merge into
+   the spine branch on green checks with no ack, and the spine PR merges into the base branch only
+   on the claim's ack. The operator approves what they saw.
 
 4. Start the run with the same command and `--yes` in place of `--dry-run`. It prints the run ID.
    Add `--replace <run>` to replace an earlier run that has no running session.
@@ -86,6 +93,31 @@ same run (next section). Nothing needs a new run.
    cause as the reason of a new request. `clear` runs no hook.
 
 `claim`, `answer` and `clear` refuse a caller that is, or descends from, a seat.
+
+## Merge the spine PR
+
+When every item has merged and the lane has written `rounds.done`, the `spine` seat runs the first
+pass of the method's spine close. It pushes the spine branch and opens the spine PR into the base
+branch. Then the controller opens a `merge_ack` request for it. Nothing merges until the claim
+holder acks.
+
+1. `pulse-factory requests` lists the `merge_ack` request. `pulse-factory show <R-n>` prints the PR,
+   the base branch, the head branch and the head SHA the ack will merge. Check them against the
+   forge. Review the PR and drive it to a mergeable state as you would any PR.
+2. `pulse-factory claim`, if this session does not hold the claim.
+3. `pulse-factory ack <R-n> --rev <k>`, with the revision that `show` printed. The controller reads
+   the PR again. If the head moved, it revises the request to the new SHA and refuses; `show` the
+   request and ack the new revision. If the checks are not green, or the PR has a conflict, or the
+   base or head branch changed, it refuses with the cause and the request stays open. Otherwise it
+   merges the PR with that SHA pinned, then fetches the base branch.
+4. After the merge, run the second pass in the claim session: `/ossify:close <spine>` on Claude
+   Code, `skill://close <spine>` on OMP. It finds the merged PR and records the close, runs the
+   demo and runs the harvest. A seat does not run it. The run ends when the method records the
+   spine as closed, and `status` shows each session's cost and the run's total.
+
+`ack` answers only a `merge_ack` request. `answer` and `clear` refuse one and name `ack`. A merge
+that does not land parks the unit with a `merge_failed` request. `clear` sends it back to the merge,
+which opens a new `merge_ack`. A halted or ended run refuses the ack.
 
 ## Halt a run
 

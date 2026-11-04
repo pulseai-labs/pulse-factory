@@ -50,6 +50,15 @@ pub struct RepeatDef {
     pub max: u32,
 }
 
+/// A seed unit that starts later: it is admitted once, on the first tick at which `file` exists
+/// and every unit of the track `units_done` is done (and at least one such unit exists).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartWhen {
+    /// A template over the run. The seed waits until the rendered path exists.
+    pub file: String,
+    pub units_done: String,
+}
+
 /// A unit the file declares, admitted at the start of a run with no queue record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedDef {
@@ -59,6 +68,9 @@ pub struct SeedDef {
     pub track: String,
     pub vars: BTreeMap<String, String>,
     pub repeat: Option<RepeatDef>,
+    /// `Some`: the seed is admitted when its condition holds, not at the start of the run. A seed
+    /// carries `repeat` or `start_when`, never both.
+    pub start_when: Option<StartWhen>,
 }
 
 /// The check a `pr` condition applies to its output.
@@ -133,10 +145,24 @@ pub struct MergeSpec {
     pub rule: MergeRule,
     pub repo: String,
     pub base: String,
+    /// The branch a unit's PR must come from. Only the `claim_ack` rule takes it.
+    pub head_branch: Option<String>,
     /// Prints the unit's PR URL.
     pub pr: CommandSpec,
     pub head_check: bool,
     pub after_merge: Vec<CommandSpec>,
+}
+
+/// When a run may end. The run ends with `reason` once its seeds are finished and every unit is
+/// done, and every `when` condition holds. Until then each tick notes `waiting`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndWhen {
+    /// `file` and `exit0` conditions, in the order the file lists them.
+    pub when: Vec<DoneCond>,
+    /// A template over the run: the note a tick keeps while a condition does not hold.
+    pub waiting: String,
+    /// A template over the run: the reason the run ends with.
+    pub reason: String,
 }
 
 /// A named list of stages, with an optional merge definition.
@@ -161,6 +187,8 @@ pub struct WorkflowFile {
     pub unit_sources: Vec<UnitSourceDef>,
     pub seeds: Vec<SeedDef>,
     pub tracks: Vec<TrackDef>,
+    /// `None`: the run ends as soon as its seeds are finished and every unit is done.
+    pub end_when: Option<EndWhen>,
 }
 
 impl WorkflowFile {
@@ -554,6 +582,7 @@ const TOP_FIELDS: &[&str] = &[
     "seeds",
     "unit_sources",
     "tracks",
+    "end_when",
 ];
 
 fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
@@ -690,6 +719,11 @@ fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
         }
     }
 
+    let end_when = match top.get("end_when") {
+        None => None,
+        Some(n) => Some(read_end_when(n, &check)?),
+    };
+
     Ok(WorkflowFile {
         version: SUPPORTED_VERSION,
         name,
@@ -702,6 +736,7 @@ fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
         unit_sources,
         seeds,
         tracks,
+        end_when,
     })
 }
 
@@ -782,7 +817,15 @@ fn read_seed(
     let f = Fields::new(
         node,
         "a seed",
-        &["id", "group", "order", "track", "vars", "repeat"],
+        &[
+            "id",
+            "group",
+            "order",
+            "track",
+            "vars",
+            "repeat",
+            "start_when",
+        ],
     )?;
     let id = name_of(f.req("id")?, "the seed id")?;
     let group = nonempty_text(f.req("group")?, "`group`")?;
@@ -812,6 +855,27 @@ fn read_seed(
             })
         }
     };
+    let start_when = match f.get("start_when") {
+        None => None,
+        Some(w) => {
+            if repeat.is_some() {
+                return Err(ParseError::new(
+                    w.pos,
+                    format!(
+                        "seed `{id}` has both `start_when` and `repeat`; a seed has one or the other"
+                    ),
+                ));
+            }
+            let wf = Fields::new(w, "`start_when`", &["file", "units_done"])?;
+            let done = wf.req("units_done")?;
+            let units_done = name_of(done, "`units_done`")?;
+            refs.push((units_done.clone(), done.pos, "`start_when`"));
+            Some(StartWhen {
+                file: check.text_node(wf.req("file")?, "`file`", Scope::Run)?,
+                units_done,
+            })
+        }
+    };
     Ok(SeedDef {
         id,
         group,
@@ -819,6 +883,7 @@ fn read_seed(
         track,
         vars,
         repeat,
+        start_when,
     })
 }
 
@@ -1209,28 +1274,81 @@ fn read_done(node: &Node, check: &Checker, scope: Scope) -> Result<DoneCond, Par
     Ok(DoneCond::Pr { command, test })
 }
 
+/// The `end_when` block: `when` lists `file` and `exit0` conditions, and `waiting` and `reason`
+/// are templates over the run. No unit exists when the run ends, so none of them may name one.
+fn read_end_when(node: &Node, check: &Checker) -> Result<EndWhen, ParseError> {
+    let f = Fields::new(node, "`end_when`", &["when", "waiting", "reason"])?;
+    let when_node = f.req("when")?;
+    let entries = items(when_node, "`when`")?;
+    if entries.is_empty() {
+        return Err(ParseError::new(
+            when_node.pos,
+            "`when` of `end_when` must hold at least one condition",
+        ));
+    }
+    let mut when = Vec::new();
+    for entry in entries {
+        let cond = read_done(entry, check, Scope::Run)?;
+        if matches!(cond, DoneCond::Pr { .. }) {
+            return Err(ParseError::new(
+                entry.pos,
+                "a `pr` condition cannot end a run; `end_when` accepts `file` and `exit0`",
+            ));
+        }
+        when.push(cond);
+    }
+    Ok(EndWhen {
+        when,
+        waiting: check.text_node(f.req("waiting")?, "`waiting`", Scope::Run)?,
+        reason: check.text_node(f.req("reason")?, "`reason`", Scope::Run)?,
+    })
+}
+
+/// The merge rules version 1 accepts, as the file spells them.
+const MERGE_RULES: &str = "green_checks_in_declared_order, claim_ack";
+
 fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, ParseError> {
     let f = Fields::new(
         node,
         "`merge`",
-        &["rule", "repo", "base", "pr", "head_check", "after_merge"],
+        &[
+            "rule",
+            "repo",
+            "base",
+            "head_branch",
+            "pr",
+            "head_check",
+            "after_merge",
+        ],
     )?;
     let rule_node = f.req("rule")?;
     let rule = match text_of(rule_node, "`rule`")?.as_str() {
         "green_checks_in_declared_order" => MergeRule::GreenChecksInDeclaredOrder,
+        "claim_ack" => MergeRule::ClaimAck,
         other => {
             return Err(ParseError::new(
                 rule_node.pos,
-                format!(
-                    "merge rule `{other}` is unknown; version 1 accepts: green_checks_in_declared_order"
-                ),
+                format!("merge rule `{other}` is unknown; version 1 accepts: {MERGE_RULES}"),
             ));
+        }
+    };
+    let head_branch = match f.get("head_branch") {
+        None => None,
+        Some(n) => {
+            if rule != MergeRule::ClaimAck {
+                return Err(ParseError::new(
+                    n.pos,
+                    "`head_branch` belongs to the merge rule `claim_ack`",
+                ));
+            }
+            Some(check.text_node(n, "`head_branch`", scope)?)
         }
     };
     Ok(MergeSpec {
         rule,
         repo: check.text_node(f.req("repo")?, "`repo`", scope)?,
         base: check.text_node(f.req("base")?, "`base`", scope)?,
+        head_branch,
         pr: check.command(f.req("pr")?, "`pr`", scope)?,
         head_check: match f.get("head_check") {
             None => false,

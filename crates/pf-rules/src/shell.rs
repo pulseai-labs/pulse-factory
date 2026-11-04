@@ -1117,8 +1117,9 @@ impl Parser<'_> {
         }
     }
 
-    /// A `${` after its two characters. The grammar lists `${NAME}`, `${#NAME}` and the four
-    /// default forms `${NAME:-word}`, `${NAME-word}`, `${NAME:+word}` and `${NAME+word}`, where
+    /// A `${` after its two characters. The grammar lists `${NAME}`, `${#NAME}`, the four
+    /// default forms `${NAME:-word}`, `${NAME-word}`, `${NAME:+word}` and `${NAME+word}`, and the
+    /// four trim forms `${NAME#word}`, `${NAME##word}`, `${NAME%word}` and `${NAME%%word}`, where
     /// `NAME` is a name, a number or one of `? $ ! # @ * -`. Any other text is outside the
     /// grammar: it is noted with its source, and its inside is still searched for commands.
     fn param(&mut self, segs: &mut Vec<Seg>, quoted: bool, depth: usize) -> Result<(), String> {
@@ -1169,6 +1170,21 @@ impl Parser<'_> {
                     return Ok(());
                 }
                 (Some('-' | '+'), _) if !length => {
+                    self.i += 1;
+                    self.param_word(quoted, depth + 1)?;
+                    segs.push(Seg::Subst);
+                    return Ok(());
+                }
+                // The trim forms `${NAME#word}`, `${NAME##word}`, `${NAME%word}` and
+                // `${NAME%%word}` remove a pattern from the value. Their word is read like a
+                // default word.
+                (Some('#' | '%'), Some('#' | '%')) if !length && self.peek() == self.peek_at(1) => {
+                    self.i += 2;
+                    self.param_word(quoted, depth + 1)?;
+                    segs.push(Seg::Subst);
+                    return Ok(());
+                }
+                (Some('#' | '%'), _) if !length => {
                     self.i += 1;
                     self.param_word(quoted, depth + 1)?;
                     segs.push(Seg::Subst);
@@ -1805,7 +1821,7 @@ mod grammar_tests {
             ("echo ${x:?m}", "${x:?m}"),
             ("echo ${x/a/b}", "${x/a/b}"),
             ("echo ${!x}", "${!x}"),
-            ("echo ${x%y} ${x#y} ${x^^} ${x,,}", "${x%y}"),
+            ("echo ${x^^} ${x,,}", "${x^^}"),
             ("echo ${x:1:2}", "${x:1:2}"),
             ("echo ${x[1]}", "${x[1]}"),
             ("echo ${x[@]}", "${x[@]}"),
@@ -1830,6 +1846,27 @@ mod grammar_tests {
                 "{src:?} gave {o:?}, want {form:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_four_trim_forms_are_inside_the_grammar_and_their_word_is_read() {
+        for src in [
+            "echo ${x#y} ${x##y} ${x%y} ${x%%y} ${x#} ${x%}",
+            "echo \"${x##*/}\" \"${x%%.*}\" ${1#--} ${@%x}",
+            "echo ${x#${y:-z}} \"${x%$(date)}\"",
+        ] {
+            assert!(outside(src).is_empty(), "{src:?} gave {:?}", outside(src));
+        }
+        // The word holds commands, and they are found.
+        let c = commands("echo ${x#$(gh pr merge 1)} ${x%%`gh pr merge 2`}");
+        assert!(c.contains(&"gh pr merge 1".to_string()), "{c:?}");
+        assert!(c.contains(&"gh pr merge 2".to_string()), "{c:?}");
+        // A form outside the grammar in the word is still noted.
+        let o = outside("echo ${x#${y:=z}}");
+        assert!(o.iter().any(|f| f.contains("${y:=z}")), "{o:?}");
+        // A length with a trim is not a trim.
+        let o = outside("echo ${#x#y}");
+        assert!(!o.is_empty(), "{o:?}");
     }
 
     #[test]

@@ -42,7 +42,7 @@ the reason text to find it.
 | `stall` | A seat that stalled again after its one relaunch. |
 | `merge_failed` | A merge that did not land. The unit parks through the same command as any park. |
 | `seat_lost` | Start-up's reconcile, for a running unit whose seat is gone (ADR-0007). |
-| `merge_ack` | The spine merge waits on the claim. A later work item opens it. |
+| `merge_ack` | The merge of a track with the rule `claim_ack` (`workflow-file.md`, "`merge`"): its PR is green and clean, and the merge waits on the claim's ack. A unit park cannot open it. |
 
 ### The body of a `gaps` and a `stop` request
 
@@ -58,6 +58,37 @@ data: redacted, bounded, stored as JSON strings, and never rendered or run (ADR-
   be read adds nothing.
 - `show` prints both, one line for a gap and an indented block for the stop text, with every control
   character replaced.
+
+### The body of a `merge_ack` request
+
+The merge step opens one `merge_ack` request for the unit, in one commit with the unit's park at the
+stage `merge`. A replay opens no second one. The body is data:
+
+- `pr`: the PR as `<repo>#<n>`. The engine has no PR URL; the forge adapter reads the PR by this
+  form. `requests` shows it in the reason.
+- `repo`, `base` and `head_branch`: what the PR was when the request opened.
+- `head_sha`: the SHA the ack will merge.
+
+The reason starts with the unit's track name: `<track> merge waits on the claim's ack: <repo>#<n>
+<head branch> -> <base> at <short SHA>`. `show` prints the body and lists `ack` as the only verb.
+`answer` and `clear` refuse a `merge_ack` request and name `ack`.
+
+`ack` (`cli.md`) is admitted when the request is open and at the revision given, under the current
+claim. The controller reads the PR again first:
+
+- a head SHA other than `head_sha` revises the request (the body gets the new SHA, the revision
+  rises by one, the reason names the new short SHA) and refuses the ack, and the refusal names the
+  new revision and SHA;
+- checks that are pending or red, a conflict, or a repo, base or head branch that differs from the
+  body refuse the ack with the cause, and the request stays open at its revision;
+- otherwise the answer is `{"verb":"ack","head_sha":…}`, and the PR merges with that SHA pinned
+  through the same merge path as any other (command IDs `merge:` and `merge-result:`). A merge
+  that lands ends the unit `done`. A merge that does not land parks the unit with `merge_failed`,
+  and `clear` sends it back to the merge, which opens a new `merge_ack`.
+
+Each ack writes the ledger line `ack <R-n>@<revision> by claim <generation>: verb=ack unit=<unit>
+pr=<repo>#<n> base=<base> branch=<head branch> sha=<head SHA>`. Each refusal after the request is
+known writes `ack <R-n>@<revision> by claim <generation> refused: <cause>`. The token is in neither.
 
 ### The revision rule
 
@@ -76,6 +107,8 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Open a request | `request:<run>:<unit or ->:<kind>:<n>` |
 | Revise a request | `revise:<id>:<revision>` |
 | Answer a request | `answer:<id>:<revision>` |
+| Ack a `merge_ack` request | `ack:<id>:<revision>` |
+| Record a refused ack | `ack-refused:<id>:<revision>:<n>` (n counts the refusals for the request and revision) |
 | Withdraw a request | `withdraw:<id>` |
 | Record a run of an answer hook | `answer-hook:<id>:<revision>:<n>` (n counts the runs for the request and revision) |
 | Claim | `claim:<generation>` |

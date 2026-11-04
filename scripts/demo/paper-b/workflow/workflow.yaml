@@ -1,0 +1,268 @@
+# The paper workflow of golden journey B: one round, one item, and the spine close. The paper env
+# runs it with no model, no spend and no network. It has no method tool.
+#
+# The lane script queues one item. The item's implementer first writes `gaps.json`; the answer goes
+# into the handoff's `## Clarifications` (the shipped `clarify.sh`, which the journey copies into
+# `scripts/`), and the implementer runs again. Then the item has a verify, a close and a review. Its
+# PR merges into the spine branch on green checks. When the item is done, the spine seat pushes the
+# spine branch and writes the spine PR into `main`. The controller opens a `merge_ack` request, and
+# the PR merges only on the claim's ack. The run ends when the file `closed.flag` exists.
+version: 1
+name: paper-spine-b
+
+# What `arm` must supply.
+#   spine         the spine ID (arm sets it)
+#   spine_branch  the branch the item PR merges into
+#   spine_dir     the directory that holds the reports and the handoffs
+#   worktree_root the directory that holds the item worktrees
+#   forge_repo    the bare repo; `arm --paper` sets it to <paper>/forge.git
+#   briefs        the run's own copy of the briefs (arm sets it)
+#   base_branch   the branch the spine PR merges into
+params: [spine, spine_branch, spine_dir, worktree_root, forge_repo, briefs, base_branch]
+
+roles:
+  lane:
+    runtime: paper
+    model: paper/lane
+    rules: rules/lane.yaml
+  implementer:
+    runtime: paper
+    model: paper/implementer
+    rules: rules/implementer.yaml
+  verifier:
+    runtime: paper
+    model: paper/verifier
+    rules: rules/verifier.yaml
+  close:
+    runtime: paper
+    model: paper/close
+    rules: rules/close.yaml
+  reviewer:
+    runtime: paper
+    model: paper/reviewer
+    rules: rules/reviewer.yaml
+  spine_close:
+    runtime: paper
+    model: paper/spine_close
+    rules: rules/spine_close.yaml
+
+settings:
+  model_sessions: 2
+  cold_builds: 1
+
+# `arm` runs this to learn how many items the spine has.
+plan_check: [echo, "1"]
+
+roots: ["{param.worktree_root}"]
+
+unit_sources:
+  - dir: "{run.dir}/queue"
+    track: item
+    vars: [worktree_path, branch, handoff_path]
+
+seeds:
+  - id: lane
+    group: lane
+    order: 1
+    track: lane
+    vars: {}
+    repeat:
+      when_units_done: item
+      until_file: "{run.dir}/rounds.done"
+      max: 2
+  - id: spine
+    group: spine
+    order: 2
+    track: spine
+    vars: {}
+    start_when:
+      file: "{run.dir}/rounds.done"
+      units_done: item
+
+tracks:
+  lane:
+    stages:
+      - name: lane
+        role: lane
+        brief: [briefs/common.md]
+        message: "Paper lane for {param.spine}. Rulings: {run.dir}/out/{unit.id}/rulings.md."
+        cwd: "{param.spine_dir}"
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_LANE_DONE: "{run.dir}/out/{unit.id}/lane.done"
+          env.PAPER_QUEUE: "{run.dir}/queue"
+          env.PAPER_RUN_DIR: "{run.dir}"
+          env.PAPER_SPINE_BRANCH: "{param.spine_branch}"
+          env.PAPER_SPINE_DIR: "{param.spine_dir}"
+          env.PAPER_WORKTREE_ROOT: "{param.worktree_root}"
+          report_dir: "{param.spine_dir}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/lane.done"
+
+  item:
+    stages:
+      - name: implement
+        role: implementer
+        brief: [briefs/common.md]
+        message: "Paper implement for {unit.id}. Handoff: {unit.vars.handoff_path}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/gaps.json"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_GAPS: "{run.dir}/out/{unit.id}/gaps.json"
+          env.PAPER_HANDOFF: "{unit.vars.handoff_path}"
+          env.PAPER_REPORT_DIR: "{param.spine_dir}/work-{unit.id}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{param.spine_dir}/work-{unit.id}/report.md"
+        park_on:
+          - file: "{run.dir}/out/{unit.id}/gaps.json"
+            reason: "gaps surfaced for {unit.id}: answer them with `pulse-factory answer`"
+            on_answer:
+              - - sh
+                - "{run.package}/scripts/clarify.sh"
+                - "{unit.vars.handoff_path}"
+                - "{request.body_file}"
+                - "{answer.file}"
+                - "{answer.request}"
+                - "{answer.generation}"
+                - "{param.spine_dir}"
+
+      - name: verify
+        role: verifier
+        brief: [briefs/common.md]
+        message: "Paper verify for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_VERDICT: "{run.dir}/out/{unit.id}/verdict.json"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/verdict.json"
+
+      - name: close
+        role: close
+        brief: [briefs/common.md]
+        message: "Paper close for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_BRANCH: "{unit.vars.branch}"
+          env.PAPER_BASE: "{param.spine_branch}"
+          env.PAPER_PR_URL: "{run.dir}/out/{unit.id}/pr.url"
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - pr:
+              argv: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+              test: url
+
+      # The paper reviewer reads the item branch's head in the bare repo and passes it.
+      - name: review
+        role: reviewer
+        brief: [briefs/common.md]
+        message: "Paper review for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/review.md"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_BRANCH: "{unit.vars.branch}"
+          env.PAPER_REVIEW: "{run.dir}/out/{unit.id}/review.md"
+          report_dir: "{run.dir}/out/{unit.id}"
+        done:
+          - exit0:
+              - grep
+              - -Eq
+              - "^verdict: (pass|block)$"
+              - "{run.dir}/out/{unit.id}/review.md"
+
+    merge:
+      rule: green_checks_in_declared_order
+      repo: "{param.forge_repo}"
+      base: "{param.spine_branch}"
+      pr: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+      head_check: true
+      after_merge:
+        - [sh, -c, "echo {unit.id} >> {run.dir}/after_merge.log"]
+
+  spine:
+    stages:
+      - name: spine_close
+        role: spine_close
+        brief: [briefs/common.md]
+        message: "Paper spine close for {param.spine}."
+        cwd: "{param.spine_dir}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_BRANCH: "{param.spine_branch}"
+          env.PAPER_BASE: "{param.base_branch}"
+          env.PAPER_CLONE: "{param.worktree_root}/spine-close"
+          env.PAPER_PR_URL: "{run.dir}/out/{unit.id}/pr.url"
+          push_dir: "{param.worktree_root}/spine-close"
+          push_branch: "{param.spine_branch}"
+          own_branch: "{param.spine_branch}"
+          report_dir: "{param.spine_dir}"
+        done:
+          - pr:
+              argv: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+              test: url
+
+    merge:
+      rule: claim_ack
+      repo: "{param.forge_repo}"
+      base: "{param.base_branch}"
+      head_branch: "{param.spine_branch}"
+      pr: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+      head_check: false
+      after_merge:
+        - [sh, -c, "echo {unit.id} >> {run.dir}/after_merge.log"]
+
+# The paper env ends the run when the journey writes this file.
+end_when:
+  when:
+    - file: "{param.spine_dir}/closed.flag"
+  waiting: "the spine PR is merged: close {param.spine} in the claim session"
+  reason: "paper spine {param.spine} closed"

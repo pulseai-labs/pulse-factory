@@ -299,10 +299,21 @@ fn build_summary(
             // as written.
             let base =
                 pf_engine::render::render(&m.base, ctx).map_or_else(|_| m.base.clone(), |r| r.text);
+            // A `claim_ack` track merges only when the claim holder acks the PR; the others
+            // merge on green checks.
+            let sentence = match m.rule {
+                pf_engine::MergeRule::ClaimAck => format!(
+                    "the {} PR merges into {base} only on the claim's ack",
+                    t.name
+                ),
+                pf_engine::MergeRule::GreenChecksInDeclaredOrder => {
+                    format!("item PRs merge into {base} on green checks with no ack")
+                }
+            };
             json!({
                 "track": t.name,
                 "base": base,
-                "sentence": format!("item PRs merge into {base} on green checks with no ack"),
+                "sentence": sentence,
             })
         })
         .collect();
