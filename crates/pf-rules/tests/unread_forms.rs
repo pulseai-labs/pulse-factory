@@ -4,7 +4,9 @@
 
 mod common;
 
-use common::{allowed_for_every_role, denied_for_every_role};
+use common::{
+    allowed_for_every_role, allowed_for_every_role_but_the_reviewer, denied_for_every_role,
+};
 
 #[test]
 fn a_function_or_group_keyword_does_not_hide_its_body() {
@@ -172,8 +174,8 @@ fn a_brace_expansion_is_read_as_the_words_it_makes() {
     allowed_for_every_role("echo {a,b} f{,.bak} {1..3} {a..c} x{01..03}");
     allowed_for_every_role("echo '{gh,x}' \"{a,b}\" {} {a} ${HOME} \\{a,b\\}");
     // The quoted braces of a git or gh word stay one word: the subcommand is `{merge,x}`.
-    allowed_for_every_role("gh pr '{merge,x}' 1");
-    allowed_for_every_role("gh pr \"{merge,x}\" 1");
+    allowed_for_every_role_but_the_reviewer("gh pr '{merge,x}' 1");
+    allowed_for_every_role_but_the_reviewer("gh pr \"{merge,x}\" 1");
     allowed_for_every_role("echo {a,{b,c}}d");
     allowed_for_every_role("echo {1..100000}x");
 }
@@ -258,7 +260,7 @@ fn an_alias_that_a_call_defines_is_denied() {
     }
     allowed_for_every_role("git -c core.pager=cat log");
     allowed_for_every_role("git config user.name");
-    allowed_for_every_role("gh alias list");
+    allowed_for_every_role_but_the_reviewer("gh alias list");
 }
 
 #[test]

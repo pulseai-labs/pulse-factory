@@ -13,7 +13,7 @@ use pulse_factory::arm::ArmPlan;
 use pulse_factory::controller::ports::{Ports, RunPorts, RunSpec};
 use pulse_factory::controller::{Config, Controller, RunHandle};
 
-use super::{BIN, Sandbox, git};
+use super::{BIN, Options, Sandbox, git};
 
 /// A gate a test closes to hold a launch inside the adapter.
 #[derive(Default)]
@@ -61,6 +61,9 @@ pub struct Recording {
     pub inner: Arc<FakeAdapter>,
     pub plans: Arc<Mutex<Vec<LaunchPlan>>>,
     pub gate: Arc<Gate>,
+    /// The process each session runs, by the session reference. A test registers a real child
+    /// process here, so the caller check has a seat process to find.
+    pub pids: Arc<Mutex<BTreeMap<String, u32>>>,
 }
 
 impl AgentPort for Recording {
@@ -97,6 +100,9 @@ impl AgentPort for Recording {
     fn is_alive(&self, s: &SessionRef) -> Result<bool, AgentError> {
         self.inner.is_alive(s)
     }
+    fn process_id(&self, s: &SessionRef) -> Option<u32> {
+        self.pids.lock().unwrap().get(&s.0).copied()
+    }
     fn stop(&self, s: &SessionRef) -> Result<(), AgentError> {
         self.inner.stop(s)
     }
@@ -112,6 +118,7 @@ pub struct TestPorts {
     pub fake: Arc<FakeAdapter>,
     pub plans: Arc<Mutex<Vec<LaunchPlan>>>,
     pub gate: Arc<Gate>,
+    pub pids: Arc<Mutex<BTreeMap<String, u32>>>,
     /// When set, the next runs cannot write `run.json`: a directory of that name is in the way.
     /// It makes an arm fail late, after the engine has started and committed.
     pub block_run_json: std::sync::atomic::AtomicBool,
@@ -131,6 +138,7 @@ impl Ports for TestPorts {
                 inner: self.fake.clone(),
                 plans: self.plans.clone(),
                 gate: self.gate.clone(),
+                pids: self.pids.clone(),
             }),
             forge: Arc::new(forge),
             forge_api_hosts: "forge.invalid".to_string(),
@@ -155,7 +163,18 @@ impl Live {
 
     /// Start with the seats told to run this binary for the hook.
     pub fn start_with(binary: PathBuf) -> Live {
-        let sb = Sandbox::new();
+        Live::start_config(binary, |_| {})
+    }
+
+    /// Start with the seats told to run this binary, and `tweak` adjusting the controller's config
+    /// (the random source and the proc file system are test seams).
+    pub fn start_config(binary: PathBuf, tweak: impl FnOnce(&mut Config)) -> Live {
+        Live::start_package(binary, &Options::default(), tweak)
+    }
+
+    /// Start on a fixture package built from `o`.
+    pub fn start_package(binary: PathBuf, o: &Options, tweak: impl FnOnce(&mut Config)) -> Live {
+        let sb = Sandbox::with(o);
         let fake = Arc::new(FakeAdapter::new());
         fake.add_plugin(
             "methodkit",
@@ -166,6 +185,7 @@ impl Live {
             fake,
             plans: Arc::new(Mutex::new(Vec::new())),
             gate: Arc::new(Gate::default()),
+            pids: Arc::new(Mutex::new(BTreeMap::new())),
             block_run_json: std::sync::atomic::AtomicBool::new(false),
         });
         let bare = sb.root.path().join("forge.git");
@@ -176,15 +196,9 @@ impl Live {
         );
         pf_ipc::prepare_state_dir(&sb.state).unwrap();
         let bound = pf_ipc::bind(&sb.state).unwrap();
-        let controller = Controller::open(
-            Config {
-                state_dir: sb.state.clone(),
-                tick_ms: 3_600_000,
-                binary,
-            },
-            ports.clone(),
-        )
-        .unwrap();
+        let mut cfg = Config::new(sb.state.clone(), 3_600_000, binary);
+        tweak(&mut cfg);
+        let controller = Controller::open(cfg, ports.clone()).unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let served = controller.clone();
         let thread = std::thread::spawn(move || {
@@ -270,6 +284,70 @@ impl Live {
         };
         self.handle().agent.launch(&plan)?;
         Ok(self.last_plan())
+    }
+
+    /// Put a unit record in the run's queue, with a worktree path and a branch.
+    pub fn queue_item(&self, id: &str, order: u32) {
+        let wt = self.sb.spine_dir.join(format!("wt-{id}"));
+        std::fs::create_dir_all(&wt).unwrap();
+        let rec = pf_engine::port::unit_source::UnitRecord::new(
+            id,
+            "g1",
+            order,
+            [
+                ("worktree_path".to_string(), wt.display().to_string()),
+                ("branch".to_string(), format!("work/{id}")),
+            ]
+            .into(),
+        );
+        std::fs::write(
+            self.run_dir().join(format!("queue/{id}.json")),
+            rec.to_json(),
+        )
+        .unwrap();
+    }
+
+    /// The process references of the run's sessions that have not ended.
+    pub fn session_refs(&self) -> Vec<SessionRef> {
+        self.handle()
+            .engine
+            .view()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| !s.ended)
+            .filter_map(|s| s.process_ref.clone().map(SessionRef))
+            .collect()
+    }
+
+    /// Park a running unit through the engine, then tick so the driver ends its stage node.
+    /// The unit is then `parked` with an open request, and `answer` and `clear` can take it.
+    pub fn park_unit(&self, unit: &str, reason: &str) {
+        self.handle().engine.park(unit, reason).unwrap();
+        self.controller.tick_all();
+    }
+
+    /// Arm, queue the units and tick until each has a running session.
+    pub fn arm_with_units(&self, units: &[&str]) {
+        self.arm();
+        for (i, u) in units.iter().enumerate() {
+            self.queue_item(u, u32::try_from(i + 1).unwrap());
+        }
+        self.controller.tick_all();
+        self.controller.tick_all();
+    }
+
+    /// Run the CLI as a child process against this controller. No seat token is set.
+    pub fn cli(&self, args: &[&str]) -> std::process::Output {
+        self.sb.cmd(args).output().expect("run pulse-factory")
+    }
+
+    /// The status of one unit node.
+    pub fn unit_status(&self, unit: &str) -> String {
+        let view = self.handle().engine.view().unwrap();
+        view.node(unit)
+            .map(|n| n.status.as_str().to_string())
+            .unwrap_or_default()
     }
 
     /// The settings of a seat for a role, as the stages of the fixture workflow give them.

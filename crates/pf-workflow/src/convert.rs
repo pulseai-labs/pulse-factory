@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use pf_engine::port::agent::RuleSet;
-use pf_engine::{MergeDef, StageDef, Track, Workflow};
+use pf_engine::{MergeDef, OutcomeDef, StageDef, Track, Workflow};
 
 use crate::file::{StageSpec, TrackDef, WorkflowFile};
 
@@ -33,6 +33,7 @@ impl WorkflowFile {
                 repo: m.repo.clone(),
                 base: m.base.clone(),
                 head_check: m.head_check,
+                head_branch: m.head_branch.clone().unwrap_or_default(),
             }),
         }
     }
@@ -54,6 +55,15 @@ impl WorkflowFile {
             deny: Vec::new(),
         };
         def.settings = stage_settings(stage);
+        def.outcomes = stage
+            .outcomes
+            .iter()
+            .map(|o| OutcomeDef {
+                to: o.to.clone(),
+                max: o.max,
+            })
+            .collect();
+        def.entered_by_outcome = stage.entered_by_outcome;
         def
     }
 }

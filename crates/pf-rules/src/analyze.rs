@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 
 use pf_workflow::rules::{Allow, RoleRules};
 
+use crate::grammar;
+use crate::options;
 use crate::shell::{Cmd, Parsed, Word, is_keyword, parse};
 use crate::{Context, Part, PushIntent};
 
@@ -29,6 +31,9 @@ fn finding(rule: &str, reason: impl Into<String>) -> Finding {
 #[derive(Default)]
 pub struct Walk {
     pub denies: Vec<Finding>,
+    /// Forms outside the grammar (`crate::grammar`). They deny the line after every guard has had
+    /// its say: `decide` reads them only when `denies` is empty.
+    pub outside: Vec<Finding>,
     pub allows: Vec<Finding>,
     pub pushes: Vec<PushIntent>,
 }
@@ -42,6 +47,29 @@ struct Final {
 
 pub fn basename(text: &str) -> &str {
     text.rsplit('/').next().unwrap_or(text)
+}
+
+/// The role that may read the forge and never write to it (ADR-0005, `role-rules.md`). Every `gh`
+/// command of this role must be a read on the list in `gh_read_only`; the other roles meet only
+/// the `gh` denials of every seat.
+const READ_ONLY_FORGE_ROLE: &str = "reviewer";
+
+/// Whether `gh <first> <second>` is a forge read. `gh api` is judged by its method elsewhere. A
+/// command that is not named here is not a read: `gh pr create`, `gh issue create`,
+/// `gh release create`, `gh workflow run`, `gh run download` (it writes files) and the rest.
+fn gh_read_only(first: Option<&str>, second: Option<&str>) -> bool {
+    matches!(
+        (first, second),
+        (None, _)
+            | (Some("search" | "status" | "version" | "help"), _)
+            | (Some("auth"), Some("status"))
+            | (
+                Some(
+                    "pr" | "issue" | "run" | "release" | "repo" | "workflow" | "label" | "ruleset"
+                ),
+                Some("view" | "list" | "diff" | "checks" | "status"),
+            )
+    )
 }
 
 const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh"];
@@ -250,6 +278,13 @@ impl<'a> Analyzer<'a> {
         self.walk.allows.push(finding(rule, reason));
     }
 
+    /// Record a form outside the grammar, named in the reason.
+    fn outside(&mut self, form: &str) {
+        self.walk
+            .outside
+            .push(finding("unparsed-command", grammar::reason(form)));
+    }
+
     fn has(&self, a: Allow) -> bool {
         self.rules.allow.contains(&a)
     }
@@ -266,6 +301,9 @@ impl<'a> Analyzer<'a> {
                 format!("the command cannot be parsed: {why}"),
             ),
             Ok(parsed) => {
+                for form in &parsed.outside {
+                    self.outside(form);
+                }
                 self.record_assigns(&parsed);
                 self.parsed(&parsed, depth);
             }
@@ -360,7 +398,11 @@ impl<'a> Analyzer<'a> {
                 )),
                 "nohup" | "setsid" | "unbuffer" | "builtin" => Some(after_opts(args, &[], 0)),
                 "time" => Some(after_opts(args, &["-f", "-o", "--format", "--output"], 0)),
-                "exec" => Some(after_opts(args, &["-a"], 0)),
+                "exec" => {
+                    // The command that `exec` runs is still judged, so a guard's rule comes first.
+                    self.outside("`exec` (it replaces the shell with a command)");
+                    Some(after_opts(args, &["-a"], 0))
+                }
                 "stdbuf" => Some(after_opts(args, &["-i", "-o", "-e"], 0)),
                 "command" => {
                     if args.iter().any(|a| matches!(a.text.as_str(), "-v" | "-V")) {
@@ -540,8 +582,19 @@ impl<'a> Analyzer<'a> {
         let words = &fin.words;
         let name = basename(&words[0].text).to_string();
         let args = &words[1..];
+        if (!cmd.heredocs.is_empty() || cmd.herestring.is_some()) && grammar::is_interpreter(&name)
+        {
+            self.outside(&format!(
+                "a heredoc or here-string that feeds `{name}` (an interpreter whose program the rules cannot read)"
+            ));
+        }
         match name.as_str() {
             n if SHELLS.contains(&n) => self.shell(parsed, idx, cmd, args, depth),
+            "source" | "." => self.outside(&format!(
+                "`{}` (it runs a file whose text the rules cannot read: source)",
+                words[0].text
+            )),
+            "select" => self.outside("`select` (a menu loop)"),
             "eval" => {
                 let parts: Vec<&Word> = args.iter().collect();
                 if parts.iter().any(|a| a.dynamic) {
@@ -811,7 +864,13 @@ impl<'a> Analyzer<'a> {
             return;
         }
         let sub_name = sub.text.as_str();
-        let rest = &words[i + 1..];
+        // Git reads a long option by any unique prefix. Write each guarded option in full, so the
+        // guards below match by exact name. A prefix that two of them share is denied once the
+        // guards have run: git refuses it, so no valid work is lost.
+        let (canonical, ambiguous) =
+            options::canonical_words(&words[i + 1..], &options::git_options(sub_name));
+        let rest = &canonical[..];
+        let first_deny = self.walk.denies.len();
         if sub_name == "config" && config_writes_command(rest) {
             self.deny(
                 "unparsed-command",
@@ -885,6 +944,22 @@ impl<'a> Analyzer<'a> {
                 self.delete_targets("git worktree remove", &targets, false, false);
             }
             _ => {}
+        }
+        if let Some(why) = ambiguous {
+            // A guard that fired on an option written in full keeps its rule. Otherwise the
+            // ambiguous prefix is the first deny of the command.
+            let f = finding("unparsed-command", format!("git {sub_name}: {why}"));
+            let keep = self.walk.denies[first_deny..].iter().any(|d| {
+                matches!(
+                    d.rule.as_str(),
+                    "force-push" | "no-verify" | "branch-delete" | "push-default-branch"
+                )
+            });
+            if keep {
+                self.walk.denies.push(f);
+            } else {
+                self.walk.denies.insert(first_deny, f);
+            }
         }
     }
 
@@ -1175,7 +1250,38 @@ impl<'a> Analyzer<'a> {
                     "gh pr merge is denied for every seat: only the workflow's merge rule merges",
                 );
             }
+            (
+                Some("pr"),
+                Some(
+                    "review" | "comment" | "edit" | "close" | "reopen" | "ready" | "lock"
+                    | "unlock" | "update-branch",
+                ),
+            )
+            | (
+                Some("issue"),
+                Some("comment" | "edit" | "close" | "reopen" | "lock" | "unlock" | "delete"),
+            ) => {
+                self.deny(
+                    "gh-pr-write",
+                    format!(
+                        "gh {} {} writes to the forge: a seat reports through its files, and the operator speaks on the forge",
+                        first.unwrap_or_default(),
+                        second.unwrap_or_default()
+                    ),
+                );
+            }
             (Some("api"), _) => self.gh_api(args),
+            _ if self.rules.role == READ_ONLY_FORGE_ROLE && !gh_read_only(first, second) => {
+                self.deny(
+                    "gh-forge-write",
+                    format!(
+                        "role {} reads the forge only: gh {} {} is not on its read list",
+                        self.rules.role,
+                        first.unwrap_or_default(),
+                        second.unwrap_or_default()
+                    ),
+                );
+            }
             _ => {}
         }
     }
@@ -1916,7 +2022,7 @@ pub fn push_args(rest: &[Word]) -> PushArgs {
             match name {
                 "force" | "force-with-lease" | "force-if-includes" => a.force = true,
                 "delete" => a.delete = true,
-                "all" | "mirror" => a.all = true,
+                "all" | "branches" | "mirror" => a.all = true,
                 "tags" => a.tags = true,
                 "push-option" | "repo" | "receive-pack" | "exec" if !long.contains('=') => i += 1,
                 _ => {}

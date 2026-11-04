@@ -9,26 +9,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
+use pf_engine::claim::{gaps_detail, stop_detail};
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
     AgentPort, SessionEvent, SessionRef, SessionState as AdapterState, SessionStatus, Usage,
 };
-use pf_engine::port::store::{NodeRow, RunState, SessionRow};
+use pf_engine::port::store::{
+    NodeRow, RequestKind, RequestRow, RequestStatus, RunState, SessionRow,
+};
 use pf_engine::render::{RenderContext, UnitView, render};
 use pf_engine::status::Status;
 use pf_engine::unit::{StallDecision, UnitDetail, stall_decision};
 use pf_engine::{EndStatus, Engine};
-use pf_workflow::commands::{HookOutcome, run_after_merge, run_unit_hook};
-use pf_workflow::file::{SeedDef, StageSpec};
+use pf_workflow::CommandSpec;
+use pf_workflow::commands::{
+    AnswerOutcome, HookOutcome, answer_through_hook, exit0, run_after_merge, run_unit_hook,
+};
+use pf_workflow::file::{DoneCond, EndWhen, SeedDef, StageSpec};
 use pf_workflow::package::Package;
 use pf_workflow::pin::{self, Pin};
 use pf_workflow::queue::{QueuePoll, QueueSource, ingest_queue};
-use pf_workflow::seeds::{SeedAction, advance_seed};
+use pf_workflow::seeds::{SeedAction, advance_seed_started};
 use pf_workflow::signals::{
     ApplyResult, SessionState as SignalState, StageVerdict, SystemProbe, apply, evaluate,
+    park_on_kind,
 };
 
 /// Seconds on the controller's clock. Tests inject their own.
@@ -50,6 +58,32 @@ pub const DECISIONS_MAX_BYTES: u64 = 1 << 20;
 
 /// The reason of a stall that left no screen text.
 pub const NO_SCREEN_TEXT: &str = "no screen text";
+
+/// What an answer did besides record the ruling.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answered {
+    /// The workflow declared an answer hook for the request, and it ran.
+    pub hook_ran: bool,
+    /// The hook's cause, when it failed. The request is answered, and the unit is parked again
+    /// with a new request. `None` for a hook that passed, and for a request with no hook.
+    pub hook_failed: Option<String>,
+}
+
+/// What an ack did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Acked {
+    /// The unit that waited on the ack.
+    pub unit: String,
+    /// The PR merged and the merge landed: the unit is done.
+    pub landed: bool,
+    /// `landed`, or why the merge did not land. A merge that did not land parks the unit with a
+    /// `merge_failed` request.
+    pub outcome: String,
+    /// The head SHA the merge pinned.
+    pub head_sha: String,
+    /// The `after_merge` commands of the track ran and one of them failed: its cause.
+    pub after_merge_failure: Option<String>,
+}
 
 /// What a driver runs on.
 pub struct DriverConfig {
@@ -88,6 +122,8 @@ pub struct Driver {
     cfg: DriverConfig,
     state: Mutex<DState>,
     notes: Mutex<Vec<String>>,
+    /// Notes from start-up. The first tick takes them into its own notes.
+    startup_notes: Mutex<Vec<String>>,
 }
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -124,7 +160,15 @@ impl Driver {
             cfg,
             state: Mutex::new(DState::default()),
             notes: Mutex::new(Vec::new()),
+            startup_notes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Keep notes from start-up (the ledger recovery's foreign lines). The notes show at once, and
+    /// the first tick carries them too.
+    pub fn note_startup(&self, notes: Vec<String>) {
+        *locked(&self.notes) = notes.clone();
+        *locked(&self.startup_notes) = notes;
     }
 
     /// The notes of the last tick.
@@ -164,7 +208,7 @@ impl Driver {
     pub fn tick(&self) {
         let mut state = locked(&self.state);
         let mut t = Tick {
-            notes: Vec::new(),
+            notes: std::mem::take(&mut *locked(&self.startup_notes)),
             now: (self.cfg.clock)(),
         };
         self.tick_inner(&mut state, &mut t);
@@ -236,7 +280,14 @@ impl Driver {
                     continue;
                 }
             };
-            match advance_seed(&self.cfg.engine, seed, exists) {
+            let started = match self.start_file_exists(seed, run_dir) {
+                Ok(e) => e,
+                Err(why) => {
+                    t.note(why);
+                    continue;
+                }
+            };
+            match advance_seed_started(&self.cfg.engine, seed, exists, started) {
                 Ok(SeedAction::Halted(reason)) => {
                     t.note(format!("seed {} halted the run: {reason}", seed.id))
                 }
@@ -252,6 +303,16 @@ impl Driver {
         };
         let path = render(&repeat.until_file, &self.ctx(run_dir, None))
             .map_err(|e| format!("seed {}: until_file cannot render: {e}", seed.id))?;
+        Ok(Path::new(&path.text).exists())
+    }
+
+    /// Does the rendered `start_when.file` of a seed exist? A seed with none reports true.
+    fn start_file_exists(&self, seed: &SeedDef, run_dir: &str) -> Result<bool, String> {
+        let Some(start) = &seed.start_when else {
+            return Ok(true);
+        };
+        let path = render(&start.file, &self.ctx(run_dir, None))
+            .map_err(|e| format!("seed {}: start_when file cannot render: {e}", seed.id))?;
         Ok(Path::new(&path.text).exists())
     }
 
@@ -398,7 +459,12 @@ impl Driver {
     }
 
     fn park(&self, t: &mut Tick, unit_id: &str, reason: &str) -> bool {
-        match self.cfg.engine.park(unit_id, reason) {
+        self.park_kind(t, unit_id, RequestKind::Park, reason)
+    }
+
+    /// Park a unit and open the request of `kind` with it. The kind is the park's source.
+    fn park_kind(&self, t: &mut Tick, unit_id: &str, kind: RequestKind, reason: &str) -> bool {
+        match self.cfg.engine.park_as(unit_id, kind, reason) {
             Ok(_) => true,
             Err(e) => {
                 t.note(format!("park of {unit_id} not recorded: {e}"));
@@ -425,14 +491,18 @@ impl Driver {
         t.absorb("end of session", res);
     }
 
-    /// Park a unit whose stage is running: park, stop, read, end the session.
+    /// Park a unit whose stage is running: park, stop, read, end the session. `facts` is more
+    /// for the request body: the gap list or the stop text a seat's file holds.
+    #[allow(clippy::too_many_arguments)]
     fn park_running(
         &self,
         st: &mut DState,
         t: &mut Tick,
         session: &SessionRow,
         r: &SessionRef,
+        kind: RequestKind,
         reason: &str,
+        facts: Option<&serde_json::Value>,
     ) {
         let running = self
             .cfg
@@ -447,8 +517,47 @@ impl Driver {
         if !running {
             return;
         }
-        self.park(t, &session.unit_id, reason);
+        match self
+            .cfg
+            .engine
+            .park_with(&session.unit_id, kind, reason, facts)
+        {
+            Ok(_) => {}
+            Err(e) => t.note(format!("park of {} not recorded: {e}", session.unit_id)),
+        }
         self.end_session(st, t, session, r, reason, false);
+    }
+
+    /// The facts a seat's file adds to the request its park opens: the gap list of a `gaps.json`,
+    /// or the text of the stop file. The kind says which file parked the unit.
+    fn park_facts(
+        &self,
+        stage: &StageSpec,
+        ctx: &RenderContext,
+        kind: RequestKind,
+    ) -> Option<serde_json::Value> {
+        match kind {
+            RequestKind::Stop => {
+                let path = render(&stage.stop_file, ctx).ok()?;
+                stop_detail(Path::new(&path.text))
+            }
+            RequestKind::Gaps => {
+                let paths: Vec<String> = stage
+                    .park_on
+                    .iter()
+                    .filter_map(|entry| render(&entry.file, ctx).ok())
+                    .map(|r| r.text)
+                    .filter(|p| park_on_kind(p) == RequestKind::Gaps)
+                    .collect();
+                // The file that parked the unit exists. If it went away since, the facts say so.
+                let path = paths
+                    .iter()
+                    .find(|p| Path::new(p).exists())
+                    .or_else(|| paths.first())?;
+                Some(gaps_detail(Path::new(path)))
+            }
+            _ => None,
+        }
     }
 
     // 4. `after_first_turn`, once for each session.
@@ -580,7 +689,9 @@ impl Driver {
             let r = SessionRef(process_ref.clone());
             match decision {
                 StallDecision::Relaunch => self.end_session(st, t, session, &r, &reason, true),
-                StallDecision::Park => self.park_running(st, t, session, &r, &reason),
+                StallDecision::Park => {
+                    self.park_running(st, t, session, &r, RequestKind::Stall, &reason, None)
+                }
                 StallDecision::Active => {}
             }
         }
@@ -660,8 +771,11 @@ impl Driver {
             );
             match &verdict {
                 StageVerdict::Wait => {}
-                StageVerdict::Park { reason } => self.park_running(st, t, session, &r, reason),
-                StageVerdict::Done { .. } => {
+                StageVerdict::Park { reason, kind } => {
+                    let facts = self.park_facts(stage, &ctx, *kind);
+                    self.park_running(st, t, session, &r, *kind, reason, facts.as_ref())
+                }
+                StageVerdict::Done { .. } | StageVerdict::Outcome { .. } => {
                     // A done signal seen mid-turn can come before the push it belongs to.
                     if status.turn_ended || ended {
                         if let Err(e) = self.cfg.agent.stop(&r) {
@@ -757,6 +871,10 @@ impl Driver {
                 Ok(MergeStep::Merged { unit, .. }) => self.after_merge(t, run_dir, &unit),
                 Ok(MergeStep::Parked { unit, reason }) => {
                     t.note(format!("unit {unit} parked at merge: {reason}"))
+                }
+                Ok(MergeStep::AckRequested { unit, reason }) => {
+                    t.note(format!("unit {unit} waits on the claim's ack: {reason}"));
+                    return;
                 }
                 Ok(_) => return,
                 Err(e) => {
@@ -866,27 +984,283 @@ impl Driver {
     }
 
     // 10. The end of the run.
+    //
+    // The run is finished when every seed is: a `repeat` seed has its `until_file`, and a
+    // `start_when` seed has its unit. Every unit is done too. Then the run ends with
+    // `every item merged`, or, when the file has `end_when`, with its `reason` once each of its
+    // conditions holds. Until then the tick notes its `waiting` text.
     fn step10_finish(&self, t: &mut Tick, run_dir: &str) {
         let Some(view) = self.view(t) else { return };
-        let seeds_done = self
-            .cfg
-            .package
-            .file
-            .seeds
-            .iter()
-            .all(|s| s.repeat.is_none() || self.until_file_exists(s, run_dir).unwrap_or(false));
+        let seeds_done = self.cfg.package.file.seeds.iter().all(|s| {
+            if s.start_when.is_some() {
+                // The seed's first unit is the seed ID. It exists once the seed started.
+                return view.node(&s.id).is_some();
+            }
+            s.repeat.is_none() || self.until_file_exists(s, run_dir).unwrap_or(false)
+        });
         let units: Vec<&NodeRow> = view.units().collect();
-        if seeds_done && !units.is_empty() && units.iter().all(|u| u.status == Status::Done) {
-            let res = self.cfg.engine.end_run("every item merged");
-            t.absorb("end of run", res);
+        if !(seeds_done && !units.is_empty() && units.iter().all(|u| u.status == Status::Done)) {
+            return;
         }
+        let reason = match &self.cfg.package.file.end_when {
+            None => "every item merged".to_string(),
+            Some(end) => {
+                if !self.end_when_holds(t, end, run_dir) {
+                    match render(&end.waiting, &self.ctx(run_dir, None)) {
+                        Ok(text) => t.note(text.text),
+                        Err(e) => t.note(format!("end_when waiting text cannot render: {e}")),
+                    }
+                    return;
+                }
+                match render(&end.reason, &self.ctx(run_dir, None)) {
+                    Ok(text) => text.text,
+                    Err(e) => {
+                        t.note(format!("end_when reason cannot render: {e}"));
+                        return;
+                    }
+                }
+            }
+        };
+        let res = self.cfg.engine.end_run(&reason);
+        t.absorb("end of run", res);
+    }
+
+    /// Does every condition of `end_when` hold? A condition that cannot be read does not hold, and
+    /// the tick notes why.
+    fn end_when_holds(&self, t: &mut Tick, end: &EndWhen, run_dir: &str) -> bool {
+        let ctx = self.ctx(run_dir, None);
+        for cond in &end.when {
+            let holds = match cond {
+                DoneCond::File(template) => match render(template, &ctx) {
+                    Ok(path) => Path::new(&path.text).exists(),
+                    Err(e) => {
+                        t.note(format!("end_when file cannot render: {e}"));
+                        false
+                    }
+                },
+                DoneCond::Exit0(spec) => match exit0(spec, &ctx) {
+                    Ok(holds) => holds,
+                    Err(e) => {
+                        t.note(format!("end_when command: {e}"));
+                        false
+                    }
+                },
+                // The file parser refuses a `pr` condition here.
+                DoneCond::Pr { .. } => false,
+            };
+            if !holds {
+                return false;
+            }
+        }
+        true
+    }
+
+    // ------------------------------------------------------------------ resumes
+
+    /// The run's copies must be as they were at arm. A mismatch names the file.
+    pub fn check_pins(&self) -> Result<(), String> {
+        match self.cfg.pins.iter().find_map(|p| pin::check(p).err()) {
+            Some(mismatch) => Err(mismatch.to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// Resume a parked unit at `to_stage` (default: the stage it parked in), in the name of the
+    /// claim `generation`. The pins of the run's whole manifest are checked first: a mismatch
+    /// refuses the clear, names the file and changes nothing. The next tick launches the stage
+    /// through the normal path (capacity, pins, `before`); a halted run launches nothing.
+    pub fn clear_unit(
+        &self,
+        unit_id: &str,
+        to_stage: Option<&str>,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Admission, String> {
+        self.check_pins()?;
+        self.cfg
+            .engine
+            .clear_unit(unit_id, to_stage, generation, request_id)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Ack a `merge_ack` request in the name of the claim `generation` (ADR-0005). The engine checks
+    /// the PR again, answers the request and merges with the acked SHA pinned. A merge that lands
+    /// ends the unit `done`, and the track's `after_merge` commands run. The pins of the run's whole
+    /// manifest are checked first, as for a clear, because `after_merge` runs the package's commands.
+    ///
+    /// The ack holds the tick still, so no tick opens a second request for the unit between the
+    /// ack and the merge.
+    pub fn ack_request(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+    ) -> Result<Acked, String> {
+        self.check_pins()?;
+        let _held = locked(&self.state);
+        let step = self
+            .cfg
+            .engine
+            .ack_merge(request_id, revision, generation)
+            .map_err(|e| match e {
+                EngineError::Rejected(why) => why,
+                other => other.to_string(),
+            })?;
+        match step {
+            MergeStep::Merged { unit, effect } => {
+                let mut t = Tick {
+                    notes: Vec::new(),
+                    now: (self.cfg.clock)(),
+                };
+                let run_dir = self.run_dir_text();
+                self.after_merge(&mut t, &run_dir, &unit);
+                Ok(Acked {
+                    unit,
+                    landed: true,
+                    outcome: "landed".to_string(),
+                    head_sha: effect.sha,
+                    after_merge_failure: t.notes.into_iter().next(),
+                })
+            }
+            MergeStep::Parked { unit, reason } => Ok(Acked {
+                unit,
+                landed: false,
+                outcome: reason,
+                head_sha: String::new(),
+                after_merge_failure: None,
+            }),
+            MergeStep::Held { unit, reason } => Ok(Acked {
+                unit,
+                landed: false,
+                outcome: reason,
+                head_sha: String::new(),
+                after_merge_failure: None,
+            }),
+            other => Err(format!("the ack ended in an unexpected step: {other:?}")),
+        }
+    }
+
+    /// Answer a request with a ruling. An answer that resumes a unit checks the pins first, as
+    /// a clear does.
+    ///
+    /// When the workflow declares an `on_answer` hook for the request, the hook runs first, before
+    /// the unit can become `running`, and the whole answer holds the tick still, so no launch
+    /// comes between the hook and the resume. A hook that fails leaves the request answered and
+    /// the unit parked again with a new request (`answer hook failed: <cause>`): never a silent
+    /// resume. A `clear` runs no hook.
+    pub fn answer_request(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        text: &str,
+    ) -> Result<Answered, String> {
+        let engine = &self.cfg.engine;
+        let request = engine
+            .requests()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|r| r.id == request_id);
+        let resumes = request.as_ref().is_some_and(|r| r.unit_id.is_some());
+        if resumes {
+            self.check_pins()?;
+        }
+        if let Some(request) = request.filter(|r| resumes && r.status == RequestStatus::Open) {
+            // One tick at a time: the stage must not launch between the hook and the resume.
+            let _held = locked(&self.state);
+            if let Some(answered) = self.answer_with_hook(&request, revision, generation, text)? {
+                return Ok(answered);
+            }
+        }
+        engine
+            .answer_request(request_id, revision, generation, text)
+            .map_err(|e| e.to_string())?;
+        Ok(Answered::default())
+    }
+
+    /// Answer a request through its hook. `None` when the workflow declares no hook for it.
+    fn answer_with_hook(
+        &self,
+        request: &RequestRow,
+        revision: u32,
+        generation: u64,
+        text: &str,
+    ) -> Result<Option<Answered>, String> {
+        let engine = &self.cfg.engine;
+        let view = engine.view().map_err(|e| e.to_string())?;
+        let Some(unit) = request.unit_id.as_deref().and_then(|id| view.node(id)) else {
+            return Ok(None);
+        };
+        let Ok(detail) = view.unit_detail(unit) else {
+            return Ok(None);
+        };
+        let run_dir = self.run_dir_text();
+        let ctx = self.ctx(&run_dir, Some((&unit.id, &detail.record.vars)));
+        let hook = self.answer_hook(&detail.track, request, &ctx);
+        if hook.is_empty() {
+            return Ok(None);
+        }
+        let outcome = answer_through_hook(
+            engine,
+            request,
+            revision,
+            generation,
+            text,
+            &hook,
+            &ctx,
+            &self.cfg.run_dir.join("answers"),
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Some(Answered {
+            hook_ran: true,
+            hook_failed: match outcome {
+                AnswerOutcome::Resumed => None,
+                AnswerOutcome::HookFailed(cause) => Some(cause),
+            },
+        }))
+    }
+
+    /// The `on_answer` commands the workflow declares for a request, or none. The stop file's
+    /// hook goes with a `stop` request. A `park_on` entry's hook goes with the request its file
+    /// opens: the entry whose file name gives the request's kind (`park_on_kind`), and for the
+    /// generic `park` kind also the entry whose reason is the request's reason. The first such
+    /// entry wins.
+    fn answer_hook(
+        &self,
+        track: &str,
+        request: &RequestRow,
+        ctx: &RenderContext,
+    ) -> Vec<CommandSpec> {
+        let Some(stage) = self.stage_spec(track, &request.stage) else {
+            return Vec::new();
+        };
+        if request.kind == RequestKind::Stop {
+            return stage.stop_on_answer.clone();
+        }
+        stage
+            .park_on
+            .iter()
+            .find(|entry| {
+                let Ok(file) = render(&entry.file, ctx) else {
+                    return false;
+                };
+                if park_on_kind(&file.text) != request.kind {
+                    return false;
+                }
+                request.kind != RequestKind::Park
+                    || render(&entry.reason, ctx).is_ok_and(|reason| {
+                        pf_engine::status::one_line_reason(&reason.text) == request.reason
+                    })
+            })
+            .map(|entry| entry.on_answer.clone())
+            .unwrap_or_default()
     }
 
     /// End each session still open under a unit that is not running (start-up, and a replaced run).
     pub fn sweep(&self) {
         let mut state = locked(&self.state);
         let mut t = Tick {
-            notes: Vec::new(),
+            notes: locked(&self.startup_notes).clone(),
             now: (self.cfg.clock)(),
         };
         self.step3_sessions(&mut state, &mut t);

@@ -1,5 +1,6 @@
-//! AC-14: the two demo scripts run against the built binary, and each fails when its journey is
-//! broken. The scripts run the paper env: no model, no spend, no network, no `gh`, and no build.
+//! AC-14 and AC-8 (`r0.s2.w3`): the three demo scripts run against the built binary, and each fails
+//! when its journey is broken. The scripts run the paper env: no model, no spend, no network, no
+//! `gh`, and no build.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -59,6 +60,14 @@ fn paper_copy() -> (tempfile::TempDir, PathBuf) {
     (dir, paper)
 }
 
+/// A copy of `scripts/demo/paper-b` that a test may break.
+fn paper_b_copy() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-b");
+    copy_dir(&root().join("scripts/demo/paper-b"), &paper);
+    (dir, paper)
+}
+
 fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
     let path = paper.join(rel);
     let text = std::fs::read_to_string(&path).unwrap();
@@ -68,8 +77,12 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
 }
 
 #[test]
-fn both_scripts_exit_0_within_120_seconds() {
-    for name in ["golden-journey-a.sh", "arm-dry-run.sh"] {
+fn all_three_scripts_exit_0_within_120_seconds() {
+    for name in [
+        "golden-journey-a.sh",
+        "golden-journey-b.sh",
+        "arm-dry-run.sh",
+    ] {
         let (out, took) = run(name, &[]);
         assert!(
             out.status.success(),
@@ -92,8 +105,34 @@ fn the_golden_journey_reports_what_it_checked() {
 }
 
 #[test]
+fn golden_journey_b_reports_what_it_checked() {
+    let (out, took) = run("golden-journey-b.sh", &[]);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "acked R-2@2 by claim 1; merged",
+        "paper spine demo-g2 closed",
+        "acked at revision 2",
+        "total cost 9000",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
+#[test]
 fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
-    for name in ["golden-journey-a.sh", "arm-dry-run.sh"] {
+    for name in [
+        "golden-journey-a.sh",
+        "golden-journey-b.sh",
+        "arm-dry-run.sh",
+    ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [
             "cargo build",
@@ -228,4 +267,88 @@ fn arm_dry_run_fails_when_the_summary_changes() {
         "{}",
         stderr(&out)
     );
+}
+
+fn journey_b_with(paper: &Path) -> (Output, Duration) {
+    run(
+        "golden-journey-b.sh",
+        &[("PAPER_SRC", paper.to_str().unwrap())],
+    )
+}
+
+#[test]
+fn a_spine_close_seat_that_exits_non_zero_fails_golden_journey_b() {
+    let (dir, paper) = paper_b_copy();
+    edit(&paper, "seats/spine_close.sh", |t| {
+        t.replacen("set -eu\n", "set -eu\nexit 3\n", 1)
+    });
+    let (out, took) = journey_b_with(&paper);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("FAIL") && stderr(&out).contains("stuck"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(took < LIMIT, "it fails at once, not at the limit: {took:?}");
+    drop(dir);
+}
+
+#[test]
+fn a_spine_pr_with_red_checks_fails_golden_journey_b_at_once() {
+    // The merge parks with `merge_failed`; no `merge_ack` request opens.
+    let (dir, paper) = paper_b_copy();
+    edit(&paper, "seats/spine_close.sh", |t| {
+        t.replacen("\"checks\":\"green\"", "\"checks\":\"red\"", 1)
+    });
+    let (out, took) = journey_b_with(&paper);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(stderr(&out).contains("stuck"), "{}", stderr(&out));
+    assert!(took < LIMIT, "{took:?}");
+    drop(dir);
+}
+
+#[test]
+fn a_changed_usage_number_fails_golden_journey_b() {
+    for (seat, from, to) in [
+        ("reviewer", "\"cost_micros\":800", "\"cost_micros\":801"),
+        (
+            "spine_close",
+            "\"cost_micros\":1200",
+            "\"cost_micros\":1201",
+        ),
+        (
+            "implementer",
+            "\"cost_micros\":2000",
+            "\"cost_micros\":2001",
+        ),
+    ] {
+        let (dir, paper) = paper_b_copy();
+        edit(&paper, &format!("seats/{seat}.sh"), |t| t.replace(from, to));
+        let (out, _) = journey_b_with(&paper);
+        assert!(!out.status.success(), "{seat}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains(&format!("role {seat} cost")),
+            "{seat}: {}",
+            stderr(&out)
+        );
+        drop(dir);
+    }
+}
+
+#[test]
+fn a_spine_pr_that_names_another_base_fails_golden_journey_b() {
+    // The PR's base is not the base branch of the run: the merge parks with `merge_failed`.
+    let (dir, paper) = paper_b_copy();
+    edit(&paper, "seats/spine_close.sh", |t| {
+        t.replacen(
+            "\"$PAPER_BRANCH\" \"$PAPER_BASE\" \\\n  > \"$(dirname \"$forge\")/prs/100.json\"",
+            "\"$PAPER_BRANCH\" \"$PAPER_BRANCH\" \\\n  > \"$(dirname \"$forge\")/prs/100.json\"",
+            1,
+        )
+    });
+    let (out, took) = journey_b_with(&paper);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(stderr(&out).contains("stuck"), "{}", stderr(&out));
+    assert!(took < LIMIT, "{took:?}");
+    drop(dir);
 }

@@ -172,6 +172,12 @@ pub trait AgentPort: Send + Sync {
     fn resolve_plugin(&self, name: &str, min_version: &str) -> Result<ResolvedPlugin, AgentError>;
     /// Take the neutral events that happened since the last drain, oldest first.
     fn drain_events(&self, session: &SessionRef) -> Result<Vec<SessionEvent>, AgentError>;
+    /// The operating-system process ID of the session's process, when the adapter runs one. The
+    /// controller refuses a `claim`, `answer`, `clear` or `ack` from a process that descends from it
+    /// (ADR-0005). An adapter with no process of its own keeps the default.
+    fn process_id(&self, _session: &SessionRef) -> Option<u32> {
+        None
+    }
 }
 
 /// Routes each call to the adapter of the right runtime.
@@ -303,6 +309,11 @@ impl AgentPort for AgentRouter {
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let (_, adapter, inner) = self.route(session)?;
         adapter.is_alive(&inner)
+    }
+
+    fn process_id(&self, session: &SessionRef) -> Option<u32> {
+        let (_, adapter, inner) = self.route(session).ok()?;
+        adapter.process_id(&inner)
     }
 
     /// An untagged reference, or one for a runtime with no adapter, is already gone: `Ok`.

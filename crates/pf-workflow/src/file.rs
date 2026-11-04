@@ -50,6 +50,15 @@ pub struct RepeatDef {
     pub max: u32,
 }
 
+/// A seed unit that starts later: it is admitted once, on the first tick at which `file` exists
+/// and every unit of the track `units_done` is done (and at least one such unit exists).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartWhen {
+    /// A template over the run. The seed waits until the rendered path exists.
+    pub file: String,
+    pub units_done: String,
+}
+
 /// A unit the file declares, admitted at the start of a run with no queue record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeedDef {
@@ -59,6 +68,9 @@ pub struct SeedDef {
     pub track: String,
     pub vars: BTreeMap<String, String>,
     pub repeat: Option<RepeatDef>,
+    /// `Some`: the seed is admitted when its condition holds, not at the start of the run. A seed
+    /// carries `repeat` or `start_when`, never both.
+    pub start_when: Option<StartWhen>,
 }
 
 /// The check a `pr` condition applies to its output.
@@ -76,11 +88,24 @@ pub enum DoneCond {
     Pr { command: CommandSpec, test: PrTest },
 }
 
+/// One entry of a stage's `outcomes`. It is tried after the stage's session ends and its `done`
+/// conditions hold. When every `when` condition holds, the unit goes to the stage `to` of the same
+/// track. The entry sends the unit at most `max` times; one more is a park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeSpec {
+    pub when: Vec<DoneCond>,
+    pub to: String,
+    pub max: u32,
+}
+
 /// A file that parks the unit, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParkOn {
     pub file: String,
     pub reason: String,
+    /// Commands that run when an answer resumes a unit parked by this file, before the unit
+    /// becomes `running`. Empty declares no hook.
+    pub on_answer: Vec<CommandSpec>,
 }
 
 /// One stage of a track.
@@ -96,6 +121,9 @@ pub struct StageSpec {
     pub before: Vec<CommandSpec>,
     pub after_first_turn: Vec<CommandSpec>,
     pub stop_file: String,
+    /// Commands that run when an answer resumes a unit parked by the stop file, before the unit
+    /// becomes `running`. Empty declares no hook.
+    pub stop_on_answer: Vec<CommandSpec>,
     pub stall_minutes: u32,
     pub first_turn_seconds: u32,
     pub skills: Vec<String>,
@@ -103,6 +131,12 @@ pub struct StageSpec {
     pub settings: BTreeMap<String, String>,
     pub done: Vec<DoneCond>,
     pub park_on: Vec<ParkOn>,
+    /// Tried in order after the stage is done. The first entry that holds sends the unit on. An
+    /// empty list is a stage that goes on to the next one.
+    pub outcomes: Vec<OutcomeSpec>,
+    /// `entered_by: outcome`: the stage runs only when an outcome sends the unit to it. A unit
+    /// that reaches it in order goes past it.
+    pub entered_by_outcome: bool,
 }
 
 /// The merge definition of a track.
@@ -111,10 +145,24 @@ pub struct MergeSpec {
     pub rule: MergeRule,
     pub repo: String,
     pub base: String,
+    /// The branch a unit's PR must come from. Only the `claim_ack` rule takes it.
+    pub head_branch: Option<String>,
     /// Prints the unit's PR URL.
     pub pr: CommandSpec,
     pub head_check: bool,
     pub after_merge: Vec<CommandSpec>,
+}
+
+/// When a run may end. The run ends with `reason` once its seeds are finished and every unit is
+/// done, and every `when` condition holds. Until then each tick notes `waiting`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndWhen {
+    /// `file` and `exit0` conditions, in the order the file lists them.
+    pub when: Vec<DoneCond>,
+    /// A template over the run: the note a tick keeps while a condition does not hold.
+    pub waiting: String,
+    /// A template over the run: the reason the run ends with.
+    pub reason: String,
 }
 
 /// A named list of stages, with an optional merge definition.
@@ -139,6 +187,8 @@ pub struct WorkflowFile {
     pub unit_sources: Vec<UnitSourceDef>,
     pub seeds: Vec<SeedDef>,
     pub tracks: Vec<TrackDef>,
+    /// `None`: the run ends as soon as its seeds are finished and every unit is done.
+    pub end_when: Option<EndWhen>,
 }
 
 impl WorkflowFile {
@@ -349,8 +399,10 @@ pub(crate) fn is_version(text: &str) -> bool {
 /// Where a template is used, and so which placeholders it may hold.
 #[derive(Clone, Copy)]
 enum Scope<'a> {
-    /// A unit on this track exists: every placeholder is allowed.
+    /// A unit on this track exists: every placeholder is allowed, except the answer ones.
     Unit(&'a str),
+    /// An answer hook of a unit on this track: the unit placeholders and the answer ones.
+    Answer(&'a str),
     /// A run exists, a unit does not.
     Run,
     /// Only the parameters exist.
@@ -364,11 +416,16 @@ struct Checker<'a> {
 
 impl Checker<'_> {
     fn template(&self, text: &str, pos: Pos, scope: Scope) -> Result<(), ParseError> {
+        // The track of a unit placeholder, when a unit exists here.
+        let track = match scope {
+            Scope::Unit(t) | Scope::Answer(t) => Some(t),
+            Scope::Run | Scope::Params => None,
+        };
         for name in placeholder_names(text) {
             let hole = Placeholder::parse(&name).map_err(|m| ParseError::new(pos, m))?;
             let shown = format!("{{{}}}", hole.name());
-            match (&hole, scope) {
-                (Placeholder::Param(k), _) => {
+            match &hole {
+                Placeholder::Param(k) => {
                     if !self.params.iter().any(|p| p == k) {
                         return Err(ParseError::new(
                             pos,
@@ -378,27 +435,45 @@ impl Checker<'_> {
                         ));
                     }
                 }
-                (Placeholder::RunId | Placeholder::RunDir, Scope::Params) => {
-                    return Err(ParseError::new(
-                        pos,
-                        format!("placeholder `{shown}` needs a run, and no run exists here"),
-                    ));
+                Placeholder::RunId | Placeholder::RunDir | Placeholder::RunPackage => {
+                    if matches!(scope, Scope::Params) {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a run, and no run exists here"),
+                        ));
+                    }
                 }
-                (Placeholder::RunId | Placeholder::RunDir, _) => {}
-                (Placeholder::UnitId | Placeholder::UnitVar(_), Scope::Params | Scope::Run) => {
-                    return Err(ParseError::new(
-                        pos,
-                        format!("placeholder `{shown}` needs a unit, and no unit exists here"),
-                    ));
+                Placeholder::UnitId => {
+                    if track.is_none() {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a unit, and no unit exists here"),
+                        ));
+                    }
                 }
-                (Placeholder::UnitId, Scope::Unit(_)) => {}
-                (Placeholder::UnitVar(k), Scope::Unit(track)) => {
+                Placeholder::UnitVar(k) => {
+                    let Some(track) = track else {
+                        return Err(ParseError::new(
+                            pos,
+                            format!("placeholder `{shown}` needs a unit, and no unit exists here"),
+                        ));
+                    };
                     let declared = self.vars.get(track).is_some_and(|v| v.contains(k));
                     if !declared {
                         return Err(ParseError::new(
                             pos,
                             format!(
                                 "placeholder `{shown}`: variable `{k}` is not declared by a unit source or seed of track `{track}`"
+                            ),
+                        ));
+                    }
+                }
+                Placeholder::Answer(_) => {
+                    if !matches!(scope, Scope::Answer(_)) {
+                        return Err(ParseError::new(
+                            pos,
+                            format!(
+                                "placeholder `{shown}` is allowed only in an `on_answer` command"
                             ),
                         ));
                     }
@@ -507,6 +582,7 @@ const TOP_FIELDS: &[&str] = &[
     "seeds",
     "unit_sources",
     "tracks",
+    "end_when",
 ];
 
 fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
@@ -643,6 +719,11 @@ fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
         }
     }
 
+    let end_when = match top.get("end_when") {
+        None => None,
+        Some(n) => Some(read_end_when(n, &check)?),
+    };
+
     Ok(WorkflowFile {
         version: SUPPORTED_VERSION,
         name,
@@ -655,6 +736,7 @@ fn read_file(root: &Node) -> Result<WorkflowFile, ParseError> {
         unit_sources,
         seeds,
         tracks,
+        end_when,
     })
 }
 
@@ -735,7 +817,15 @@ fn read_seed(
     let f = Fields::new(
         node,
         "a seed",
-        &["id", "group", "order", "track", "vars", "repeat"],
+        &[
+            "id",
+            "group",
+            "order",
+            "track",
+            "vars",
+            "repeat",
+            "start_when",
+        ],
     )?;
     let id = name_of(f.req("id")?, "the seed id")?;
     let group = nonempty_text(f.req("group")?, "`group`")?;
@@ -765,6 +855,27 @@ fn read_seed(
             })
         }
     };
+    let start_when = match f.get("start_when") {
+        None => None,
+        Some(w) => {
+            if repeat.is_some() {
+                return Err(ParseError::new(
+                    w.pos,
+                    format!(
+                        "seed `{id}` has both `start_when` and `repeat`; a seed has one or the other"
+                    ),
+                ));
+            }
+            let wf = Fields::new(w, "`start_when`", &["file", "units_done"])?;
+            let done = wf.req("units_done")?;
+            let units_done = name_of(done, "`units_done`")?;
+            refs.push((units_done.clone(), done.pos, "`start_when`"));
+            Some(StartWhen {
+                file: check.text_node(wf.req("file")?, "`file`", Scope::Run)?,
+                units_done,
+            })
+        }
+    };
     Ok(SeedDef {
         id,
         group,
@@ -772,6 +883,7 @@ fn read_seed(
         track,
         vars,
         repeat,
+        start_when,
     })
 }
 
@@ -812,15 +924,32 @@ fn read_tracks(
         }
         let scope = Scope::Unit(&e.key);
         let mut stages: Vec<StageSpec> = Vec::new();
+        let mut targets: Vec<(String, String, Pos)> = Vec::new();
         for s in stage_nodes {
-            let stage = read_stage(s, check, scope, roles)?;
+            let (stage, to_refs) = read_stage(s, check, scope, roles)?;
             if stages.iter().any(|x| x.name == stage.name) {
                 return Err(ParseError::new(
                     s.pos,
                     format!("stage `{}` is defined twice in {what}", stage.name),
                 ));
             }
+            targets.extend(
+                to_refs
+                    .into_iter()
+                    .map(|(to, pos)| (stage.name.clone(), to, pos)),
+            );
             stages.push(stage);
+        }
+        // An outcome sends the unit to a stage of its own track, earlier or later.
+        for (from, to, pos) in targets {
+            if !stages.iter().any(|x| x.name == to) {
+                return Err(ParseError::new(
+                    pos,
+                    format!(
+                        "an outcome of stage `{from}` sends the unit to `{to}`, which {what} does not define"
+                    ),
+                ));
+            }
         }
         let merge = match f.get("merge") {
             None => None,
@@ -851,14 +980,21 @@ const STAGE_FIELDS: &[&str] = &[
     "settings",
     "done",
     "park_on",
+    "outcomes",
+    "entered_by",
 ];
+
+/// A stage, and the `to` of each of its outcomes with the place it was written. The track checks
+/// the targets once it has read every stage.
+type OutcomeTargets = Vec<(String, Pos)>;
+type StageRead = (StageSpec, OutcomeTargets);
 
 fn read_stage(
     node: &Node,
     check: &Checker,
     scope: Scope,
     roles: &[RoleDef],
-) -> Result<StageSpec, ParseError> {
+) -> Result<StageRead, ParseError> {
     let f = Fields::new(node, "a stage", STAGE_FIELDS)?;
     let name = name_of(f.req("name")?, "the stage name")?;
     let role_node = f.req("role")?;
@@ -900,7 +1036,21 @@ fn read_stage(
         None => Vec::new(),
         Some(n) => check.commands(n, "`after_first_turn`", scope)?,
     };
-    let stop_file = check.text_node(f.req("stop_file")?, "`stop_file`", scope)?;
+    // The stop file is a path, or a mapping `{file, on_answer}` that adds an answer hook.
+    let stop_node = f.req("stop_file")?;
+    let (stop_file, stop_on_answer) = match &stop_node.value {
+        Value::Map(_) => {
+            let sf = Fields::new(stop_node, "`stop_file`", &["file", "on_answer"])?;
+            (
+                check.text_node(sf.req("file")?, "`file`", scope)?,
+                read_on_answer(&sf, check, scope)?,
+            )
+        }
+        _ => (
+            check.text_node(stop_node, "`stop_file`", scope)?,
+            Vec::new(),
+        ),
+    };
     let stall_minutes = small_uint(f.req("stall_minutes")?, "`stall_minutes`", 1)?;
     let first_turn_seconds = small_uint(f.req("first_turn_seconds")?, "`first_turn_seconds`", 1)?;
     let skills = match f.get("skills") {
@@ -928,15 +1078,41 @@ fn read_stage(
         Some(n) => items(n, "`park_on`")?
             .iter()
             .map(|p| {
-                let pf = Fields::new(p, "a `park_on` entry", &["file", "reason"])?;
+                let pf = Fields::new(p, "a `park_on` entry", &["file", "reason", "on_answer"])?;
                 Ok(ParkOn {
                     file: check.text_node(pf.req("file")?, "`file`", scope)?,
                     reason: check.text_node(pf.req("reason")?, "`reason`", scope)?,
+                    on_answer: read_on_answer(&pf, check, scope)?,
                 })
             })
             .collect::<Result<_, ParseError>>()?,
     };
-    Ok(StageSpec {
+    let (outcomes, targets) = match f.get("outcomes") {
+        None => (Vec::new(), Vec::new()),
+        Some(n) => read_outcomes(n, &name, check, scope)?,
+    };
+    let entered_by_outcome = match f.get("entered_by") {
+        None => false,
+        Some(n) => {
+            let value = text_of(n, "`entered_by`")?;
+            if value != "outcome" {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!("`entered_by` `{value}` is unknown; version 1 accepts: outcome"),
+                ));
+            }
+            if outcomes.is_empty() {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!(
+                        "stage `{name}` is `entered_by: outcome`, so it must hold at least one `outcomes` entry"
+                    ),
+                ));
+            }
+            true
+        }
+    };
+    let spec = StageSpec {
         name,
         role,
         brief,
@@ -946,13 +1122,73 @@ fn read_stage(
         before,
         after_first_turn,
         stop_file,
+        stop_on_answer,
         stall_minutes,
         first_turn_seconds,
         skills,
         settings,
         done,
         park_on,
-    })
+        outcomes,
+        entered_by_outcome,
+    };
+    Ok((spec, targets))
+}
+
+/// The `outcomes` list of a stage: each entry is `{when, to, max}`. `when` holds `done` entries
+/// and all of them must hold. `max` is at least 1: an entry that may never fire has no use.
+fn read_outcomes(
+    node: &Node,
+    stage: &str,
+    check: &Checker,
+    scope: Scope,
+) -> Result<(Vec<OutcomeSpec>, OutcomeTargets), ParseError> {
+    let list = items(node, "`outcomes`")?;
+    if list.is_empty() {
+        return Err(ParseError::new(
+            node.pos,
+            format!("`outcomes` of stage `{stage}` must hold at least one entry"),
+        ));
+    }
+    let mut outcomes = Vec::new();
+    let mut targets = Vec::new();
+    for entry in list {
+        let f = Fields::new(entry, "an outcome", &["when", "to", "max"])?;
+        let when_node = f.req("when")?;
+        let when_items = items(when_node, "`when`")?;
+        if when_items.is_empty() {
+            return Err(ParseError::new(
+                when_node.pos,
+                format!("`when` of an outcome of stage `{stage}` must hold at least one condition"),
+            ));
+        }
+        let when = when_items
+            .iter()
+            .map(|d| read_done(d, check, scope))
+            .collect::<Result<_, _>>()?;
+        let to_node = f.req("to")?;
+        let to = name_of(to_node, "`to`")?;
+        let max = small_uint(f.req("max")?, "`max`", 1)?;
+        targets.push((to.clone(), to_node.pos));
+        outcomes.push(OutcomeSpec { when, to, max });
+    }
+    Ok((outcomes, targets))
+}
+
+/// The optional `on_answer` list of a `park_on` entry or a `stop_file`. Its commands may use the
+/// answer placeholders, so they are checked in the answer scope.
+fn read_on_answer(
+    f: &Fields,
+    check: &Checker,
+    scope: Scope,
+) -> Result<Vec<CommandSpec>, ParseError> {
+    let Some(node) = f.get("on_answer") else {
+        return Ok(Vec::new());
+    };
+    let Scope::Unit(track) = scope else {
+        unreachable!("a stage is read in the scope of its track");
+    };
+    check.commands(node, "`on_answer`", Scope::Answer(track))
 }
 
 /// The keys other than `env.<NAME>` that a stage's `settings` admits. Each is a template that
@@ -1038,28 +1274,81 @@ fn read_done(node: &Node, check: &Checker, scope: Scope) -> Result<DoneCond, Par
     Ok(DoneCond::Pr { command, test })
 }
 
+/// The `end_when` block: `when` lists `file` and `exit0` conditions, and `waiting` and `reason`
+/// are templates over the run. No unit exists when the run ends, so none of them may name one.
+fn read_end_when(node: &Node, check: &Checker) -> Result<EndWhen, ParseError> {
+    let f = Fields::new(node, "`end_when`", &["when", "waiting", "reason"])?;
+    let when_node = f.req("when")?;
+    let entries = items(when_node, "`when`")?;
+    if entries.is_empty() {
+        return Err(ParseError::new(
+            when_node.pos,
+            "`when` of `end_when` must hold at least one condition",
+        ));
+    }
+    let mut when = Vec::new();
+    for entry in entries {
+        let cond = read_done(entry, check, Scope::Run)?;
+        if matches!(cond, DoneCond::Pr { .. }) {
+            return Err(ParseError::new(
+                entry.pos,
+                "a `pr` condition cannot end a run; `end_when` accepts `file` and `exit0`",
+            ));
+        }
+        when.push(cond);
+    }
+    Ok(EndWhen {
+        when,
+        waiting: check.text_node(f.req("waiting")?, "`waiting`", Scope::Run)?,
+        reason: check.text_node(f.req("reason")?, "`reason`", Scope::Run)?,
+    })
+}
+
+/// The merge rules version 1 accepts, as the file spells them.
+const MERGE_RULES: &str = "green_checks_in_declared_order, claim_ack";
+
 fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, ParseError> {
     let f = Fields::new(
         node,
         "`merge`",
-        &["rule", "repo", "base", "pr", "head_check", "after_merge"],
+        &[
+            "rule",
+            "repo",
+            "base",
+            "head_branch",
+            "pr",
+            "head_check",
+            "after_merge",
+        ],
     )?;
     let rule_node = f.req("rule")?;
     let rule = match text_of(rule_node, "`rule`")?.as_str() {
         "green_checks_in_declared_order" => MergeRule::GreenChecksInDeclaredOrder,
+        "claim_ack" => MergeRule::ClaimAck,
         other => {
             return Err(ParseError::new(
                 rule_node.pos,
-                format!(
-                    "merge rule `{other}` is unknown; version 1 accepts: green_checks_in_declared_order"
-                ),
+                format!("merge rule `{other}` is unknown; version 1 accepts: {MERGE_RULES}"),
             ));
+        }
+    };
+    let head_branch = match f.get("head_branch") {
+        None => None,
+        Some(n) => {
+            if rule != MergeRule::ClaimAck {
+                return Err(ParseError::new(
+                    n.pos,
+                    "`head_branch` belongs to the merge rule `claim_ack`",
+                ));
+            }
+            Some(check.text_node(n, "`head_branch`", scope)?)
         }
     };
     Ok(MergeSpec {
         rule,
         repo: check.text_node(f.req("repo")?, "`repo`", scope)?,
         base: check.text_node(f.req("base")?, "`base`", scope)?,
+        head_branch,
         pr: check.command(f.req("pr")?, "`pr`", scope)?,
         head_check: match f.get("head_check") {
             None => false,

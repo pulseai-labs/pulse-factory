@@ -61,7 +61,7 @@ out="$("$PF_BIN" arm s1 --workflow "$workflow" --ledger "$tmp/ledger.md" --dry-r
   --plugin-root "$tmp/plugins" \
   --param spine_branch=spine/s1 --param "spine_dir=$tmp/spine" --param "method_root=$tmp/method" \
   --param "repo=$tmp/repo" --param "worktree_root=$tmp/wt" --param "state_file=$tmp/state.json" \
-  --param oss=oss 2>&1)" || { echo "$out" >&2; fail "arm --dry-run exited non-zero"; }
+  --param oss=oss --param base_branch=main 2>&1)" || { echo "$out" >&2; fail "arm --dry-run exited non-zero"; }
 echo "$out"
 
 want() { printf '%s\n' "$out" | grep -qxF -- "$1" || fail "the summary lacks the line: $1"; }
@@ -71,12 +71,20 @@ want "workflow: ossify-spine (file version 1)"
 for role in lane implementer verifier close; do
   want "role $role: runtime omp, model zai/glm-5.3-flash"
 done
+want "role reviewer: runtime omp, model zai/glm-5.3"
 want "caps: model_sessions 2, cold_builds 1"
 want "caps: seed lane runs at most 12 times"
+want "caps: seed spine runs at most 1 times"
+want "caps: loop review -> fix at most 2 times per item unit"
+want "caps: loop review -> review at most 2 times per item unit"
+want "caps: loop fix -> review at most 2 times per item unit"
 want "caps: one relaunch per stage"
-# 2 x (12 lane launches + 3 items x 3 stages)
-want "most launches: 42"
+# Per item: implement, verify, close and review once (4), `fix` counts 0, and the three loop caps
+# 2 + 2 + 2 (6): 10. The spine track has one stage, and its seed runs once: 1.
+# 2 x (12 lane launches + 3 items x 10 + 1 spine close)
+want "most launches: 86"
 want "item PRs merge into spine/s1 on green checks with no ack"
+want "the spine PR merges into main only on the claim's ack"
 printf '%s\n' "$out" | grep -q '^plugin.*ossify.*1\.30\.1' || fail "the summary lacks the pinned plugin"
 
 # Nothing changed: no state directory, no socket, no ledger, and no `gh` call but `repo view`.

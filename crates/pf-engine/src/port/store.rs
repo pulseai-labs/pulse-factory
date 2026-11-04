@@ -3,6 +3,8 @@
 //! The port carries one atomic commit: the state transition, its command and receipt, and its
 //! ledger outbox line, together or not at all. It shows no SQL.
 
+use serde::{Deserialize, Serialize};
+
 use crate::status::Status;
 
 /// Whether a run still takes work.
@@ -159,12 +161,155 @@ pub struct NewAdmission {
     pub admitted_at: String,
 }
 
+/// What a request is about: the closed list of the halts of ADR-0006, and the merge ack.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    /// Any park whose reason is not one of the others.
+    #[default]
+    Park,
+    /// An implementer's pre-flight `gaps-surfaced` return.
+    Gaps,
+    /// A stop file.
+    Stop,
+    /// A red close gate (a correction packet).
+    RedGate,
+    /// A stalled seat that already had its one relaunch.
+    Stall,
+    /// A merge that did not land.
+    MergeFailed,
+    /// A seat lost across a controller restart.
+    SeatLost,
+    /// A merge waits on the claim's ack.
+    MergeAck,
+}
+
+impl RequestKind {
+    /// Every kind, in the order the contract lists them.
+    pub const ALL: [RequestKind; 8] = [
+        RequestKind::Park,
+        RequestKind::Gaps,
+        RequestKind::Stop,
+        RequestKind::RedGate,
+        RequestKind::Stall,
+        RequestKind::MergeFailed,
+        RequestKind::SeatLost,
+        RequestKind::MergeAck,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestKind::Park => "park",
+            RequestKind::Gaps => "gaps",
+            RequestKind::Stop => "stop",
+            RequestKind::RedGate => "red_gate",
+            RequestKind::Stall => "stall",
+            RequestKind::MergeFailed => "merge_failed",
+            RequestKind::SeatLost => "seat_lost",
+            RequestKind::MergeAck => "merge_ack",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<RequestKind> {
+        RequestKind::ALL.into_iter().find(|k| k.as_str() == text)
+    }
+}
+
+/// Where a request stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStatus {
+    Open,
+    Answered,
+    Withdrawn,
+}
+
+impl RequestStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RequestStatus::Open => "open",
+            RequestStatus::Answered => "answered",
+            RequestStatus::Withdrawn => "withdrawn",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<RequestStatus> {
+        match text {
+            "open" => Some(RequestStatus::Open),
+            "answered" => Some(RequestStatus::Answered),
+            "withdrawn" => Some(RequestStatus::Withdrawn),
+            _ => None,
+        }
+    }
+}
+
+/// One request: something an operator can see and answer (`docs/contracts/requests.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestRow {
+    /// `R-<n>`, from one sequence for the whole store.
+    pub id: String,
+    /// From 1. A revision rises when the request's facts change while it stays open.
+    pub revision: u32,
+    pub run_id: String,
+    /// `None` for a run-level request.
+    pub unit_id: Option<String>,
+    /// The stage the unit parked in, `merge` for a unit parked at its merge, or empty.
+    pub stage: String,
+    pub kind: RequestKind,
+    /// One line.
+    pub reason: String,
+    /// JSON text.
+    pub body: String,
+    pub status: RequestStatus,
+    pub opened_at: String,
+    /// When the request left `open`: answered or withdrawn.
+    pub answered_at: Option<String>,
+    /// JSON text of the answer: `{"verb":"answer",...}`, `{"verb":"clear",...}` or
+    /// `{"verb":"withdraw",...}`.
+    pub answer: Option<String>,
+    /// The claim generation that answered.
+    pub answer_generation: Option<u64>,
+}
+
+/// A request before the store gives it an ID. The store sets the revision to 1 and the status to
+/// `open`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewRequest {
+    pub run_id: String,
+    pub unit_id: Option<String>,
+    pub stage: String,
+    pub kind: RequestKind,
+    pub reason: String,
+    pub body: String,
+    pub opened_at: String,
+}
+
+/// One claim. The current claim is the highest generation with no `fenced_at`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimRow {
+    /// From 1, strictly rising.
+    pub generation: u64,
+    /// SHA-256 of the token, as 64 hex digits. The token itself is never stored.
+    pub token_hash: String,
+    /// One line the client sends: user, host and session label.
+    pub holder: String,
+    pub claimed_at: String,
+    /// Set when a newer claim replaces this one.
+    pub fenced_at: Option<String>,
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     PutRun(RunRow),
     PutNode(NodeRow),
     PutSession(SessionRow),
+    /// Open a request. The store gives it the next `R-<n>`.
+    OpenRequest(NewRequest),
+    /// Replace the request with this ID. It must exist.
+    PutRequest(RequestRow),
+    /// Insert the claim of this generation, or replace it.
+    PutClaim(ClaimRow),
 }
 
 /// What the engine wants on the ledger. The store assigns the sequence number.
@@ -233,6 +378,12 @@ pub trait Store: Send + Sync {
     fn nodes(&self, run_id: &str) -> Result<Vec<NodeRow>, StoreError>;
     /// Read a run's sessions, in creation order.
     fn sessions(&self, run_id: &str) -> Result<Vec<SessionRow>, StoreError>;
+    /// Read a run's requests, in the order they were opened.
+    fn requests(&self, run_id: &str) -> Result<Vec<RequestRow>, StoreError>;
+    /// Read one request by ID, whatever run it belongs to.
+    fn request(&self, id: &str) -> Result<Option<RequestRow>, StoreError>;
+    /// Read every claim of the store, by generation.
+    fn claims(&self) -> Result<Vec<ClaimRow>, StoreError>;
     /// Read a run's admissions, in admission order.
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError>;
     /// Read one admission by command ID.

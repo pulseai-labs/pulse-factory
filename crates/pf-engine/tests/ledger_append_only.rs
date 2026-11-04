@@ -160,6 +160,8 @@ fn a_command_that_is_replayed_or_rejected_writes_no_line() {
         body: CommandBody::Park {
             unit_id: "u1".to_string(),
             reason: "stalled".to_string(),
+            request_kind: pf_engine::RequestKind::Park,
+            detail: None,
         },
     };
     env.engine.submit(park.clone()).unwrap();
@@ -173,6 +175,8 @@ fn a_command_that_is_replayed_or_rejected_writes_no_line() {
                 body: CommandBody::Park {
                     unit_id: "u1".to_string(),
                     reason: "again".to_string(),
+                    request_kind: pf_engine::RequestKind::Park,
+                    detail: None,
                 },
             })
             .is_err()

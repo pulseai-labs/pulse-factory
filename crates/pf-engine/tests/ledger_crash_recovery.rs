@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,8 +28,8 @@ impl LedgerFile for FlakyLedger {
     fn truncate_torn_tail(&mut self) -> std::io::Result<bool> {
         self.inner.truncate_torn_tail()
     }
-    fn seqs(&mut self) -> std::io::Result<BTreeSet<u64>> {
-        self.inner.seqs()
+    fn lines(&mut self) -> std::io::Result<BTreeMap<u64, Vec<String>>> {
+        self.inner.lines()
     }
     fn append(&mut self, line: &str) -> std::io::Result<()> {
         if self.fail.load(Ordering::SeqCst) {

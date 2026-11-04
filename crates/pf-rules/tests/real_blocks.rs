@@ -146,6 +146,46 @@ oss work_item_pr "$wi" "$pr_url" \
 echo "close: $wi PR $pr_url"
 "####;
 
+/// From `skills/close/references/spine-close.md`, section 3, lines 483-517 (ossify 1.36.6): the
+/// merge-bar `case` with `${pr_bad#line:}`, the push of the spine branch, `gh pr create` and
+/// `pr_num="${pr_url##*/}"`. The `fi` on its sixth line closes an `if` that opens above line 483.
+const SPINE_CLOSE_PR_BLOCK: &str = r####"        case "$pr_bad" in
+          line:*) echo "close: $pr_ff lacks the merge-bar line '${pr_bad#line:}' under '## Merge bar' - copy the template's Merge bar block word for word - halt"; exit 1;;
+          extra:*) echo "close: $pr_ff has the numbered line '${pr_bad#extra:}' in its Merge bar, which the template does not - the bar is the template's four conditions - halt"; exit 1;;
+          dup:*) echo "close: $pr_ff repeats the merge-bar line '${pr_bad#dup:}' under '## Merge bar' - the bar is the template's lines once each - halt"; exit 1;;
+          door) echo "close: $pr_ff has no 'Door: one-way' or 'Door: two-way' line under '## Merge danger' - fill the Merge danger field - halt"; exit 1;;
+        esac
+      fi
+      git -C "$repo_root" push -u "$remote_name" "$spine_branch" \
+        || { echo "close: cannot push '$spine_branch' to '$remote_name' in $repo - halt"; exit 1; }
+      # The body carries the pushed tip: the lineage guard's durable input.
+      # It lives on the PR, so it survives the halt/resume boundary and session
+      # death - no shell state is trusted across the loop. --head pins the PR to
+      # the branch this pass just pushed: gh defaults it to the CURRENT branch,
+      # which after a resume or a work-pr loop is not necessarily the spine's.
+      # merge-bar's fields, when composed, go AFTER these two lines: the
+      # record pass reads the first `pushed-tip:` line. `:+` keeps an unset
+      # $pr_fields legal under `set -u`; it was loaded before the push.
+      pr_body="spine close $spine_id -> $base_branch in $repo
+pushed-tip: $pre${pr_fields:+
+
+$pr_fields}"
+      # gh prints the PR's URL, never its number, and every step after this one
+      # uses the NUMBER: the `$repo:$pr_num` lines the record pass reads, `gh pr
+      # view "$pr_num"`, the messages. Capturing the URL as `pr_num` stored a
+      # value whose failure surfaced far from here, in a guard that could not
+      # name the cause. Keep the URL whole for the messages, take the last path
+      # segment, and refuse anything that is not all digits (#716).
+      pr_url="$( (cd "$repo_root" && gh --repo "$pr_slug" pr create --base "$base_branch" --head "$spine_branch" \
+        --title "merge $spine_id" --body "$pr_body") 2>&1 )" \
+        || { echo "close: gh cannot open the PR in $repo ($pr_url) - fix gh (auth, host) or record an operator-decided local merge - never a silent local fall-through - halt"; exit 1; }
+      pr_num="${pr_url##*/}"
+      case "$pr_num" in
+        ''|*[!0-9]*) echo "close: gh pr create in $repo printed '$pr_url', not a PR URL - halt"; exit 1;;
+      esac
+      echo "close: $repo PR #$pr_num opened against $base_branch - hand it to /ossify:work-pr"
+"####;
+
 /// A lane works from the method's root and has no worktree.
 fn lane_ctx() -> Context {
     let mut c = ctx();
@@ -550,4 +590,60 @@ fn push_of_marks_each_form_that_the_rules_allow_unread() {
     // A bare push after a literal switch names that branch.
     let v = push_of("git switch work/u1 && git push");
     assert_eq!(v[0].branch, Part::Literal("work/u1".to_string()), "{v:?}");
+}
+
+/// The spine-close seat: it works from the method's root, pushes from the repository, and its own
+/// branch is the spine branch.
+fn spine_close_ctx() -> Context {
+    let mut c = ctx();
+    c.cwd = PathBuf::from("/method");
+    c.push_dir = PathBuf::from("/repo");
+    c.own_branch = "spine/r0.s2-x".to_string();
+    c.current_branch = "spine/r0.s2-x".to_string();
+    c
+}
+
+#[test]
+fn the_real_spine_close_pr_block_is_allowed_for_close_with_the_spine_branch_as_its_own() {
+    let close = shipped("close");
+    let d = bash_in(&close, &spine_close_ctx(), SPINE_CLOSE_PR_BLOCK);
+    assert!(d.is_allow(), "{} ({})", d.rule, d.reason);
+    // The copy still holds the four forms the grammar had to learn.
+    assert!(SPINE_CLOSE_PR_BLOCK.contains("${pr_bad#line:}"));
+    assert!(SPINE_CLOSE_PR_BLOCK.contains("pr_num=\"${pr_url##*/}\""));
+    assert!(SPINE_CLOSE_PR_BLOCK.contains("gh --repo \"$pr_slug\" pr create"));
+    // It pushes one branch, named by a variable, from a directory named by a variable.
+    let pushes = push_of(SPINE_CLOSE_PR_BLOCK);
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert!(
+        matches!(pushes[0].branch, Part::Unresolved(_)),
+        "{pushes:?}"
+    );
+    // A role that may not push does not get the push through.
+    let implementer = shipped("implementer");
+    assert_eq!(
+        denied(&implementer, &spine_close_ctx(), SPINE_CLOSE_PR_BLOCK),
+        "push-not-allowed"
+    );
+}
+
+#[test]
+fn a_trim_word_that_holds_a_denied_command_keeps_the_guard_rule_of_that_command() {
+    let close = shipped("close");
+    for (command, rule) in [
+        ("echo ${x#$(gh pr merge 1)}", "gh-pr-merge"),
+        ("echo ${x##$(gh pr merge 1)}", "gh-pr-merge"),
+        ("echo ${x%$(gh pr merge 1)}", "gh-pr-merge"),
+        ("echo \"${x%%`gh pr merge 1`}\"", "gh-pr-merge"),
+        (
+            "echo ${x%%$(git push --force origin work/u1)}",
+            "force-push",
+        ),
+    ] {
+        assert_eq!(
+            denied(&close, &spine_close_ctx(), command),
+            rule,
+            "{command}"
+        );
+    }
 }

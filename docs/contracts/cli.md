@@ -1,8 +1,9 @@
 # CLI contract
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
-Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. This
-spine has five verbs. `r0.s2` adds the rest (`requests`, `show`, `claim`, `answer`, and a clear verb).
+Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
+has eleven verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), and `requests`, `show`,
+`claim`, `answer`, `clear` and `ack` (`r0.s2`). `requests.md` holds the records and the rules.
 
 ## Common rules
 
@@ -17,7 +18,9 @@ spine has five verbs. `r0.s2` adds the rest (`requests`, `show`, `claim`, `answe
   `schema_version` (now `1`). A change that removes or renames a field raises the version.
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
   `--yes`, and a command line that clap refuses.
-- **A seat cannot spend.** `arm` and `halt` refuse when `PF_SEAT_TOKEN` is in the environment.
+- **A seat cannot spend.** `arm`, `halt`, `claim`, `answer`, `clear` and `ack` refuse when
+  `PF_SEAT_TOKEN` is in the environment. The controller checks the caller of `claim`, `answer`,
+  `clear` and `ack` again (see `claim`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
   both.
@@ -44,11 +47,19 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   earlier run not at an end state that `--replace` does not name; and, without `--paper`, a `repo`
   whose `origin` is not on GitHub or a failed `gh` read.
 - **The summary.** Spine, item count, workflow name and file version, each role with runtime and
-  model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, one relaunch per stage), the
-  pinned plugins, the most launches, `item PRs merge into <base> on green checks with no ack`, the
-  run `--replace` names, and `paper env` when set. The most launches is
-  `2 x (seed max x seed-track stages + items x item-track stages)`, summed over every seed and
-  track. It is what the plan shows. It is not a limit the run enforces.
+  model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, each stage-outcome loop, one
+  relaunch per stage), the pinned plugins, the most launches,
+  one merge line for each track that merges, the run `--replace` names, and `paper env` when set.
+  A track with the rule `green_checks_in_declared_order` prints
+  `item PRs merge into <base> on green checks with no ack`. A track with the rule `claim_ack`
+  prints `the <track> PR merges into <base> only on the claim's ack`. A loop is one `outcomes` entry of a stage. Its text line is
+  `caps: loop <stage> -> <to> at most <max> times per <track> unit`. The JSON form holds them as
+  `caps.loops`, an array of `{track, from, to, max}`.
+  The most launches is `2 x (seed max x seed-track launches + items x item-track launches)`, summed
+  over every seed and track. The launches of one unit of a track are its stages, each counted once
+  except a stage with `entered_by: outcome`, which counts 0, plus the `max` of every `outcomes`
+  entry of the track: each time an entry fires, it launches its `to` stage once. The 2 is the one
+  relaunch after a stall. The number is what the plan shows. It is not a limit the run enforces.
 - **Flags.** `--dry-run` prints the summary, exits 0 and records nothing. It needs no controller;
   with none it skips the checks on earlier runs and says so. With neither flag, `arm` prints the
   summary, says `re-run with --yes to start` and exits 2. `--yes` sends the plan to the controller,
@@ -75,6 +86,122 @@ pulse-factory halt [<run>] --reason <text> [--json]
 
 Running seats finish their stage. Nothing new launches or merges. A repeat is safe, and the first
 reason stays. A caller with `PF_SEAT_TOKEN` is refused.
+
+## `requests`
+
+```
+pulse-factory requests [--run <run>] [--all] [--json]
+```
+
+Lists the open requests of every run, newest last. Each line holds the ID, revision, kind, run,
+unit, stage, what it blocks (the unit, and each later unit the merge order holds back), the time it
+opened and the reason. `--run` narrows to one run; an unknown run exits 1 and names it. `--all` adds
+answered and withdrawn requests, each marked with its status. With nothing open it prints
+`no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
+`requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
+`opened_at`, `answered_at` and `reason`). It needs no claim.
+
+## `show`
+
+```
+pulse-factory show <R-n> [--json]
+```
+
+Prints every field of one request: the body, the answer if there is one, and the verbs that answer
+it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
+holds and the text of a `stop` request. The JSON adds `body`, `answer`,
+`answer_generation` and `verbs` to the fields of `requests`. An unknown ID exits 1 and names it. It
+needs no claim.
+
+## `claim`
+
+```
+pulse-factory claim [--holder <label>] [--run <run>] [--json]
+```
+
+Makes this session the one that may answer. The controller makes a token, stores its hash as
+generation `n+1`, fences the old claim and writes the ledger line. The client writes the token to
+`<state dir>/claim-token` (mode 0600, replacing an older file) and prints the generation, the holder
+and the path, never the token. The default holder is `<user>@<host>:<process>`. The default run is
+the latest that has not ended.
+
+- **Refusals** (exit 1, nothing recorded): `PF_SEAT_TOKEN` set; a caller that is, or descends from, a
+  seat; a `/proc` read that fails; no random bytes (`no token can be made`); no run that takes a
+  claim.
+- The JSON holds `schema_version`, `generation`, `holder`, `run` and `token_file`.
+
+## `answer`
+
+```
+pulse-factory answer <R-n> --rev <k> --text <ruling> [--claim-token-file <path>] [--json]
+```
+
+Records the ruling in the request and writes the ledger line. A request that has a unit resumes the
+unit at the stage it parked in, as `clear` does. The text is untrusted data: it is stored and shown,
+never run. `--rev` must be the request's current revision.
+
+- **Refusals** (exit 1, nothing recorded): the refusals of `claim`; a token file that is missing or
+  empty (the message names the path); a token that matches no claim; a fenced token
+  (`claim <old> was fenced by claim <new>`); an unknown request; a request that is not open; another
+  revision (the message names the current one); a changed pinned file (the message names it).
+- When the workflow declares an `on_answer` hook for the request, it runs first (`workflow-file.md`,
+  "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
+  parks again with a new request, and `resumed` is `false`.
+- The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `resumed`,
+  `hook` (`none`, `passed` or `failed`) and `hook_failure` (the cause, or null).
+
+## `clear`
+
+```
+pulse-factory clear <run> <item> [--to <stage>] [--claim-token-file <path>] [--json]
+```
+
+Resumes a parked unit in the same run. It answers the unit's open request with
+`{"verb":"clear","to_stage":…}`, sets the unit `running` at the stage with no session and writes the
+ledger line `answer <R-n>@<rev> by claim <generation>: clear <unit> --to <stage>`. The default stage
+is the one the unit parked in. The next tick launches it. A halted run accepts the clear and
+launches nothing.
+
+- **Refusals** (exit 1, nothing recorded): those of `answer`; a unit that is not parked or has no
+  open request; a `--to` that is not a stage of the unit's track; a `merge_ack` request (the
+  message names `ack`).
+- The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation` and
+  `to_stage`.
+
+## `ack`
+
+```
+pulse-factory ack <R-n> --rev <k> [--claim-token-file <path>] [--json]
+```
+
+Merges the spine PR that an open `merge_ack` request names, with the head SHA of the request
+pinned. It takes the claim as `answer` does: the same token file, the same caller check and the same
+refusals. `--rev` must be the request's current revision. The controller, in order:
+
+1. refuses a halted or ended run, and names the state;
+2. reads the PR again. If its head SHA is not the request's `head_sha`, it revises the request (the
+   body holds the new SHA, the revision is `k+1`) and refuses; the message names the new revision
+   and SHA. If the checks are not green, the PR has a conflict, or its repo, base or head branch
+   changed, it refuses with the cause and the request stays open at its revision;
+3. otherwise records the answer (`{"verb":"ack","head_sha":…}` under the claim generation), merges
+   with the SHA pinned, checks that the merge landed and runs the track's `after_merge` commands.
+   If the merge did not land, the unit parks with a `merge_failed` request, and `clear` sends it
+   back to the merge, which opens a new `merge_ack`.
+
+- **Refusals** (exit 1): those of `claim`; a token file that is missing or empty; a token that
+  matches no claim; a fenced token; an unknown request; a request of another kind (the message
+  names the kind: `ack` answers only a `merge_ack` request); a request that is not open; another
+  revision (the message names the current one); a halted or ended run; a moved head or any cause in
+  step 2; a changed pinned file. A refusal after the request is known writes the ledger line
+  `ack <R-n>@<rev> by claim <generation> refused: <cause>`, except a refusal of the token or the
+  caller, which the controller makes before the engine runs. A moved head is the one refusal that
+  changes state: it revises the request.
+- The ledger line of a landed ack is `ack <R-n>@<rev> by claim <generation>: verb=ack unit=<unit>
+  pr=<repo>#<n> base=<base> branch=<head branch> sha=<head SHA>`. The merge writes its own line
+  (`merge of unit <unit>: repo=… branch=… sha=… outcome=landed`).
+- The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `verb`
+  (`ack`), `pr`, `base`, `head_sha`, `merged` (true when the merge landed), `outcome` (`landed`, or
+  the cause of the park) and `after_merge_failure` (the cause, or null).
 
 ## `hook`
 

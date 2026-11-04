@@ -84,9 +84,23 @@ impl Response {
     }
 }
 
+/// The process on the other end of a connection, as the kernel reports it (`SO_PEERCRED`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Peer {
+    /// The caller's process ID. `None` when the kernel did not say, which a handler that checks
+    /// the caller must treat as a refusal.
+    pub pid: Option<u32>,
+}
+
 /// The server side of a verb. A handler may block: the server calls it off the async threads.
 pub trait Handler: Send + Sync + 'static {
     fn handle(&self, request: Request) -> Response;
+
+    /// Like [`Handler::handle`], with the caller's process. A handler that checks who calls
+    /// overrides this one. The default ignores the caller.
+    fn handle_from(&self, request: Request, _peer: Peer) -> Response {
+        self.handle(request)
+    }
 }
 
 // ------------------------------------------------------------------ the state directory
@@ -258,6 +272,14 @@ async fn write_answer<W: AsyncWriteExt + Unpin>(stream: &mut W, answer: &Respons
 }
 
 async fn serve_one(stream: tokio::net::UnixStream, handler: Arc<dyn Handler>) {
+    // The kernel records the caller when it connects. Read it before the stream is split.
+    let peer = Peer {
+        pid: stream
+            .peer_cred()
+            .ok()
+            .and_then(|cred| cred.pid())
+            .and_then(|pid| u32::try_from(pid).ok()),
+    };
     let (mut read, mut write) = stream.into_split();
     let line = read_line(&mut read).await;
     let answer = match line {
@@ -266,7 +288,7 @@ async fn serve_one(stream: tokio::net::UnixStream, handler: Arc<dyn Handler>) {
             Err(refusal) => refusal,
             Ok(request) => {
                 let verb = request.verb.clone();
-                tokio::task::spawn_blocking(move || handler.handle(request))
+                tokio::task::spawn_blocking(move || handler.handle_from(request, peer))
                     .await
                     .unwrap_or_else(|_| {
                         Response::err(format!("the verb {verb} failed inside the controller"))

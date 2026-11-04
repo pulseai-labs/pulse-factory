@@ -1,7 +1,7 @@
-//! AC-15: migration `0001` applies once and records schema version 1; a second open changes
-//! nothing; a test-supplied second migration is refused while a run is active. `0001`'s tables
-//! are exactly those in the spec's Approach 3, and none is named for requests, claims,
-//! projects, agents or devices.
+//! AC-15 of `r0.s1`, kept up to date: the migrations apply once and record their schema versions;
+//! a second open changes nothing; a test-supplied migration after the built-in ones is refused
+//! while a run is active. The tables are those of `0001` (the spec's Approach 3) and `0002`
+//! (requests and claims), and none is named for projects, agents or devices.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -9,8 +9,9 @@ use std::path::Path;
 use pf_store_sqlite::{MIGRATIONS, Migration, OpenError, SqliteStore};
 use rusqlite::Connection;
 
+/// A migration after the built-in `0001` and `0002`.
 const SECOND: Migration = Migration {
-    version: 2,
+    version: 3,
     name: "test second",
     sql: "CREATE TABLE extra_for_test (x INTEGER NOT NULL) STRICT;",
 };
@@ -48,30 +49,32 @@ fn insert_run(path: &Path, id: &str, state: &str) {
 }
 
 #[test]
-fn migration_0001_applies_once_and_records_schema_version_1() {
+fn the_migrations_apply_once_and_record_their_schema_versions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    assert_eq!(MIGRATIONS.len(), 1);
+    assert_eq!(MIGRATIONS.len(), 2);
     assert_eq!(MIGRATIONS[0].version, 1);
+    assert_eq!(MIGRATIONS[1].version, 2);
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), 2);
     drop(store);
     let first = versions(&path);
-    assert_eq!(first.len(), 1);
+    assert_eq!(first.len(), 2);
     assert_eq!(first[0].0, 1);
+    assert_eq!(first[1].0, 2);
 
-    // A second open changes nothing: one row, the same time stamp, the same tables.
+    // A second open changes nothing: the same rows, the same time stamps, the same tables.
     let tables_before = tables(&path);
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(store.schema_version().unwrap(), 2);
     drop(store);
     assert_eq!(versions(&path), first);
     assert_eq!(tables(&path), tables_before);
 }
 
 #[test]
-fn the_tables_of_0001_are_exactly_those_of_the_approach_and_no_more() {
+fn the_tables_of_0001_and_0002_are_exactly_those_of_the_approach_and_no_more() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
     drop(SqliteStore::open(&path).unwrap());
@@ -83,13 +86,15 @@ fn the_tables_of_0001_are_exactly_those_of_the_approach_and_no_more() {
         "admissions",
         "ledger_outbox",
         "schema_version",
+        "requests",
+        "claims",
     ]
     .iter()
     .map(ToString::to_string)
     .collect();
     assert_eq!(found, expected);
     for name in &found {
-        for banned in ["request", "claim", "project", "agent", "device"] {
+        for banned in ["project", "agent", "device"] {
             assert!(!name.contains(banned), "table {name} is named for {banned}");
         }
     }
@@ -165,7 +170,7 @@ fn a_second_migration_is_refused_while_a_run_is_active_and_applies_when_none_is(
         .expect("a migration must wait for the active run");
     assert!(matches!(err, OpenError::RunActive { .. }), "{err:?}");
     assert!(err.to_string().contains("active"), "{err}");
-    assert_eq!(versions(&path).len(), 1, "no version was recorded");
+    assert_eq!(versions(&path).len(), 2, "no version was recorded");
     assert!(!tables(&path).contains("extra_for_test"));
 
     // The plain open of the same file still works: it has nothing to migrate.
@@ -177,24 +182,24 @@ fn a_second_migration_is_refused_while_a_run_is_active_and_applies_when_none_is(
         .execute("UPDATE runs SET state = 'ended'", [])
         .unwrap();
     let store = SqliteStore::open_with_migrations(&path, &[SECOND]).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
     drop(store);
     assert!(tables(&path).contains("extra_for_test"));
     assert_eq!(
         versions(&path).iter().map(|v| v.0).collect::<Vec<_>>(),
-        vec![1, 2]
+        vec![1, 2, 3]
     );
     // A third open with the same list changes nothing.
     drop(SqliteStore::open_with_migrations(&path, &[SECOND]).unwrap());
-    assert_eq!(versions(&path).len(), 2);
+    assert_eq!(versions(&path).len(), 3);
 }
 
 #[test]
-fn a_fresh_file_takes_the_first_and_the_second_migration_together() {
+fn a_fresh_file_takes_every_migration_together() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
     let store = SqliteStore::open_with_migrations(&path, &[SECOND]).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 2);
+    assert_eq!(store.schema_version().unwrap(), 3);
 }
 
 #[test]
@@ -203,7 +208,7 @@ fn migrations_are_forward_only_and_numbered_without_a_gap() {
     let path = dir.path().join("run.db");
 
     let gap = Migration {
-        version: 3,
+        version: 4,
         name: "gap",
         sql: "SELECT 1;",
     };
@@ -225,14 +230,14 @@ fn migrations_are_forward_only_and_numbered_without_a_gap() {
         OpenError::BadMigrations(_)
     ));
 
-    // A file at version 2 does not open in a binary that knows version 1 only: no roll back.
+    // A file at version 3 does not open in a binary that knows version 2 only: no roll back.
     drop(SqliteStore::open_with_migrations(&path, &[SECOND]).unwrap());
     let err = SqliteStore::open(&path).err().unwrap();
     assert_eq!(
         err,
         OpenError::SchemaNewer {
-            database: 2,
-            supported: 1
+            database: 3,
+            supported: 2
         }
     );
 }
@@ -243,7 +248,7 @@ fn a_migration_that_fails_leaves_no_trace() {
     let path = dir.path().join("run.db");
     drop(SqliteStore::open(&path).unwrap());
     let broken = Migration {
-        version: 2,
+        version: 3,
         name: "broken",
         sql: "CREATE TABLE half_done (x INTEGER) STRICT; THIS IS NOT SQL;",
     };
@@ -252,5 +257,5 @@ fn a_migration_that_fails_leaves_no_trace() {
         .unwrap();
     assert!(matches!(err, OpenError::Sqlite(_)), "{err:?}");
     assert!(!tables(&path).contains("half_done"));
-    assert_eq!(versions(&path).len(), 1);
+    assert_eq!(versions(&path).len(), 2);
 }

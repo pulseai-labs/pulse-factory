@@ -141,6 +141,8 @@ fn park(id: &str, unit: &str, reason: &str) -> Command {
         body: CommandBody::Park {
             unit_id: unit.to_string(),
             reason: reason.to_string(),
+            request_kind: pf_engine::RequestKind::Park,
+            detail: None,
         },
     }
 }

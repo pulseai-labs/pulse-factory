@@ -6,6 +6,8 @@ mod common;
 
 use common::ctl::Live;
 use common::*;
+use std::path::Path;
+
 use serde_json::Value;
 
 const HOUR_MS: u64 = 3_600_000;
@@ -77,6 +79,202 @@ fn most_launches_follows_the_formula() {
     let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(v["items"], 4);
     assert_eq!(v["most_launches"], 28);
+}
+
+fn review_loop_sandbox() -> Sandbox {
+    Sandbox::with(&Options {
+        review_loop: true,
+        scripts_from: Some(real_scripts_dir()),
+        ..Options::default()
+    })
+}
+
+#[test]
+fn most_launches_counts_each_loops_cap() {
+    // Per item: implement, verify, close and review once (4), `fix` counts 0, then the three
+    // outcome caps 2 + 2 + 2 = 10. 2 x (seed max 3 x 1 lane stage + 2 items x 10) = 46.
+    let sb = review_loop_sandbox();
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["items"], 2);
+    assert_eq!(v["most_launches"], 46);
+}
+
+#[test]
+fn the_summary_names_the_review_loop() {
+    let sb = review_loop_sandbox();
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    for want in [
+        "role reviewer: runtime omp, model model-e",
+        "caps: loop review -> fix at most 2 times per item unit",
+        "caps: loop review -> review at most 2 times per item unit",
+        "caps: loop fix -> review at most 2 times per item unit",
+        "most launches: 46",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+
+    let v = json_summary(&sb, &[]);
+    let loops = v["caps"]["loops"].as_array().unwrap();
+    assert_eq!(loops.len(), 3, "{loops:?}");
+    let has = |from: &str, to: &str| {
+        loops
+            .iter()
+            .any(|l| l["from"] == from && l["to"] == to && l["max"] == 2 && l["track"] == "item")
+    };
+    assert!(has("review", "fix") && has("review", "review") && has("fix", "review"));
+}
+
+fn spine_close_args(sb: &Sandbox) -> Vec<String> {
+    let mut args = sb.arm_args();
+    args.extend(["--param".into(), "base_branch=main".into()]);
+    args
+}
+
+#[test]
+fn the_spine_stage_counts_once_and_the_summary_names_the_spine_track() {
+    // The old count is 18 = 2 x (seed max 3 x 1 lane stage + 2 items x 3 item stages). The spine
+    // seed has no `repeat`, so it runs once, and its track has one stage: 2 x (3 + 6 + 1) = 20.
+    let sb = Sandbox::with(&Options {
+        spine_close: true,
+        ..Options::default()
+    });
+    let mut args = spine_close_args(&sb);
+    args.extend(["--dry-run".into(), "--json".into()]);
+    let out = sb.run(&args);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["most_launches"], 20);
+    let seeds = v["caps"]["seeds"].as_array().unwrap();
+    assert!(
+        seeds.iter().any(|s| s["id"] == "spine" && s["max"] == 1),
+        "{seeds:?}"
+    );
+    let merges = v["merges"].as_array().unwrap();
+    assert_eq!(merges.len(), 2, "{merges:?}");
+    let sentence = |track: &str| {
+        merges
+            .iter()
+            .find(|m| m["track"] == track)
+            .map(|m| m["sentence"].as_str().unwrap().to_string())
+            .unwrap_or_else(|| panic!("no merge for {track}: {merges:?}"))
+    };
+    assert_eq!(
+        sentence("item"),
+        "item PRs merge into spine/s1 on green checks with no ack"
+    );
+    assert_eq!(
+        sentence("spine"),
+        "the spine PR merges into main only on the claim's ack"
+    );
+
+    let mut args = spine_close_args(&sb);
+    args.push("--dry-run".into());
+    let out = sb.run(&args);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    for want in [
+        "caps: seed spine runs at most 1 times",
+        "item PRs merge into spine/s1 on green checks with no ack",
+        "the spine PR merges into main only on the claim's ack",
+        "most launches: 20",
+    ] {
+        assert!(
+            text.lines().any(|l| l == want),
+            "missing {want:?} in:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn the_shipped_package_counts_the_spine_stage_once_and_names_the_spine_track() {
+    let sb = Sandbox::new();
+    sb.install_plugin("ossify", "1.30.1");
+    let state = sb.root.path().join("state.json");
+    std::fs::write(
+        &state,
+        r#"{"work_items":[{"spine":"s1","id":"w1"},{"spine":"s1","id":"w2"},{"spine":"s1","id":"w3"}]}"#,
+    )
+    .unwrap();
+    let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workflows/ossify-spine");
+    let mut args: Vec<String> = vec![
+        "arm".into(),
+        "s1".into(),
+        "--workflow".into(),
+        package.display().to_string(),
+        "--ledger".into(),
+        sb.ledger.display().to_string(),
+        "--plugin-root".into(),
+        sb.plugin_root.display().to_string(),
+        "--dry-run".into(),
+        "--json".into(),
+    ];
+    for (k, v) in [
+        ("spine_branch", "spine/s1".to_string()),
+        ("spine_dir", sb.spine_dir.display().to_string()),
+        ("method_root", sb.root.path().display().to_string()),
+        ("repo", sb.repo.display().to_string()),
+        ("worktree_root", sb.root.path().display().to_string()),
+        ("state_file", state.display().to_string()),
+        ("oss", "oss".to_string()),
+        ("base_branch", "main".to_string()),
+    ] {
+        args.push("--param".into());
+        args.push(format!("{k}={v}"));
+    }
+    let out = sb.run(&args);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["items"], 3);
+    // 2 x (lane seed max 12 x 1 + 3 items x 10 + the spine seed 1 x 1 stage) = 86.
+    assert_eq!(v["most_launches"], 86);
+    let seeds = v["caps"]["seeds"].as_array().unwrap();
+    assert!(
+        seeds.iter().any(|s| s["id"] == "spine" && s["max"] == 1),
+        "{seeds:?}"
+    );
+    let spine = v["merges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["track"] == "spine")
+        .unwrap_or_else(|| panic!("{}", v["merges"]));
+    assert_eq!(
+        spine["sentence"],
+        "the spine PR merges into main only on the claim's ack"
+    );
+}
+
+#[test]
+fn arming_a_package_with_a_base_branch_param_needs_the_param() {
+    let sb = Sandbox::with(&Options {
+        spine_close: true,
+        ..Options::default()
+    });
+    let mut args = sb.arm_args();
+    args.push("--dry-run".into());
+    let out = sb.run(&args);
+    assert_ne!(code(&out), 0, "{}", stdout(&out));
+    assert!(stderr(&out).contains("base_branch"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_workflow_with_no_outcomes_shows_no_loop_and_the_old_count() {
+    let sb = Sandbox::new();
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["caps"]["loops"].as_array().unwrap().len(), 0);
+    assert_eq!(v["most_launches"], 18);
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert!(!stdout(&out).contains("caps: loop"), "{}", stdout(&out));
 }
 
 #[test]

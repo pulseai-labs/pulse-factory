@@ -31,13 +31,16 @@ fn the_tracks_stages_and_runtime_come_over() {
     assert_eq!(wf.roots, file.roots);
     assert_eq!(wf.settings, file.settings);
     let names: Vec<&str> = wf.tracks.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["lane", "item"]);
+    assert_eq!(names, ["lane", "item", "spine"]);
 
     let item = wf.track("item").unwrap();
     let stages: Vec<&str> = item.stages.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(stages, ["implement", "verify", "close"]);
+    assert_eq!(stages, ["implement", "verify", "close", "review", "fix"]);
     let roles: Vec<&str> = item.stages.iter().map(|s| s.role.as_str()).collect();
-    assert_eq!(roles, ["implementer", "verifier", "close"]);
+    assert_eq!(
+        roles,
+        ["implementer", "verifier", "close", "reviewer", "close"]
+    );
     for stage in wf.tracks.iter().flat_map(|t| &t.stages) {
         assert_eq!(stage.runtime, "omp", "{}", stage.name);
         assert!(!stage.model.is_empty(), "{}", stage.name);
@@ -48,7 +51,7 @@ fn the_tracks_stages_and_runtime_come_over() {
 }
 
 #[test]
-fn only_the_item_track_merges_and_it_checks_the_head() {
+fn the_item_track_merges_on_green_checks_and_the_spine_track_on_the_ack() {
     let (_, wf) = converted();
     assert!(wf.track("lane").unwrap().merge.is_none());
     let merge = wf
@@ -63,6 +66,17 @@ fn only_the_item_track_merges_and_it_checks_the_head() {
     assert_eq!(merge.repo, "{param.forge_repo}");
     assert_eq!(merge.base, "{param.spine_branch}");
     assert!(wf.has_merge());
+    // The spine track merges too, only on the claim's ack, with the spine branch as its head.
+    let spine = wf
+        .track("spine")
+        .unwrap()
+        .merge
+        .as_ref()
+        .expect("spine merges");
+    assert_eq!(spine.rule, MergeRule::ClaimAck);
+    assert!(!spine.head_check);
+    assert_eq!(spine.base, "{param.base_branch}");
+    assert_eq!(spine.head_branch, "{param.spine_branch}");
 }
 
 #[test]
@@ -103,6 +117,13 @@ fn each_stage_carries_the_run_facts_its_seat_needs() {
     assert!(!lane.settings.contains_key("own_branch"));
     for stage in &wf.track("item").unwrap().stages {
         let s = &stage.settings;
+        if stage.name == "review" {
+            // The reviewer reads the worktree through `cwd`. It has no worktree write and no branch.
+            assert_eq!(s["report_dir"], "{run.dir}/out/{unit.id}");
+            assert!(!s.contains_key("worktree"));
+            assert!(!s.contains_key("own_branch"));
+            continue;
+        }
         assert_eq!(
             s["report_dir"], "{param.spine_dir}/work-{unit.id}",
             "{}",

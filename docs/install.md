@@ -51,11 +51,14 @@ The paper env runs the whole journey with scripts in place of seats, against a b
 
 ```bash
 PF_BIN=pulse-factory scripts/demo/golden-journey-a.sh
+PF_BIN=pulse-factory scripts/demo/golden-journey-b.sh
 PF_BIN=pulse-factory scripts/demo/arm-dry-run.sh
 ```
 
 `golden-journey-a.sh` starts its own controller in a temporary state directory, so it works with or
-without the installed unit. It builds nothing. `arm-dry-run.sh` dry-runs the shipped
+without the installed unit. It builds nothing. `golden-journey-b.sh` is the same journey with the
+claim: a gaps request is answered, the spine PR waits for the ack, and the ack merges it into the
+base branch. `arm-dry-run.sh` dry-runs the shipped
 `workflows/ossify-spine` against stubs and changes nothing.
 
 ## Arm a spine
@@ -68,16 +71,25 @@ pulse-factory arm <spine> --workflow ossify-spine --ledger <ledger file> \
   --plugin-root <plugin cache> --param repo=<path> --param ... --dry-run
 ```
 
-Read the summary: items, roles and models, caps, the most launches, and that item PRs merge into the
-spine branch on green checks with no ack. Then run the same command with `--yes` in place of
-`--dry-run`. You can close your session. Later:
+The shipped workflow also declares `base_branch`, the branch the spine PR merges into. The skill
+reads it with `oss spine_base_get <spine> <repo>`. Read the summary: items, roles and models, caps,
+the most launches, that item PRs merge into the spine branch on green checks with no ack, and that
+the spine PR merges into the base branch only on the claim's ack. Then run the same command with
+`--yes` in place of `--dry-run`. You can close your session. Later:
 
 ```bash
 pulse-factory status          # every unit and every session, with tokens and cost
 pulse-factory halt --reason "stop for now"    # running seats finish; nothing new launches or merges
 ```
 
-A parked unit needs a new run until `r0.s2` (`arm --replace <run>`).
+A parked unit has an open request. Read it with `pulse-factory requests` and `pulse-factory show <R-n>`,
+make a claim with `pulse-factory claim`, then resume the unit in the same run with
+`pulse-factory answer <R-n> --rev <k> --text "<ruling>"` or `pulse-factory clear <run> <item>`.
+
+When every item has merged, a spine-close seat opens the spine PR and the controller opens a
+`merge_ack` request. `pulse-factory show <R-n>` names the PR, the base branch and the head SHA.
+`pulse-factory ack <R-n> --rev <k>` merges the PR with that SHA. Then run `/ossify:close <spine>`
+in the claim session for the second pass. The run ends when the method records the close.
 
 ## Remove
 

@@ -24,12 +24,20 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-/// The migrations of this binary. Migration `0001` holds only what skeleton A needs.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+/// The migrations of this binary. Migration `0001` holds what skeleton A needs. Migration `0002`
+/// adds requests and claims.
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "requests",
+        sql: include_str!("../migrations/0002_requests.sql"),
+    },
+];
 
 /// Why the store cannot open.
 #[derive(Clone, Debug, PartialEq, Eq)]

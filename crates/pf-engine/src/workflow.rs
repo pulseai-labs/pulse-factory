@@ -9,6 +9,19 @@ use crate::port::agent::RuleSet;
 /// The runtime name that [`StageDef::new`] gives a stage.
 pub const DEFAULT_RUNTIME: &str = "default";
 
+/// One outcome of a stage: where an ended stage sends the unit, and how often.
+///
+/// The conditions of an outcome (`when`) belong to the workflow file, not to the engine: the
+/// workflow crate tries them, in order, and tells the engine which entry held. The engine keeps
+/// the target and the cap, and counts the visits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutcomeDef {
+    /// The stage of the same track that the unit goes to.
+    pub to: String,
+    /// How many times this entry may send the unit. One more is a park.
+    pub max: u32,
+}
+
 /// One stage of a workflow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageDef {
@@ -22,6 +35,12 @@ pub struct StageDef {
     /// Launch settings, as templates. `start_stage` renders them into the launch plan.
     /// The keys are documented in `docs/contracts/launch-settings.md`.
     pub settings: BTreeMap<String, String>,
+    /// The outcomes, in the order the workflow file tries them. An empty list is a stage that
+    /// always goes on to the next one.
+    pub outcomes: Vec<OutcomeDef>,
+    /// The stage runs only when an outcome sends the unit to it. A unit that reaches it in order
+    /// goes past it, and a track that merges counts it as done.
+    pub entered_by_outcome: bool,
 }
 
 impl StageDef {
@@ -33,6 +52,8 @@ impl StageDef {
             runtime: DEFAULT_RUNTIME.to_string(),
             rules: RuleSet::default(),
             settings: BTreeMap::new(),
+            outcomes: Vec::new(),
+            entered_by_outcome: false,
         }
     }
 }
@@ -42,6 +63,9 @@ impl StageDef {
 pub enum MergeRule {
     /// Merge when the checks are green, one unit at a time, in the declared order.
     GreenChecksInDeclaredOrder,
+    /// When the checks are green, open a `merge_ack` request for the unit's PR. The PR merges
+    /// only when the claim holder acks that request, with the head SHA the request names.
+    ClaimAck,
 }
 
 /// The merge definition of a track.
@@ -56,6 +80,10 @@ pub struct MergeDef {
     pub base: String,
     /// Compare the PR head with the last recorded push before the merge ([`crate::merge::head_check`]).
     pub head_check: bool,
+    /// The branch a unit's PR must come from, with placeholders. The engine renders it for each
+    /// unit and parks a unit whose PR has another head branch. Empty declares nothing. Only the
+    /// `ClaimAck` rule reads it.
+    pub head_branch: String,
 }
 
 impl MergeDef {
@@ -66,6 +94,7 @@ impl MergeDef {
             repo: String::new(),
             base: String::new(),
             head_check: false,
+            head_branch: String::new(),
         }
     }
 }
@@ -78,6 +107,21 @@ pub struct Track {
     pub stages: Vec<StageDef>,
     /// `None`: a unit is done when its last stage is done.
     pub merge: Option<MergeDef>,
+}
+
+impl Track {
+    /// The index of the first stage at or after `from` that a unit reaches in order: a stage that
+    /// only an outcome enters is passed over. The result is the stage count when none is left.
+    pub fn next_stage_index(&self, from: usize) -> usize {
+        (from..self.stages.len())
+            .find(|i| !self.stages[*i].entered_by_outcome)
+            .unwrap_or(self.stages.len())
+    }
+
+    /// The index of the stage called `name`.
+    pub fn stage_index(&self, name: &str) -> Option<usize> {
+        self.stages.iter().position(|s| s.name == name)
+    }
 }
 
 /// The name of the only track of a workflow built by [`Workflow::single_track`].

@@ -4,9 +4,12 @@
 //! returns `Err` and records nothing. A command the run refuses on purpose, such as a launch after
 //! `halt`, returns a `Refused` decision, and the store records the refusal with its reason.
 
+use crate::claim;
 use crate::launch;
 use crate::merge;
-use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow, RunRow, RunState};
+use crate::port::store::{
+    AdmissionOutcome, Effect, NodeKind, NodeRow, RequestKind, RunRow, RunState,
+};
 use crate::status::{EndStatus, Status, check_reason};
 use crate::unit::{Signal, UnitDetail};
 use crate::workflow::Workflow;
@@ -112,7 +115,32 @@ pub fn decide(
             stage,
             signal,
             pr,
-        } => signal_stage(view, workflow, unit_id, stage, signal, pr.clone(), now),
+        } => signal_stage(
+            view,
+            workflow,
+            unit_id,
+            stage,
+            signal,
+            pr.clone(),
+            None,
+            now,
+        ),
+        CommandBody::Outcome {
+            unit_id,
+            stage,
+            entry,
+            signal,
+            pr,
+        } => signal_stage(
+            view,
+            workflow,
+            unit_id,
+            stage,
+            signal,
+            pr.clone(),
+            Some(*entry),
+            now,
+        ),
         CommandBody::Usage { session_id, usage } => {
             let session = view
                 .session(session_id)
@@ -136,7 +164,20 @@ pub fn decide(
             status,
             reason,
         } => end_node(view, node_id, *status, reason, now),
-        CommandBody::Park { unit_id, reason } => park_unit(view, unit_id, reason, now),
+        CommandBody::Park {
+            unit_id,
+            reason,
+            request_kind,
+            detail,
+        } => park_unit(
+            view,
+            workflow,
+            unit_id,
+            *request_kind,
+            reason,
+            detail.as_ref(),
+            now,
+        ),
         CommandBody::Halt { reason } => launch::decide_halt(view, workflow, reason, now),
         CommandBody::Merge { unit_id } => merge::decide_merge(view, workflow, unit_id, now),
         CommandBody::MergeResult {
@@ -173,9 +214,83 @@ pub fn decide(
             r.updated_at = now.to_string();
             let mut d = Decision::admitted();
             d.effects.push(Effect::PutRun(r));
+            // Nothing answers a request of an ended run.
+            d.effects.extend(claim::withdraw_all(
+                view,
+                &format!("run ended: {reason}"),
+                now,
+            ));
             d.ledger = Some(format!("run ended: {reason}"));
             Ok(d)
         }
+        CommandBody::OpenRequest { request } => {
+            claim::decide_open_request(view, run_id, request, now)
+        }
+        CommandBody::ReviseRequest {
+            id,
+            revision,
+            body,
+            reason,
+        } => claim::decide_revise(view, id, *revision, body, reason.as_deref()),
+        CommandBody::AnswerRequest {
+            id,
+            revision,
+            generation,
+            answer,
+            hook_failed,
+        } => claim::decide_answer(
+            view,
+            workflow,
+            id,
+            *revision,
+            *generation,
+            answer,
+            hook_failed.as_deref(),
+            now,
+        ),
+        CommandBody::AnswerHook { id, rc, note, .. } => {
+            claim::decide_answer_hook(view, id, *rc, note)
+        }
+        CommandBody::WithdrawRequest { id, reason } => {
+            claim::decide_withdraw(view, id, reason, now)
+        }
+        CommandBody::Claim {
+            generation,
+            holder,
+            token_hash,
+        } => claim::decide_claim(view, *generation, holder, token_hash, now),
+        CommandBody::ClearUnit {
+            unit_id,
+            to_stage,
+            generation,
+            request_id,
+        } => claim::decide_clear(
+            view,
+            workflow,
+            unit_id,
+            to_stage.as_deref(),
+            *generation,
+            request_id,
+            now,
+        ),
+        CommandBody::OpenMergeAck {
+            unit_id,
+            reason,
+            facts,
+        } => claim::decide_open_merge_ack(view, workflow, unit_id, reason, facts, now),
+        CommandBody::AckRequest {
+            id,
+            revision,
+            generation,
+            head_sha,
+        } => claim::decide_ack(view, workflow, id, *revision, *generation, head_sha, now),
+        CommandBody::AckRefused {
+            id,
+            revision,
+            generation,
+            cause,
+            ..
+        } => claim::decide_ack_refused(view, id, *revision, *generation, cause),
     }
 }
 
@@ -225,12 +340,16 @@ fn admit_unit(
         ));
     }
     let ingest_seq = u32::try_from(view.units().count() + 1).unwrap_or(u32::MAX);
+    // A first stage that only an outcome enters is passed over, as any later one is.
+    let first = workflow.track(track).map_or(0, |t| t.next_stage_index(0));
     let detail = UnitDetail {
         record: unit.clone(),
         track: track.to_string(),
         ingest_seq,
-        stages_done: 0,
+        stages_done: u32::try_from(first).unwrap_or(u32::MAX),
         pr: None,
+        park_generation: 0,
+        visits: std::collections::BTreeMap::new(),
     };
     let mut d = Decision::admitted();
     d.unit_id = Some(unit.id.clone());
@@ -295,6 +414,9 @@ fn running_unit<'a>(view: &'a RunView, unit_id: &str) -> Result<&'a NodeRow, Rej
     Ok(unit)
 }
 
+/// What ends a stage with a signal: the stage ends `done`, and the unit goes on to the next stage
+/// in order (`outcome` is `None`) or the stage's outcome entry decides where it goes.
+#[allow(clippy::too_many_arguments)]
 fn signal_stage(
     view: &RunView,
     workflow: &Workflow,
@@ -302,6 +424,7 @@ fn signal_stage(
     stage: &str,
     signal: &Signal,
     pr: Option<crate::port::forge::PrRef>,
+    outcome: Option<u32>,
     now: &str,
 ) -> Result<Decision, Rejected> {
     let unit = running_unit(view, unit_id)?;
@@ -315,6 +438,12 @@ fn signal_stage(
     let track = workflow
         .track(&detail.track)
         .ok_or_else(|| unknown_track(unit_id, &detail.track))?;
+    if outcome.is_some() && !signal.is_success() {
+        return Err(format!(
+            "an outcome of stage {stage} needs a signal that succeeded, not {}",
+            signal.describe()
+        ));
+    }
     if pr.is_some() {
         detail.pr = pr;
     }
@@ -326,11 +455,65 @@ fn signal_stage(
     unit_next.updated_at = now.to_string();
     let halted = view.is_halted();
 
+    // The unit stands at the stage that ended: `stages_done` is its place in the track.
+    let place = track
+        .stage_index(stage)
+        .unwrap_or(detail.stages_done as usize);
+    // Set when the entry is at its cap: the unit parks with this reason.
+    let mut cap_park: Option<String> = None;
     let text;
-    if signal.is_success() {
+    if !signal.is_success() {
+        stage_end.status = Status::Failed;
+        unit_next.status = Status::Failed;
+        unit_next.reason = Some(format!("stage {stage} failed: {}", signal.describe()));
+        text = format!("stage {stage} failed ({}); unit failed", signal.describe());
+    } else if let Some(entry) = outcome {
         stage_end.status = Status::Done;
-        detail.stages_done += 1;
-        let all_done = detail.stages_done as usize >= track.stages.len();
+        let entry = entry as usize;
+        let def = track
+            .stages
+            .get(place)
+            .and_then(|s| s.outcomes.get(entry).map(|o| (s, o)))
+            .ok_or_else(|| format!("stage {stage} of unit {unit_id} has no outcome {entry}"))?;
+        let (_, target) = def;
+        let to = track.stage_index(&target.to).ok_or_else(|| {
+            format!(
+                "outcome {entry} of stage {stage} names {}, which track {} does not define",
+                target.to, track.name
+            )
+        })?;
+        let key = crate::unit::visit_key(stage, entry);
+        let visit = detail
+            .visits
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if visit > target.max {
+            let reason = format!("{stage}: {} cap {} reached", target.to, target.max);
+            text = format!(
+                "stage {stage} done ({}); {reason}; unit parked",
+                signal.describe()
+            );
+            cap_park = Some(reason);
+        } else {
+            detail.visits.insert(key, visit);
+            detail.stages_done = u32::try_from(to).unwrap_or(u32::MAX);
+            unit_next.reason = halted.then(|| crate::status::REASON_RUN_HALTED.to_string());
+            text = format!(
+                "stage {stage} done ({}); outcome {} sends the unit to {} (visit {visit} of {})",
+                signal.describe(),
+                entry + 1,
+                target.to,
+                target.max
+            );
+        }
+    } else {
+        stage_end.status = Status::Done;
+        // A stage that only an outcome enters is passed over.
+        let next = track.next_stage_index(place + 1);
+        detail.stages_done = u32::try_from(next).unwrap_or(u32::MAX);
+        let all_done = next >= track.stages.len();
         if all_done && track.merge.is_none() {
             unit_next.status = Status::Done;
             unit_next.reason = Some("all stages done".to_string());
@@ -339,11 +522,6 @@ fn signal_stage(
             unit_next.reason = halted.then(|| crate::status::REASON_RUN_HALTED.to_string());
             text = format!("stage {stage} done ({})", signal.describe());
         }
-    } else {
-        stage_end.status = Status::Failed;
-        unit_next.status = Status::Failed;
-        unit_next.reason = Some(format!("stage {stage} failed: {}", signal.describe()));
-        text = format!("stage {stage} failed ({}); unit failed", signal.describe());
     }
     unit_next.detail = detail.to_text();
 
@@ -356,7 +534,22 @@ fn signal_stage(
         d.effects.push(Effect::PutSession(s));
     }
     d.effects.push(Effect::PutNode(stage_end));
-    d.effects.push(Effect::PutNode(unit_next));
+    match cap_park {
+        // The stage is over, and the unit parks in the same commit with its request (ADR-0006).
+        Some(reason) => {
+            let reason = check_reason(&reason).map_err(|e| e.to_string())?;
+            d.effects.extend(claim::park_effects(
+                view,
+                workflow,
+                &unit_next,
+                RequestKind::Park,
+                reason,
+                None,
+                now,
+            )?);
+        }
+        None => d.effects.push(Effect::PutNode(unit_next)),
+    }
     d.ledger = Some(text);
     Ok(d)
 }
@@ -400,16 +593,21 @@ fn end_node(
     Ok(d)
 }
 
-fn park_unit(view: &RunView, unit_id: &str, reason: &str, now: &str) -> Result<Decision, Rejected> {
+/// Park a unit that is `running`. The same commit opens the unit's request (ADR-0006).
+fn park_unit(
+    view: &RunView,
+    workflow: &Workflow,
+    unit_id: &str,
+    kind: RequestKind,
+    reason: &str,
+    detail: Option<&serde_json::Value>,
+    now: &str,
+) -> Result<Decision, Rejected> {
     let reason = check_reason(reason).map_err(|e| e.to_string())?;
     let unit = running_unit(view, unit_id)?;
-    let mut u = unit.clone();
-    u.status = Status::Parked;
-    u.reason = Some(reason.to_string());
-    u.updated_at = now.to_string();
     let mut d = Decision::admitted();
     d.unit_id = Some(unit_id.to_string());
-    d.effects.push(Effect::PutNode(u));
+    d.effects = claim::park_effects(view, workflow, unit, kind, reason, detail, now)?;
     d.ledger = Some(format!("unit {unit_id} parked: {reason}"));
     Ok(d)
 }

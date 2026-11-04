@@ -73,11 +73,15 @@ fn it_has_a_lane_track_and_an_item_track_with_verify_before_close() {
     assert!(at("implement") < at("verify"), "{names:?}");
     assert!(at("verify") < at("close"), "{names:?}");
     assert_eq!(file.track("lane").unwrap().stages.len(), 1);
-    assert_eq!(names, ["implement", "verify", "close"]);
+    assert_eq!(names, ["implement", "verify", "close", "review", "fix"]);
+    assert!(
+        at("close") < at("review") && at("review") < at("fix"),
+        "{names:?}"
+    );
 }
 
 #[test]
-fn only_the_item_track_merges_and_it_checks_the_head() {
+fn only_the_item_track_checks_the_head_of_its_merge() {
     let file = load().file;
     let with_merge: Vec<&str> = file
         .tracks
@@ -85,7 +89,7 @@ fn only_the_item_track_merges_and_it_checks_the_head() {
         .filter(|t| t.merge.is_some())
         .map(|t| t.name.as_str())
         .collect();
-    assert_eq!(with_merge, ["item"]);
+    assert_eq!(with_merge, ["item", "spine"]);
     let with_head_check: Vec<&str> = file
         .tracks
         .iter()
@@ -428,4 +432,692 @@ fn the_minimum_ossify_version_is_one_whose_close_reads_that_verdict() {
     let version = (parts.next().unwrap(), parts.next().unwrap());
     // ossify 1.30.0 is the first close with `--verdict`, and it requires the `agent` key.
     assert!(version >= (1, 30), "min_version {}", plugin.min_version);
+}
+
+// ------------------------------------------------------------------ answers that resume (r0.s2.w2)
+
+/// What is wrong with the way a package routes an answer. Each line is one defect.
+fn answer_route_problems(package: &Package, common_brief: &str) -> Vec<String> {
+    let mut p = Vec::new();
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            if !stage
+                .message
+                .contains("Rulings: {run.dir}/out/{unit.id}/rulings.md")
+            {
+                p.push(format!("stage {} does not name `Rulings:`", stage.name));
+            }
+            let rule = stage
+                .stop_on_answer
+                .iter()
+                .find(|c| c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh"));
+            match rule {
+                None => p.push(format!("stage {} has no rule.sh stop hook", stage.name)),
+                Some(c) => {
+                    if c.argv.last().map(String::as_str) != Some(stage.name.as_str()) {
+                        p.push(format!(
+                            "the stop hook of stage {} does not name its stage",
+                            stage.name
+                        ));
+                    }
+                }
+            }
+            for entry in &stage.park_on {
+                if entry.reason.contains("start a new run") {
+                    p.push(format!(
+                        "a park_on reason of stage {} says to start a new run",
+                        stage.name
+                    ));
+                }
+            }
+        }
+    }
+    let implement = package
+        .file
+        .track("item")
+        .and_then(|t| t.stages.iter().find(|s| s.name == "implement"));
+    let gaps_hook = implement
+        .and_then(|s| s.park_on.iter().find(|e| e.file.ends_with("/gaps.json")))
+        .map(|e| &e.on_answer);
+    match gaps_hook {
+        Some(h)
+            if h.iter().any(|c| {
+                c.argv
+                    .iter()
+                    .any(|a| a == "{run.package}/scripts/clarify.sh")
+            }) => {}
+        _ => p.push("implement's gaps.json park has no clarify.sh hook".to_string()),
+    }
+    if !common_brief.contains("rulings.md")
+        || !common_brief.contains("Its last entry answers your last stop")
+    {
+        p.push("common.md holds no rulings rule".to_string());
+    }
+    p
+}
+
+#[test]
+fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
+    let package = load();
+    for script in [
+        "scripts/clarify.sh",
+        "scripts/rule.sh",
+        "scripts/review-prep.sh",
+        "scripts/stale-pass.sh",
+    ] {
+        assert!(
+            package.scripts.contains(&PathBuf::from(script)),
+            "{script} in {:?}",
+            package.scripts
+        );
+        assert!(package.pinned_files().contains(&PathBuf::from(script)));
+    }
+    let item = package.file.track("item").unwrap();
+    let implement = &item.stages[0];
+    let gaps = &implement.park_on[0];
+    assert!(gaps.file.ends_with("/gaps.json"));
+    assert_eq!(gaps.on_answer.len(), 1);
+    // clarify.sh <handoff> <body_file> <answer_file> <request> <generation> <spine_dir>
+    assert_eq!(
+        gaps.on_answer[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/clarify.sh",
+            "{unit.vars.handoff_path}",
+            "{request.body_file}",
+            "{answer.file}",
+            "{answer.request}",
+            "{answer.generation}",
+            "{param.spine_dir}",
+        ]
+    );
+    // rule.sh <rulings_file> <stop_file> <answer_file> <request> <generation> <stage>
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            assert_eq!(
+                stage.stop_on_answer.len(),
+                1,
+                "stage {} has a stop hook",
+                stage.name
+            );
+            assert_eq!(
+                stage.stop_on_answer[0].argv,
+                [
+                    "sh",
+                    "{run.package}/scripts/rule.sh",
+                    "{run.dir}/out/{unit.id}/rulings.md",
+                    "{run.dir}/out/{unit.id}/stop",
+                    "{answer.file}",
+                    "{answer.request}",
+                    "{answer.generation}",
+                    stage.name.as_str(),
+                ]
+            );
+            // The hook retires the file that the stage's stop_file names.
+            assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop");
+        }
+    }
+    // The close stage's correction packet has a hook too: without it, an answer resumes the stage
+    // and the packet, still on disk, parks it again at once.
+    let close = package
+        .file
+        .track("item")
+        .unwrap()
+        .stages
+        .iter()
+        .find(|s| s.name == "close")
+        .expect("the close stage");
+    let packet = close
+        .park_on
+        .iter()
+        .find(|e| e.file.ends_with("/correction.txt"))
+        .expect("the close stage parks on the correction packet");
+    assert_eq!(
+        packet.on_answer.len(),
+        1,
+        "the correction packet's park has an answer hook"
+    );
+    assert_eq!(
+        packet.on_answer[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/rule.sh",
+            "{run.dir}/out/{unit.id}/rulings.md",
+            "{run.dir}/out/{unit.id}/correction.txt",
+            "{answer.file}",
+            "{answer.request}",
+            "{answer.generation}",
+            "close",
+        ]
+    );
+    // The redispatch counts toward the cap of 3 that `before` already checks.
+    assert!(
+        implement
+            .before
+            .iter()
+            .any(|c| flatten(&c.argv).contains("(.dispatches // 0) < 3")),
+        "implement's before keeps the dispatch cap"
+    );
+    assert!(
+        implement
+            .before
+            .iter()
+            .any(|c| c.argv == ["rm", "-f", "{run.dir}/out/{unit.id}/gaps.json"]),
+        "implement's before removes gaps.json, so the park file does not park the unit again"
+    );
+}
+
+#[test]
+fn every_session_stage_names_the_rulings_file_and_no_park_says_start_a_new_run() {
+    let package = load();
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    assert_eq!(
+        answer_route_problems(&package, &common),
+        Vec::<String>::new()
+    );
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            assert!(
+                stage
+                    .message
+                    .contains("Rulings: {run.dir}/out/{unit.id}/rulings.md."),
+                "stage {}",
+                stage.name
+            );
+        }
+    }
+    // The close gate's park names the verbs that answer or clear it.
+    let close = &package.file.track("item").unwrap().stages[2];
+    let reason = &close.park_on[0].reason;
+    assert!(
+        reason.contains("pulse-factory answer") && reason.contains("pulse-factory clear"),
+        "{reason}"
+    );
+    let gaps = &package.file.track("item").unwrap().stages[0].park_on[0].reason;
+    assert!(gaps.contains("pulse-factory answer"), "{gaps}");
+    // The rule reads as the spec words it.
+    assert!(common.contains(
+        "If `<your OUT>/rulings.md` exists, read it first. Its last entry answers your last stop; earlier entries still bind. Never edit it."
+    ));
+}
+
+#[test]
+fn the_answer_route_check_fires_on_inline_bad_samples() {
+    let package = load();
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    // A stage message with no `Rulings:`.
+    let mut bad = package.clone();
+    bad.file.tracks[0].stages[0].message = "Read the brief.".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("does not name `Rulings:`"))
+    );
+    // A stage with no stop hook, and one whose hook names another stage.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[1].stop_on_answer.clear();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("no rule.sh stop hook"))
+    );
+    let mut bad = package.clone();
+    let hook = &mut bad.file.tracks[1].stages[1].stop_on_answer[0];
+    *hook.argv.last_mut().unwrap() = "implement".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("does not name its stage"))
+    );
+    // A park reason that sends the operator to a new run.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[2].park_on[0].reason =
+        "fix it, then start a new run to clear this park".to_string();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("start a new run"))
+    );
+    // No gaps hook.
+    let mut bad = package.clone();
+    bad.file.tracks[1].stages[0].park_on[0].on_answer.clear();
+    assert!(
+        answer_route_problems(&bad, &common)
+            .iter()
+            .any(|m| m.contains("no clarify.sh hook"))
+    );
+    // A common brief without the rule.
+    assert!(
+        answer_route_problems(&package, "# Every seat\n")
+            .iter()
+            .any(|m| m.contains("no rulings rule"))
+    );
+}
+
+#[test]
+fn every_script_is_posix_sh_and_calls_no_method_tool() {
+    for name in ["clarify.sh", "rule.sh", "review-prep.sh", "stale-pass.sh"] {
+        let path = package_dir().join("scripts").join(name);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("#!/bin/sh\n"), "{name}: POSIX sh");
+        for line in text.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            let words: Vec<&str> = line
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .collect();
+            assert!(!words.contains(&"oss"), "{name} calls `oss`: {line}");
+            assert!(
+                !words.contains(&"bash") && !words.contains(&"eval"),
+                "{name}: {line}"
+            );
+        }
+        assert!(text.contains("set -eu"), "{name} stops on an error");
+    }
+}
+
+// ------------------------------------------------------------------ the item PR reviewer seat
+
+fn item_stage(file: &WorkflowFile, name: &str) -> pf_workflow::StageSpec {
+    file.track("item")
+        .unwrap()
+        .stages
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("stage {name}"))
+        .clone()
+}
+
+fn argv_has(cond: &DoneCond, word: &str) -> bool {
+    match cond {
+        DoneCond::Exit0(c) => c.argv.iter().any(|a| a == word),
+        _ => false,
+    }
+}
+
+#[test]
+fn the_reviewer_role_runs_glm_5_3_under_its_own_read_only_rules() {
+    let package = load();
+    let role = package
+        .file
+        .roles
+        .iter()
+        .find(|r| r.name == "reviewer")
+        .expect("roles.reviewer");
+    assert_eq!(role.runtime, "omp");
+    assert_eq!(role.model, "zai/glm-5.3");
+    assert_eq!(role.rules, "rules/reviewer.yaml");
+    assert_eq!(
+        package.rules["reviewer"].allow,
+        [Allow::WriteOwnReportAndRunFiles],
+        "the reviewer writes only its report and run files"
+    );
+    let review = item_stage(&package.file, "review");
+    assert_eq!(review.role, "reviewer");
+    assert_eq!(item_stage(&package.file, "fix").role, "close");
+}
+
+#[test]
+fn the_review_and_fix_briefs_exist_and_each_is_named_by_its_stage() {
+    let package = load();
+    for (stage, brief) in [("review", "briefs/review.md"), ("fix", "briefs/fix.md")] {
+        assert!(package_dir().join(brief).is_file(), "{brief}");
+        let spec = item_stage(&package.file, stage);
+        assert!(
+            spec.brief.iter().any(|b| b == brief),
+            "{stage}: {:?}",
+            spec.brief
+        );
+        assert!(
+            spec.brief.iter().any(|b| b == "briefs/common.md"),
+            "{stage}"
+        );
+    }
+    let review = std::fs::read_to_string(package_dir().join("briefs/review.md")).unwrap();
+    for needed in [
+        "verdict: pass",
+        "verdict: block",
+        "head:",
+        "previous:",
+        "redirection",
+    ] {
+        assert!(review.contains(needed), "review.md lacks `{needed}`");
+    }
+    let fix = std::fs::read_to_string(package_dir().join("briefs/fix.md")).unwrap();
+    for needed in ["review", "Fix done file", "Rulings"] {
+        assert!(fix.contains(needed), "fix.md lacks `{needed}`");
+    }
+}
+
+#[test]
+fn the_review_stage_is_read_only_and_names_its_files() {
+    let file = load().file;
+    let review = item_stage(&file, "review");
+    assert!(
+        !review.settings.contains_key("worktree"),
+        "no worktree write"
+    );
+    assert_eq!(
+        review.cwd, "{unit.vars.worktree_path}",
+        "cwd is for reading"
+    );
+    assert_eq!(review.settings["report_dir"], "{run.dir}/out/{unit.id}");
+    assert!(review.slots == ["session"], "{:?}", review.slots);
+    assert!(
+        review
+            .message
+            .contains("previous: {run.dir}/out/{unit.id}/review-prev.md"),
+        "{}",
+        review.message
+    );
+    assert!(review.message.starts_with("/review "), "{}", review.message);
+    let before: Vec<String> = review.before.iter().map(|c| flatten(&c.argv)).collect();
+    assert!(
+        before.iter().any(|c| c.contains("scripts/review-prep.sh")
+            && c.contains("out/{unit.id}/review.md")
+            && c.contains("out/{unit.id}/review-prev.md")),
+        "{before:?}"
+    );
+    assert_eq!(review.done.len(), 1);
+    assert!(argv_has(&review.done[0], "^verdict: (pass|block)$"));
+    assert!(argv_has(
+        &review.done[0],
+        "{run.dir}/out/{unit.id}/review.md"
+    ));
+}
+
+#[test]
+fn the_review_outcomes_send_a_block_to_fix_and_a_stale_pass_to_review_each_at_most_twice() {
+    let file = load().file;
+    let review = item_stage(&file, "review");
+    assert_eq!(review.outcomes.len(), 2);
+    let block = &review.outcomes[0];
+    assert_eq!((block.to.as_str(), block.max), ("fix", 2));
+    assert_eq!(block.when.len(), 1);
+    assert!(argv_has(&block.when[0], "-qx"));
+    assert!(argv_has(&block.when[0], "verdict: block"));
+    let stale = &review.outcomes[1];
+    assert_eq!((stale.to.as_str(), stale.max), ("review", 2));
+    assert_eq!(stale.when.len(), 1);
+    assert!(argv_has(
+        &stale.when[0],
+        "{run.package}/scripts/stale-pass.sh"
+    ));
+    assert!(argv_has(&stale.when[0], "{param.forge_repo}"));
+    assert!(argv_has(&stale.when[0], "{unit.vars.branch}"));
+}
+
+#[test]
+fn the_fix_stage_runs_only_by_outcome_pushes_its_branch_and_returns_to_review() {
+    let file = load().file;
+    let fix = item_stage(&file, "fix");
+    assert!(fix.entered_by_outcome, "a passing review skips fix");
+    assert_eq!(fix.outcomes.len(), 1);
+    assert_eq!(
+        fix.outcomes[0].when,
+        [DoneCond::File(
+            "{run.dir}/out/{unit.id}/fix-done".to_string()
+        )]
+    );
+    assert_eq!(
+        (fix.outcomes[0].to.as_str(), fix.outcomes[0].max),
+        ("review", 2)
+    );
+    assert_eq!(
+        fix.done,
+        [DoneCond::File(
+            "{run.dir}/out/{unit.id}/fix-done".to_string()
+        )]
+    );
+    assert_eq!(fix.settings["push_dir"], "{unit.vars.worktree_path}");
+    assert_eq!(fix.settings["push_branch"], "{unit.vars.branch}");
+    assert_eq!(fix.settings["worktree"], "{unit.vars.worktree_path}");
+    assert_eq!(fix.cwd, "{unit.vars.worktree_path}");
+    assert_eq!(fix.slots, ["session", "build"]);
+    let before: Vec<String> = fix.before.iter().map(|c| flatten(&c.argv)).collect();
+    assert!(
+        before
+            .iter()
+            .any(|c| c.contains("rm -f") && c.ends_with("/fix-done")),
+        "{before:?}"
+    );
+    // No other stage is entered by an outcome, and none of the older stages has an outcome.
+    for stage in &file.track("item").unwrap().stages {
+        assert_eq!(
+            stage.entered_by_outcome,
+            stage.name == "fix",
+            "{}",
+            stage.name
+        );
+        if stage.name != "review" && stage.name != "fix" {
+            assert!(stage.outcomes.is_empty(), "{}", stage.name);
+        }
+    }
+}
+
+#[test]
+fn review_and_fix_carry_the_stop_file_and_the_ruling_hook() {
+    let file = load().file;
+    for name in ["review", "fix"] {
+        let stage = item_stage(&file, name);
+        assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop", "{name}");
+        assert_eq!(
+            stage.settings["env.SPINE_STOP_FILE"], "{run.dir}/out/{unit.id}/stop",
+            "{name}"
+        );
+        assert_eq!(stage.stall_minutes, 20, "{name}");
+        assert!(
+            stage
+                .message
+                .contains("Rulings: {run.dir}/out/{unit.id}/rulings.md"),
+            "{name}"
+        );
+        assert!(
+            stage.stop_on_answer.iter().any(|c| {
+                c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")
+                    && c.argv.last().map(String::as_str) == Some(name)
+            }),
+            "{name} has no rule.sh hook naming itself"
+        );
+    }
+}
+
+// ------------------------------------------------------------------ the spine close
+
+const PR_ARGV: [&str; 13] = [
+    "gh",
+    "pr",
+    "list",
+    "--repo",
+    "{param.forge_repo}",
+    "--head",
+    "{param.spine_branch}",
+    "--base",
+    "{param.base_branch}",
+    "--state",
+    "open",
+    "--json",
+    "url",
+];
+
+fn spine_close_stage(file: &WorkflowFile) -> pf_workflow::StageSpec {
+    let track = file.track("spine").expect("the spine track");
+    assert_eq!(track.stages.len(), 1, "one stage");
+    let stage = track.stages[0].clone();
+    assert_eq!(stage.name, "spine_close");
+    stage
+}
+
+#[test]
+fn the_package_takes_the_base_branch_of_the_spine_as_a_param() {
+    let file = load().file;
+    assert!(file.params.iter().any(|p| p == "base_branch"));
+}
+
+#[test]
+fn the_spine_seed_starts_when_the_rounds_are_done_and_the_items_are_done() {
+    let file = load().file;
+    let seed = file
+        .seeds
+        .iter()
+        .find(|s| s.id == "spine")
+        .expect("the spine seed");
+    assert_eq!(
+        (seed.group.as_str(), seed.track.as_str()),
+        ("spine", "spine")
+    );
+    assert!(seed.repeat.is_none());
+    let start = seed.start_when.as_ref().expect("start_when");
+    assert_eq!(start.file, "{run.dir}/rounds.done");
+    assert_eq!(start.units_done, "item");
+    // The lane seed is the only repeating one, and it does not start late.
+    let lane = file.seeds.iter().find(|s| s.id == "lane").unwrap();
+    assert!(lane.start_when.is_none() && lane.repeat.is_some());
+}
+
+#[test]
+fn the_spine_close_stage_runs_as_the_close_role_on_the_spine_branch() {
+    let file = load().file;
+    let stage = spine_close_stage(&file);
+    assert_eq!(stage.role, "close");
+    assert_eq!(stage.skills, ["close"]);
+    assert_eq!(stage.brief, ["briefs/common.md", "briefs/spine-close.md"]);
+    assert_eq!(stage.cwd, "{param.method_root}");
+    assert_eq!(stage.slots, ["session"]);
+    assert_eq!(stage.stall_minutes, 30);
+    assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop");
+    assert_eq!(stage.settings["push_dir"], "{param.repo}");
+    assert_eq!(stage.settings["push_branch"], "{param.spine_branch}");
+    assert_eq!(stage.settings["own_branch"], "{param.spine_branch}");
+    assert_eq!(stage.settings["report_dir"], "{param.spine_dir}");
+    assert_eq!(
+        stage.settings["env.SPINE_STOP_FILE"],
+        "{run.dir}/out/{unit.id}/stop"
+    );
+    // The seat never has a worktree write: the close runs from the method's root.
+    assert!(!stage.settings.contains_key("worktree"));
+    assert!(
+        stage.stop_on_answer.iter().any(|c| {
+            c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")
+                && c.argv.last().map(String::as_str) == Some("spine_close")
+        }),
+        "no rule.sh hook naming the stage"
+    );
+    for want in [
+        "{param.spine}",
+        "Stop file: {run.dir}/out/{unit.id}/stop",
+        "Rulings: {run.dir}/out/{unit.id}/rulings.md.",
+        "Decisions file: {run.dir}/out/{unit.id}/decisions.md",
+    ] {
+        assert!(
+            stage.message.contains(want),
+            "{want:?} in {:?}",
+            stage.message
+        );
+    }
+    // The seat's own words never name the PR: the stage reads it from the forge.
+    assert!(!stage.message.contains("pr.url") && !stage.message.contains("PR URL"));
+}
+
+#[test]
+fn the_spine_close_stage_is_done_when_the_forge_lists_an_open_spine_pr() {
+    let file = load().file;
+    let stage = spine_close_stage(&file);
+    assert_eq!(stage.done.len(), 1);
+    let DoneCond::Pr { command, test } = &stage.done[0] else {
+        panic!("{:?}", stage.done);
+    };
+    assert_eq!(*test, pf_workflow::PrTest::Url);
+    assert_eq!(command.argv[..13], PR_ARGV);
+    assert_eq!(command.argv[13], "--jq");
+    assert_eq!(command.argv[14], ".[0].url // \"\"");
+    assert_eq!(command.argv.len(), 15);
+    // The merge reads the same PR.
+    let merge = file.track("spine").unwrap().merge.as_ref().unwrap();
+    assert_eq!(merge.pr.argv, command.argv);
+}
+
+#[test]
+fn the_spine_merge_waits_for_the_ack_and_does_not_check_the_head() {
+    let file = load().file;
+    let merge = file.track("spine").unwrap().merge.as_ref().unwrap();
+    assert_eq!(merge.rule, pf_engine::MergeRule::ClaimAck);
+    assert_eq!(merge.repo, "{param.forge_repo}");
+    assert_eq!(merge.base, "{param.base_branch}");
+    assert_eq!(merge.head_branch.as_deref(), Some("{param.spine_branch}"));
+    assert!(!merge.head_check, "the acked SHA replaces the head check");
+    assert_eq!(merge.after_merge.len(), 1);
+    assert_eq!(
+        merge.after_merge[0].argv,
+        [
+            "git",
+            "-C",
+            "{param.repo}",
+            "fetch",
+            "origin",
+            "{param.base_branch}"
+        ]
+    );
+    // The item merge stays as it was.
+    let item = file.track("item").unwrap().merge.as_ref().unwrap();
+    assert_eq!(item.rule, pf_engine::MergeRule::GreenChecksInDeclaredOrder);
+    assert!(item.head_check && item.head_branch.is_none());
+}
+
+#[test]
+fn the_run_ends_when_the_method_records_the_close() {
+    let file = load().file;
+    let end = file.end_when.as_ref().expect("end_when");
+    assert_eq!(end.when.len(), 1);
+    let DoneCond::Exit0(c) = &end.when[0] else {
+        panic!("{:?}", end.when);
+    };
+    assert_eq!(
+        c.argv,
+        [
+            "jq",
+            "-e",
+            "--arg",
+            "s",
+            "{param.spine}",
+            "any(.spines[]; .id == $s and .status == \"closed\")",
+            "{param.state_file}"
+        ]
+    );
+    assert_eq!(
+        end.waiting,
+        "the spine PR is merged: run /ossify:close {param.spine} in the claim session for the second pass"
+    );
+    assert_eq!(end.reason, "spine {param.spine} closed");
+}
+
+#[test]
+fn the_spine_close_brief_stops_after_the_pr_opens() {
+    let dir = package_dir();
+    let brief = std::fs::read_to_string(dir.join("briefs/spine-close.md")).unwrap();
+    assert!(brief.contains("/ossify:close"), "{brief}");
+    assert!(brief.contains("skill://close"), "{brief}");
+    assert!(brief.contains("work-pr"), "{brief}");
+    for never in ["merge", "review", "demo", "second pass"] {
+        assert!(brief.contains(never), "the brief never says {never:?}");
+    }
+    // A halt before the PR opens is a stop.
+    assert!(brief.contains("stop file"), "{brief}");
+    assert!(
+        load()
+            .briefs
+            .iter()
+            .any(|b| b == Path::new("briefs/spine-close.md"))
+    );
+}
+
+#[test]
+fn the_spine_close_role_may_push_its_branch_and_nothing_else_is_added_to_its_rules() {
+    let package = load();
+    assert_eq!(
+        package.rules["close"].allow,
+        [
+            Allow::DeleteOwnScratch,
+            Allow::PushOwnBranch,
+            Allow::WriteOwnReportAndRunFiles
+        ]
+    );
 }

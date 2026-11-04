@@ -230,12 +230,20 @@ impl Rig {
 
     /// Make an item's worktree (a git repo under the spine directory) and publish its record.
     pub fn queue_item(&self, id: &str, order: u32) -> PathBuf {
+        self.queue_item_with(id, order, &[])
+    }
+
+    /// [`Rig::queue_item`], with more unit variables in the record.
+    pub fn queue_item_with(&self, id: &str, order: u32, more: &[(&str, &str)]) -> PathBuf {
         let wt = self.spine_dir.join(format!("wt-{id}"));
         std::fs::create_dir_all(&wt).unwrap();
         git(&wt, &["init", "-q", "-b", &format!("work/{id}")]);
         let mut vars = BTreeMap::new();
         vars.insert("worktree_path".to_string(), wt.display().to_string());
         vars.insert("branch".to_string(), format!("work/{id}"));
+        for (k, v) in more {
+            vars.insert((*k).to_string(), (*v).to_string());
+        }
         let rec = UnitRecord::new(id, "g1", order, vars);
         self.publish(&format!("{id}.json"), &rec.to_json());
         wt
@@ -423,6 +431,38 @@ impl Rig {
             clock: Arc::new(move || now.load(Ordering::SeqCst)),
             walk_limit,
         })
+    }
+
+    /// A restart on a new adapter instance: a new engine and driver over the same store and
+    /// ledger. The new adapter knows none of the sessions the first one launched, so start-up's
+    /// reconcile finds each running unit's seat gone.
+    pub fn restart_on(&self, fake: Arc<FakeAdapter>) -> (Arc<Engine>, Driver) {
+        let now = self.now.clone();
+        let agent: Arc<dyn AgentPort> = fake;
+        let engine = Arc::new(
+            Engine::new(
+                self.cfg.clone(),
+                self.store.clone() as Arc<dyn Store>,
+                agent.clone(),
+                Arc::new(self.forge.clone()),
+                system_clock(),
+                Box::new(pf_engine::ledger::FsLedger::new(self.ledger.clone())),
+            )
+            .unwrap(),
+        );
+        engine.start_up().unwrap();
+        let driver = Driver::new(DriverConfig {
+            engine: engine.clone(),
+            agent,
+            package: self.package.clone(),
+            pins: self.pins.clone(),
+            params: self.params.clone(),
+            run_dir: self.run_dir.clone(),
+            target_dir: String::new(),
+            clock: Arc::new(move || now.load(Ordering::SeqCst)),
+            walk_limit: pulse_factory::controller::driver::WALK_LIMIT,
+        });
+        (engine, driver)
     }
 
     /// The test clock now.

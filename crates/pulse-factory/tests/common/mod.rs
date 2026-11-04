@@ -31,6 +31,21 @@ pub struct Options {
     pub cold_builds: u32,
     /// The `stall_minutes` of the stage `implement`.
     pub implement_stall: u32,
+    /// The `stop_file:` entry of the stage `implement`, indented by 8 spaces, with a final
+    /// newline. The default is a plain path. A mapping adds an `on_answer` hook.
+    pub implement_stop: String,
+    /// The unit variables that the queue records of the item track carry, as a YAML flow list.
+    pub item_vars: String,
+    /// A directory whose files become the package's `scripts/` directory.
+    pub scripts_from: Option<PathBuf>,
+    /// Add the `reviewer` role and the stages `review` and `fix` after `close`, like the shipped
+    /// package. The two scripts the stages call come from `scripts_from`; set it to
+    /// `real_scripts_dir()`.
+    pub review_loop: bool,
+    /// Add the spine-close pieces: the param `base_branch`, a `spine` seed that starts when the
+    /// items are done and `rounds.done` exists, a `spine` track with the stage `spine_close` and a
+    /// `claim_ack` merge, and an `end_when` that waits for `{run.dir}/closed.flag`.
+    pub spine_close: bool,
 }
 
 impl Default for Options {
@@ -45,9 +60,128 @@ impl Default for Options {
             model_sessions: 2,
             cold_builds: 1,
             implement_stall: 20,
+            implement_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
+            item_vars: "[worktree_path, branch]".to_string(),
+            scripts_from: None,
+            review_loop: false,
+            spine_close: false,
         }
     }
 }
+
+/// The shipped package's `scripts/` directory.
+pub fn real_scripts_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/ossify-spine/scripts")
+}
+
+const REVIEWER_ROLE: &str = "  reviewer:
+    runtime: omp
+    model: model-e
+    rules: rules/reviewer.yaml
+";
+
+/// The stages `review` and `fix`, indented as the stages of the item track. They mirror the
+/// shipped package: a block sends the unit to `fix`, a pass whose head is not the PR's head sends
+/// it to `review` again, and `fix` goes back to `review`. Each loop is capped at 2.
+const REVIEW_STAGES: &str = r#"      - name: review
+        role: reviewer
+        brief: [briefs/common.md]
+        message: "/review {param.forge_repo} {unit.vars.branch} previous: {run.dir}/out/{unit.id}/review-prev.md"
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [sh, "{run.package}/scripts/review-prep.sh", "{run.dir}/out/{unit.id}/review.md", "{run.dir}/out/{unit.id}/review-prev.md"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          report_dir: "{run.dir}/out/{unit.id}"
+        done:
+          - exit0: [grep, -Eq, "^verdict: (pass|block)$", "{run.dir}/out/{unit.id}/review.md"]
+        outcomes:
+          - when:
+              - exit0: [grep, -qx, "verdict: block", "{run.dir}/out/{unit.id}/review.md"]
+            to: fix
+            max: 2
+          - when:
+              - exit0: [sh, "{run.package}/scripts/stale-pass.sh", "{run.dir}/out/{unit.id}/review.md", "{param.forge_repo}", "{unit.vars.branch}"]
+            to: review
+            max: 2
+      - name: fix
+        role: close
+        entered_by: outcome
+        brief: [briefs/common.md]
+        message: "Fix {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/fix-done"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/fix-done"
+        outcomes:
+          - when:
+              - file: "{run.dir}/out/{unit.id}/fix-done"
+            to: review
+            max: 2
+"#;
+
+/// The seed of the spine-close pieces, indented as the seeds.
+const SPINE_SEED: &str = r#"  - id: spine
+    group: spine
+    order: 2
+    track: spine
+    vars: {}
+    start_when:
+      file: "{run.dir}/rounds.done"
+      units_done: item
+"#;
+
+/// The track `spine`, and the `end_when` that follows the tracks.
+const SPINE_TRACK: &str = r#"  spine:
+    stages:
+      - name: spine_close
+        role: close
+        brief: [briefs/common.md]
+        message: "Close {param.spine}. OUT {run.dir}/out/{unit.id}."
+        cwd: "{param.repo}"
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 30
+        first_turn_seconds: 180
+        settings:
+          push_dir: "{param.repo}"
+          push_branch: "{param.spine_branch}"
+          own_branch: "{param.spine_branch}"
+          report_dir: "{param.spine_dir}"
+        done:
+          - pr:
+              argv: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+              test: url
+    merge:
+      rule: claim_ack
+      repo: "{param.forge_repo}"
+      base: "{param.base_branch}"
+      head_branch: "{param.spine_branch}"
+      pr: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+      head_check: false
+      after_merge:
+        - [sh, -c, "echo {unit.id} >> {run.dir}/after_merge.log"]
+end_when:
+  when:
+    - file: "{run.dir}/closed.flag"
+  waiting: "the spine PR is merged: close {param.spine} in the claim session"
+  reason: "spine {param.spine} closed"
+"#;
 
 pub fn write_script(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
@@ -60,7 +194,7 @@ pub fn workflow_yaml(o: &Options) -> String {
     format!(
         r#"version: 1
 name: fixture-spine
-params: [spine, spine_branch, spine_dir, repo, forge_repo, count, briefs]
+params: [spine, spine_branch, spine_dir, repo, forge_repo, count, briefs{extra_param}]
 plugins:
   - name: methodkit
     min_version: {plugin_min}
@@ -81,7 +215,7 @@ roles:
     runtime: omp
     model: model-d
     rules: rules/close.yaml
-settings:
+{review_role}settings:
   model_sessions: {model_sessions}
   cold_builds: {cold_builds}
 plan_check: {plan_check}
@@ -89,7 +223,7 @@ roots: ["{{param.spine_dir}}"]
 unit_sources:
   - dir: "{{run.dir}}/queue"
     track: item
-    vars: [worktree_path, branch]
+    vars: {item_vars}
 seeds:
   - id: lane
     group: lane
@@ -100,7 +234,7 @@ seeds:
       when_units_done: item
       until_file: "{{run.dir}}/rounds.done"
       max: {seed_max}
-tracks:
+{spine_seed}tracks:
   lane:
     stages:
       - name: lane
@@ -124,8 +258,7 @@ tracks:
         message: "Implement {{unit.id}}."
         cwd: "{{unit.vars.worktree_path}}"
         slots: [session, build]
-{implement_extra}        stop_file: "{{run.dir}}/out/{{unit.id}}/stop"
-        stall_minutes: {implement_stall}
+{implement_extra}{implement_stop}        stall_minutes: {implement_stall}
         first_turn_seconds: 180
         settings:
           report_dir: "{{param.spine_dir}}/work-{{unit.id}}"
@@ -167,7 +300,7 @@ tracks:
           - pr:
               argv: [cat, "{{run.dir}}/out/{{unit.id}}/pr.url"]
               test: url
-    merge:
+{review_stages}    merge:
       rule: green_checks_in_declared_order
       repo: "{{param.forge_repo}}"
       base: "{{param.spine_branch}}"
@@ -175,15 +308,22 @@ tracks:
       head_check: true
       after_merge:
         - [sh, -c, "echo {{unit.id}} >> {{run.dir}}/after_merge.log"]
-"#,
+{spine_track}"#,
+        extra_param = if o.spine_close { ", base_branch" } else { "" },
+        spine_seed = if o.spine_close { SPINE_SEED } else { "" },
+        spine_track = if o.spine_close { SPINE_TRACK } else { "" },
         plugin_min = o.plugin_min,
         plan_check = o.plan_check,
         seed_max = o.seed_max,
         lane_settings = o.lane_settings,
         implement_extra = o.implement_extra,
+        implement_stop = o.implement_stop,
+        item_vars = o.item_vars,
         model_sessions = o.model_sessions,
         cold_builds = o.cold_builds,
         implement_stall = o.implement_stall,
+        review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
+        review_stages = if o.review_loop { REVIEW_STAGES } else { "" },
     )
 }
 
@@ -191,8 +331,15 @@ pub fn write_package(dir: &Path, o: &Options) {
     std::fs::create_dir_all(dir.join("briefs")).unwrap();
     std::fs::create_dir_all(dir.join("rules")).unwrap();
     std::fs::write(dir.join("workflow.yaml"), workflow_yaml(o)).unwrap();
+    if let Some(from) = &o.scripts_from {
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), dir.join("scripts").join(entry.file_name())).unwrap();
+        }
+    }
     std::fs::write(dir.join("briefs/common.md"), "# Common\nDo the work.\n").unwrap();
-    let rules: [(&str, &[&str]); 4] = [
+    let rules: [(&str, &[&str]); 5] = [
         (
             "lane",
             &["delete_own_scratch", "write_own_report_and_run_files"],
@@ -213,6 +360,7 @@ pub fn write_package(dir: &Path, o: &Options) {
                 "write_own_report_and_run_files",
             ],
         ),
+        ("reviewer", &["write_own_report_and_run_files"]),
     ];
     for (role, allow) in rules {
         let list: String = allow.iter().map(|a| format!("  - {a}\n")).collect();

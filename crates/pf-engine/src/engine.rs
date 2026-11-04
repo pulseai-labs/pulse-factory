@@ -17,12 +17,12 @@ use crate::admission::{
     canonical_content, decide,
 };
 use crate::capacity::Capacity;
-use crate::ledger::{FsLedger, LedgerFile, format_line};
+use crate::ledger::{FsLedger, LedgerFile, RecoveryReport, format_line};
 use crate::merge::PushRecord;
 use crate::port::agent::{AgentPort, Usage};
 use crate::port::forge::{ForgePort, PrRef};
 use crate::port::store::{
-    Commit, Committed, LedgerEntry, LedgerLine, NewAdmission, Store, StoreError,
+    Commit, Committed, LedgerEntry, LedgerLine, NewAdmission, RequestKind, Store, StoreError,
 };
 use crate::port::unit_source::{UnitRecord, UnitSource};
 use crate::status::{EndStatus, one_line_reason, redact};
@@ -140,12 +140,12 @@ impl Engine {
         Ok(engine)
     }
 
-    /// Start-up: recover the ledger, open the run, then reconcile.
-    pub fn start_up(&self) -> Result<(), EngineError> {
-        self.recover_ledger()?;
+    /// Start-up: recover the ledger, open the run, then reconcile. Returns what the recovery did.
+    pub fn start_up(&self) -> Result<RecoveryReport, EngineError> {
+        let report = self.recover_ledger()?;
         self.open_run()?;
         self.reconcile()?;
-        Ok(())
+        Ok(report)
     }
 
     pub fn run_id(&self) -> &str {
@@ -204,6 +204,8 @@ impl Engine {
                 nodes: self.store.nodes(run)?,
                 sessions: self.store.sessions(run)?,
                 admissions: self.store.admissions(run)?,
+                requests: self.store.requests(run)?,
+                claims: self.store.claims()?,
             })
         };
         read().map_err(|e| EngineError::Store(e.to_string()))
@@ -414,6 +416,40 @@ impl Engine {
         })
     }
 
+    /// A signal ends the unit's running stage `stage`, and entry `entry` of the stage's outcomes
+    /// holds: the unit goes to the entry's stage. An entry that has sent the unit as often as its
+    /// cap allows parks it instead, and opens a `park` request. The ID is that of the stage
+    /// attempt, so a repeat of the same call is a replay.
+    pub fn outcome(
+        &self,
+        unit_id: &str,
+        stage: &str,
+        entry: usize,
+        signal: Signal,
+        pr: Option<PrRef>,
+    ) -> Result<Admission, EngineError> {
+        let view = self.view()?;
+        let node = view
+            .stages_of(unit_id)
+            .into_iter()
+            .rfind(|n| n.detail == stage)
+            .ok_or_else(|| {
+                EngineError::Rejected(format!("unit {unit_id} has no stage {stage} yet"))
+            })?;
+        let entry = u32::try_from(entry)
+            .map_err(|_| EngineError::Rejected(format!("outcome {entry} is out of range")))?;
+        self.submit(Command {
+            id: format!("outcome:{}", node.id),
+            body: CommandBody::Outcome {
+                unit_id: unit_id.to_string(),
+                stage: stage.to_string(),
+                entry,
+                signal,
+                pr,
+            },
+        })
+    }
+
     /// Add one reading of token usage and cost to a session. `reading_id` makes a retry safe.
     pub fn record_usage(
         &self,
@@ -500,15 +536,10 @@ impl Engine {
             }))
     }
 
-    /// Park a unit that is `running`. Every halt condition comes through here.
+    /// Park a unit that is `running`, and open a generic `park` request for it. A halt whose
+    /// source has its own request kind uses [`Engine::park_as`].
     pub fn park(&self, unit_id: &str, reason: &str) -> Result<Admission, EngineError> {
-        self.submit(Command {
-            id: format!("park:{unit_id}"),
-            body: CommandBody::Park {
-                unit_id: unit_id.to_string(),
-                reason: one_line_reason(reason),
-            },
-        })
+        self.park_as(unit_id, RequestKind::Park, reason)
     }
 
     /// End a node with `done`, `failed` or `stopped`.

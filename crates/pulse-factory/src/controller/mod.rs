@@ -5,6 +5,7 @@ pub mod client;
 pub mod driver;
 pub mod files;
 pub mod ports;
+pub mod requests;
 pub mod seat;
 pub mod status;
 
@@ -17,7 +18,7 @@ use pf_engine::ledger::FsLedger;
 use pf_engine::port::agent::{AgentPort, SessionRef};
 use pf_engine::port::store::{RunState, Store};
 use pf_engine::{Engine, EngineConfig, system_clock};
-use pf_ipc::{Handler, Request, Response};
+use pf_ipc::{Handler, Peer, Request, Response};
 use pf_store_sqlite::SqliteStore;
 use pf_workflow::package::Package;
 use pf_workflow::pin;
@@ -34,6 +35,24 @@ pub struct Config {
     pub tick_ms: u64,
     /// The binary's canonical path: the seats run `<binary> hook`.
     pub binary: PathBuf,
+    /// The source of random bytes for session keys and claim tokens: `/dev/urandom`. A test
+    /// points it at a path that cannot be read.
+    pub random_device: PathBuf,
+    /// The proc file system the caller check reads: `/proc`. A test points it elsewhere.
+    pub proc_root: PathBuf,
+}
+
+impl Config {
+    /// A config with the system's random source and `/proc`.
+    pub fn new(state_dir: PathBuf, tick_ms: u64, binary: PathBuf) -> Config {
+        Config {
+            state_dir,
+            tick_ms,
+            binary,
+            random_device: PathBuf::from(seat::RANDOM_DEVICE),
+            proc_root: PathBuf::from("/proc"),
+        }
+    }
 }
 
 /// One run the controller knows.
@@ -53,6 +72,9 @@ pub struct Controller {
     ports: Arc<dyn Ports>,
     runs: Mutex<Vec<Arc<RunHandle>>>,
     seats: Arc<seat::SeatTable>,
+    /// `claim`, `answer`, `clear` and `ack` run one at a time, so a claim cannot fence between an
+    /// answer's check of the generation and its commit.
+    claim_lock: Mutex<()>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -75,6 +97,7 @@ impl Controller {
             ports,
             runs: Mutex::new(Vec::new()),
             seats: Arc::new(seat::SeatTable::default()),
+            claim_lock: Mutex::new(()),
         });
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
@@ -173,7 +196,10 @@ impl Controller {
         let mut driven = !ended;
         if !ended {
             match engine.start_up() {
-                Ok(()) => driver.sweep(),
+                Ok(report) => {
+                    driver.note_startup(report.notes());
+                    driver.sweep();
+                }
                 Err(e) => {
                     eprintln!("pulse-factory: run {} did not start up: {e}", info.run_id);
                     driven = false;
@@ -218,6 +244,7 @@ impl Controller {
             plugins: info.plugins.iter().map(|p| p.path.clone()).collect(),
             rules,
             binary: self.cfg.binary.clone(),
+            random_device: self.cfg.random_device.clone(),
         };
         ports::RunPorts {
             agent: Arc::new(seat::SeatPort::new(
@@ -533,7 +560,24 @@ impl Handler for Controller {
             "hook" => Response::ok(self.seats.answer(&request.args)),
             "status" => self.verb_status(&request.args),
             "halt" => self.verb_halt(&request.args),
+            "requests" => self.verb_requests(&request.args),
+            "show" => self.verb_show(&request.args),
+            // These four change who acts and what runs. They need to know who calls.
+            "claim" | "answer" | "clear" | "ack" => Response::err(format!(
+                "{} refused: the controller cannot tell which process called",
+                request.verb
+            )),
             other => Response::err(format!("unknown verb {other:?}")),
+        }
+    }
+
+    fn handle_from(&self, request: Request, peer: Peer) -> Response {
+        match request.verb.as_str() {
+            "claim" => self.verb_claim(&request.args, peer),
+            "answer" => self.verb_answer(&request.args, peer),
+            "clear" => self.verb_clear(&request.args, peer),
+            "ack" => self.verb_ack(&request.args, peer),
+            _ => self.handle(request),
         }
     }
 }
@@ -597,13 +641,13 @@ pub fn run(args: &ControllerArgs) -> i32 {
         }
     };
     let controller = match Controller::open(
-        Config {
-            state_dir: state,
-            tick_ms: args.tick_ms,
-            binary: std::env::current_exe()
+        Config::new(
+            state,
+            args.tick_ms,
+            std::env::current_exe()
                 .and_then(std::fs::canonicalize)
                 .unwrap_or_else(|_| PathBuf::from("pulse-factory")),
-        },
+        ),
         Arc::new(LivePorts),
     ) {
         Ok(c) => c,

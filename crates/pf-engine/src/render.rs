@@ -2,7 +2,12 @@
 //!
 //! A placeholder is `{name}`, where `name` holds only `A-Z a-z 0-9 _ . -`. Any other brace text,
 //! such as a JSON object or a `jq` program, is literal. The names are a closed set:
-//! `unit.id`, `unit.vars.<k>`, `run.id`, `run.dir` and `param.<k>`.
+//! `unit.id`, `unit.vars.<k>`, `run.id`, `run.dir`, `run.package` and `param.<k>`, and, in an
+//! `on_answer` command only, `answer.file`, `answer.request`, `answer.revision`,
+//! `answer.generation` and `request.body_file`.
+//!
+//! A value goes into the text once. Nothing re-reads a rendered value for placeholders, so a value
+//! that holds `{param.repo}` stays that literal text.
 
 use std::collections::BTreeMap;
 
@@ -17,8 +22,40 @@ pub enum Placeholder {
     RunId,
     /// `{run.dir}`
     RunDir,
+    /// `{run.package}`: the run's own copy of the workflow package, `<run dir>/package`.
+    RunPackage,
     /// `{param.<k>}`
     Param(String),
+    /// `{answer.*}` and `{request.body_file}`. Only an answer hook has them.
+    Answer(AnswerField),
+}
+
+/// The placeholders that only an answer hook (`on_answer`) may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerField {
+    /// `{answer.file}`: a file that holds the answer text.
+    File,
+    /// `{answer.request}`: the request ID, `R-<n>`.
+    Request,
+    /// `{answer.revision}`: the revision the answer was bound to.
+    Revision,
+    /// `{answer.generation}`: the claim generation that answered.
+    Generation,
+    /// `{request.body_file}`: a file that holds the request body as JSON.
+    BodyFile,
+}
+
+impl AnswerField {
+    /// The name as written between the braces.
+    pub fn name(self) -> &'static str {
+        match self {
+            AnswerField::File => "answer.file",
+            AnswerField::Request => "answer.request",
+            AnswerField::Revision => "answer.revision",
+            AnswerField::Generation => "answer.generation",
+            AnswerField::BodyFile => "request.body_file",
+        }
+    }
 }
 
 impl Placeholder {
@@ -35,6 +72,12 @@ impl Placeholder {
             "unit.id" => Ok(Placeholder::UnitId),
             "run.id" => Ok(Placeholder::RunId),
             "run.dir" => Ok(Placeholder::RunDir),
+            "run.package" => Ok(Placeholder::RunPackage),
+            "answer.file" => Ok(Placeholder::Answer(AnswerField::File)),
+            "answer.request" => Ok(Placeholder::Answer(AnswerField::Request)),
+            "answer.revision" => Ok(Placeholder::Answer(AnswerField::Revision)),
+            "answer.generation" => Ok(Placeholder::Answer(AnswerField::Generation)),
+            "request.body_file" => Ok(Placeholder::Answer(AnswerField::BodyFile)),
             _ => {
                 if let Some(rest) = name.strip_prefix("unit.vars.") {
                     key(rest).map(Placeholder::UnitVar)
@@ -42,7 +85,7 @@ impl Placeholder {
                     key(rest).map(Placeholder::Param)
                 } else {
                     Err(format!(
-                        "unknown placeholder `{{{name}}}`; use unit.id, unit.vars.<k>, run.id, run.dir or param.<k>"
+                        "unknown placeholder `{{{name}}}`; use unit.id, unit.vars.<k>, run.id, run.dir, run.package or param.<k> (an on_answer command also has answer.file, answer.request, answer.revision, answer.generation and request.body_file)"
                     ))
                 }
             }
@@ -61,7 +104,9 @@ impl Placeholder {
             Placeholder::UnitVar(k) => format!("unit.vars.{k}"),
             Placeholder::RunId => "run.id".to_string(),
             Placeholder::RunDir => "run.dir".to_string(),
+            Placeholder::RunPackage => "run.package".to_string(),
             Placeholder::Param(k) => format!("param.{k}"),
+            Placeholder::Answer(field) => field.name().to_string(),
         }
     }
 }
@@ -136,6 +181,17 @@ pub struct RenderContext<'a> {
     pub unit: Option<UnitView<'a>>,
 }
 
+/// What an answer hook's templates may use besides the run and the unit: the answer being applied.
+/// The controller makes the two files and owns their paths.
+#[derive(Clone, Copy, Debug)]
+pub struct AnswerView<'a> {
+    pub file: &'a str,
+    pub request: &'a str,
+    pub revision: u32,
+    pub generation: u64,
+    pub body_file: &'a str,
+}
+
 /// Why a template cannot render.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenderError {
@@ -147,6 +203,8 @@ pub enum RenderError {
     MissingVariable(String),
     /// The run has no such parameter.
     MissingParam(String),
+    /// An answer placeholder, and no answer is being applied.
+    NeedsAnswer(String),
 }
 
 impl std::fmt::Display for RenderError {
@@ -164,6 +222,10 @@ impl std::fmt::Display for RenderError {
                 f,
                 "placeholder {{param.{name}}}: the run has no parameter `{name}`"
             ),
+            RenderError::NeedsAnswer(name) => write!(
+                f,
+                "placeholder {{{name}}} is allowed only in an `on_answer` command"
+            ),
         }
     }
 }
@@ -178,8 +240,18 @@ pub struct Rendered {
     pub from_record: bool,
 }
 
-/// Render a template. Each placeholder becomes its value as one piece of text.
+/// Render a template. Each placeholder becomes its value as one piece of text. An answer
+/// placeholder is an error here: use [`render_with`] in an answer hook.
 pub fn render(template: &str, ctx: &RenderContext) -> Result<Rendered, RenderError> {
+    render_with(template, ctx, None)
+}
+
+/// Render a template for an answer hook: `answer` gives the values of the answer placeholders.
+pub fn render_with(
+    template: &str,
+    ctx: &RenderContext,
+    answer: Option<&AnswerView>,
+) -> Result<Rendered, RenderError> {
     let mut text = String::new();
     let mut from_record = false;
     for piece in split(template) {
@@ -191,6 +263,20 @@ pub fn render(template: &str, ctx: &RenderContext) -> Result<Rendered, RenderErr
                 match hole {
                     Placeholder::RunId => text.push_str(ctx.run_id),
                     Placeholder::RunDir => text.push_str(ctx.run_dir),
+                    Placeholder::RunPackage => {
+                        text.push_str(ctx.run_dir);
+                        text.push_str("/package");
+                    }
+                    Placeholder::Answer(field) => match answer {
+                        Some(a) => match field {
+                            AnswerField::File => text.push_str(a.file),
+                            AnswerField::Request => text.push_str(a.request),
+                            AnswerField::Revision => text.push_str(&a.revision.to_string()),
+                            AnswerField::Generation => text.push_str(&a.generation.to_string()),
+                            AnswerField::BodyFile => text.push_str(a.body_file),
+                        },
+                        None => return Err(RenderError::NeedsAnswer(name)),
+                    },
                     Placeholder::Param(k) => match ctx.params.get(&k) {
                         Some(v) => text.push_str(v),
                         None => return Err(RenderError::MissingParam(k)),
