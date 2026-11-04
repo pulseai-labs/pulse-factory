@@ -366,10 +366,8 @@ fn a_failed_push_writes_one_failed_line_and_parks_naming_the_cause() {
     assert_eq!(on_origin(&r, "base-x"), None, "the hook refused it");
 }
 
-#[test]
-fn an_unreadable_origin_pushes_nothing_writes_no_line_and_parks_naming_the_rc() {
-    let r = Rig::with(&options(), |_| {});
-    // A repository with no `origin` remote.
+/// A repository with a commit on `base-x` and no `origin` remote.
+fn lonely_repo(r: &Rig) -> std::path::PathBuf {
     let lonely = r.root.path().join("lonely");
     std::fs::create_dir_all(&lonely).unwrap();
     git(&lonely, &["init", "--quiet", "--initial-branch=base-x"]);
@@ -378,18 +376,106 @@ fn an_unreadable_origin_pushes_nothing_writes_no_line_and_parks_naming_the_rc() 
     std::fs::write(lonely.join("f"), "x\n").unwrap();
     git(&lonely, &["add", "-A"]);
     git(&lonely, &["commit", "--quiet", "-m", "x"]);
+    lonely
+}
+
+#[test]
+fn an_unreadable_origin_is_refused_with_the_cause_and_pushes_nothing() {
+    let r = Rig::with(&options(), |_| {});
+    let lonely = lonely_repo(&r);
     item(&r, UNIT, 1, "base-x", &lonely);
 
     through_verify(&r, UNIT);
 
     let reason = park_reason(&r, UNIT);
     assert!(
-        reason.starts_with("cannot read base-x on origin of ")
-            && reason.contains("(ls-remote rc 128)"),
+        reason.starts_with(
+            "base push of branch `base-x` refused: cannot read the fetch URL of origin of "
+        ) && reason.contains("No such remote"),
         "{reason}"
     );
+    assert!(!close_started(&r, UNIT));
     assert!(forge_push_lines(&r).is_empty());
     assert_eq!(on_origin(&r, "base-x"), None);
+}
+
+#[test]
+fn a_directory_named_origin_does_not_stand_in_for_a_missing_origin_remote() {
+    // With no remote named `origin`, git reads `origin` as a path: `ls-remote` and `push` would go
+    // to this bare repository inside `dir`.
+    let r = Rig::with(&options(), |_| {});
+    let lonely = lonely_repo(&r);
+    let decoy = lonely.join("origin");
+    std::fs::create_dir_all(&decoy).unwrap();
+    git(&decoy, &["init", "--quiet", "--bare"]);
+    item(&r, UNIT, 1, "base-x", &lonely);
+
+    through_verify(&r, UNIT);
+
+    let reason = park_reason(&r, UNIT);
+    assert!(
+        reason.contains("refused: cannot read the fetch URL of origin of "),
+        "{reason}"
+    );
+    assert!(!close_started(&r, UNIT));
+    let in_decoy = Command::new("git")
+        .arg("-C")
+        .arg(&decoy)
+        .args(["rev-parse", "--verify", "--quiet", "refs/heads/base-x"])
+        .output()
+        .unwrap();
+    assert!(!in_decoy.status.success(), "nothing reached the directory");
+    assert!(forge_push_lines(&r).is_empty());
+}
+
+#[test]
+fn a_push_url_that_is_not_the_runs_forge_is_refused_and_that_repo_gets_no_ref() {
+    // `remote.origin.pushurl` redirects `git push` and leaves the fetch URL (what `ls-remote`
+    // reads) at the forge. The second case adds the redirect after the forge as a second push URL.
+    for first_is_forge in [false, true] {
+        let r = rig_for("base-x");
+        local_branch(&r.work, "base-x");
+        let other_bare = r.root.path().join("elsewhere.git");
+        std::fs::create_dir_all(&other_bare).unwrap();
+        git(
+            &other_bare,
+            &["init", "--quiet", "--bare", "--initial-branch=spine"],
+        );
+        let other = other_bare.to_str().unwrap();
+        if first_is_forge {
+            git(
+                &r.work,
+                &["config", "remote.origin.pushurl", r.bare.to_str().unwrap()],
+            );
+            git(
+                &r.work,
+                &["config", "--add", "remote.origin.pushurl", other],
+            );
+        } else {
+            git(&r.work, &["config", "remote.origin.pushurl", other]);
+        }
+
+        through_verify(&r, UNIT);
+
+        let reason = park_reason(&r, UNIT);
+        assert!(
+            reason.contains("pushes to") && reason.contains(other),
+            "{first_is_forge}: {reason}"
+        );
+        assert!(!close_started(&r, UNIT), "{first_is_forge}");
+        assert_eq!(on_origin(&r, "base-x"), None, "{first_is_forge}");
+        let in_other = Command::new("git")
+            .arg("-C")
+            .arg(&other_bare)
+            .args(["for-each-ref", "refs/heads"])
+            .output()
+            .unwrap();
+        assert!(
+            in_other.stdout.is_empty(),
+            "{first_is_forge}: nothing reached the other repo"
+        );
+        assert!(forge_push_lines(&r).is_empty(), "{first_is_forge}");
+    }
 }
 
 #[test]
@@ -435,7 +521,7 @@ fn a_repeat_of_the_event_id_is_a_replay_and_a_clear_gives_a_new_attempt_a_new_id
         .engine
         .record_push(
             UNIT,
-            "base-push:u1:0",
+            "base-push:u1:0:0",
             r.forge.repo(),
             "base-x",
             "",
@@ -469,6 +555,92 @@ fn a_repeat_of_the_event_id_is_a_replay_and_a_clear_gives_a_new_attempt_a_new_id
     r.tick();
     r.tick();
     assert_eq!(push_lines(&r, "base-x").len(), 2);
+}
+
+#[test]
+fn a_second_real_push_in_one_park_generation_gets_its_own_ledger_line() {
+    use pf_engine::render::RenderContext;
+    use pf_workflow::file::BasePush;
+    use pulse_factory::controller::base_push::{Forge, ensure};
+
+    let r = rig_for("base-x");
+    r.tick();
+    assert!(r.has_unit(UNIT));
+    let stage = r
+        .package
+        .file
+        .tracks
+        .iter()
+        .flat_map(|t| &t.stages)
+        .find(|s| s.name == "close")
+        .expect("a close stage");
+    let base = BasePush {
+        dir: r.work.display().to_string(),
+        branch: "base-x".to_string(),
+    };
+    let forge = Forge {
+        repo: r.forge.repo(),
+        default_branch: BASE,
+        paper: true,
+    };
+    let run_dir = r.run_dir.display().to_string();
+    let ctx = RenderContext {
+        run_id: "r",
+        run_dir: &run_dir,
+        params: &r.params,
+        unit: None,
+    };
+    let go = || ensure(&r.engine, &forge, stage, &base, UNIT, 0, &ctx);
+    let lose = || {
+        git(&r.bare, &["update-ref", "-d", "refs/heads/base-x"]);
+        assert_eq!(on_origin(&r, "base-x"), None);
+    };
+
+    // One generation. The same SHA pushed twice: both pushes have a line.
+    let first = local_branch(&r.work, "base-x");
+    go().unwrap();
+    assert_eq!(on_origin(&r, "base-x"), Some(first.clone()));
+    lose();
+    go().unwrap();
+    assert_eq!(on_origin(&r, "base-x"), Some(first.clone()));
+    assert_eq!(
+        push_lines(&r, "base-x").len(),
+        2,
+        "{:?}",
+        push_lines(&r, "base-x")
+    );
+
+    // Another SHA in the same generation: a third line, and no park.
+    lose();
+    std::fs::write(r.work.join("more.txt"), "more\n").unwrap();
+    git(&r.work, &["add", "-A"]);
+    git(&r.work, &["commit", "--quiet", "-m", "more"]);
+    let second = git(&r.work, &["rev-parse", "HEAD"]);
+    assert_ne!(first, second);
+    go().unwrap();
+    assert_eq!(on_origin(&r, "base-x"), Some(second.clone()));
+    let lines = push_lines(&r, "base-x");
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines.iter().all(|l| l.contains("outcome=pushed")),
+        "{lines:?}"
+    );
+    assert!(lines[2].contains(&format!("sha={second} ")), "{}", lines[2]);
+
+    // A repeat of an attempt's own command ID is still a replay.
+    let again = r
+        .engine
+        .record_push(
+            UNIT,
+            "base-push:u1:0:2",
+            r.forge.repo(),
+            "base-x",
+            &second,
+            PushOutcome::Pushed,
+        )
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(push_lines(&r, "base-x").len(), 3);
 }
 
 #[test]

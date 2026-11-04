@@ -241,11 +241,16 @@ pin check and before the stage's `before` commands:
 
 1. It renders `dir` and `branch` for the unit.
 2. It refuses the branch when it is empty, starts with `-`, fails `git check-ref-format --branch`,
-   or is the run's default branch. It refuses the `dir` when its `origin` is not the run's forge: on
-   GitHub the `owner/name` of `git -C <dir> remote get-url origin` must be the run's forge
-   repository (the case is not compared), and in the paper env the canonical path of that URL must
-   be the canonical path of `forge.git`. A workflow file can so make the controller push only to the
-   forge the operator armed against.
+   or is the run's default branch. It refuses the `dir` when its `origin` is not the run's forge. It
+   reads every URL of `git -C <dir> remote get-url --all origin` (the fetch URL, which `ls-remote`
+   reads) and of `git -C <dir> remote get-url --all --push origin` (the push URLs, which `git push`
+   writes to, after `remote.origin.pushurl` and `pushInsteadOf`). On GitHub the `owner/name` of each
+   must be the run's forge repository (the case is not compared). In the paper env the canonical
+   path of each must be the canonical path of `forge.git`. So the fetch URL and every push URL are
+   the run's forge, the branch check and the push go to one place, and a workflow file can make the
+   controller push only to the forge the operator armed against. When either read fails (for
+   example, `dir` has no remote named `origin`, which git would read as a path), it refuses and
+   names the cause. It never skips the check.
 3. It runs `git -C <dir> ls-remote --exit-code origin refs/heads/<branch>`, as an argv with no
    shell, with `GIT_TERMINAL_PROMPT=0` and the 60 s command timeout.
 4. **Exit 0:** `origin` holds the branch, at any SHA. Nothing is pushed, there is no ledger line,
@@ -259,9 +264,10 @@ pin check and before the stage's `before` commands:
 
 **The ledger line.** Every push is an admitted `Push` command, so it writes
 `push: repo=<forge> branch=<branch> sha=<sha> outcome=pushed` or `outcome=failed: <cause>`. The
-command ID is `push:base-push:<unit>:<park generation>`. A repeat of one ID is a replay and writes no
-second line. A `clear` gives the unit a new park generation, so a new attempt has a new ID and a new
-line. A refusal in step 2 and a failed read in step 6 write no push line, because nothing was tried.
+command ID is `push:base-push:<unit>:<park generation>:<attempt>`. The attempt number counts the base
+pushes the unit already has in that park generation, so each push attempt has its own ID and its own
+line, also a second push in one generation. A repeat of one ID is a replay and writes no second line.
+A `clear` gives the unit a new park generation, so the attempt count starts again. A refusal in step 2 and a failed read in step 6 write no push line, because nothing was tried.
 A missing local branch writes `outcome=failed: no local branch <branch>` with an empty SHA, and tries
 no push.
 
@@ -273,12 +279,16 @@ authentication failure names itself.
 |---|---|
 | A template does not render | `cannot render the <field> of base_push of stage <stage> for unit <unit>: <why>` |
 | The branch is refused | `base push of branch <branch> refused: <rule>` |
-| The `origin` is another forge | `base push of branch <branch> refused: origin of <dir> is <origin>, which is not the run's forge <forge>` |
+| The `dir` is empty | `base push of branch <branch> refused: the dir is empty` |
+| `origin` cannot be read | `base push of branch <branch> refused: cannot read the <fetch or push> URL of origin of <dir>: <cause>` |
+| The `origin` is another forge | `base push of branch <branch> refused: origin of <dir> is <url>, which is not the run's forge <forge>`, or `origin of <dir> pushes to <url>, which …` for a push URL |
 | `ls-remote` fails | `cannot read <branch> on origin of <dir> (ls-remote rc <n>)`, or `(ls-remote timed out)` |
 | The push fails | `base push of <branch> to origin failed: <cause>` |
 
-When `origin` cannot be read (no `origin` remote), the read in step 3 fails and names its exit code.
-The check blocks the tick for at most the timeout, as an `exit0` condition does.
+Every git call of the check has the 60 s command timeout: `check-ref-format`, the fetch and push URL
+reads, `ls-remote`, `rev-parse` and `push`. A tick that runs the whole check can be blocked for up to
+five calls of 60 s each (the URL reads, `ls-remote`, `rev-parse` and `push` run in turn). A timeout
+of `push` is recorded as a failed push (see the known limit below).
 
 **What it never does.**
 
@@ -294,6 +304,10 @@ The check blocks the tick for at most the timeout, as an `exit0` condition does.
 **Credentials.** The controller pushes with the git credentials of the user unit, the same ones the
 seats it launches push with (`docs/install.md`). No new secret is read, and none reaches a ledger line
 or a reason.
+
+**Known limit (timeout of `push`).** A push the 60 s limit kills after the remote took the ref is
+recorded as `outcome=failed` and parks the unit. After a `clear`, `ls-remote` returns exit 0, so the
+launch goes on and the ledger keeps the `failed` line over a pushed branch.
 
 **Known limit (ADR-0007).** The push has no record before it runs. If the controller dies between the
 push and its record, the push has no ledger line, and after a restart `ls-remote` returns exit 0, so

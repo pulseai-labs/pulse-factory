@@ -65,6 +65,32 @@ fn canonical(url: &str) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
+/// The URLs `git remote get-url --all [--push] origin` prints, or the cause when it cannot print
+/// one. A remote with several push URLs pushes to every one, so each counts.
+fn origin_urls(dir: &str, push: bool) -> Result<Vec<String>, String> {
+    let mut args = vec!["remote", "get-url", "--all"];
+    if push {
+        args.push("--push");
+    }
+    args.push("origin");
+    let out = git(dir, &args).map_err(|e| e.to_string())?;
+    if out.exit_code != Some(0) {
+        let how = out.exit_code.map_or("ended by a signal".to_string(), |n| {
+            format!("git exited with code {n}")
+        });
+        return Err(with_cause(how, &stderr_line(&out)));
+    }
+    let urls: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if urls.is_empty() {
+        return Err("git printed no URL".to_string());
+    }
+    Ok(urls)
+}
+
 /// Does `origin` (a remote URL) name the run's forge?
 fn is_run_forge(forge: &Forge, origin: &str) -> bool {
     if forge.paper {
@@ -140,15 +166,28 @@ pub fn ensure(
         ));
     }
 
-    // Only the forge the operator armed against receives a base push. When `origin` cannot be
-    // read here, `ls-remote` below fails the same way and names its code.
-    if let Ok(out) = git(&dir, &["remote", "get-url", "origin"])
-        && out.exit_code == Some(0)
-    {
-        let origin = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !is_run_forge(forge, &origin) {
+    // Only the forge the operator armed against receives a base push. `ls-remote` reads the fetch
+    // URL of `origin`, and `push` writes to its push URLs (`remote.origin.pushurl`,
+    // `pushInsteadOf`). Both must be the run's forge, so that the branch check and the push go to
+    // one place. When `origin` cannot be read, the controller refuses: with no remote named
+    // `origin`, git reads a directory of that name in `dir` as the remote.
+    for push in [false, true] {
+        let urls = origin_urls(&dir, push).map_err(|cause| {
+            one_line_reason(&format!(
+                "base push of branch `{branch}` refused: {}",
+                with_cause(
+                    format!(
+                        "cannot read the {} URL of origin of {dir}",
+                        if push { "push" } else { "fetch" }
+                    ),
+                    &cause
+                )
+            ))
+        })?;
+        if let Some(url) = urls.iter().find(|u| !is_run_forge(forge, u)) {
+            let what = if push { "pushes to" } else { "is" };
             return Err(one_line_reason(&format!(
-                "base push of branch `{branch}` refused: origin of {dir} is {origin}, which is not the run's forge {}",
+                "base push of branch `{branch}` refused: origin of {dir} {what} {url}, which is not the run's forge {}",
                 forge.repo
             )));
         }
@@ -184,8 +223,27 @@ pub fn ensure(
         }
     }
 
-    // `origin` lacks the branch. One attempt per park generation: its command ID is its record.
-    let event_id = format!("base-push:{unit}:{park_generation}");
+    // `origin` lacks the branch. Each push attempt has its own command ID, and that ID is its record:
+    // the attempt number counts the base pushes this unit already recorded in this park generation.
+    let id_prefix = format!("push:base-push:{unit}:{park_generation}:");
+    let attempt = match engine.view() {
+        Ok(view) => view
+            .admissions
+            .iter()
+            .filter(|a| a.kind == "push" && a.unit_id.as_deref() == Some(unit))
+            .filter(|a| {
+                a.command_id
+                    .strip_prefix(&id_prefix)
+                    .is_some_and(|n| n.parse::<u32>().is_ok())
+            })
+            .count(),
+        Err(e) => {
+            return Err(one_line_reason(&format!(
+                "base push of {branch} to origin not tried: cannot read the ledger: {e}"
+            )));
+        }
+    };
+    let event_id = format!("base-push:{unit}:{park_generation}:{attempt}");
     let record = |sha: &str, outcome: PushOutcome| {
         engine
             .record_push(unit, &event_id, forge.repo, &branch, sha, outcome)
