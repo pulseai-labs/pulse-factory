@@ -40,9 +40,25 @@ const EXTRA: &str = r#"        before:
 
 const HANDOFF: &str = "# Handoff — u1\n\n## 1. How to use this handoff\n\nRead it.\n\n## 12. Report contract\n\nWrite report.md.\n";
 
+/// `EXTRA` with the hook the shipped workflow gives the correction packet's `park_on` entry.
+fn extra_with_red_gate_hook() -> String {
+    EXTRA.replace(
+        "            reason: \"the red gate needs a correction\"\n",
+        concat!(
+            "            reason: \"the red gate needs a correction\"\n",
+            "            on_answer:\n",
+            "              - [sh, \"{run.package}/scripts/rule.sh\", \"{run.dir}/out/{unit.id}/rulings.md\", \"{run.dir}/out/{unit.id}/correction.txt\", \"{answer.file}\", \"{answer.request}\", \"{answer.generation}\", implement]\n",
+        ),
+    )
+}
+
 fn rig() -> Rig {
+    rig_with_extra(EXTRA.to_string())
+}
+
+fn rig_with_extra(extra: String) -> Rig {
     let o = Options {
-        implement_extra: EXTRA.to_string(),
+        implement_extra: extra,
         implement_stop: STOP_HOOK.to_string(),
         item_vars: "[worktree_path, branch, handoff_path]".to_string(),
         scripts_from: Some(scripts_dir()),
@@ -317,6 +333,42 @@ fn a_request_without_a_hook_resumes_as_before() {
     assert!(!answered.hook_ran && answered.hook_failed.is_none());
     assert_eq!(r.unit("u1").0, Status::Running);
     assert_eq!(read(&handoff_path(&r)), HANDOFF);
+}
+
+#[test]
+fn a_red_gate_answer_retires_the_correction_packet_so_the_unit_does_not_park_on_it_again() {
+    let r = rig_with_extra(extra_with_red_gate_hook());
+    queue_with_handoff(&r, &handoff_path(&r));
+    dispatches(&r, 0);
+    r.tick();
+    std::fs::create_dir_all(r.out("u1", "")).unwrap();
+    std::fs::write(r.out("u1", "correction.txt"), "gate red: AC-2 exits 1\n").unwrap();
+    r.tick();
+    let req = open_request(&r);
+    assert_eq!(req.kind, RequestKind::RedGate);
+    let generation = claim(&r);
+    let answered = r
+        .driver
+        .answer_request(&req.id, 1, generation, "fixed AC-2 by hand")
+        .unwrap();
+    assert!(answered.hook_ran && answered.hook_failed.is_none());
+    assert_eq!(r.unit("u1").0, Status::Running);
+
+    // The packet and the answer are in the rulings file; the packet file is gone.
+    let rulings = read(&r.out("u1", "rulings.md"));
+    assert!(rulings.contains("> gate red: AC-2 exits 1"), "{rulings}");
+    assert!(rulings.contains("fixed AC-2 by hand"), "{rulings}");
+    assert!(!r.out("u1", "correction.txt").exists());
+    assert!(
+        r.out("u1", &format!("correction.txt.answered-{}", req.id))
+            .exists()
+    );
+
+    // The next ticks do not park the unit on the packet again, and open no new request.
+    r.tick();
+    r.tick();
+    assert_eq!(r.unit("u1").0, Status::Running, "{:?}", r.unit("u1"));
+    assert!(r.view().open_request_of("u1").is_none());
 }
 
 // ------------------------------------------------------------------ a handoff that is not the spine's

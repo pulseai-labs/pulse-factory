@@ -557,6 +557,39 @@ fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
             assert_eq!(stage.stop_file, "{run.dir}/out/{unit.id}/stop");
         }
     }
+    // The close stage's correction packet has a hook too: without it, an answer resumes the stage
+    // and the packet, still on disk, parks it again at once.
+    let close = package
+        .file
+        .track("item")
+        .unwrap()
+        .stages
+        .iter()
+        .find(|s| s.name == "close")
+        .expect("the close stage");
+    let packet = close
+        .park_on
+        .iter()
+        .find(|e| e.file.ends_with("/correction.txt"))
+        .expect("the close stage parks on the correction packet");
+    assert_eq!(
+        packet.on_answer.len(),
+        1,
+        "the correction packet's park has an answer hook"
+    );
+    assert_eq!(
+        packet.on_answer[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/rule.sh",
+            "{run.dir}/out/{unit.id}/rulings.md",
+            "{run.dir}/out/{unit.id}/correction.txt",
+            "{answer.file}",
+            "{answer.request}",
+            "{answer.generation}",
+            "close",
+        ]
+    );
     // The redispatch counts toward the cap of 3 that `before` already checks.
     assert!(
         implement

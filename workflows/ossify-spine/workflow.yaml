@@ -4,12 +4,16 @@
 # when the method records the spine as closed. Every path is a placeholder. The arm step supplies
 # the parameters.
 #
-# An answer reaches the seat that needs it through two hooks (`on_answer`), both POSIX `sh`
+# An answer reaches the seat that needs it through three hooks (`on_answer`), all POSIX `sh`
 # scripts in `scripts/`. The controller runs a hook when an answer resumes a unit, before the
 # unit runs again. The scripts call no method tool.
-#   gaps.json   `clarify.sh` appends the answer to the work item handoff's `## Clarifications`.
-#   stop file   `rule.sh` appends the ruling to {run.dir}/out/{unit.id}/rulings.md, which every
-#               brief tells a seat to read first, and renames the stop file.
+#   gaps.json       `clarify.sh` appends the answer to the work item handoff's `## Clarifications`.
+#   stop file       `rule.sh` appends the ruling to {run.dir}/out/{unit.id}/rulings.md, which every
+#                   brief tells a seat to read first, and renames the stop file.
+#   correction.txt  `rule.sh` does the same for the close stage's correction packet: it quotes the
+#                   packet in the rulings file and renames the packet.
+# A park with no file has no hook: the review cap park (`<stage>: <to> cap <max> reached`) ends its
+# stage `done`, so no seat of that stage is left to read an answer. `clear` is its way on.
 version: 1
 name: ossify-spine
 
@@ -296,7 +300,18 @@ tracks:
               test: url
         park_on:
           - file: "{run.dir}/out/{unit.id}/correction.txt"
-            reason: "the close gate for {unit.id} is red and needs a correction: fix it, then answer with `pulse-factory answer` or resume with `pulse-factory clear`"
+            reason: "the close gate for {unit.id} is red and needs a correction: fix it, then answer with `pulse-factory answer`; `pulse-factory clear` resumes only after the correction packet is moved away"
+            # The answer retires the packet, so the resumed stage does not park on it again. The
+            # packet text goes into the rulings file, which the close brief tells the seat to read.
+            on_answer:
+              - - sh
+                - "{run.package}/scripts/rule.sh"
+                - "{run.dir}/out/{unit.id}/rulings.md"
+                - "{run.dir}/out/{unit.id}/correction.txt"
+                - "{answer.file}"
+                - "{answer.request}"
+                - "{answer.generation}"
+                - close
 
       # The reviewer reads the item PR at its head and writes `review.md`. A block sends the unit to
       # `fix`; a pass whose head is not the PR's head sends it to `review` again. A pass on the PR

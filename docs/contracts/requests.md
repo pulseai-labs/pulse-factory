@@ -139,15 +139,15 @@ unit detail (see `unit-record.md`), and it makes a second park of the same unit 
 ### The token file
 
 `claim` returns the token once, to the client. The client writes it to `<state dir>/claim-token`
-with mode 0600 and replaces any older file. It prints only the generation and the path. `answer`
-and `clear` read the file named by `--claim-token-file`, else the default. A missing or empty file
+with mode 0600 and replaces any older file. It prints only the generation and the path. `answer`,
+`clear` and `ack` read the file named by `--claim-token-file`, else the default. A missing or empty file
 is refused, and the refusal names the path.
 
 The token reaches no log, ledger line, `status`, request body, `requests`, `show` or error text.
 
 ### The caller check
 
-On every `claim`, `answer` and `clear` the controller:
+On every `claim`, `answer`, `clear` and `ack` the controller:
 
 1. reads the peer's PID from the socket (`SO_PEERCRED`);
 2. refuses a peer whose `/proc/<pid>/environ` holds `PF_SEAT_TOKEN`;
@@ -176,8 +176,12 @@ unit does not resume. The hook's run is a ledger line, `answer hook <R-n>: rc <n
 The unit becomes `running` at that stage with no session, and its park generation rises. The next
 tick launches the stage through the normal path (capacity, pins, `before`). A unit that parked
 after its PR was recorded keeps its PR. A halted run accepts the resume and launches nothing. The
-resume does not remove a stop file. The operator does, or the workflow's stop hook retires it
-(`workflow-file.md`, "Answer hooks"): the `ossify-spine` hook renames it to `stop.answered-<R-n>`.
+resume does not remove a stop file or a correction packet. The operator does, or the workflow's
+hook retires it (`workflow-file.md`, "Answer hooks"): the `ossify-spine` hooks rename a stop file
+to `stop.answered-<R-n>` and a correction packet to `correction.txt.answered-<R-n>`. So after a
+`clear` the operator moves the packet away first, or the stage parks on it again. A `park` whose
+cause is a cap (`<stage>: <to> cap <max> reached`) has no hook: its stage has ended, and `clear` is
+the way on.
 
 An answer's text is data. The engine stores it and shows it, and never runs or renders it as a
 template.
