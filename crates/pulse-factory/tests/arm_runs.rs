@@ -81,6 +81,90 @@ fn most_launches_follows_the_formula() {
     assert_eq!(v["most_launches"], 28);
 }
 
+/// The item `close` stage of the fixture, with the base push the shipped package has.
+const BASE_PUSH: &str = "        base_push:
+          dir: \"{param.repo}\"
+          branch: \"{param.spine_branch}\"
+";
+
+#[test]
+fn the_summary_names_each_base_push_and_leaves_the_launch_count_alone() {
+    let plain = Sandbox::new();
+    let before = json_summary(&plain, &[]);
+
+    let sb = Sandbox::with(&Options {
+        close_extra: BASE_PUSH.to_string(),
+        ..Options::default()
+    });
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    let line = "base push: before item.close, push spine/s1 to origin when origin lacks it";
+    assert!(
+        text.lines().any(|l| l == line),
+        "missing {line:?} in:\n{text}"
+    );
+
+    let v = json_summary(&sb, &[]);
+    let pushes = v["base_pushes"]
+        .as_array()
+        .expect("base_pushes is an array");
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_eq!(pushes[0]["track"], "item");
+    assert_eq!(pushes[0]["stage"], "close");
+    assert_eq!(pushes[0]["dir"], sb.repo.display().to_string());
+    assert_eq!(pushes[0]["branch"], "spine/s1");
+    // Additive: the schema version and the launch count stay.
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["most_launches"], before["most_launches"]);
+    assert_eq!(v["most_launches"], 18);
+}
+
+#[test]
+fn a_base_push_that_needs_a_unit_shows_as_written() {
+    let sb = Sandbox::with(&Options {
+        item_vars: "[worktree_path, branch, base]".to_string(),
+        close_extra: "        base_push:
+          dir: \"{param.repo}\"
+          branch: \"{unit.vars.base}\"
+"
+        .to_string(),
+        ..Options::default()
+    });
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["base_pushes"][0]["branch"], "{unit.vars.base}");
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert!(
+        stdout(&out).contains(
+            "base push: before item.close, push {unit.vars.base} to origin when origin lacks it"
+        ),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_package_with_no_base_push_shows_no_such_line() {
+    let sb = Sandbox::new();
+    let out = {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        sb.run(&args)
+    };
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(!stdout(&out).contains("base push:"), "{}", stdout(&out));
+    let v = json_summary(&sb, &[]);
+    assert_eq!(v["base_pushes"], serde_json::json!([]));
+}
+
 fn review_loop_sandbox() -> Sandbox {
     Sandbox::with(&Options {
         review_loop: true,

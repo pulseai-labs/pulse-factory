@@ -1,5 +1,5 @@
-//! AC-14 and AC-8 (`r0.s2.w3`): the three demo scripts run against the built binary, and each fails
-//! when its journey is broken. The scripts run the paper env: no model, no spend, no network, no
+//! AC-14 and AC-8 (`r0.s2.w3`) and AC-5 (`r0.s3.w1`): the four demo scripts run against the built
+//! binary, and each fails when its journey is broken. The scripts run the paper env: no model, no spend, no network, no
 //! `gh`, and no build.
 
 use std::path::{Path, PathBuf};
@@ -7,6 +7,8 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 const LIMIT: Duration = Duration::from_secs(120);
+/// The limit of `spine-base.sh`: one round, one item.
+const BASE_LIMIT: Duration = Duration::from_secs(60);
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -77,11 +79,12 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
 }
 
 #[test]
-fn all_three_scripts_exit_0_within_120_seconds() {
-    for name in [
-        "golden-journey-a.sh",
-        "golden-journey-b.sh",
-        "arm-dry-run.sh",
+fn all_four_scripts_exit_0_within_their_limit() {
+    for (name, limit) in [
+        ("golden-journey-a.sh", LIMIT),
+        ("golden-journey-b.sh", LIMIT),
+        ("arm-dry-run.sh", LIMIT),
+        ("spine-base.sh", BASE_LIMIT),
     ] {
         let (out, took) = run(name, &[]);
         assert!(
@@ -91,8 +94,65 @@ fn all_three_scripts_exit_0_within_120_seconds() {
             stdout(&out),
             stderr(&out)
         );
-        assert!(took < LIMIT, "{name} took {took:?}");
+        assert!(took < limit, "{name} took {took:?}");
     }
+}
+
+/// A copy of `scripts/demo/paper-base` that a test may break.
+fn paper_base_copy() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-base");
+    copy_dir(&root().join("scripts/demo/paper-base"), &paper);
+    (dir, paper)
+}
+
+#[test]
+fn spine_base_reports_what_it_checked() {
+    let (out, took) = run("spine-base.sh", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(took < BASE_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "base push: before item.close, push spine-base1 to origin when origin lacks it",
+        "run demo-base-1 ended: every item merged",
+        "spine-base: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
+#[test]
+fn the_base_push_demo_fails_without_the_base_push() {
+    // With `base_push` removed, the controller pushes nothing, the close seat does not find the
+    // spine branch on origin and writes its stop file, and the unit parks: the demo fails at once.
+    let (dir, paper) = paper_base_copy();
+    edit(&paper, "workflow/workflow.yaml", |t| {
+        let start = t
+            .find("        base_push:\n")
+            .expect("the demo names a base push");
+        let end = t[start..]
+            .find("        before:")
+            .expect("a `before` follows")
+            + start;
+        format!("{}{}", &t[..start], &t[end..])
+    });
+    let (out, took) = run("spine-base.sh", &[("PAPER_SRC", paper.to_str().unwrap())]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("FAIL") && stderr(&out).contains("stuck"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("spine branch not on origin"),
+        "the seat's own words are in the failure: {}",
+        stderr(&out)
+    );
+    assert!(
+        took < BASE_LIMIT,
+        "it fails at once, not at the limit: {took:?}"
+    );
+    drop(dir);
 }
 
 #[test]
@@ -132,6 +192,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "golden-journey-a.sh",
         "golden-journey-b.sh",
         "arm-dry-run.sh",
+        "spine-base.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [

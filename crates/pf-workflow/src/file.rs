@@ -137,6 +137,17 @@ pub struct StageSpec {
     /// `entered_by: outcome`: the stage runs only when an outcome sends the unit to it. A unit
     /// that reaches it in order goes past it.
     pub entered_by_outcome: bool,
+    /// `base_push`: a branch the controller puts on `origin` before the stage launches, when
+    /// `origin` lacks it.
+    pub base_push: Option<BasePush>,
+}
+
+/// The `base_push` key of a stage. Both fields are templates in the stage's scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BasePush {
+    /// The local repository that holds the branch and whose `origin` receives it.
+    pub dir: String,
+    pub branch: String,
 }
 
 /// The merge definition of a track.
@@ -982,6 +993,7 @@ const STAGE_FIELDS: &[&str] = &[
     "park_on",
     "outcomes",
     "entered_by",
+    "base_push",
 ];
 
 /// A stage, and the `to` of each of its outcomes with the place it was written. The track checks
@@ -1112,6 +1124,10 @@ fn read_stage(
             true
         }
     };
+    let base_push = match f.get("base_push") {
+        None => None,
+        Some(n) => Some(read_base_push(n, check, scope)?),
+    };
     let spec = StageSpec {
         name,
         role,
@@ -1131,8 +1147,18 @@ fn read_stage(
         park_on,
         outcomes,
         entered_by_outcome,
+        base_push,
     };
     Ok((spec, targets))
+}
+
+/// The `base_push` mapping of a stage: `{dir, branch}`, both templates, both required.
+fn read_base_push(node: &Node, check: &Checker, scope: Scope) -> Result<BasePush, ParseError> {
+    let f = Fields::new(node, "`base_push`", &["dir", "branch"])?;
+    Ok(BasePush {
+        dir: check.text_node(f.req("dir")?, "`dir`", scope)?,
+        branch: check.text_node(f.req("branch")?, "`branch`", scope)?,
+    })
 }
 
 /// The `outcomes` list of a stage: each entry is `{when, to, max}`. `when` holds `done` entries

@@ -1121,3 +1121,32 @@ fn the_spine_close_role_may_push_its_branch_and_nothing_else_is_added_to_its_rul
         ]
     );
 }
+
+// ------------------------------------------------------------------ the base push
+
+#[test]
+fn only_the_item_close_stage_has_a_base_push_of_the_spine_branch() {
+    let package = load();
+    let close = item_stage(&package.file, "close");
+    assert_eq!(
+        close.base_push,
+        Some(pf_workflow::BasePush {
+            dir: "{param.repo}".to_string(),
+            branch: "{param.spine_branch}".to_string(),
+        }),
+        "ossify's PR-mode close needs the spine branch on origin, and the seat may push only its own"
+    );
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            if track.name == "item" && stage.name == "close" {
+                continue;
+            }
+            assert!(
+                stage.base_push.is_none(),
+                "{}.{} must not have a base push",
+                track.name,
+                stage.name
+            );
+        }
+    }
+}

@@ -1,6 +1,7 @@
 //! The controller: one process, seats as children (ADR-0001). It owns the store, the queue and
 //! the ledger (ADR-0003).
 
+pub mod base_push;
 pub mod client;
 pub mod driver;
 pub mod files;
@@ -190,6 +191,9 @@ impl Controller {
             params: info.params.clone(),
             run_dir: dir.to_path_buf(),
             target_dir: info.target_dir.clone(),
+            forge_repo: info.forge_repo.clone(),
+            default_branch: info.default_branch.clone(),
+            paper: info.paper.is_some(),
             clock: system_secs(),
             walk_limit: driver::WALK_LIMIT,
         }));

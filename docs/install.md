@@ -9,7 +9,8 @@ later see each item PR merged into the spine branch.
 - Linux with `systemd --user`. The unit runs as your user. It needs no root.
 - A Rust toolchain (`rust-toolchain.toml` in the repository names the channel), `git` and `jq`.
 - `gh`, logged in as the account that owns the repository. Seats use your `gh` and git credentials
-  (ADR-0005), and `arm` reads the forge through `gh repo view`.
+  (ADR-0005), and `arm` reads the forge through `gh repo view`. The controller itself pushes a base
+  branch with the same credentials, where a stage names one with `base_push`.
 - OMP at a qualified version, and the method's plugin (for the shipped workflow, `ossify`).
 - User lingering, so the controller keeps running after you log out. Check it with
   `loginctl show-user "$USER" -p Linger`. If it prints `Linger=no`, run
