@@ -78,7 +78,8 @@ a command. A rule name is what the audit line and a deny's reason show.
 | a push whose directory or branch is one quoted variable, or follows a `cd`, `git switch` or `git checkout` to one | `own-branch-unverified` | `push_own_branch` |
 | a push from a directory outside the worktree and the push directory | `push-outside-worktree` (deny) | every role |
 | a push of another branch | `push-other-branch` (deny) | every role |
-| `gh pr review`, `gh pr comment`, `gh pr edit`, `gh pr close`, `gh pr reopen`, `gh pr ready`, `gh pr lock`, `gh pr unlock` | `gh-pr-write` (deny) | every role |
+| `gh pr review`, `gh pr comment`, `gh pr edit`, `gh pr close`, `gh pr reopen`, `gh pr ready`, `gh pr lock`, `gh pr unlock`, `gh pr update-branch`, `gh issue comment`, `gh issue edit`, `gh issue close`, `gh issue reopen`, `gh issue lock`, `gh issue unlock`, `gh issue delete` | `gh-pr-write` (deny) | every role |
+| any `gh` command that is not a read (`gh pr create`, `gh issue create`, `gh release create`, `gh workflow run`, …) | `gh-forge-write` (deny) | the `reviewer` role only |
 
 A relative path means the working directory and the directory of every literal `cd` earlier in the
 call. The `push_dir` of the seat's context is a second place a push may run from. A literal half of a
@@ -92,14 +93,21 @@ It lists one value, `write_own_report_and_run_files`, and no push value. Its sta
 so the seat's worktree is empty and matches no path: a write tool inside the item's worktree is
 denied (`write-outside-worktree`), although the seat's working directory is that worktree, for
 reading. A write tool to its report under `<run>/out/<unit>/` is allowed. Every denial of every seat
-holds for it: a merge, a push, a branch delete, `--no-verify`, an AI trailer and every forge write,
-which includes `gh pr review` and `gh pr comment`.
+holds for it: a merge, a push, a branch delete, `--no-verify`, an AI trailer and the forge writes of
+the table above. On top of those, the `reviewer` may run only `gh` reads: `gh pr|issue|run|release|repo|workflow|label|ruleset`
+with `view`, `list`, `diff`, `checks` or `status`, `gh search`, `gh status`, `gh auth status`,
+`gh version` and `gh api` with the GET method. Any other `gh` command is denied with
+`gh-forge-write`, `gh pr create` included. The other roles keep `gh pr create`, which `close` needs to
+open the item PR and the spine PR; they meet the `gh` denials of every seat and no more. A forge
+write that goes through no `gh` command (`curl`, `git`) is judged by the rules for those commands.
 
 **Known limit (ADR-0005): shell redirection is not guarded by path.** The rules read the words of a
 command, not the file a `>` or `>>` opens, so `echo x > <worktree>/file` is allowed for the
 `reviewer` as it is for every role. The reviewer's brief (`briefs/review.md`) forbids a redirection
 into the worktree. A test (`reviewer_role.rs`) fails if the rules start to guard redirection, so this
-paragraph is corrected then.
+paragraph is corrected then. The same holds for the other shell writes, such as `sed -i`, `git add`
+and `git commit`: the rules deny a push, not a local change. The `reviewer`'s write path also
+includes the run directory itself, not only `out/<unit>`, so the brief is the guard there too.
 
 ## The grammar of the shell that `pf-rules` reads
 
@@ -176,3 +184,18 @@ reads (`crate::options`, one constant per command with the man page section as i
 that two guarded options share, such as `git push --f`, is denied as `unparsed-command`, because git
 refuses it too. `gh` and `cargo` read long options by exact name, and no guard reads a long option of
 `curl`, `wget`, `rm` or `find`, so they need no list.
+
+### Known limits of the grammar (ADR-0005: the rails stop mistakes, not an attacker)
+
+The rules read the words of a command line. They do not read what a command later evaluates. These
+forms pass the grammar and are not read inside:
+
+- **A name in `$((…))`, `let` and `[[ … -eq … ]]`.** Bash evaluates the value of a variable named
+  there as arithmetic, and an arithmetic subscript can run a command substitution. So
+  `x='a[$(cmd)]'; echo $((x))` runs `cmd`, and the rules read neither the value of `x` nor `cmd`.
+- **A pipe to an interpreter.** The heredoc and herestring forms are denied for an interpreter. A
+  pipe into one (`printf … | python3`, `make -f -`) is not. The interpreter list is closed: `make`,
+  `sed -f -`, `awk -f -`, `sqlite3` and `ssh` are not on it.
+- **A wrapper's long option by a prefix.** `timeout`, `nice`, `ionice`, `time`, `stdbuf`, `sudo`,
+  `env`, `xargs` and `flock` read their long options by exact name, and the commands accept a unique
+  prefix. So `timeout --kill-aft 5 10 gh pr merge 1` leaves `10` as the command the guards see.

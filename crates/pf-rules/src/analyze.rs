@@ -49,6 +49,29 @@ pub fn basename(text: &str) -> &str {
     text.rsplit('/').next().unwrap_or(text)
 }
 
+/// The role that may read the forge and never write to it (ADR-0005, `role-rules.md`). Every `gh`
+/// command of this role must be a read on the list in `gh_read_only`; the other roles meet only
+/// the `gh` denials of every seat.
+const READ_ONLY_FORGE_ROLE: &str = "reviewer";
+
+/// Whether `gh <first> <second>` is a forge read. `gh api` is judged by its method elsewhere. A
+/// command that is not named here is not a read: `gh pr create`, `gh issue create`,
+/// `gh release create`, `gh workflow run`, `gh run download` (it writes files) and the rest.
+fn gh_read_only(first: Option<&str>, second: Option<&str>) -> bool {
+    matches!(
+        (first, second),
+        (None, _)
+            | (Some("search" | "status" | "version" | "help"), _)
+            | (Some("auth"), Some("status"))
+            | (
+                Some(
+                    "pr" | "issue" | "run" | "release" | "repo" | "workflow" | "label" | "ruleset"
+                ),
+                Some("view" | "list" | "diff" | "checks" | "status"),
+            )
+    )
+}
+
 const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh"];
 
 /// Commands that run another command, with options that this crate does not read. A call that
@@ -1231,18 +1254,34 @@ impl<'a> Analyzer<'a> {
                 Some("pr"),
                 Some(
                     "review" | "comment" | "edit" | "close" | "reopen" | "ready" | "lock"
-                    | "unlock",
+                    | "unlock" | "update-branch",
                 ),
+            )
+            | (
+                Some("issue"),
+                Some("comment" | "edit" | "close" | "reopen" | "lock" | "unlock" | "delete"),
             ) => {
                 self.deny(
                     "gh-pr-write",
                     format!(
-                        "gh pr {} writes to the forge: a seat reports through its files, and the operator speaks on the forge",
+                        "gh {} {} writes to the forge: a seat reports through its files, and the operator speaks on the forge",
+                        first.unwrap_or_default(),
                         second.unwrap_or_default()
                     ),
                 );
             }
             (Some("api"), _) => self.gh_api(args),
+            _ if self.rules.role == READ_ONLY_FORGE_ROLE && !gh_read_only(first, second) => {
+                self.deny(
+                    "gh-forge-write",
+                    format!(
+                        "role {} reads the forge only: gh {} {} is not on its read list",
+                        self.rules.role,
+                        first.unwrap_or_default(),
+                        second.unwrap_or_default()
+                    ),
+                );
+            }
             _ => {}
         }
     }

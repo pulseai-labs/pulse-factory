@@ -146,6 +146,14 @@ fn a_forge_write_is_denied_for_every_role_and_a_forge_read_is_not() {
         "gh pr close 3",
         "gh pr reopen 3",
         "gh pr ready 3",
+        "gh pr update-branch 3",
+        "gh issue comment 12 -b x",
+        "gh issue edit 12 --add-label x",
+        "gh issue close 12",
+        "gh issue reopen 12",
+        "gh issue lock 12",
+        "gh issue delete 12 --yes",
+        "gh --repo acme/widgets issue comment 12 -b x",
     ] {
         denied_for_every_role(c, "gh-pr-write");
     }
@@ -156,12 +164,76 @@ fn a_forge_write_is_denied_for_every_role_and_a_forge_read_is_not() {
         "gh pr list --head work/u1 --state open",
         "gh pr checks 12",
         "gh pr status",
-        "gh pr create --base main --head work/u1 --title t --body b",
+        "gh issue view 12",
+        "gh issue list --state open",
         "echo \"gh pr comment 12\"",
         "git log --grep='gh pr review'",
     ] {
         allowed_for_every_role(c);
     }
+}
+
+/// The reviewer reads the forge and writes nothing there: every `gh` command that is not on the
+/// read list is denied, so the verbs no list of writes names are denied too.
+#[test]
+fn the_reviewer_is_denied_every_gh_command_that_is_not_a_read() {
+    let r = shipped("reviewer");
+    let ctx = reviewer_ctx();
+    for c in [
+        "gh pr create --base main --head work/u1 --title t --body b",
+        "gh issue create --title t --body b",
+        "gh release create v1",
+        "gh workflow run ci.yml",
+        "gh label create x",
+        "gh repo edit --description x",
+        "gh run download 1",
+        "gh run rerun 1",
+        "gh secret set X",
+        "gh -R acme/widgets pr create --fill",
+        "echo ok && gh issue create --title t",
+        "bash -c 'gh release create v1'",
+    ] {
+        let d = decide(&r, &ctx, &ToolCall::bash(c));
+        assert!(
+            !d.is_allow() && d.rule == "gh-forge-write",
+            "{c}: {:?} {} ({})",
+            d.outcome,
+            d.rule,
+            d.reason
+        );
+    }
+    for c in [
+        "gh pr view 12 --json headRefOid --jq .headRefOid",
+        "gh pr diff 12",
+        "gh pr list --head work/u1 --state open",
+        "gh pr checks 12",
+        "gh pr status",
+        "gh issue view 12",
+        "gh issue list",
+        "gh run view 1",
+        "gh repo view acme/widgets",
+        "gh -R acme/widgets pr view 12",
+        "gh api repos/o/r/pulls/12/comments",
+        "gh --version",
+    ] {
+        let d = decide(&r, &ctx, &ToolCall::bash(c));
+        assert!(d.is_allow(), "{c}: {d:?}");
+    }
+}
+
+/// `close` opens the item PR and the spine PR, so `gh pr create` stays allowed for it. The guard
+/// of the reviewer is a guard of that role, not of every seat.
+#[test]
+fn gh_pr_create_stays_open_to_the_other_roles() {
+    for name in ["lane", "implementer", "verifier", "close"] {
+        let d = bash(
+            &shipped(name),
+            "gh pr create --base main --head work/u1 --title t --body b",
+        );
+        assert!(d.is_allow(), "role {name}: {d:?}");
+    }
+    let d = bash(&shipped("reviewer"), "gh pr create --fill");
+    assert!(!d.is_allow() && d.rule == "gh-forge-write", "{d:?}");
 }
 
 #[test]

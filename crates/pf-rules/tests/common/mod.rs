@@ -91,7 +91,17 @@ pub fn denied_for_every_role(command: &str, rule: &str) {
 
 /// Assert a command is allowed for every role in the list.
 pub fn allowed_for_every_role(command: &str) {
-    for r in every_role() {
+    allowed_for_roles(command, |_| true);
+}
+
+/// Assert a command is allowed for every role but the `reviewer`, which reads the forge only: a
+/// `gh` command that is not a read is denied to it (`gh-forge-write`).
+pub fn allowed_for_every_role_but_the_reviewer(command: &str) {
+    allowed_for_roles(command, |role| role != "reviewer");
+}
+
+fn allowed_for_roles(command: &str, include: impl Fn(&str) -> bool) {
+    for r in every_role().into_iter().filter(|r| include(&r.role)) {
         let d = bash(&r, command);
         assert!(
             d.is_allow(),
