@@ -158,6 +158,11 @@ On every `claim`, `answer`, `clear` and `ack` the controller:
 Any read that fails refuses, and so does a chain that does not end. The client refuses too when
 `PF_SEAT_TOKEN` is set. A refusal records nothing.
 
+**Known limit (ADR-0005: the rails stop mistakes, not an attacker).** The check follows process
+ancestry and the caller's initial environment. A child that a seat detaches from its tree
+(`env -u PF_SEAT_TOKEN setsid -f pulse-factory claim …`) has no seat ancestor and no token, so the
+check passes it. The role rules do not deny `pulse-factory claim`, `answer`, `clear` or `ack`.
+
 ## Resuming a unit
 
 `clear` and `answer` on a request that has a unit resume the unit:
