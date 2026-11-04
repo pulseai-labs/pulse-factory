@@ -352,6 +352,78 @@ fn three_stale_passes_park_the_item_with_the_review_cap() {
     assert!(!r.run_dir.join("after_merge.log").exists());
 }
 
+// ------------------------------------------------------------------ line 1 is the verdict
+
+#[test]
+fn a_pass_that_quotes_a_block_on_a_later_line_merges_with_no_fix() {
+    let s = seat();
+    let head = to_review(&s);
+    let r = &s.r;
+    // Line 1 is the verdict. The findings quote `verdict: block` further down.
+    let text = format!(
+        "verdict: pass\nhead: {head}\n\n- the old review said:\nverdict: block\n- it is fixed\n"
+    );
+    end_review(r, &text);
+    r.tick();
+    assert_merged(r);
+    assert_eq!(fix_launches(r), 0, "a quoted block does not start `fix`");
+    assert_eq!(review_launches(r), 1, "{}", r.ledger_text());
+    assert!(
+        r.ledger_lines("sends the unit to").is_empty(),
+        "{:?}",
+        r.ledger_lines("sends the unit to")
+    );
+}
+
+#[test]
+fn a_block_that_quotes_a_pass_on_a_later_line_still_runs_fix() {
+    let s = seat();
+    let h0 = to_review(&s);
+    let r = &s.r;
+    let h1 = prepare_fix(r);
+    let text = format!("verdict: block\nhead: {h0}\n\n- the last review said:\nverdict: pass\n");
+    end_review(r, &text);
+    assert_eq!(fix_launches(r), 1, "{}", r.ledger_text());
+    assert!(!r.run_dir.join("after_merge.log").exists());
+    end_fix(r);
+    assert_eq!(review_launches(r), 2, "{}", r.ledger_text());
+    end_review(r, &review_text("pass", &h1));
+    r.tick();
+    assert_merged(r);
+}
+
+#[test]
+fn a_malformed_line_one_over_a_later_pass_does_not_end_the_stage() {
+    let s = seat();
+    let h0 = to_review(&s);
+    let r = &s.r;
+    // The file holds `verdict: pass` and the right head, but line 1 is not the verdict.
+    let text = format!("# Review of {h0}\nverdict: pass\nhead: {h0}\n");
+    end_review(r, &text);
+    r.tick();
+    assert_ne!(
+        r.unit(UNIT).0,
+        Status::Done,
+        "a later verdict line must not end the stage: {}",
+        r.ledger_text()
+    );
+    // The stage is not done, so the ended seat is a seat with no done signal: the unit parks.
+    let (status, reason) = r.unit(UNIT);
+    assert_eq!(status, Status::Parked, "{}", r.ledger_text());
+    assert_eq!(reason.as_deref(), Some("seat ended with no done signal"));
+    assert!(
+        !r.run_dir.join("after_merge.log").exists(),
+        "the item does not merge"
+    );
+    assert_eq!(fix_launches(r), 0, "no outcome fired");
+    assert_eq!(review_launches(r), 1, "{}", r.ledger_text());
+    assert!(
+        r.ledger_lines("sends the unit to").is_empty(),
+        "{:?}",
+        r.ledger_lines("sends the unit to")
+    );
+}
+
 // ------------------------------------------------------------------ the cap and the clear
 
 /// Block three reviews in a row. The third block parks the unit. Returns the PR head and the
