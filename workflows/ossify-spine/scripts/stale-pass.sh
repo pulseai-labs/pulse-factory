@@ -2,7 +2,8 @@
 # stale-pass.sh <review_file> <forge_repo> <branch>
 #
 # The stale-pass test of the review stage. It exits 0 (the pass is stale: review again) when the
-# first line of <review_file> is exactly `verdict: pass` and the second line, `head: <sha>`, is not
+# first line of <review_file> is exactly `verdict: pass` (`verdict.sh` reads it) and the second
+# line, `head: <sha>`, is not
 # the PR's current head. It also exits 0 when the head line is missing or malformed, or when the
 # current head cannot be read: it fails closed, and the stage's cap then parks the unit.
 # It exits 1 when the verdict is not `pass`, or when the heads are equal.
@@ -20,9 +21,7 @@ review=$1
 repo=$2
 branch=$3
 
-[ -f "$review" ] || exit 1
-first=$(sed -n '1p' -- "$review")
-[ "$first" = "verdict: pass" ] || exit 1
+sh "$(dirname -- "$0")/verdict.sh" "$review" pass || exit 1
 
 second=$(sed -n '2p' -- "$review")
 case $second in

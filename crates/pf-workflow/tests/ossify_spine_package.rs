@@ -504,6 +504,7 @@ fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
         "scripts/rule.sh",
         "scripts/review-prep.sh",
         "scripts/stale-pass.sh",
+        "scripts/verdict.sh",
     ] {
         assert!(
             package.scripts.contains(&PathBuf::from(script)),
@@ -696,7 +697,13 @@ fn the_answer_route_check_fires_on_inline_bad_samples() {
 
 #[test]
 fn every_script_is_posix_sh_and_calls_no_method_tool() {
-    for name in ["clarify.sh", "rule.sh", "review-prep.sh", "stale-pass.sh"] {
+    for name in [
+        "clarify.sh",
+        "rule.sh",
+        "review-prep.sh",
+        "stale-pass.sh",
+        "verdict.sh",
+    ] {
         let path = package_dir().join("scripts").join(name);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("#!/bin/sh\n"), "{name}: POSIX sh");
@@ -817,11 +824,336 @@ fn the_review_stage_is_read_only_and_names_its_files() {
         "{before:?}"
     );
     assert_eq!(review.done.len(), 1);
-    assert!(argv_has(&review.done[0], "^verdict: (pass|block)$"));
-    assert!(argv_has(
-        &review.done[0],
-        "{run.dir}/out/{unit.id}/review.md"
-    ));
+    // The verdict is line 1 of the review file, read by `verdict.sh`; no condition calls `grep`.
+    assert_eq!(
+        exit0_argv(&review.done[0]),
+        [
+            "sh",
+            "{run.package}/scripts/verdict.sh",
+            "{run.dir}/out/{unit.id}/review.md",
+            "any"
+        ]
+    );
+}
+
+/// The argv of an `exit0` condition. Any other kind of condition panics.
+fn exit0_argv(cond: &DoneCond) -> Vec<String> {
+    match cond {
+        DoneCond::Exit0(c) => c.argv.clone(),
+        other => panic!("not an exit0 condition: {other:?}"),
+    }
+}
+
+#[test]
+fn no_review_condition_calls_grep() {
+    let file = load().file;
+    let review = item_stage(&file, "review");
+    let conds = review
+        .done
+        .iter()
+        .chain(review.outcomes.iter().flat_map(|o| o.when.iter()));
+    for cond in conds {
+        let argv = exit0_argv(cond);
+        assert!(
+            !argv.iter().any(|a| a == "grep"),
+            "a review condition calls grep: {argv:?}"
+        );
+    }
+}
+
+/// Run `verdict.sh` with these arguments. Returns its exit code and its stderr.
+fn run_verdict(args: &[&std::ffi::OsStr]) -> (i32, String) {
+    let out = std::process::Command::new("sh")
+        .arg(package_dir().join("scripts/verdict.sh"))
+        .args(args)
+        .output()
+        .expect("sh runs");
+    (
+        out.status
+            .code()
+            .expect("verdict.sh ends with an exit code"),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The exit code of `verdict.sh <dir>/review.md <mode>` when the file holds exactly `bytes`.
+fn verdict_of(bytes: &[u8], mode: &str) -> i32 {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("review.md");
+    std::fs::write(&file, bytes).unwrap();
+    run_verdict(&[file.as_os_str(), mode.as_ref()]).0
+}
+
+#[test]
+fn verdict_sh_accepts_only_a_line_one_that_is_exactly_the_verdict_asked_for() {
+    // (file bytes, expected exit in `pass`, in `block`, in `any`)
+    let cases: &[(&str, &[u8], i32, i32, i32)] = &[
+        ("pass", b"verdict: pass\nhead: abc\n", 0, 1, 0),
+        ("block", b"verdict: block\nhead: abc\n", 1, 0, 0),
+        ("pass, no final newline", b"verdict: pass", 0, 1, 0),
+        ("block, no final newline", b"verdict: block", 1, 0, 0),
+        (
+            "pass that quotes a block",
+            b"verdict: pass\nhead: abc\n\n- verdict: block\n",
+            0,
+            1,
+            0,
+        ),
+        (
+            "block that quotes a pass",
+            b"verdict: block\nverdict: pass\n",
+            1,
+            0,
+            0,
+        ),
+        (
+            "a verdict only on a later line",
+            b"review\nverdict: pass\n",
+            1,
+            1,
+            1,
+        ),
+        (
+            "a later block under a bad line 1",
+            b"# Review\nverdict: block\n",
+            1,
+            1,
+            1,
+        ),
+        ("a trailing space", b"verdict: pass \nhead: abc\n", 1, 1, 1),
+        ("a trailing space, no newline", b"verdict: block ", 1, 1, 1),
+        (
+            "a carriage return",
+            b"verdict: pass\r\nhead: abc\n",
+            1,
+            1,
+            1,
+        ),
+        ("a leading space", b" verdict: pass\n", 1, 1, 1),
+        ("a prefix", b"xverdict: pass\n", 1, 1, 1),
+        ("a longer verdict", b"verdict: passed\n", 1, 1, 1),
+        ("another verdict", b"verdict: maybe\n", 1, 1, 1),
+        ("an empty file", b"", 1, 1, 1),
+        ("a blank line 1", b"\nverdict: pass\n", 1, 1, 1),
+    ];
+    for (name, bytes, pass, block, any) in cases {
+        for (mode, want) in [("pass", pass), ("block", block), ("any", any)] {
+            assert_eq!(
+                verdict_of(bytes, mode),
+                *want,
+                "{name}: mode {mode}: {:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+}
+
+#[test]
+fn verdict_sh_fails_closed_for_no_file_a_directory_and_a_symbolic_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.md");
+    let real = dir.path().join("real.md");
+    std::fs::write(&real, "verdict: pass\n").unwrap();
+    let folder = dir.path().join("folder");
+    std::fs::create_dir(&folder).unwrap();
+    let link = dir.path().join("link.md");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    for mode in ["pass", "block", "any"] {
+        for (name, path) in [
+            ("no file", &missing),
+            ("a directory", &folder),
+            ("a link", &link),
+        ] {
+            assert_eq!(
+                run_verdict(&[path.as_os_str(), mode.as_ref()]).0,
+                1,
+                "{name}, mode {mode}"
+            );
+        }
+    }
+    // The same text in the plain file passes: only the link made the difference.
+    assert_eq!(run_verdict(&[real.as_os_str(), "pass".as_ref()]).0, 0);
+}
+
+#[test]
+fn verdict_sh_exits_2_with_a_line_on_stderr_for_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("review.md");
+    std::fs::write(&file, "verdict: pass\n").unwrap();
+    let f = file.as_os_str();
+    let wrong: Vec<Vec<&std::ffi::OsStr>> = vec![
+        vec![],
+        vec![f],
+        vec![f, "pass".as_ref(), "extra".as_ref()],
+        vec![f, "maybe".as_ref()],
+        vec![f, "".as_ref()],
+        vec![f, "PASS".as_ref()],
+    ];
+    for args in wrong {
+        let (code, stderr) = run_verdict(&args);
+        assert_eq!(code, 2, "args {args:?}");
+        assert_eq!(stderr.lines().count(), 1, "args {args:?}: {stderr:?}");
+    }
+}
+
+/// The text of a package script, without its comment lines.
+fn script_code(name: &str) -> String {
+    let text = std::fs::read_to_string(package_dir().join("scripts").join(name)).unwrap();
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn stale_pass_and_review_prep_read_the_verdict_through_verdict_sh_alone() {
+    for name in ["stale-pass.sh", "review-prep.sh"] {
+        let code = script_code(name);
+        assert!(
+            code.contains("/verdict.sh\""),
+            "{name} calls verdict.sh next to itself: {code}"
+        );
+        // No second copy of the line-1 test.
+        for copy in ["verdict: pass", "verdict: block"] {
+            assert!(!code.contains(copy), "{name} holds its own `{copy}` test");
+        }
+    }
+    assert!(script_code("stale-pass.sh").contains("verdict.sh\" \"$review\" pass"));
+    assert!(script_code("review-prep.sh").contains("verdict.sh\" \"$review\" any"));
+}
+
+/// Run `stale-pass.sh <file> <bare repo> main` and return its exit code. The bare repo has a
+/// branch `main` at a known commit, built with local git only.
+fn stale_pass_of(review: &[u8]) -> i32 {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str], cwd: &Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bare = dir.path().join("bare.git");
+    git(
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "-b",
+            "main",
+            bare.to_str().unwrap(),
+        ],
+        dir.path(),
+    );
+    let work = dir.path().join("work");
+    git(
+        &["init", "--quiet", "-b", "main", work.to_str().unwrap()],
+        dir.path(),
+    );
+    git(&["commit", "--quiet", "--allow-empty", "-m", "c1"], &work);
+    git(&["push", "--quiet", bare.to_str().unwrap(), "main"], &work);
+    let head = git(&["rev-parse", "main"], &bare);
+    let mut text = Vec::new();
+    for part in review.split(|b| *b == b'@') {
+        text.extend_from_slice(part);
+        if part.len() != review.len() {
+            text.extend_from_slice(head.as_bytes());
+        }
+    }
+    let file = dir.path().join("review.md");
+    std::fs::write(&file, &text).unwrap();
+    std::process::Command::new("sh")
+        .arg(package_dir().join("scripts/stale-pass.sh"))
+        .arg(&file)
+        .arg(&bare)
+        .arg("main")
+        .status()
+        .unwrap()
+        .code()
+        .unwrap()
+}
+
+#[test]
+fn stale_pass_reads_line_one_through_verdict_sh_and_line_two_for_the_head() {
+    // `@` stands for the branch head. A pass on the head is not stale (1).
+    assert_eq!(stale_pass_of(b"verdict: pass\nhead: @\n"), 1);
+    // A pass on another head, or with no head, is stale (0).
+    assert_eq!(stale_pass_of(b"verdict: pass\nhead: 0123abc\n"), 0);
+    assert_eq!(stale_pass_of(b"verdict: pass\nno head\n"), 0);
+    // Any other line 1 is not a pass, whatever follows (1).
+    assert_eq!(stale_pass_of(b"verdict: block\nhead: 0123abc\n"), 1);
+    assert_eq!(stale_pass_of(b"verdict: pass \nhead: 0123abc\n"), 1);
+    assert_eq!(stale_pass_of(b"verdict: pass\r\nhead: 0123abc\n"), 1);
+    assert_eq!(
+        stale_pass_of(b"# review\nverdict: pass\nhead: 0123abc\n"),
+        1
+    );
+    assert_eq!(stale_pass_of(b""), 1);
+}
+
+#[test]
+fn review_prep_keeps_a_review_only_when_line_one_is_a_verdict_and_always_clears_review_md() {
+    let prep = package_dir().join("scripts/review-prep.sh");
+    let run = |review: &Path, prev: &Path| {
+        let status = std::process::Command::new("sh")
+            .arg(&prep)
+            .arg(review)
+            .arg(prev)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(!review.exists() && review.symlink_metadata().is_err());
+    };
+    let cases: &[(&str, &[u8], bool)] = &[
+        ("pass", b"verdict: pass\nhead: abc\n", true),
+        ("block, no final newline", b"verdict: block", true),
+        (
+            "a quoted block under a pass",
+            b"verdict: pass\nverdict: block\n",
+            true,
+        ),
+        (
+            "a later verdict under a bad line 1",
+            b"# Review\nverdict: pass\n",
+            false,
+        ),
+        ("a trailing space", b"verdict: pass \n", false),
+        ("a carriage return", b"verdict: block\r\n", false),
+        ("an empty file", b"", false),
+    ];
+    for (name, bytes, kept) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, prev) = (
+            dir.path().join("review.md"),
+            dir.path().join("review-prev.md"),
+        );
+        std::fs::write(&prev, "old\n").unwrap();
+        std::fs::write(&review, bytes).unwrap();
+        run(&review, &prev);
+        let want: &[u8] = if *kept { bytes } else { b"old\n" };
+        assert_eq!(std::fs::read(&prev).unwrap(), want, "{name}");
+    }
+    // A symbolic link is never followed.
+    let dir = tempfile::tempdir().unwrap();
+    let (review, prev) = (
+        dir.path().join("review.md"),
+        dir.path().join("review-prev.md"),
+    );
+    let target = dir.path().join("target.md");
+    std::fs::write(&target, "verdict: pass\n").unwrap();
+    std::fs::write(&prev, "old\n").unwrap();
+    std::os::unix::fs::symlink(&target, &review).unwrap();
+    run(&review, &prev);
+    assert_eq!(std::fs::read_to_string(&prev).unwrap(), "old\n", "a link");
+    assert!(target.exists(), "the link's target is untouched");
 }
 
 #[test]
@@ -832,8 +1164,15 @@ fn the_review_outcomes_send_a_block_to_fix_and_a_stale_pass_to_review_each_at_mo
     let block = &review.outcomes[0];
     assert_eq!((block.to.as_str(), block.max), ("fix", 2));
     assert_eq!(block.when.len(), 1);
-    assert!(argv_has(&block.when[0], "-qx"));
-    assert!(argv_has(&block.when[0], "verdict: block"));
+    assert_eq!(
+        exit0_argv(&block.when[0]),
+        [
+            "sh",
+            "{run.package}/scripts/verdict.sh",
+            "{run.dir}/out/{unit.id}/review.md",
+            "block"
+        ]
+    );
     let stale = &review.outcomes[1];
     assert_eq!((stale.to.as_str(), stale.max), ("review", 2));
     assert_eq!(stale.when.len(), 1);

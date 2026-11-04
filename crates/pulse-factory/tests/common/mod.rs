@@ -102,10 +102,10 @@ const REVIEW_STAGES: &str = r#"      - name: review
         settings:
           report_dir: "{run.dir}/out/{unit.id}"
         done:
-          - exit0: [grep, -Eq, "^verdict: (pass|block)$", "{run.dir}/out/{unit.id}/review.md"]
+          - exit0: [sh, "{run.package}/scripts/verdict.sh", "{run.dir}/out/{unit.id}/review.md", any]
         outcomes:
           - when:
-              - exit0: [grep, -qx, "verdict: block", "{run.dir}/out/{unit.id}/review.md"]
+              - exit0: [sh, "{run.package}/scripts/verdict.sh", "{run.dir}/out/{unit.id}/review.md", block]
             to: fix
             max: 2
           - when:
