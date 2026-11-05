@@ -1,7 +1,7 @@
 # ADR-0001 — One controller daemon as a systemd user unit, and one CLI over an OS-user Unix socket
 
-- **Status:** Proposed. Acceptance waits for the clean-checkout install run that the Release 0 close
-  decides (2026-11-05): `scripts/install.sh` has not yet run from a clean checkout on this host.
+- **Status:** Accepted, 2026-11-05, at the Release 0 close, after `scripts/install.sh` ran from a
+  clean checkout (see "Verified claims").
 - **Date:** 2026-10-25
 
 ## Context
@@ -31,7 +31,14 @@ Rejected alternatives:
 
 ### Verified claims
 - `loginctl show-user dev -p Linger` printed `Linger=yes` on draco-desk (2026-10-25).
+- The systemd user bus is reachable from an agent's shell when `XDG_RUNTIME_DIR` is set to
+  `/run/user/$(id -u)`, which `scripts/install.sh` does when it is unset. The unit was installed and
+  ran demo line d3 on 2026-11-02 (`systemctl --user is-active pulse-factory` printed `active`).
+- `scripts/install.sh` ran from a clean clone of `main` at `c92a31a` on draco-desk (2026-11-05, Release
+  0 close). It built the release binary in 49 s, installed it, the workflows, the skill and the unit,
+  and restarted the unit. `systemctl --user is-active pulse-factory` printed `active`, `pulse-factory
+  status --json` answered over the socket, and the three `auto:` demo lines passed on the installed
+  binary.
 
 ### Unverified claims
-- The systemd user bus was not reachable from the onboarding agent's shell: `systemctl --user` failed
-  because `$XDG_RUNTIME_DIR` was not set. Revisit when the skeleton spine installs the unit.
+None.
