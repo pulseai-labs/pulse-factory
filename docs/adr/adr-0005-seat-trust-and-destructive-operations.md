@@ -1,6 +1,6 @@
 # ADR-0005 — Seat trust and destructive operations
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
 
 ## Context
@@ -49,6 +49,13 @@ Only code merges, and only under the workflow's merge rule:
   generation, the exact request ID and revision (ADR-0009), and the PR's head SHA. Code merges with
   that SHA pinned, so a moved head or a superseded claim cannot merge.
 
+*Amended 2026-11-05, at the Release 0 close:* the `git-effects` gate's "human confirm" is a
+**claim-holder confirm** (operator, 2026-11-04). The control is met when the session that holds the
+claim acks the `merge_ack` request, which names the PR, the base and the head SHA. The claim carries
+the operator's authority. The operator may delegate it to an orchestrator session, as for the d5
+walk on `r0.s17`. The ledger records the claim generation, not whether a person or a delegate typed
+the ack.
+
 **Authority:**
 - Only a session that holds the claim can answer a request.
 - A session that Pulse Factory launched can never claim. Pulse Factory launches every seat with a
@@ -70,6 +77,14 @@ Rejected alternatives:
   scan.
 - **Full operator authentication in Release 0.** The operator chose local rails only, because Release
   0 has no network surface.
+- **Push the spine branch at `arm`, or at the lane's cut time** (added 2026-11-05, for `r0.s3.w1`'s
+  base push). The branch does not exist at `arm`: ossify's lane cuts it after the run starts. The
+  lane is a seat, so a push at cut time would give a seat a second own branch and widen its push
+  rights.
+- **A static `pf-rules` allow for the named spine ref** (added 2026-11-05). It would let the close
+  seat's own push create the base. `pf-rules` judges one command line and cannot read remote state,
+  so it cannot allow the push only when `origin` lacks the branch. The controller can, and a seat's
+  push rights stay unchanged.
 
 ## Consequences
 - A gap in a rule set lets a seat do harm with no prompt. The `seat-permission-rules` risk gate covers
@@ -128,3 +143,27 @@ Rejected alternatives:
     A prefix that two guarded options share is denied (canonical issue #8).
   *Still a known limit:* the rails stop mistakes, not an attacker. A script file that the seat
   wrote and then runs, and a program in a file or a `-c` string of an interpreter, are not read.
+- **Amended 2026-11-05, at the Release 0 close: known limits that the `r0.s2` and `r0.s3` close
+  audits named.** None changes a decision above.
+  - **The grammar is a parse-list, not a list of safe forms.** Every form that the parser reads
+    reaches the guards, and the guards deny what they name. Only an unreadable form is denied for
+    being unreadable. So "a role runs only the shell forms the rules read" means the rules read every
+    line they allow. It does not mean that every readable form is safe (`r0.s2` audit finding 1).
+  - **The claim session's second pass runs outside `pf-rules`.** After the ack, `/ossify:close
+    <spine>` runs in the claim session, which Pulse Factory did not launch. No role rule and no
+    `hook` audit covers it. The claim holder owns what it runs (`r0.s2` audit finding 3).
+  - **Ambiguous ancestry fails closed.** The caller check refuses when a read of the process chain
+    fails or the chain does not end (`docs/contracts/requests.md`). A child that a seat detaches from
+    its tree, with the seat token unset, passes the check: that is the stated known limit there.
+    Revisit it with the separate seat identity, or when a network surface appears (`r0.s2` audit
+    finding 6).
+  - **A reviewer model switch needs a full first review.** Review rounds 2 and later read only the
+    fix diff and each earlier finding's closure. When the reviewer model changes, as at the quota
+    switch, the next review of an open PR is a full round 1 (`r0.s2` audit finding 9).
+  - **The controller's base push trusts the local ref's content.** It checks the destination and
+    the ref name, not who moved the ref. A seat that repoints the local spine branch (`git
+    update-ref`, `git branch -f`) before the push makes the controller push that tip as the base.
+    The item PR's review and the spine PR's ack still read the result (`r0.s3` audit finding 1).
+  - **Git config in the repo directory is trusted by the base push.** `url.<base>.insteadOf` and
+    `pushInsteadOf` rewrite the URL at transport time, and `core.hooksPath` and a `pre-push` hook
+    run under the controller (`r0.s3` audit finding 2, PR #20's C9).

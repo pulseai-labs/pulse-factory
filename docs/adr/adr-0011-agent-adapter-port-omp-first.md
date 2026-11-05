@@ -1,8 +1,9 @@
 # ADR-0011 — An agent adapter port, with OMP as the first adapter
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
-- **Amended:** 2026-10-26, at the planning of spine r0.s1: `--no-skills` disables all skill loading,
+- **Amended:** 2026-10-26, at the planning of spine r0.s1, with text from its review round 1 on
+  2026-10-31: `--no-skills` disables all skill loading,
   so a seat could not run the workflow's method skills, such as ossify's `/run-spine`.
 - **Amended:** 2026-11-01, in `r0.s1.w3`: the six unverified claims were settled on real OMP sessions.
   Each result is under "Verified claims". No decision changed: each result took a fallback that

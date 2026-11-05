@@ -1,8 +1,9 @@
 # ADR-0002 — A generic engine core behind ports
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
-- **Amended:** 2026-10-26, at the planning of spine r0.s1: no planning-method code, a queue unit
+- **Amended:** 2026-10-26, at the planning of spine r0.s1, with text from its review round 1 on
+  2026-10-31: no planning-method code, a queue unit
   source, and the vocabulary below.
 - **Amended:** 2026-11-01, at `r0.s1.w2`: the vocabulary gains *track* and a seed's *repeat*. Nothing
   above changes.

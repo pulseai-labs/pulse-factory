@@ -1,6 +1,6 @@
 # ADR-0010 — Privacy posture: fully-open via none
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
 
 ## Context

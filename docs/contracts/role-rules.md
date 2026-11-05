@@ -117,6 +117,12 @@ is denied with the rule `unparsed-command`, and the reason names the form. So a 
 nobody has seen yet fails closed with no new code. The list is `pf_rules::grammar::ALLOWED` in code,
 and a test keeps this page and that list in step.
 
+The list says what the rules can read, not what is safe. A capability gates only its own
+operations, such as a push of the seat's own branch or a delete of its scratch. Any other command
+line passes when every form in it is listed and no guard denies it. So a form that joins the list
+widens what a role may run, and the guards are the only check on it (ADR-0005, known limits amended
+2026-11-05).
+
 **The guards run first.** A line that a guard denies keeps the rule of that guard (`gh-pr-merge`,
 `force-push`, `delete-outside-own-paths`, and the others). The grammar deny applies only when no
 guard denied the line, and it applies before any capability allow. So `git push origin work/u1;

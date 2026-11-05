@@ -1,8 +1,9 @@
 # ADR-0004 — A versioned CLI with JSON output, and a strict versioned workflow file
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
-- **Amended:** 2026-10-26, at the planning of spine r0.s1: declared plugins, unit sources and seed
+- **Amended:** 2026-10-26, at the planning of spine r0.s1, with text from its review round 1 on
+  2026-10-31: declared plugins, unit sources and seed
   units.
 - **Amended:** 2026-11-01, at `r0.s1.w2`: `roots` and the role rule files. Nothing above changes.
 
