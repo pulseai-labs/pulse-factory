@@ -19,7 +19,7 @@ cp -R "$root/skill" "$share/skill"
 cp "$root/deploy/systemd/pulse-factory.service" "$unit_dir/pulse-factory.service"
 
 # A shell with no login session has no XDG_RUNTIME_DIR, and `systemctl --user` then cannot find
-# the user bus (ADR-0001, the unverified claim).
+# the user bus (ADR-0001).
 if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   XDG_RUNTIME_DIR="/run/user/$(id -u)"
   export XDG_RUNTIME_DIR
