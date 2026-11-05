@@ -1,6 +1,7 @@
 # ADR-0001 — One controller daemon as a systemd user unit, and one CLI over an OS-user Unix socket
 
-- **Status:** Proposed
+- **Status:** Proposed. Acceptance waits for the clean-checkout install run that the Release 0 close
+  decides (2026-11-05): `scripts/install.sh` has not yet run from a clean checkout on this host.
 - **Date:** 2026-10-25
 
 ## Context

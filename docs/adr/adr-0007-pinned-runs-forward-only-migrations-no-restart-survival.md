@@ -1,6 +1,6 @@
 # ADR-0007 — Pinned runs, forward-only migrations, and no restart survival
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
 
 ## Context
@@ -33,3 +33,9 @@ Rejected alternatives:
 ## Consequences
 - A controller crash costs each in-flight seat its work since that seat last committed or staged.
 - The operator decides each relaunch through the claim.
+- **Known limit, a remote effect with no ledger line (amended 2026-11-05, at the Release 0 close;
+  `r0.s3` audit finding 8).** The controller's base push can land on `origin` while its ledger write
+  fails. The unit parks, and the park reason says the push was done but its ledger line was not
+  written. On the retry, `origin` already has the branch, so the controller skips the push and no
+  ledger line for it is ever written. The park reason is the only record. Revisit it with restart
+  survival and ledger durability.

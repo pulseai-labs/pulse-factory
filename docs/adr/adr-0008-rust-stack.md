@@ -1,6 +1,6 @@
 # ADR-0008 — The stack: Rust with Tokio, rusqlite, portable-pty, clap, serde and yaml-rust2
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
 
 ## Context

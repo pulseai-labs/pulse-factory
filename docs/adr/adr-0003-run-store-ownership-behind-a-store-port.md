@@ -1,8 +1,9 @@
 # ADR-0003 — The controller owns the run store behind a store port
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
-- **Amended:** 2026-10-26, at the planning of spine r0.s1: the spine-plan row and the run queue row.
+- **Amended:** 2026-10-26, at the planning of spine r0.s1, with text from its review round 1 on
+  2026-10-31: the spine-plan row and the run queue row.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of

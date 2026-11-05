@@ -1,6 +1,6 @@
 # ADR-0006 — Every node ends in a recorded status, and every halt becomes a request
 
-- **Status:** Proposed
+- **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
 
 ## Context
