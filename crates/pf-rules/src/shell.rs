@@ -42,7 +42,9 @@ pub struct Word {
     /// True when any part of the word was in quotes.
     pub any_quote: bool,
     /// True when the word is exactly one double-quoted string (`"$a/b"`, `"$(cmd)"`) with nothing
-    /// outside the quotes. The shell does not split or expand what is inside it.
+    /// outside the quotes. The shell does not split a variable or a substitution inside it into
+    /// words, with one exception: `"$@"` and `"${a[@]}"` do split, so a word with a `$@` in its
+    /// text (see `Word::text`) is `one_dq` and still makes many words.
     pub one_dq: bool,
     /// The words that an unquoted brace expansion makes of this word, such as `{merge,x}`.
     /// Empty when the word has none. The parser puts these words in the command in its place.
@@ -1182,14 +1184,12 @@ impl Parser<'_> {
                 }
                 (Some(':'), Some('-' | '+')) if !length => {
                     self.i += 2;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 (Some('-' | '+'), _) if !length => {
                     self.i += 1;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 // The trim forms `${NAME#word}`, `${NAME##word}`, `${NAME%word}` and
@@ -1197,14 +1197,12 @@ impl Parser<'_> {
                 // default word.
                 (Some('#' | '%'), Some('#' | '%')) if !length && self.peek() == self.peek_at(1) => {
                     self.i += 2;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 (Some('#' | '%'), _) if !length => {
                     self.i += 1;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 _ => {}
@@ -1239,6 +1237,34 @@ impl Parser<'_> {
             "`{raw}` (a parameter expansion that the grammar does not list)"
         ));
         self.scan_text(&inner, depth)?;
+        // `${a[@]}`, `${@:2}` and `${!a[@]}` expand to many words, as `$@` does.
+        if inner.contains("[@]") || inner.trim_start_matches('!').starts_with('@') {
+            segs.push(Seg::Var {
+                name: "@".to_string(),
+                quoted,
+            });
+        }
+        segs.push(Seg::Subst);
+        Ok(())
+    }
+
+    /// The rest of `${NAME:-word}` and the like, after the operator: reads the word, then pushes
+    /// the expansion. It also pushes the variable `@` when the expansion can make many words:
+    /// `NAME` is `@`, or the word holds a `$@`, so the word is marked as one that splits.
+    fn param_tail(
+        &mut self,
+        segs: &mut Vec<Seg>,
+        name: &str,
+        quoted: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        let many = self.param_word(quoted, depth)?;
+        if many || name == "@" {
+            segs.push(Seg::Var {
+                name: "@".to_string(),
+                quoted,
+            });
+        }
         segs.push(Seg::Subst);
         Ok(())
     }
@@ -1246,14 +1272,17 @@ impl Parser<'_> {
     /// The word of `${NAME:-word}`, up to the brace that closes it. It is read as a word is: a
     /// quote, a variable or a substitution in it is found, and a `}` inside one does not close it.
     /// `quoted` is true when the expansion stands in double quotes, where a single quote is text.
-    fn param_word(&mut self, quoted: bool, depth: usize) -> Result<(), String> {
+    /// It returns true when the word holds a `$@` (or a `${a[@]}`) that can make many words.
+    fn param_word(&mut self, quoted: bool, depth: usize) -> Result<bool, String> {
         let mut scratch: Vec<Seg> = Vec::new();
         loop {
             match self.peek() {
                 None => return Err("a ${…} is not closed".to_string()),
                 Some('}') => {
                     self.i += 1;
-                    return Ok(());
+                    return Ok(scratch
+                        .iter()
+                        .any(|s| matches!(s, Seg::Var { name, .. } if name == "@")));
                 }
                 Some('\\') => self.i += 2,
                 Some('\'') if !quoted => {

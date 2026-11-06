@@ -387,6 +387,12 @@ fn a_glob_or_variable_word_among_the_options_of_git_is_denied() {
         "git -C \"$a\"$Y status",
         "git -C \"a\"\"$Y\" status",
         "git -C \"$a\"{x,y} status",
+        "git -C \"$@\" status",
+        "git --git-dir \"$@\" status",
+        "git -C \"${a[@]}\" status",
+        "git -C \"${@:2}\" status",
+        "git -C \"${x:-$@}\" status",
+        "git -C \"$@\" push origin work/u1",
     ] {
         denied_for_every_role(c, "unparsed-command");
     }
@@ -399,6 +405,7 @@ fn a_literal_or_quoted_option_of_git_stays_allowed() {
         "git --no-pager status",
         "git -C \"$DIR\" status",
         "git --git-dir \"$D\" status",
+        "git -C \"$*\" status",
         "git -C \"$tmp/seed\" status",
         "git -C \"$(git rev-parse --show-toplevel)\" status",
         "git -C 'a*' status",

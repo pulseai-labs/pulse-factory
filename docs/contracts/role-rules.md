@@ -107,7 +107,9 @@ options of `git` itself, before the subcommand: a word there with an unquoted gl
 (`-c*`, `-c$X`) is denied as `unparsed-command`, because it can expand to `-c` and make the next
 word a key; so is a glob or any value that expands as the value of `-C`, `--git-dir`, `--work-tree`
 and the other options that take one, unless the value is one double-quoted string
-(`-C "$WT"`, `-C "$(cmd)"`). A quote beside an unquoted part (`-C "."$Y`) is denied. A joined option
+(`-C "$WT"`, `-C "$(cmd)"`; the shell does not split these). A quote beside an unquoted part
+(`-C "."$Y`) is denied. `"$@"` and `"${a[@]}"` are denied too, because the shell splits them into
+words even in double quotes, so they can bring in more options; `"$*"` stays one word. A joined option
 word with a variable (`--git-dir="$D"`) is denied too; write the spaced form. The editor opens a config whose writes the
 rules cannot read, so `--edit` is denied too. Git stops reading flags at the first operand, so
 `core.hooksPath --unset` and `core.hooksPath --` write the value `--unset` and `--`; the rules read

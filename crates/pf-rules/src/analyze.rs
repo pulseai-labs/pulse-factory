@@ -825,10 +825,12 @@ impl<'a> Analyzer<'a> {
         // value of an option that takes one can bring in more options when it splits or expands.
         let option_unreadable = |w: &Word| w.dynamic || w.glob;
         // A value that expands is readable only when it is one double-quoted string, such as
-        // `-C "$WT"` or `-C "$(cmd)"`: the shell does not split or expand it. A quote beside an
-        // unquoted part (`"."$Y`) does not help, because the shell splits that part into words.
-        let value_unreadable =
-            |w: Option<&Word>| w.is_some_and(|w| w.glob || (w.dynamic && !w.one_dq));
+        // `-C "$WT"` or `-C "$(cmd)"`: the shell does not split that into words. A quote beside
+        // an unquoted part (`"."$Y`) does not help, because the shell splits that part into
+        // words. `"$@"` and `"${a[@]}"` are the exception: they split, so they are denied.
+        let value_unreadable = |w: Option<&Word>| {
+            w.is_some_and(|w| w.glob || (w.dynamic && (!w.one_dq || makes_many_words(w))))
+        };
         while i < words.len() {
             if option_unreadable(&words[i]) {
                 self.deny(
@@ -1110,7 +1112,10 @@ impl<'a> Analyzer<'a> {
                 format!("the push has {:?}, which cannot be read (a variable outside quotes, or one that changes the meaning)", w.raw),
             );
         }
-        for d in dirs.iter().filter(|d| d.dynamic && d.quoted_var.is_none()) {
+        for d in dirs
+            .iter()
+            .filter(|d| d.dynamic && (d.quoted_var.is_none() || makes_many_words(d)))
+        {
             self.deny(
                 "push-unreadable",
                 format!(
@@ -1789,6 +1794,13 @@ fn config_trust_reason(form: &str, key: &str) -> String {
         "{form} sets {}, which redirects git; a seat may not set it",
         redact(key)
     )
+}
+
+/// True when the shell can split the word into many words even in double quotes: it holds a
+/// `$@`, `${@…}` or `${a[@]…}` (the parser puts the variable `@` in the text for each of them).
+/// `"$*"` is one word and does not count.
+fn makes_many_words(w: &Word) -> bool {
+    w.dynamic && w.text.contains("$@")
 }
 
 /// The key of a `key=value` setting, as `git -c` and `git --config-env` read it: the text before
