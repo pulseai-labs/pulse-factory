@@ -255,6 +255,90 @@ fn a_flag_after_the_first_operand_is_an_operand() {
     }
 }
 
+/// PR #28, C18: a `--` after the first operand is an operand, not the end of the flags. `git config
+/// core.hooksPath --` writes the value `--`. The guard is a closed form after round 3: it lets a
+/// call through for a key that redirects git only in a shape it reads exactly, and a `--` anywhere
+/// in such a call is outside every shape.
+#[test]
+fn a_double_dash_in_a_call_that_names_a_redirect_key_is_denied() {
+    for c in [
+        "git config core.hooksPath --",
+        "git config set core.hooksPath --",
+        "git config core.sshCommand --",
+        "git config --global core.sshCommand --",
+        "git config remote.forge.pushurl --",
+        "git config --global remote.forge.pushurl --",
+        "git config remote.origin.proxy --",
+        "git config -- core.hooksPath",
+        "git config --global -- core.hooksPath",
+        "git config --get core.hooksPath -- x",
+        "git config --unset core.hooksPath --",
+        "git config get core.hooksPath --",
+        "git config core.hooksPath x --",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+}
+
+/// PR #28, C18: one allowed form of each shape the guard reads exactly, for a key that redirects
+/// git: a key alone, a read flag, a list flag, a removal flag, and the verbs `get`, `list` and
+/// `unset`, each with the scope flags and the options that take a value.
+#[test]
+fn every_modeled_read_shape_stays_allowed() {
+    for c in [
+        "git config core.hooksPath",
+        "git config --global core.sshCommand",
+        "git config --local --file f remote.forge.pushurl",
+        "git config --type bool core.hooksPath",
+        "git config --get core.hooksPath",
+        "git config --get-all remote.forge.pushurl",
+        "git config --system --get-regexp core.hooksPath",
+        "git config --worktree --get core.hooksPath",
+        "git config --list",
+        "git config -l",
+        "git config --global --list",
+        "git config --file f --list",
+        "git config --unset core.hooksPath",
+        "git config --global --unset-all remote.forge.pushurl",
+        "git config --remove-section http",
+        "git config get core.hooksPath",
+        "git config get --all remote.forge.pushurl",
+        "git config get --global core.sshCommand",
+        "git config list",
+        "git config list --global",
+        "git config unset core.hooksPath",
+        "git config unset --all core.hooksPath",
+        "git config remove-section remote.forge",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
+/// PR #28, C18: a call that is outside every modeled shape is denied when any word names a key that
+/// redirects git, so no later round has to guess which word is a flag.
+#[test]
+fn a_call_outside_every_modeled_shape_that_names_a_redirect_key_is_denied() {
+    for c in [
+        "git config --unknown-flag core.hooksPath x",
+        "git config --global get core.hooksPath x",
+        "git config --get --add core.hooksPath x",
+        "git config --get --get-all core.hooksPath",
+        "git config core.hooksPath x y",
+        "git config set --global core.hooksPath x",
+        "git config --null core.hooksPath x",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+    // No word names a key that redirects git: the write is not this rule's.
+    for c in [
+        "git config user.name x",
+        "git config --global user.name x --",
+        "git config set user.email a@b.c",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
 /// A short flag inside a cluster is a flag: `-ze` is `-z` and `--edit`.
 #[test]
 fn a_short_flag_in_a_cluster_is_read() {
@@ -297,7 +381,6 @@ fn a_read_that_uses_an_option_with_a_value_stays_allowed() {
         "git config get --url https://github.com/ http.proxy",
         "git config --file f --get core.hooksPath",
         "git config -f f --list",
-        "git config --get core.hooksPath -- x",
     ] {
         allowed_for_every_role(c);
     }

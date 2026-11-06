@@ -89,10 +89,17 @@ a command. A rule name is what the audit line and a deny's reason show.
 from the global config: `core.sshCommand`, `core.gitProxy`, `http.proxy`, `http.<url>.proxy`,
 `http.sslVerify`, `http.<url>.sslVerify`, `credential.helper` and `credential.<url>.helper`. They
 redirect git, so a seat may not set them, whatever the value: a bare path, a bare host and an empty
-value each redirect. A read, a listing and a removal of such a key stay allowed. The editor opens a
-config whose writes the rules cannot read, so `--edit` is denied too. The rules read a flag of
-`git config` only where git reads one: the value of an option that takes one (`--comment --get`) and
-every word after `--` or after the first operand (`core.hooksPath --unset` writes the value `--unset`) are operands, and a short flag counts inside a cluster (`-ze`). A write into the repository's
+value each redirect. A read, a listing and a removal of such a key stay allowed, but only in a shape the rules read exactly:
+a key alone (`git config <key>`); one read or removal flag (`--get`, `--get-all`, `--get-regexp`,
+`--get-urlmatch`, `--list`, `-l`, `--unset`, `--unset-all`, `--remove-section`); or the verb `get`,
+`list`, `unset` or `remove-section` in first place. Scope flags (`--global`, `--local`, `--system`,
+`--worktree`) and the options that take a value (`--file <f>`, `--comment`, `--type`, …) may come
+before the key. Every other call is denied when any word of it names a key that redirects git: the
+rules do not guess which later word is a flag, and a `--` anywhere in such a call is outside every
+shape. So a value that equals such a key is denied too. The editor opens a config whose writes the
+rules cannot read, so `--edit` is denied too. Git stops reading flags at the first operand, so
+`core.hooksPath --unset` and `core.hooksPath --` write the value `--unset` and `--`; the rules read
+them as writes. A short flag counts inside a cluster (`-ze`). A write into the repository's
 `.git/config` or a hooks directory through a shell redirection or `cp` is not read. That is the known
 limit of the redirection paragraph below.
 

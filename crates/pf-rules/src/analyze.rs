@@ -1896,14 +1896,15 @@ fn config_call(rest: &[Word]) -> ConfigCall<'_> {
     let mut i = 0;
     while i < rest.len() {
         let t = rest[i].text.as_str();
-        if t == "--" {
-            call.positional.extend(rest[i + 1..].iter());
-            break;
-        }
-        // Past the first operand, every word is an operand, whatever it looks like.
+        // Past the first operand, every word is an operand, whatever it looks like. A `--` there
+        // is an operand too: `core.hooksPath --` writes the value `--`.
         let verb_first = rest.first().is_some_and(|w| config_verb(&w.text));
         if !call.positional.is_empty() && !(call.positional.len() == 1 && verb_first) {
             call.positional.extend(rest[i..].iter());
+            break;
+        }
+        if t == "--" {
+            call.positional.extend(rest[i + 1..].iter());
             break;
         }
         if let Some(long) = t.strip_prefix("--") {
@@ -1991,8 +1992,9 @@ fn config_writes_command(rest: &[Word]) -> bool {
 }
 
 /// Does `git config …` set a key that redirects git, rename a section into one, or open the
-/// config in an editor? Returns the rule and the reason. A read, a listing and a removal do not.
-/// The positional reading is the one of `config_writes_command`, so a read stays a read.
+/// config in an editor? Returns the rule and the reason. A read, a listing and a removal do not,
+/// but only in a shape `config_read_shape` reads exactly. Any other call is denied when a word of
+/// it names a key that redirects git.
 fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
     let call = config_call(rest);
     let editor = || {
@@ -2012,36 +2014,148 @@ fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
     } else {
         positional.first().map(|w| w.text.as_str())
     };
-    match verb {
-        Some("edit") => return Some(editor()),
-        Some("get" | "list" | "unset" | "remove-section") => return None,
-        Some("set") => {
-            positional.remove(0);
-        }
-        Some("rename-section") => {
-            positional.remove(0);
-            return config_rename_deny(&positional);
-        }
-        _ => {}
+    if verb == Some("edit") {
+        return Some(editor());
     }
-    if call.rename {
-        return config_rename_deny(&positional);
-    }
-    if call.reads {
+    // A call in a shape the guard reads exactly, which only reads or removes, is allowed.
+    if config_read_shape(rest) {
         return None;
     }
-    // `git config key` reads the key. A value after it, or `--add`, writes it. A key that is a
-    // variable stays with `config_writes_command`.
-    if !(call.writes_more || positional.len() > 1) {
-        return None;
+    if verb == Some("rename-section") {
+        positional.remove(0);
+        if let Some(deny) = config_rename_deny(&positional) {
+            return Some(deny);
+        }
     }
-    let key = positional.first().filter(|k| !k.dynamic)?;
-    config_key_redirects(&key.text).then(|| {
-        (
-            CONFIG_TRUST,
-            config_trust_reason("git config", key.text.trim()),
-        )
-    })
+    if call.rename
+        && let Some(deny) = config_rename_deny(&positional)
+    {
+        return Some(deny);
+    }
+    // Any other call is a shape the guard does not read: it cannot tell the key from the value, or
+    // a read from a write. It is denied when any word names a key that redirects git. A key that
+    // is a variable stays with `config_writes_command`.
+    rest.iter()
+        .find(|w| !w.dynamic && config_key_redirects(&w.text))
+        .map(|w| {
+            (
+                CONFIG_TRUST,
+                config_trust_reason("git config", w.text.trim()),
+            )
+        })
+}
+
+/// The flags of `git config` that name no action and change no write: a scope, and the format
+/// flags. They are the only ones `config_read_shape` skips besides the actions that read.
+const CONFIG_NEUTRAL_FLAGS: [&str; 9] = [
+    "global",
+    "local",
+    "system",
+    "worktree",
+    "null",
+    "name-only",
+    "show-origin",
+    "show-scope",
+    "includes",
+];
+
+/// The flags of the verbs `get` and `unset` that name no action.
+const CONFIG_VERB_FLAGS: [&str; 4] = ["all", "regexp", "show-names", "fixed-value"];
+
+/// Is this `git config …` call one of the shapes that only read or remove, written so the guard
+/// reads it exactly? The shapes are:
+/// - `git config <key>`, with scope, format and value-taking options before the key;
+/// - one read or removal flag (`--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`, `--list`,
+///   `-l`, `--unset`, `--unset-all`, `--remove-section`) among those options, then its operands;
+/// - the verb `get`, `list`, `unset` or `remove-section` in first place, with its own flags
+///   (`--all`, `--regexp`, …) and those options, then its operands.
+///
+/// Every other word before the first operand, a `--` anywhere, a word that is a variable or a
+/// glob before the first operand, and a key with more than one operand and no read flag are
+/// not a shape. The caller denies such a call when any word names a key that redirects git.
+fn config_read_shape(rest: &[Word]) -> bool {
+    let verb = rest
+        .first()
+        .is_some_and(|w| matches!(w.text.as_str(), "get" | "list" | "unset" | "remove-section"));
+    let mut action = verb;
+    let mut i = usize::from(verb);
+    while i < rest.len() {
+        let w = &rest[i];
+        let t = w.text.as_str();
+        if w.dynamic || w.glob || t == "--" {
+            return false;
+        }
+        if let Some(long) = t.strip_prefix("--") {
+            let (name, has_value) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            if has_value {
+                // `--file=f`, `--comment=c`: the value is in the word.
+                if !CONFIG_VALUE_OPTIONS.contains(&name) {
+                    return false;
+                }
+            } else if CONFIG_VALUE_OPTIONS.contains(&name) {
+                // The next word is the value, whatever it looks like.
+                i += 1;
+                if i >= rest.len() || rest[i].dynamic || rest[i].glob {
+                    return false;
+                }
+            } else if matches!(
+                name,
+                "get"
+                    | "get-all"
+                    | "get-regexp"
+                    | "get-urlmatch"
+                    | "list"
+                    | "unset"
+                    | "unset-all"
+                    | "remove-section"
+            ) {
+                if action {
+                    return false;
+                }
+                action = true;
+            } else if !(CONFIG_NEUTRAL_FLAGS.contains(&name)
+                || verb && CONFIG_VERB_FLAGS.contains(&name))
+            {
+                return false;
+            }
+        } else if t.starts_with('-') && t.len() > 1 {
+            for (at, c) in t.char_indices().skip(1) {
+                match c {
+                    'z' => {}
+                    'l' => {
+                        if action {
+                            return false;
+                        }
+                        action = true;
+                    }
+                    // `-f` and `-t` end the cluster. The rest of the word is the value, or the
+                    // next word is.
+                    'f' | 't' => {
+                        if at + 1 == t.len() {
+                            i += 1;
+                            if i >= rest.len() || rest[i].dynamic || rest[i].glob {
+                                return false;
+                            }
+                        }
+                        break;
+                    }
+                    _ => return false,
+                }
+            }
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    let operands = &rest[i.min(rest.len())..];
+    if operands.iter().any(|w| w.text == "--") {
+        return false;
+    }
+    // A read flag or a verb makes every operand an operand of a read. Without one, a key alone
+    // reads; a value after it writes.
+    action || operands.len() <= 1
 }
 
 /// `git config --rename-section <old> <new>`: is `<new>` a section that holds a key that redirects
