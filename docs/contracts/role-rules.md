@@ -36,7 +36,7 @@ The set is closed. There are five values:
 | `delete_own_build_target` | The seat may delete its own build target directory. |
 | `push_own_branch` | The seat may push the branch of its own unit. |
 | `push_own_tag` | The seat may push a tag of its own unit. |
-| `write_own_report_and_run_files` | The seat may write its report and its files under the run directory. |
+| `write_own_report_and_run_files` | The seat may write its report and the files in its own unit's directory under the run directory (`out/<unit>`, and `out/<seed>` for a repeat of a repeating seed). |
 
 A role that does not list a value does not get it. A role that lists no push value may not push.
 
@@ -118,8 +118,9 @@ command, not the file a `>` or `>>` opens, so `echo x > <worktree>/file` is allo
 `reviewer` as it is for every role. The reviewer's brief (`briefs/review.md`) forbids a redirection
 into the worktree. A test (`reviewer_role.rs`) fails if the rules start to guard redirection, so this
 paragraph is corrected then. The same holds for the other shell writes, such as `sed -i`, `git add`
-and `git commit`: the rules deny a push, not a local change. The `reviewer`'s write path also
-includes the run directory itself, not only `out/<unit>`, so the brief is the guard there too.
+and `git commit`: the rules deny a push, not a local change. The write tools of the `reviewer` reach
+only `out/<unit>` of the run directory. A shell redirection into another unit's directory is still
+this known limit, so the brief is the guard there.
 
 ## The grammar of the shell that `pf-rules` reads
 

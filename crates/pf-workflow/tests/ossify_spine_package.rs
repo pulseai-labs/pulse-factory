@@ -1305,11 +1305,74 @@ fn the_spine_seed_starts_when_the_rounds_are_done_and_the_items_are_done() {
     );
     assert!(seed.repeat.is_none());
     let start = seed.start_when.as_ref().expect("start_when");
-    assert_eq!(start.file, "{run.dir}/rounds.done");
+    assert_eq!(start.file, "{run.dir}/out/lane/rounds.done");
     assert_eq!(start.units_done, "item");
     // The lane seed is the only repeating one, and it does not start late.
     let lane = file.seeds.iter().find(|s| s.id == "lane").unwrap();
     assert!(lane.start_when.is_none() && lane.repeat.is_some());
+}
+
+/// AC-4 (`r1.s1.w4`): the lane's two run-level files live under the lane's own directory, so no
+/// seat of the package needs a write outside its own unit's directory.
+#[test]
+fn the_lane_keeps_its_queue_and_rounds_done_file_under_its_own_directory() {
+    let file = load().file;
+    assert_eq!(file.unit_sources.len(), 1);
+    assert_eq!(file.unit_sources[0].dir, "{run.dir}/out/lane/queue");
+    let lane = file.seeds.iter().find(|s| s.id == "lane").unwrap();
+    assert_eq!(
+        lane.repeat.as_ref().unwrap().until_file,
+        "{run.dir}/out/lane/rounds.done"
+    );
+    let spine = file.seeds.iter().find(|s| s.id == "spine").unwrap();
+    assert_eq!(
+        spine.start_when.as_ref().unwrap().file,
+        "{run.dir}/out/lane/rounds.done"
+    );
+    let stage = &file.track("lane").unwrap().stages[0];
+    let makes_the_queue: Vec<String> = ["mkdir", "-p", "{run.dir}/out/lane/queue"]
+        .iter()
+        .map(|a| (*a).to_string())
+        .collect();
+    assert!(
+        stage.before.iter().any(|c| c.argv == makes_the_queue),
+        "the lane stage's `before` makes the queue directory: {:?}",
+        stage.before
+    );
+    assert!(
+        stage
+            .message
+            .contains("Queue directory: {run.dir}/out/lane/queue."),
+        "{}",
+        stage.message
+    );
+    assert!(
+        stage
+            .message
+            .contains("Rounds done file: {run.dir}/out/lane/rounds.done."),
+        "{}",
+        stage.message
+    );
+}
+
+/// AC-4 (`r1.s1.w4`): every `{run.dir}/` path in the workflow file starts with `{run.dir}/out/`.
+/// The package's run-level files all live under `out/`, where a seat owns one directory.
+#[test]
+fn every_run_dir_path_in_the_workflow_file_lies_under_out() {
+    let text = std::fs::read_to_string(package_dir().join("workflow.yaml")).unwrap();
+    let mut seen = 0;
+    for (n, line) in text.lines().enumerate() {
+        for (at, _) in line.match_indices("{run.dir}") {
+            seen += 1;
+            assert!(
+                line[at + "{run.dir}".len()..].starts_with("/out/"),
+                "workflow.yaml:{}: a run-level path outside out/: {}",
+                n + 1,
+                line.trim()
+            );
+        }
+    }
+    assert!(seen > 20, "the scan read {seen} templates");
 }
 
 #[test]

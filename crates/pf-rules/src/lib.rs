@@ -64,7 +64,7 @@ pub struct OwnPaths {
     pub build_target: PathBuf,
     /// The seat's worktree.
     pub worktree: PathBuf,
-    /// The seat's report and the files under its run directory.
+    /// The seat's report directory and its own unit's directories under the run directory.
     pub report_and_run: Vec<PathBuf>,
 }
 
@@ -226,7 +226,9 @@ pub fn decide(rules: &RoleRules, ctx: &Context, call: &ToolCall) -> Decision {
             );
         }
         let why = if rules.allow.contains(&Allow::WriteOwnReportAndRunFiles) {
-            format!("{path} lies outside the worktree and outside the seat's report and run files")
+            format!(
+                "{path} lies outside the worktree, the report directory and the seat's own unit directory of the run"
+            )
         } else {
             format!(
                 "{path} lies outside the worktree, and role {} does not list write_own_report_and_run_files",

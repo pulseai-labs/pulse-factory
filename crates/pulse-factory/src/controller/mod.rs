@@ -247,6 +247,7 @@ impl Controller {
             target_dir: info.target_dir.clone(),
             plugins: info.plugins.iter().map(|p| p.path.clone()).collect(),
             rules,
+            repeat_seeds: seat::repeat_seeds(&package.file),
             binary: self.cfg.binary.clone(),
             random_device: self.cfg.random_device.clone(),
         };
