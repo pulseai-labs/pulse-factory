@@ -207,6 +207,23 @@ fn a_key_that_is_a_variable_stays_unparsed_command() {
     }
 }
 
+/// A rename deny reason quotes the new section name, which the seat wrote. A `user:password@` in
+/// that name must not reach the reason, as in the reason of a `-c` key.
+#[test]
+fn a_rename_reason_hides_a_credential_in_the_new_section() {
+    let r = shipped("implementer");
+    for c in [
+        "git config --rename-section foo url.https://user:hunter2secret@evil/",
+        "git config rename-section foo http.https://user:hunter2secret@evil/",
+        "git config --rename-section foo credential.https://user:hunter2secret@evil/",
+    ] {
+        let d = bash(&r, c);
+        assert_eq!(d.rule, RULE, "{c}: {d:?}");
+        assert!(!d.reason.contains("hunter2secret"), "{c}: {}", d.reason);
+        assert!(d.reason.contains("[redacted]"), "{c}: {}", d.reason);
+    }
+}
+
 #[test]
 fn the_reason_names_the_key() {
     let r = shipped("implementer");

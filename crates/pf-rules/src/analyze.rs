@@ -2008,7 +2008,7 @@ fn config_rename_deny(names: &[&Word]) -> Option<(&'static str, String)> {
             CONFIG_TRUST,
             format!(
                 "git config --rename-section moves keys into {}, which holds keys that redirect git; a seat may not do it",
-                new.text
+                redact(&new.text)
             ),
         )
     })
