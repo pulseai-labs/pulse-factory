@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use pf_engine::status::redact;
 use pf_workflow::rules::{Allow, RoleRules};
 
 use crate::grammar;
@@ -828,25 +829,42 @@ impl<'a> Analyzer<'a> {
                     i += 2;
                 }
                 "-c" | "--config-env" => {
-                    match words.get(i + 1) {
-                        Some(v) if v.dynamic => self.deny(
-                            "unparsed-command",
-                            format!("git {t} sets a config that cannot be read"),
-                        ),
-                        Some(v) if config_runs_command(&v.text, t == "--config-env") => self.deny(
-                            "unparsed-command",
-                            format!(
-                                "git {t} sets a config that runs a command that cannot be read"
+                    // A key that redirects git is denied for every value, before the checks of
+                    // a value that cannot be read.
+                    let redirect = words
+                        .get(i + 1)
+                        .map(|v| setting_key(&v.text))
+                        .filter(|k| config_key_redirects(k));
+                    if let Some(key) = redirect {
+                        self.deny(CONFIG_TRUST, config_trust_reason(&format!("git {t}"), key));
+                    } else {
+                        match words.get(i + 1) {
+                            Some(v) if v.dynamic => self.deny(
+                                "unparsed-command",
+                                format!("git {t} sets a config that cannot be read"),
                             ),
-                        ),
-                        _ => {}
+                            Some(v) if config_runs_command(&v.text, t == "--config-env") => self
+                                .deny(
+                                    "unparsed-command",
+                                    format!(
+                                    "git {t} sets a config that runs a command that cannot be read"
+                                ),
+                                ),
+                            _ => {}
+                        }
                     }
                     i += 2;
                 }
                 "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" | "--super-prefix"
                 | "--attr-source" => i += 2,
                 _ if t.starts_with("--config-env=") => {
-                    if words[i].dynamic || config_runs_command(&t["--config-env=".len()..], true) {
+                    let setting = &t["--config-env=".len()..];
+                    if config_key_redirects(setting_key(setting)) {
+                        self.deny(
+                            CONFIG_TRUST,
+                            config_trust_reason("git --config-env", setting_key(setting)),
+                        );
+                    } else if words[i].dynamic || config_runs_command(setting, true) {
                         self.deny(
                             "unparsed-command",
                             "git --config-env sets a config that runs a command that cannot be read",
@@ -871,6 +889,11 @@ impl<'a> Analyzer<'a> {
             options::canonical_words(&words[i + 1..], &options::git_options(sub_name));
         let rest = &canonical[..];
         let first_deny = self.walk.denies.len();
+        if sub_name == "config"
+            && let Some((rule, reason)) = config_trust_deny(rest)
+        {
+            self.deny(rule, reason);
+        }
         if sub_name == "config" && config_writes_command(rest) {
             self.deny(
                 "unparsed-command",
@@ -1679,6 +1702,96 @@ fn after_opts(args: &[Word], takes_arg: &[&str], positional: usize) -> Vec<Word>
     args[i..].to_vec()
 }
 
+/// How a subsection takes part in a config key's name.
+#[derive(Clone, Copy)]
+enum Subsection {
+    /// `section.variable`.
+    Without,
+    /// `section.<subsection>.variable`.
+    With,
+    /// Both forms name the key.
+    Either,
+}
+
+/// Git config keys that redirect git, as (section, variable, subsection), in lower case. A seat may
+/// not set one, whatever the value: a bare path, a bare host and an empty value each redirect.
+///
+/// Source: git-config(1): `core.hooksPath`, `core.sshCommand`, `core.gitProxy`,
+/// `remote.<name>.receivepack|uploadpack|vcs`, `url.<base>.insteadOf|pushInsteadOf`, `http.proxy`,
+/// `http.<url>.proxy`, `http.sslVerify`, `http.<url>.sslVerify`, `credential.helper`,
+/// `credential.<url>.helper` and, under "Includes", `include.path` and `includeIf.<condition>.path`.
+const REDIRECT_KEYS: [(&str, &str, Subsection); 13] = [
+    ("core", "hookspath", Subsection::Without),
+    ("remote", "receivepack", Subsection::With),
+    ("remote", "uploadpack", Subsection::With),
+    ("remote", "vcs", Subsection::With),
+    ("url", "insteadof", Subsection::With),
+    ("url", "pushinsteadof", Subsection::With),
+    ("include", "path", Subsection::Without),
+    ("includeif", "path", Subsection::With),
+    ("core", "sshcommand", Subsection::Without),
+    ("core", "gitproxy", Subsection::Without),
+    ("http", "proxy", Subsection::Either),
+    ("http", "sslverify", Subsection::Either),
+    ("credential", "helper", Subsection::Either),
+];
+
+/// The rule for a write of a key that redirects git.
+const CONFIG_TRUST: &str = "git-config-trust";
+
+/// The reason names the key as written. A key such as `url.<base>.insteadOf` may hold a
+/// credential in `<base>`, so the key goes through `redact`.
+fn config_trust_reason(form: &str, key: &str) -> String {
+    format!(
+        "{form} sets {}, which redirects git; a seat may not set it",
+        redact(key)
+    )
+}
+
+/// The key of a `key=value` setting, as `git -c` and `git --config-env` read it: the text before
+/// the first `=`, or all of it.
+fn setting_key(setting: &str) -> &str {
+    setting.split_once('=').map_or(setting, |(k, _)| k).trim()
+}
+
+/// Is this a config key that redirects git? Git compares the section and the variable without case
+/// and keeps the case of a subsection. The section is the text before the first `.`, the variable
+/// the text after the last, and the subsection what lies between, dots included.
+fn config_key_redirects(key: &str) -> bool {
+    let Some((section, rest)) = key.trim().split_once('.') else {
+        return false;
+    };
+    let (sub, variable) = match rest.rsplit_once('.') {
+        Some((sub, variable)) => (Some(sub), variable),
+        None => (None, rest),
+    };
+    let (section, variable) = (section.to_ascii_lowercase(), variable.to_ascii_lowercase());
+    REDIRECT_KEYS.iter().any(|(s, v, subsection)| {
+        *s == section && *v == variable && subsection_fits(*subsection, sub.is_some())
+    })
+}
+
+/// Does a section of this name, with or without a subsection, hold a key of `REDIRECT_KEYS`? A
+/// rename into such a section gives the renamed keys those names.
+fn config_section_redirects(name: &str) -> bool {
+    let (section, sub) = match name.trim().split_once('.') {
+        Some((section, _)) => (section, true),
+        None => (name.trim(), false),
+    };
+    let section = section.to_ascii_lowercase();
+    REDIRECT_KEYS
+        .iter()
+        .any(|(s, _, subsection)| *s == section && subsection_fits(*subsection, sub))
+}
+
+fn subsection_fits(subsection: Subsection, has_subsection: bool) -> bool {
+    match subsection {
+        Subsection::Without => !has_subsection,
+        Subsection::With => has_subsection,
+        Subsection::Either => true,
+    }
+}
+
 /// Git config keys whose value is a command that git runs.
 const COMMAND_KEYS: [&str; 14] = [
     "core.fsmonitor",
@@ -1737,31 +1850,22 @@ fn config_runs_command(setting: &str, value_unread: bool) -> bool {
     !(value.is_empty() || bare)
 }
 
-/// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,
-/// listing and removing one do not. A key the rules cannot read, in a write, counts as one that
-/// does.
-fn config_writes_command(rest: &[Word]) -> bool {
-    let reads = rest.iter().any(|w| {
-        matches!(
-            w.text.as_str(),
-            "--get"
-                | "--get-all"
-                | "--get-regexp"
-                | "--get-urlmatch"
-                | "--list"
-                | "-l"
-                | "--unset"
-                | "--unset-all"
-                | "--remove-section"
-        )
-    });
-    if reads {
-        return false;
-    }
-    let writes_more = rest
-        .iter()
-        .any(|w| matches!(w.text.as_str(), "--add" | "--replace-all"));
-    // The positional words. An option that takes a value hides that value from them.
+/// The words of a `git config …` call, read once for the guards below.
+struct ConfigCall<'a> {
+    /// A read or a removal: `--get` to `--remove-section`.
+    reads: bool,
+    /// `--add` or `--replace-all`: the call writes even with one positional word.
+    writes_more: bool,
+    /// `--edit` or `-e`.
+    edit: bool,
+    /// `--rename-section`.
+    rename: bool,
+    /// The positional words. An option that takes a value hides that value from them.
+    positional: Vec<&'a Word>,
+}
+
+fn config_call(rest: &[Word]) -> ConfigCall<'_> {
+    let has = |names: &[&str]| rest.iter().any(|w| names.contains(&w.text.as_str()));
     let mut positional: Vec<&Word> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -1778,6 +1882,35 @@ fn config_writes_command(rest: &[Word]) -> bool {
         }
         i += 1;
     }
+    ConfigCall {
+        reads: has(&[
+            "--get",
+            "--get-all",
+            "--get-regexp",
+            "--get-urlmatch",
+            "--list",
+            "-l",
+            "--unset",
+            "--unset-all",
+            "--remove-section",
+        ]),
+        writes_more: has(&["--add", "--replace-all"]),
+        edit: has(&["--edit", "-e"]),
+        rename: has(&["--rename-section"]),
+        positional,
+    }
+}
+
+/// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,
+/// listing and removing one do not. A key the rules cannot read, in a write, counts as one that
+/// does.
+fn config_writes_command(rest: &[Word]) -> bool {
+    let call = config_call(rest);
+    if call.reads {
+        return false;
+    }
+    let writes_more = call.writes_more;
+    let mut positional = call.positional;
     // `git config get|list|unset …` read or remove. `git config set` writes.
     match positional.first().map(|w| w.text.as_str()) {
         Some("get" | "list" | "unset" | "edit" | "rename-section" | "remove-section") => {
@@ -1803,6 +1936,82 @@ fn config_writes_command(rest: &[Word]) -> bool {
     let value = positional.get(1);
     let setting = format!("{}={}", key.text, value.map_or("", |v| v.text.as_str()));
     config_runs_command(&setting, value.is_some_and(|v| v.dynamic))
+}
+
+/// Does `git config …` set a key that redirects git, rename a section into one, or open the
+/// config in an editor? Returns the rule and the reason. A read, a listing and a removal do not.
+/// The positional reading is the one of `config_writes_command`, so a read stays a read.
+fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
+    let call = config_call(rest);
+    let editor = || {
+        (
+            CONFIG_TRUST,
+            "git config opens the config in an editor, and the editor's writes cannot be read; a seat may not use it".to_string(),
+        )
+    };
+    if call.edit {
+        return Some(editor());
+    }
+    let mut positional = call.positional.clone();
+    // The verb forms need no flag. A flag that reads, removes or renames makes a word that looks
+    // like a verb a key or a section name.
+    let verb = if call.reads || call.rename {
+        None
+    } else {
+        positional.first().map(|w| w.text.as_str())
+    };
+    match verb {
+        Some("edit") => return Some(editor()),
+        Some("get" | "list" | "unset" | "remove-section") => return None,
+        Some("set") => {
+            positional.remove(0);
+        }
+        Some("rename-section") => {
+            positional.remove(0);
+            return config_rename_deny(&positional);
+        }
+        _ => {}
+    }
+    if call.rename {
+        return config_rename_deny(&positional);
+    }
+    if call.reads {
+        return None;
+    }
+    // `git config key` reads the key. A value after it, or `--add`, writes it. A key that is a
+    // variable stays with `config_writes_command`.
+    if !(call.writes_more || positional.len() > 1) {
+        return None;
+    }
+    let key = positional.first().filter(|k| !k.dynamic)?;
+    config_key_redirects(&key.text).then(|| {
+        (
+            CONFIG_TRUST,
+            config_trust_reason("git config", key.text.trim()),
+        )
+    })
+}
+
+/// `git config --rename-section <old> <new>`: is `<new>` a section that holds a key that redirects
+/// git? A section the rules cannot read is refused as `unparsed-command`.
+fn config_rename_deny(names: &[&Word]) -> Option<(&'static str, String)> {
+    let new = names.get(1)?;
+    if new.dynamic {
+        return Some((
+            "unparsed-command",
+            "git config --rename-section renames a section into a name that cannot be read"
+                .to_string(),
+        ));
+    }
+    config_section_redirects(&new.text).then(|| {
+        (
+            CONFIG_TRUST,
+            format!(
+                "git config --rename-section moves keys into {}, which holds keys that redirect git; a seat may not do it",
+                redact(&new.text)
+            ),
+        )
+    })
 }
 
 /// Is this env name one that gives git config without a `-c`?

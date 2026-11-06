@@ -80,6 +80,18 @@ a command. A rule name is what the audit line and a deny's reason show.
 | a push of another branch | `push-other-branch` (deny) | every role |
 | `gh pr review`, `gh pr comment`, `gh pr edit`, `gh pr close`, `gh pr reopen`, `gh pr ready`, `gh pr lock`, `gh pr unlock`, `gh pr update-branch`, `gh issue comment`, `gh issue edit`, `gh issue close`, `gh issue reopen`, `gh issue lock`, `gh issue unlock`, `gh issue delete` | `gh-pr-write` (deny) | every role |
 | any `gh` command that is not a read (`gh pr create`, `gh issue create`, `gh release create`, `gh workflow run`, …) | `gh-forge-write` (deny) | the `reviewer` role only |
+| `git config <key> <value>` (any scope, `set`, `--add`, `--replace-all`), `git -c <key>=<value>` and `git --config-env <key>=<var>` of a key that redirects git; `git config --rename-section <old> <new>` into one of their sections; `git config --edit`, `-e` and `edit` | `git-config-trust` (deny) | every role |
+
+`git-config-trust` names the keys that redirect git: `core.hooksPath`, `remote.<name>.receivepack`,
+`remote.<name>.uploadpack`, `remote.<name>.vcs`, `url.<base>.insteadOf`, `url.<base>.pushInsteadOf`,
+`include.path`, `includeIf.<condition>.path`, and the transport keys that the controller's push reads
+from the global config: `core.sshCommand`, `core.gitProxy`, `http.proxy`, `http.<url>.proxy`,
+`http.sslVerify`, `http.<url>.sslVerify`, `credential.helper` and `credential.<url>.helper`. They
+redirect git, so a seat may not set them, whatever the value: a bare path, a bare host and an empty
+value each redirect. A read, a listing and a removal of such a key stay allowed. The editor opens a
+config whose writes the rules cannot read, so `--edit` is denied too. A write into the repository's
+`.git/config` or a hooks directory through a shell redirection or `cp` is not read. That is the known
+limit of the redirection paragraph below.
 
 A relative path means the working directory and the directory of every literal `cd` earlier in the
 call. The `push_dir` of the seat's context is a second place a push may run from. A literal half of a
