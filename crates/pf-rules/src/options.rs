@@ -55,11 +55,12 @@ pub const BRANCH_OPTIONS: [&str; 1] = ["delete"];
 pub const CLEAN_OPTIONS: [&str; 1] = ["dry-run"];
 
 /// Long options of `git config` that a guard reads: the ones that read or remove (`--get` to
-/// `--remove-section`), the ones that write more (`--add`, `--replace-all`) and the ones that take
-/// a value (`--file` to `--type`).
+/// `--remove-section`), the ones that write more (`--add`, `--replace-all`), the ones that open the
+/// config in an editor or rename a section (`--edit`, `--rename-section`) and the ones that take a
+/// value (`--file` to `--type`).
 ///
 /// Source: git-config(1), OPTIONS and ACTIONS.
-pub const CONFIG_OPTIONS: [&str; 15] = [
+pub const CONFIG_OPTIONS: [&str; 17] = [
     "get",
     "get-all",
     "get-regexp",
@@ -70,6 +71,8 @@ pub const CONFIG_OPTIONS: [&str; 15] = [
     "remove-section",
     "add",
     "replace-all",
+    "edit",
+    "rename-section",
     "file",
     "blob",
     "default",
