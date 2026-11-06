@@ -12,7 +12,8 @@ use pf_workflow::rules::Allow;
 
 /// The reviewer's seat as the controller builds it for the `review` stage: its working directory
 /// is the item's worktree, for reading, and the `worktree` setting is empty. Its report directory
-/// is `<run>/out/<unit>`, and the run directory is the other path it may write.
+/// is `<run>/out/<unit>`, which is also its own unit's directory of the run. The controller gives
+/// it no other root (`r1.s1.w4`).
 fn reviewer_ctx() -> Context {
     Context {
         seat: "reviewer/u1".to_string(),
@@ -27,7 +28,7 @@ fn reviewer_ctx() -> Context {
             scratch: PathBuf::from("/run/u1/out/u1/scratch"),
             build_target: PathBuf::from("/build/u1"),
             worktree: PathBuf::new(),
-            report_and_run: vec![PathBuf::from("/run/u1/out/u1"), PathBuf::from("/run/u1")],
+            report_and_run: vec![PathBuf::from("/run/u1/out/u1")],
         },
     }
 }
@@ -82,6 +83,38 @@ fn a_write_to_its_report_under_out_is_allowed() {
     ] {
         let d = decide(&r, &ctx, &write(path));
         assert!(!d.is_allow(), "{path}: {d:?}");
+    }
+}
+
+/// AC-1 (`r1.s1.w4`): a write tool reaches the seat's own unit directory of the run and nothing
+/// else under the run directory. The rule name stays `write-outside-worktree`.
+#[test]
+fn a_write_tool_reaches_only_its_own_unit_directory_of_the_run() {
+    let r = shipped("reviewer");
+    let ctx = reviewer_ctx();
+    let d = decide(&r, &ctx, &write("/run/u1/out/u1/review.md"));
+    assert!(
+        d.is_allow() && d.rule == "write-own-report-and-run-files",
+        "{d:?}"
+    );
+    for path in [
+        "/run/u1/out/u2/review.md",
+        "/run/u1/queue/x.json",
+        "/run/u1/rounds.done",
+        "/run/u1/out/u1/../u2/review.md",
+    ] {
+        for tool in ["write", "edit"] {
+            let d = decide(&r, &ctx, &ToolCall::write(tool, path));
+            assert!(
+                !d.is_allow() && d.rule == "write-outside-worktree",
+                "{tool} {path}: {d:?}"
+            );
+            assert!(
+                d.reason.contains("own unit directory"),
+                "{path}: the reason names the seat's own unit directory: {}",
+                d.reason
+            );
+        }
     }
 }
 

@@ -144,6 +144,31 @@ fn a_line_without_a_secret_is_unchanged() {
     );
 }
 
+/// r1.s1.w3: a deny of `git-config-trust` gives one audit line with the seat and the rule, and a
+/// credential in an `insteadOf` value does not reach it. The `user:password@` form is the one this
+/// item covers; the other user-info forms are `r1.s1.w2`'s.
+#[test]
+fn a_git_config_trust_deny_names_the_seat_and_the_rule_and_hides_the_credential() {
+    let c = ctx();
+    let call = ToolCall::bash(
+        "git config url.https://user:hunter2secret@evil/.insteadOf https://github.com/",
+    );
+    for role in every_role() {
+        let d = decide(&role, &c, &call);
+        assert_eq!(d.rule, "git-config-trust", "{}: {d:?}", role.role);
+        let line = audit_line(&c, &call, &d);
+        for part in ["seat=seat-1", "outcome=deny", "rule=git-config-trust"] {
+            assert!(
+                line.contains(part),
+                "{}: {part} missing from {line}",
+                role.role
+            );
+        }
+        assert!(!line.contains("hunter2secret"), "{}: {line}", role.role);
+        assert!(line.contains("[redacted]"), "{}: {line}", role.role);
+    }
+}
+
 /// An `Authorization:` value runs to the end of its own line. The audit line holds the whole
 /// command on one line, so the command is redacted before its line breaks are written out.
 /// Otherwise the value would swallow every command after it.

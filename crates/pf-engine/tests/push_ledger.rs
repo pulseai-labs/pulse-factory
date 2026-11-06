@@ -371,3 +371,117 @@ fn the_push_command_is_part_of_the_command_body() {
     let back: CommandBody = serde_json::from_str(&json).unwrap();
     assert_eq!(back, body);
 }
+
+fn note_lines(e: &Env) -> Vec<String> {
+    e.ledger_text()
+        .lines()
+        .filter(|l| l.contains("note: unit="))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_note_writes_one_ledger_line_per_event_id_and_a_replay_writes_no_second() {
+    let e = run();
+    let a = e
+        .engine
+        .record_note(
+            "u1",
+            "cfg:u1:0:core.hookspath",
+            "ignored git config core.hookspath",
+        )
+        .unwrap();
+    assert!(!a.replayed);
+    assert_eq!(a.row.kind, "note");
+    assert_eq!(a.row.unit_id.as_deref(), Some("u1"));
+    assert_eq!(a.row.command_id, "note:cfg:u1:0:core.hookspath");
+    let lines = note_lines(&e);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains("note: unit=u1 ignored git config core.hookspath"),
+        "{}",
+        lines[0]
+    );
+
+    // A repeat of the same ID and text is a replay.
+    let again = e
+        .engine
+        .record_note(
+            "u1",
+            "cfg:u1:0:core.hookspath",
+            "ignored git config core.hookspath",
+        )
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(note_lines(&e).len(), 1);
+
+    // Another event ID is another line.
+    e.engine
+        .record_note(
+            "u1",
+            "cfg:u1:0:core.sshcommand",
+            "ignored git config core.sshcommand",
+        )
+        .unwrap();
+    assert_eq!(note_lines(&e).len(), 2);
+}
+
+#[test]
+fn another_text_for_a_used_note_id_is_refused_and_writes_no_line() {
+    let e = run();
+    e.engine.record_note("u1", "n-1", "first text").unwrap();
+    let err = e.engine.record_note("u1", "n-1", "other text").unwrap_err();
+    assert!(matches!(err, EngineError::Conflict { .. }), "{err}");
+    let lines = note_lines(&e);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("first text"), "{}", lines[0]);
+}
+
+#[test]
+fn a_note_for_an_unknown_unit_is_refused_and_a_note_is_recorded_in_any_run_state() {
+    let e = run();
+    let err = e.engine.record_note("ghost", "n-1", "text").unwrap_err();
+    assert!(matches!(err, EngineError::Rejected(_)), "{err}");
+    assert!(note_lines(&e).is_empty());
+
+    // A halted run and a parked unit still record the note: it is an audit line.
+    e.engine.park("u1", "needs a person").unwrap();
+    e.engine.halt("operator stop").unwrap();
+    e.engine.record_note("u1", "n-2", "after the halt").unwrap();
+    assert_eq!(note_lines(&e).len(), 1);
+    assert_eq!(
+        e.status_of("u1").0,
+        Status::Parked,
+        "a note changes no unit"
+    );
+}
+
+#[test]
+fn a_note_is_one_clean_line_and_holds_no_token() {
+    let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+    let e = run();
+    e.engine
+        .record_note("u1", "n-1", &format!("two\nlines with {token}"))
+        .unwrap();
+    let ledger = e.ledger_text();
+    assert!(!ledger.contains(token), "{ledger}");
+    let lines = note_lines(&e);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("two / lines"), "{}", lines[0]);
+    let stored = e.engine.view().unwrap().admissions;
+    let note = stored.iter().find(|a| a.kind == "note").unwrap();
+    assert!(!note.content.contains(token), "{}", note.content);
+}
+
+#[test]
+fn the_note_command_is_part_of_the_command_body() {
+    let body = CommandBody::Note {
+        unit_id: "u1".into(),
+        event_id: "ev".into(),
+        text: "t".into(),
+    };
+    assert_eq!(body.kind(), "note");
+    let json = serde_json::to_string(&body).unwrap();
+    let back: CommandBody = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, body);
+}

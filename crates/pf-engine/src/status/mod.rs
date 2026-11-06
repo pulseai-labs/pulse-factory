@@ -274,7 +274,14 @@ fn api_key_flag(chars: &[char], i: usize) -> Option<(usize, usize)> {
     (end > start).then_some((start, end))
 }
 
-/// `://user:secret@host`: the user name stays and the secret goes.
+/// The user info of a `scheme://user-info@host` URL.
+///
+/// - `user:secret`: the user name stays and the secret goes.
+/// - `token:` (nothing after the colon): the part before the colon is the credential and goes.
+/// - `token` (no colon): the whole user info goes.
+///
+/// The authority ends at white space, `/`, `?` or `#`, and the user info ends at its last `@`. An
+/// empty user info and an authority with no `@` give nothing. The scheme does not matter.
 fn url_secret(chars: &[char], i: usize) -> Option<(usize, usize)> {
     if !(chars[i] == ':' && chars.get(i + 1) == Some(&'/') && chars.get(i + 2) == Some(&'/')) {
         return None;
@@ -287,8 +294,20 @@ fn url_secret(chars: &[char], i: usize) -> Option<(usize, usize)> {
         .iter()
         .rposition(|c| *c == '@')?
         + auth_start;
-    let colon = chars[auth_start..at].iter().position(|c| *c == ':')? + auth_start;
-    (colon + 1 < at).then_some((colon + 1, at))
+    if at == auth_start {
+        return None;
+    }
+    match chars[auth_start..at].iter().position(|c| *c == ':') {
+        Some(offset) => {
+            let colon = auth_start + offset;
+            if colon + 1 < at {
+                Some((colon + 1, at))
+            } else {
+                Some((auth_start, colon))
+            }
+        }
+        None => Some((auth_start, at)),
+    }
 }
 
 /// Remove secrets from outside text before it reaches the ledger or a status line.
@@ -302,7 +321,9 @@ fn url_secret(chars: &[char], i: usize) -> Option<(usize, usize)> {
 /// - `Authorization:` values, to the end of the line;
 /// - the values of `*_TOKEN=`, `*_KEY=` and `*_SECRET=`;
 /// - `--api-key=<value>` and `--api-key <value>`;
-/// - the secret in `https://user:secret@host`.
+/// - the secret in `scheme://user:secret@host`, and the whole user info of `scheme://user@host`
+///   and `scheme://user:@host`. The scp-like `user@host:path` is left alone: it has no password
+///   field, and it has the shape of an e-mail address.
 ///
 /// A second pass over redacted text changes nothing.
 pub fn redact(text: &str) -> String {

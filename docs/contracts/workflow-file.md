@@ -233,85 +233,178 @@ same placeholders as `cwd`):
 
 Any other field in the mapping is refused with its position, and so is an empty value or a
 placeholder the file does not declare. The file version stays 1 (ADR-0004): a file without the key
-loads and runs as before, and unknown keys are still refused. A run armed before a package gained the
-key keeps its pinned package copy (ADR-0007), so it never gains a base push.
+loads and runs as before, and unknown keys are still refused. A run armed before a package gained
+the key keeps its pinned package copy (ADR-0007), so it never gains a base push.
+
+**What the controller trusts.** `dir` is a seat's repository, and its `.git/config` is shared by
+every worktree of that repository, so any seat of the run can write it. A local `core.hooksPath`,
+a `pre-push` hook, `remote.origin.receivepack`, `core.sshCommand`, `credential.helper` or
+`url.<x>.insteadOf` would otherwise run a command or change a URL under the controller. So the
+controller reads only names and objects from `dir`. It checks, asks and pushes from a bare
+repository of its own. The global and the system git config are the operator's, and the
+controller's repository reads them: the operator's credentials live there.
+
+**Two kinds of git call.** Both run an argv with no shell, with `GIT_TERMINAL_PROMPT=0` and
+`LC_ALL=C`, with the 60 s command timeout, and with `-c core.hooksPath=/dev/null -c
+core.fsmonitor=false` before the subcommand.
+
+| Call | Runs as | Used for |
+|---|---|---|
+| `seat_read` | `git -C <dir> …` | Calls that read names and run no transport. |
+| `own` | `git --git-dir=<the controller's repository> …` | Every call that reaches the forge. |
+
+No transport call (`ls-remote`, `push`) runs in `dir`.
+
+**The controller's repository.** For each launch the controller makes
+`<run dir>/controller/base-push/<unit>.git`. It removes an old one first, runs
+`git init --bare --quiet --template=`, and writes `<common dir>/objects` as the one line of
+`objects/info/alternates`. `<common dir>` is the common git directory of `dir`. The repository
+holds no objects and no hooks: git reads the seat's objects through the alternate and copies none.
+It takes a few KiB. The controller removes it again when the check returns, on every path. A
+failure to remove it is not a park reason.
 
 **The order of the steps.** For a stage with `base_push`, the launch step does these after the
 pin check and before the stage's `before` commands:
 
 1. It renders `dir` and `branch` for the unit.
 2. It refuses the branch when it is empty, starts with `-`, fails `git check-ref-format --branch`,
-   or is the run's default branch. It refuses the `dir` when its `origin` is not the run's forge. It
-   reads every URL of `git -C <dir> remote get-url --all origin` (the fetch URL, which `ls-remote`
-   reads) and of `git -C <dir> remote get-url --all --push origin` (the push URLs, which `git push`
-   writes to, after `remote.origin.pushurl` and `pushInsteadOf`). On GitHub the `owner/name` of each
-   must be the run's forge repository (the case is not compared). In the paper env the canonical
-   path of each must be the canonical path of `forge.git`. So the fetch URL and every push URL are
-   the run's forge, the branch check and the push go to one place, and a workflow file can make the
-   controller push only to the forge the operator armed against. When either read fails (for
-   example, `dir` has no remote named `origin`, which git would read as a path), it refuses and
-   names the cause. It never skips the check.
-3. It runs `git -C <dir> ls-remote --exit-code origin refs/heads/<branch>`, as an argv with no
-   shell, with `GIT_TERMINAL_PROMPT=0` and the 60 s command timeout.
-4. **Exit 0:** `origin` holds the branch, at any SHA. Nothing is pushed, there is no ledger line,
-   and the launch goes on.
-5. **Exit 2:** `origin` lacks the branch. The controller reads the local SHA with
-   `git -C <dir> rev-parse --verify refs/heads/<branch>`, then runs
-   `git -C <dir> push origin refs/heads/<branch>:refs/heads/<branch>`. It never adds a force flag or
-   a `+`. It records the result with the unit's push record, and a successful push goes on to
-   `before` and the launch in the same tick.
-6. **Any other exit code, or a timeout:** the controller pushes nothing.
+   or is the run's default branch. It refuses an empty `dir`.
+3. It reads the common git directory with `seat_read`:
+   `rev-parse --path-format=absolute --git-common-dir`. It refuses when the read fails or the
+   directory has no `objects` directory. A `dir` that is not a repository stops here.
+4. It makes the controller's repository (above).
+5. It names each seat-written setting it ignores. `seat_read` runs
+   `config -z --show-scope --get-regexp <keys>`. The keys are `core.hookspath`, `core.fsmonitor`,
+   `core.sshcommand`, `core.gitproxy`, `core.askpass`, `core.alternaterefscommand`, `credential.*`, `url.*.insteadof`,
+   `url.*.pushinsteadof`, `remote.origin.receivepack`, `remote.origin.uploadpack`,
+   `remote.origin.vcs`, `remote.origin.proxy`, `http.*`, `protocol.*`, `include.path` and
+   `includeif.*`. The controller keeps the entries of the `local` and `worktree` scopes, once per
+   key. Exit 1 (no key) is none. Any other failure is a refusal. Each key gets one `note:` line
+   (below). The controller ignores a setting because no transport runs in `dir`, not because the
+   list names it: the list only chooses what the ledger names.
+6. It refuses the `dir` when its `origin` is not the run's forge. It reads every URL of
+   `git -C <dir> remote get-url --all origin` (the fetch URL) and of
+   `git -C <dir> remote get-url --all --push origin` (the push URLs, after
+   `remote.origin.pushurl` and `pushInsteadOf`). On GitHub the `owner/name` of each must be the
+   run's forge repository (the case is not compared). In the paper env the canonical path of each
+   must be the canonical path of `forge.git`. When either read fails (for example, `dir` has no
+   remote named `origin`, which git would read as a path), it refuses and names the cause. It
+   never skips the check.
+7. It sets the first push URL as the remote `forge` of the controller's repository, and reads
+   `remote get-url --all forge` and `--all --push forge` there. These reads apply only the global
+   and system config. Each URL must again be the run's forge. So the URL the controller checked
+   is the URL git uses. No call reads `origin` of `dir` after this, so a seat that changes the
+   config of `dir` during the check changes nothing the push uses.
+   The controller reads these URLs a second time right before the push. Git reads the global and
+   system config at each call, and a seat's shell can write the operator's global config, so the
+   second read narrows the time in which a `pushurl` or `pushInsteadOf` written there could move
+   the push. It does not close that time: a shell write is the limit of ADR-0005.
+8. It runs `ls-remote forge refs/heads/<branch>` with `own`, without `--exit-code`.
+   `ls-remote` matches a pattern by the tail of a ref, so it also prints
+   `refs/tags/refs/heads/<branch>`. The controller counts only a line whose second field is
+   exactly `refs/heads/<branch>`.
+9. **Exit 0 with that line:** `origin` holds the branch, at any SHA. Nothing is pushed, there is
+   no push line, and the launch goes on.
+10. **Exit 0 without that line:** `origin` lacks the branch. The controller reads the local SHA
+    with `seat_read`: `rev-parse --verify refs/heads/<branch>`. It then pushes that SHA to
+    `refs/heads/<branch>` and to nothing else, with no force flag and no `+`. It records the
+    result with the unit's push record, and a successful push goes on to `before` and the launch
+    in the same tick.
+11. **Any other exit code, a timeout or a signal:** the controller pushes nothing.
 
-**The ledger line.** Every push is an admitted `Push` command, so it writes
+**How the push names its ref.** The push is `<sha>:refs/heads/<branch>`. git reads a destination
+as an abbreviation, so on a forge that holds only `refs/tags/refs/heads/<branch>` the plain form
+aims at that tag, and git reports the tag as up to date or as already existing. The controller
+therefore makes `refs/heads/<branch>` at `<sha>` in its own repository with `update-ref`. That
+repository is made fresh for the call and holds no other branch. It then lists the refs of that
+repository and pushes nothing when one besides `refs/heads/<branch>` is there. Then it pushes the
+glob `refs/heads/<branch>*:refs/heads/<branch>*`. The remote ref of a glob is matched by its full
+name. The glob sends each ref of the repository whose name starts with `refs/heads/<branch>`, so
+the check of the refs is what makes the push send the one. A seat reaches that repository only by
+a shell write, within the time of one call: the limit of ADR-0005.
+
+**The ledger lines.** Every push is an admitted `Push` command, so it writes
 `push: repo=<forge> branch=<branch> sha=<sha> outcome=pushed` or `outcome=failed: <cause>`. The
-command ID is `push:base-push:<unit>:<park generation>:<attempt>`. The attempt number counts the base
-pushes the unit already has in that park generation, so each push attempt has its own ID and its own
-line, also a second push in one generation. A repeat of one ID is a replay and writes no second line.
-A `clear` gives the unit a new park generation, so the attempt count starts again. A refusal in step 2 and a failed read in step 6 write no push line, because nothing was tried.
-A missing local branch writes `outcome=failed: no local branch <branch>` with an empty SHA, and tries
-no push.
+command ID is `push:base-push:<unit>:<park generation>:<attempt>`. The attempt number counts the
+base pushes the unit already has in that park generation, so each push attempt has its own ID and
+its own line, also a second push in one generation. A repeat of one ID is a replay and writes no
+second line. A `clear` gives the unit a new park generation, so the attempt count starts again.
+A refusal and a failed read write no push line, because nothing was tried. A missing local branch
+writes `outcome=failed: no local branch <branch>` with an empty SHA, and tries no push.
+
+Every ignored setting is an admitted `Note` command (step 5). It writes
+`note: unit=<unit> base push ignored git config <key> (<scope>) of <dir>`. The line names the
+key and never the value, because a value can hold a command or a URL with a secret. The event ID
+is `base-push-config:<unit>:<park generation>:<key>` and the command ID is `note:<event ID>`. A
+repeat of one ID with the same text is a replay, so a second launch in the same park generation
+writes no second line, and a new park generation names the settings again. A note that fails to
+write is not a park reason: the push goes on, and the tick notes the failure.
 
 **The park reasons.** Each parks the unit and opens a `park` request (`requests.md`). A reason that
-comes from git ends with the first line of git's stderr, cleaned to one line and redacted, so an
-authentication failure names itself.
+comes from git ends with the first line of git's stderr. The controller redacts the whole line,
+cuts it to 160 characters and cleans it to one line, so an authentication failure names itself
+and a token that crosses the cut is never shown in part.
 
 | Case | Reason |
 |---|---|
 | A template does not render | `cannot render the <field> of base_push of stage <stage> for unit <unit>: <why>` |
 | The branch is refused | `base push of branch <branch> refused: <rule>` |
 | The `dir` is empty | `base push of branch <branch> refused: the dir is empty` |
+| The common directory cannot be read | `base push of branch <branch> refused: cannot read the common git directory of <dir>: <cause>` |
+| The controller's repository cannot be made | `base push of branch <branch> refused: cannot make the controller's repository for <dir>: <cause>` |
+| The git config cannot be read | `base push of branch <branch> refused: cannot read the git config of <dir>: <cause>` |
 | `origin` cannot be read | `base push of branch <branch> refused: cannot read the <fetch or push> URL of origin of <dir>: <cause>` |
 | The `origin` is another forge | `base push of branch <branch> refused: origin of <dir> is <url>, which is not the run's forge <forge>`, or `origin of <dir> pushes to <url>, which …` for a push URL |
+| The controller's remote cannot be set or read | `base push of branch <branch> refused: cannot set the controller's remote for <dir>: <cause>`, or `cannot read the <fetch or push> URL of the controller's remote for <dir>: <cause>` |
+| The controller's remote is another forge | `base push of branch <branch> refused: the controller's remote for <dir> is <url>, which is not the run's forge <forge>` |
 | `ls-remote` fails | `cannot read <branch> on origin of <dir> (ls-remote rc <n>)`, or `(ls-remote timed out)` |
+| The ledger cannot be read | `base push of <branch> to origin not tried: cannot read the ledger: <why>` |
 | The push fails | `base push of <branch> to origin failed: <cause>` |
+| The push was done, but its line was not written | `base push of <branch> to origin was done, but its ledger line was not written: <why>` |
 
-Every git call of the check has the 60 s command timeout: `check-ref-format`, the fetch and push URL
-reads, `ls-remote`, `rev-parse` and `push`. A tick that runs the whole check can be blocked for up to
-five calls of 60 s each (the URL reads, `ls-remote`, `rev-parse` and `push` run in turn). A timeout
-of `push` is recorded as a failed push (see the known limit below).
+**The git calls and their limit.** Every call has the 60 s command timeout. A tick that runs the
+whole check makes up to 13 calls, in turn:
+
+- 11 local calls, which read or write local files: `check-ref-format`, the common-directory read,
+  `init`, the config read, the two `get-url` reads in `dir`, the `config` that sets the remote,
+  the two `get-url` reads in the controller's repository, `rev-parse --verify` and `update-ref`.
+- 2 calls that reach the network: `ls-remote` and `push`. They are the only two.
+
+The worst case is 13 calls of 60 s each, 780 s, and 120 s of that is the network. A timeout of
+`push` is recorded as a failed push (see the known limit below).
 
 **What it never does.**
 
 - A halted run pushes nothing: the launch step returns before the check.
 - It never overwrites. A branch that `origin` holds at any SHA is exit 0, and nothing is pushed.
 - It never pushes the default branch, and never to another forge than the run's.
+- It never runs a hook, a command or a URL rewrite that a seat wrote into the config of `dir`.
 - It does not change `head_check`. The base push is recorded under the unit before the stage's seat
   launches, so the seat's own push stays the unit's newest push, and `head_check` reads that one. If
-  `origin` loses the branch after the seat pushed, the next launch of the stage pushes the base again,
-  and `head_check` then refuses the merge and parks the unit: it fails closed.
+  `origin` loses the branch after the seat pushed, the next launch of the stage pushes the base
+  again, and `head_check` then refuses the merge and parks the unit: it fails closed.
 - It changes no seat's rule set or own branch.
 
 **Credentials.** The controller pushes with the git credentials of the user unit, the same ones the
-seats it launches push with (`docs/install.md`). No new secret is read, and none reaches a ledger line
-or a reason.
+seats it launches push with (`docs/install.md`). They come from the global and system git config,
+which the operator owns. A `credential.helper` in the config of `dir` is not used. No new secret
+is read, and none reaches a ledger line or a reason.
+
+**Known limit (the local ref).** The controller pushes the SHA that the seat's local branch
+holds. A seat that repoints the branch (`git update-ref`, `git branch -f`) before the push makes
+the controller push that tip. The item PR's review and the spine PR's ack still read the result
+(ADR-0005).
+
+**Known limit (the first push URL).** When `origin` has several push URLs, each must be the run's
+forge, and the controller pushes to the first.
 
 **Known limit (timeout of `push`).** A push the 60 s limit kills after the remote took the ref is
-recorded as `outcome=failed` and parks the unit. After a `clear`, `ls-remote` returns exit 0, so the
-launch goes on and the ledger keeps the `failed` line over a pushed branch.
+recorded as `outcome=failed` and parks the unit. After a `clear`, `ls-remote` returns exit 0, so
+the launch goes on and the ledger keeps the `failed` line over a pushed branch.
 
-**Known limit (ADR-0007).** The push has no record before it runs. If the controller dies between the
-push and its record, the push has no ledger line, and after a restart `ls-remote` returns exit 0, so
-nothing repairs the line.
+**Known limit (ADR-0007).** The push has no record before it runs. If the controller dies between
+the push and its record, the push has no ledger line, and after a restart `ls-remote` returns
+exit 0, so nothing repairs the line.
 
 `arm` names each base push before the run starts (`cli.md`).
 

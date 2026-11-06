@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use pf_engine::status::redact;
 use pf_workflow::rules::{Allow, RoleRules};
 
 use crate::grammar;
@@ -819,8 +820,42 @@ impl<'a> Analyzer<'a> {
         let mut i = 1;
         let mut dir: Option<Word> = None;
         let mut dirs: Vec<Word> = Vec::new();
+        // A word that the shell expands is not readable among the options of git: `-c*` can
+        // become a file named `-c`, and `-c$X` the flag `-c`, so the next word is then a key. The
+        // value of an option that takes one can bring in more options when it splits or expands.
+        let option_unreadable = |w: &Word| w.dynamic || w.glob;
+        // A value that expands is readable only when it is one double-quoted string, such as
+        // `-C "$WT"` or `-C "$(cmd)"`: the shell does not split that into words. A quote beside
+        // an unquoted part (`"."$Y`) does not help, because the shell splits that part into
+        // words. `"$@"` and `"${a[@]}"` are the exception: they split, so they are denied.
+        let value_unreadable = |w: Option<&Word>| {
+            w.is_some_and(|w| w.glob || (w.dynamic && (!w.one_dq || makes_many_words(w))))
+        };
         while i < words.len() {
+            if option_unreadable(&words[i]) {
+                self.deny(
+                    "unparsed-command",
+                    "a word among the options of git has a glob or a variable and cannot be read",
+                );
+                return;
+            }
             let t = words[i].text.as_str();
+            if matches!(
+                t,
+                "-C" | "--git-dir"
+                    | "--work-tree"
+                    | "--namespace"
+                    | "--exec-path"
+                    | "--super-prefix"
+                    | "--attr-source"
+            ) && value_unreadable(words.get(i + 1))
+            {
+                self.deny(
+                    "unparsed-command",
+                    format!("the value of git {t} has a glob or a variable and cannot be read"),
+                );
+                return;
+            }
             match t {
                 "-C" => {
                     dir = words.get(i + 1).cloned();
@@ -828,25 +863,45 @@ impl<'a> Analyzer<'a> {
                     i += 2;
                 }
                 "-c" | "--config-env" => {
-                    match words.get(i + 1) {
-                        Some(v) if v.dynamic => self.deny(
-                            "unparsed-command",
-                            format!("git {t} sets a config that cannot be read"),
-                        ),
-                        Some(v) if config_runs_command(&v.text, t == "--config-env") => self.deny(
-                            "unparsed-command",
-                            format!(
-                                "git {t} sets a config that runs a command that cannot be read"
+                    // A key that redirects git is denied for every value, before the checks of
+                    // a value that cannot be read.
+                    let redirect = words
+                        .get(i + 1)
+                        .map(|v| setting_key(&v.text))
+                        .filter(|k| config_key_redirects(k));
+                    if let Some(key) = redirect {
+                        self.deny(CONFIG_TRUST, config_trust_reason(&format!("git {t}"), key));
+                    } else {
+                        match words.get(i + 1) {
+                            Some(v) if v.dynamic || v.glob => self.deny(
+                                "unparsed-command",
+                                format!("git {t} sets a config that cannot be read"),
                             ),
-                        ),
-                        _ => {}
+                            Some(v) if config_runs_command(&v.text, t == "--config-env") => self
+                                .deny(
+                                    "unparsed-command",
+                                    format!(
+                                    "git {t} sets a config that runs a command that cannot be read"
+                                ),
+                                ),
+                            _ => {}
+                        }
                     }
                     i += 2;
                 }
                 "--git-dir" | "--work-tree" | "--namespace" | "--exec-path" | "--super-prefix"
                 | "--attr-source" => i += 2,
                 _ if t.starts_with("--config-env=") => {
-                    if words[i].dynamic || config_runs_command(&t["--config-env=".len()..], true) {
+                    let setting = &t["--config-env=".len()..];
+                    if config_key_redirects(setting_key(setting)) {
+                        self.deny(
+                            CONFIG_TRUST,
+                            config_trust_reason("git --config-env", setting_key(setting)),
+                        );
+                    } else if words[i].dynamic
+                        || words[i].glob
+                        || config_runs_command(setting, true)
+                    {
                         self.deny(
                             "unparsed-command",
                             "git --config-env sets a config that runs a command that cannot be read",
@@ -871,6 +926,11 @@ impl<'a> Analyzer<'a> {
             options::canonical_words(&words[i + 1..], &options::git_options(sub_name));
         let rest = &canonical[..];
         let first_deny = self.walk.denies.len();
+        if sub_name == "config"
+            && let Some((rule, reason)) = config_trust_deny(rest)
+        {
+            self.deny(rule, reason);
+        }
         if sub_name == "config" && config_writes_command(rest) {
             self.deny(
                 "unparsed-command",
@@ -936,9 +996,15 @@ impl<'a> Analyzer<'a> {
                 }
             }
             "worktree" if rest.first().is_some_and(|w| w.text == "remove") => {
+                // After a `--`, a word that starts with `-` is a path, not an option.
+                let mut after_dashes = false;
                 let targets: Vec<Word> = rest[1..]
                     .iter()
-                    .filter(|w| !w.text.starts_with('-'))
+                    .filter(|w| {
+                        let is_path = after_dashes || !w.text.starts_with('-');
+                        after_dashes |= w.text == "--";
+                        is_path
+                    })
                     .cloned()
                     .collect();
                 self.delete_targets("git worktree remove", &targets, false, false);
@@ -1046,7 +1112,10 @@ impl<'a> Analyzer<'a> {
                 format!("the push has {:?}, which cannot be read (a variable outside quotes, or one that changes the meaning)", w.raw),
             );
         }
-        for d in dirs.iter().filter(|d| d.dynamic && d.quoted_var.is_none()) {
+        for d in dirs
+            .iter()
+            .filter(|d| d.dynamic && (d.quoted_var.is_none() || makes_many_words(d)))
+        {
             self.deny(
                 "push-unreadable",
                 format!(
@@ -1679,6 +1748,105 @@ fn after_opts(args: &[Word], takes_arg: &[&str], positional: usize) -> Vec<Word>
     args[i..].to_vec()
 }
 
+/// How a subsection takes part in a config key's name.
+#[derive(Clone, Copy)]
+enum Subsection {
+    /// `section.variable`.
+    Without,
+    /// `section.<subsection>.variable`.
+    With,
+    /// Both forms name the key.
+    Either,
+}
+
+/// Git config keys that redirect git, as (section, variable, subsection), in lower case. A seat may
+/// not set one, whatever the value: a bare path, a bare host and an empty value each redirect.
+///
+/// Source: git-config(1): `core.hooksPath`, `core.sshCommand`, `core.gitProxy`,
+/// `remote.<name>.receivepack|uploadpack|vcs|pushurl|proxy`, `url.<base>.insteadOf|pushInsteadOf`, `http.proxy`,
+/// `http.<url>.proxy`, `http.sslVerify`, `http.<url>.sslVerify`, `credential.helper`,
+/// `credential.<url>.helper` and, under "Includes", `include.path` and `includeIf.<condition>.path`.
+const REDIRECT_KEYS: [(&str, &str, Subsection); 15] = [
+    ("core", "hookspath", Subsection::Without),
+    ("remote", "receivepack", Subsection::With),
+    ("remote", "uploadpack", Subsection::With),
+    ("remote", "vcs", Subsection::With),
+    ("remote", "pushurl", Subsection::With),
+    ("remote", "proxy", Subsection::With),
+    ("url", "insteadof", Subsection::With),
+    ("url", "pushinsteadof", Subsection::With),
+    ("include", "path", Subsection::Without),
+    ("includeif", "path", Subsection::With),
+    ("core", "sshcommand", Subsection::Without),
+    ("core", "gitproxy", Subsection::Without),
+    ("http", "proxy", Subsection::Either),
+    ("http", "sslverify", Subsection::Either),
+    ("credential", "helper", Subsection::Either),
+];
+
+/// The rule for a write of a key that redirects git.
+const CONFIG_TRUST: &str = "git-config-trust";
+
+/// The reason names the key as written. A key such as `url.<base>.insteadOf` may hold a
+/// credential in `<base>`, so the key goes through `redact`.
+fn config_trust_reason(form: &str, key: &str) -> String {
+    format!(
+        "{form} sets {}, which redirects git; a seat may not set it",
+        redact(key)
+    )
+}
+
+/// True when the shell can split the word into many words even in double quotes: it holds a
+/// `$@`, `${@…}` or `${a[@]…}` (the parser puts the variable `@` in the text for each of them).
+/// `"$*"` is one word and does not count.
+fn makes_many_words(w: &Word) -> bool {
+    w.dynamic && w.text.contains("$@")
+}
+
+/// The key of a `key=value` setting, as `git -c` and `git --config-env` read it: the text before
+/// the first `=`, or all of it.
+fn setting_key(setting: &str) -> &str {
+    setting.split_once('=').map_or(setting, |(k, _)| k).trim()
+}
+
+/// Is this a config key that redirects git? Git compares the section and the variable without case
+/// and keeps the case of a subsection. The section is the text before the first `.`, the variable
+/// the text after the last, and the subsection what lies between, dots included.
+fn config_key_redirects(key: &str) -> bool {
+    let Some((section, rest)) = key.trim().split_once('.') else {
+        return false;
+    };
+    let (sub, variable) = match rest.rsplit_once('.') {
+        Some((sub, variable)) => (Some(sub), variable),
+        None => (None, rest),
+    };
+    let (section, variable) = (section.to_ascii_lowercase(), variable.to_ascii_lowercase());
+    REDIRECT_KEYS.iter().any(|(s, v, subsection)| {
+        *s == section && *v == variable && subsection_fits(*subsection, sub.is_some())
+    })
+}
+
+/// Does a section of this name, with or without a subsection, hold a key of `REDIRECT_KEYS`? A
+/// rename into such a section gives the renamed keys those names.
+fn config_section_redirects(name: &str) -> bool {
+    let (section, sub) = match name.trim().split_once('.') {
+        Some((section, _)) => (section, true),
+        None => (name.trim(), false),
+    };
+    let section = section.to_ascii_lowercase();
+    REDIRECT_KEYS
+        .iter()
+        .any(|(s, _, subsection)| *s == section && subsection_fits(*subsection, sub))
+}
+
+fn subsection_fits(subsection: Subsection, has_subsection: bool) -> bool {
+    match subsection {
+        Subsection::Without => !has_subsection,
+        Subsection::With => has_subsection,
+        Subsection::Either => true,
+    }
+}
+
 /// Git config keys whose value is a command that git runs.
 const COMMAND_KEYS: [&str; 14] = [
     "core.fsmonitor",
@@ -1737,47 +1905,114 @@ fn config_runs_command(setting: &str, value_unread: bool) -> bool {
     !(value.is_empty() || bare)
 }
 
+/// The words of a `git config …` call, read once for the guards below.
+struct ConfigCall<'a> {
+    /// A read or a removal: `--get` to `--remove-section`.
+    reads: bool,
+    /// `--add` or `--replace-all`: the call writes even with one positional word.
+    writes_more: bool,
+    /// `--edit` or `-e`.
+    edit: bool,
+    /// `--rename-section`.
+    rename: bool,
+    /// The positional words. An option that takes a value hides that value from them.
+    positional: Vec<&'a Word>,
+}
+
+/// The long options of `git config` that take a value: `--file`, `--blob`, `--default`, `--comment`,
+/// `--type`, and `--value` and `--url` of the `get` and `set` verbs. Without an `=`, the next word
+/// is their value, whatever it looks like.
+const CONFIG_VALUE_OPTIONS: [&str; 7] =
+    ["file", "blob", "default", "comment", "type", "value", "url"];
+
+/// Read the words of a `git config …` call. A flag counts only where git reads it as a flag: not
+/// as the value of an option that takes one (`--comment --get`), not after a `--`, and not after
+/// the first operand (`core.hooksPath --unset` writes the value `--unset`). Git stops reading
+/// flags at the first operand. The one word before it that does not end the flags is a verb
+/// (`set`, `get`, …) in first place, which keeps reading them up to its own operand. The words
+/// after `--` or after the first operand are all operands. A short flag is read inside a cluster
+/// (`-ze`).
+fn config_call(rest: &[Word]) -> ConfigCall<'_> {
+    let mut call = ConfigCall {
+        reads: false,
+        writes_more: false,
+        edit: false,
+        rename: false,
+        positional: Vec::new(),
+    };
+    let mut i = 0;
+    while i < rest.len() {
+        let t = rest[i].text.as_str();
+        // Past the first operand, every word is an operand, whatever it looks like. A `--` there
+        // is an operand too: `core.hooksPath --` writes the value `--`.
+        let verb_first = rest.first().is_some_and(|w| config_verb(&w.text));
+        if !call.positional.is_empty() && !(call.positional.len() == 1 && verb_first) {
+            call.positional.extend(rest[i..].iter());
+            break;
+        }
+        if t == "--" {
+            call.positional.extend(rest[i + 1..].iter());
+            break;
+        }
+        if let Some(long) = t.strip_prefix("--") {
+            let (name, has_value) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            match name {
+                "get" | "get-all" | "get-regexp" | "get-urlmatch" | "get-color"
+                | "get-colorbool" | "list" | "unset" | "unset-all" | "remove-section" => {
+                    call.reads = true;
+                }
+                "add" | "replace-all" => call.writes_more = true,
+                "edit" => call.edit = true,
+                "rename-section" => call.rename = true,
+                _ => {}
+            }
+            if !has_value && CONFIG_VALUE_OPTIONS.contains(&name) {
+                i += 1;
+            }
+        } else if t.starts_with('-') && t.len() > 1 {
+            for (at, c) in t.char_indices().skip(1) {
+                match c {
+                    'l' => call.reads = true,
+                    'e' => call.edit = true,
+                    // `-f` and `-t` end the cluster. The rest of the word is the value, or the
+                    // next word is.
+                    'f' | 't' => {
+                        if at + 1 == t.len() {
+                            i += 1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            call.positional.push(&rest[i]);
+        }
+        i += 1;
+    }
+    call
+}
+
+/// The verbs of `git config` that git reads in first place, before any flag.
+fn config_verb(word: &str) -> bool {
+    matches!(
+        word,
+        "get" | "set" | "list" | "unset" | "edit" | "rename-section" | "remove-section"
+    )
+}
+
 /// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,
 /// listing and removing one do not. A key the rules cannot read, in a write, counts as one that
 /// does.
 fn config_writes_command(rest: &[Word]) -> bool {
-    let reads = rest.iter().any(|w| {
-        matches!(
-            w.text.as_str(),
-            "--get"
-                | "--get-all"
-                | "--get-regexp"
-                | "--get-urlmatch"
-                | "--list"
-                | "-l"
-                | "--unset"
-                | "--unset-all"
-                | "--remove-section"
-        )
-    });
-    if reads {
+    let call = config_call(rest);
+    if call.reads {
         return false;
     }
-    let writes_more = rest
-        .iter()
-        .any(|w| matches!(w.text.as_str(), "--add" | "--replace-all"));
-    // The positional words. An option that takes a value hides that value from them.
-    let mut positional: Vec<&Word> = Vec::new();
-    let mut i = 0;
-    while i < rest.len() {
-        let t = rest[i].text.as_str();
-        if matches!(
-            t,
-            "-f" | "--file" | "--blob" | "--default" | "--comment" | "-t" | "--type"
-        ) {
-            i += 2;
-            continue;
-        }
-        if !(t.starts_with('-') && t.len() > 1) {
-            positional.push(&rest[i]);
-        }
-        i += 1;
-    }
+    let writes_more = call.writes_more;
+    let mut positional = call.positional;
     // `git config get|list|unset …` read or remove. `git config set` writes.
     match positional.first().map(|w| w.text.as_str()) {
         Some("get" | "list" | "unset" | "edit" | "rename-section" | "remove-section") => {
@@ -1803,6 +2038,220 @@ fn config_writes_command(rest: &[Word]) -> bool {
     let value = positional.get(1);
     let setting = format!("{}={}", key.text, value.map_or("", |v| v.text.as_str()));
     config_runs_command(&setting, value.is_some_and(|v| v.dynamic))
+}
+
+/// Does `git config …` set a key that redirects git, rename a section into one, or open the
+/// config in an editor? Returns the rule and the reason. A read, a listing and a removal do not,
+/// but only in a shape `config_read_shape` reads exactly. Any other call is denied when a word of
+/// it names a key that redirects git.
+fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
+    let call = config_call(rest);
+    let editor = || {
+        (
+            CONFIG_TRUST,
+            "git config opens the config in an editor, and the editor's writes cannot be read; a seat may not use it".to_string(),
+        )
+    };
+    if call.edit {
+        return Some(editor());
+    }
+    let mut positional = call.positional.clone();
+    // The verb forms need no flag. A flag that reads, removes or renames makes a word that looks
+    // like a verb a key or a section name.
+    let verb = if call.reads || call.rename {
+        None
+    } else {
+        positional.first().map(|w| w.text.as_str())
+    };
+    if verb == Some("edit") {
+        return Some(editor());
+    }
+    // A call in a shape the guard reads exactly, which only reads or removes, is allowed.
+    if config_read_shape(rest) {
+        return None;
+    }
+    // A word with an unquoted glob has no key text here: the shell expands it to the names of
+    // files in the seat's directory, and a seat can create those. It can become a key, a value or
+    // a flag, so a call outside the read shapes that has one is not readable, as a variable is not.
+    if rest.iter().any(|w| w.glob) {
+        return Some((
+            "unparsed-command",
+            "git config has a word with a glob outside the shapes that only read, and the shell can expand it to a key; quote it or write the name out".to_string(),
+        ));
+    }
+    if verb == Some("rename-section") {
+        positional.remove(0);
+        if let Some(deny) = config_rename_deny(&positional) {
+            return Some(deny);
+        }
+    }
+    if call.rename
+        && let Some(deny) = config_rename_deny(&positional)
+    {
+        return Some(deny);
+    }
+    // Any other call is a shape the guard does not read: it cannot tell the key from the value, or
+    // a read from a write. It is denied when any word names a key that redirects git. A key that
+    // is a variable stays with `config_writes_command`.
+    rest.iter()
+        .find(|w| !w.dynamic && config_key_redirects(&w.text))
+        .map(|w| {
+            (
+                CONFIG_TRUST,
+                config_trust_reason("git config", w.text.trim()),
+            )
+        })
+}
+
+/// The flags of `git config` that name no action and change no write: a scope, and the format
+/// flags. They are the only ones `config_read_shape` skips besides the actions that read.
+const CONFIG_NEUTRAL_FLAGS: [&str; 18] = [
+    "global",
+    "local",
+    "system",
+    "worktree",
+    "null",
+    "name-only",
+    "show-origin",
+    "show-scope",
+    "includes",
+    "no-includes",
+    "bool",
+    "int",
+    "bool-or-int",
+    "bool-or-str",
+    "path",
+    "expiry-date",
+    "no-type",
+    "fixed-value",
+];
+
+/// The flags of the verbs `get` and `unset` that name no action.
+const CONFIG_VERB_FLAGS: [&str; 3] = ["all", "regexp", "show-names"];
+
+/// Is this `git config …` call one of the shapes that only read or remove, written so the guard
+/// reads it exactly? The shapes are:
+/// - `git config <key>`, with scope, format, type and value-taking options before the key;
+/// - one read or removal flag (`--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`,
+///   `--get-color`, `--get-colorbool`, `--list`, `-l`, `--unset`, `--unset-all`,
+///   `--remove-section`) among those options, then its operands;
+/// - the verb `get`, `list`, `unset` or `remove-section` in first place, with its own flags
+///   (`--all`, `--regexp`, …) and those options, then its operands.
+///
+/// Every other word before the first operand, a `--` anywhere, a word that is a variable or a
+/// glob before the first operand, a glob operand when no flag reads, and a key with more than one
+/// operand and no read flag are not a shape. The caller denies such a call when any word names a
+/// key that redirects git, or is a glob.
+fn config_read_shape(rest: &[Word]) -> bool {
+    let verb = rest
+        .first()
+        .is_some_and(|w| matches!(w.text.as_str(), "get" | "list" | "unset" | "remove-section"));
+    let mut action = verb;
+    let mut i = usize::from(verb);
+    while i < rest.len() {
+        let w = &rest[i];
+        let t = w.text.as_str();
+        // A glob that stands where an operand does is the first operand: the end check reads it.
+        // A glob that stands among the flags may expand to one, so it is not a shape.
+        if w.dynamic || t == "--" || w.glob && t.starts_with('-') {
+            return false;
+        }
+        if let Some(long) = t.strip_prefix("--") {
+            let (name, has_value) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            if has_value {
+                // `--file=f`, `--comment=c`: the value is in the word.
+                if !CONFIG_VALUE_OPTIONS.contains(&name) {
+                    return false;
+                }
+            } else if CONFIG_VALUE_OPTIONS.contains(&name) {
+                // The next word is the value, whatever it looks like.
+                i += 1;
+                if i >= rest.len() || rest[i].dynamic || rest[i].glob {
+                    return false;
+                }
+            } else if matches!(
+                name,
+                "get"
+                    | "get-all"
+                    | "get-regexp"
+                    | "get-urlmatch"
+                    | "get-color"
+                    | "get-colorbool"
+                    | "list"
+                    | "unset"
+                    | "unset-all"
+                    | "remove-section"
+            ) {
+                if action {
+                    return false;
+                }
+                action = true;
+            } else if !(CONFIG_NEUTRAL_FLAGS.contains(&name)
+                || verb && CONFIG_VERB_FLAGS.contains(&name))
+            {
+                return false;
+            }
+        } else if t.starts_with('-') && t.len() > 1 {
+            for (at, c) in t.char_indices().skip(1) {
+                match c {
+                    'z' => {}
+                    'l' => {
+                        if action {
+                            return false;
+                        }
+                        action = true;
+                    }
+                    // `-f` and `-t` end the cluster. The rest of the word is the value, or the
+                    // next word is.
+                    'f' | 't' => {
+                        if at + 1 == t.len() {
+                            i += 1;
+                            if i >= rest.len() || rest[i].dynamic || rest[i].glob {
+                                return false;
+                            }
+                        }
+                        break;
+                    }
+                    _ => return false,
+                }
+            }
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    let operands = &rest[i.min(rest.len())..];
+    if operands.iter().any(|w| w.text == "--") {
+        return false;
+    }
+    // A read flag or a verb makes every operand an operand of a read. Without one, a key alone
+    // reads; a value after it writes.
+    // A glob operand with no action may expand to a key and a value: that is a write.
+    action || (operands.len() <= 1 && !operands.iter().any(|w| w.glob))
+}
+
+/// `git config --rename-section <old> <new>`: is `<new>` a section that holds a key that redirects
+/// git? A section the rules cannot read is refused as `unparsed-command`.
+fn config_rename_deny(names: &[&Word]) -> Option<(&'static str, String)> {
+    let new = names.get(1)?;
+    if new.dynamic {
+        return Some((
+            "unparsed-command",
+            "git config --rename-section renames a section into a name that cannot be read"
+                .to_string(),
+        ));
+    }
+    config_section_redirects(&new.text).then(|| {
+        (
+            CONFIG_TRUST,
+            format!(
+                "git config --rename-section moves keys into {}, which holds keys that redirect git; a seat may not do it",
+                redact(&new.text)
+            ),
+        )
+    })
 }
 
 /// Is this env name one that gives git config without a `-c`?

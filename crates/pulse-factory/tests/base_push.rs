@@ -86,12 +86,13 @@ fn local_branch(repo: &Path, name: &str) -> String {
     git(repo, &["rev-parse", "HEAD"])
 }
 
-/// The SHA of a branch of the bare forge, or `None`.
+/// The SHA of a branch of the bare forge, or `None`. It reads the full ref name: `rev-parse` would
+/// also find a tag called `refs/heads/<branch>`.
 fn on_origin(r: &Rig, branch: &str) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(&r.bare)
-        .args(["rev-parse", "--verify", "--quiet"])
+        .args(["show-ref", "--verify", "--hash"])
         .arg(format!("refs/heads/{branch}"))
         .output()
         .unwrap();
@@ -578,10 +579,12 @@ fn a_second_real_push_in_one_park_generation_gets_its_own_ledger_line() {
         dir: r.work.display().to_string(),
         branch: "base-x".to_string(),
     };
+    let work_dir = r.run_dir.join("controller").join("base-push");
     let forge = Forge {
         repo: r.forge.repo(),
         default_branch: BASE,
         paper: true,
+        work_dir: &work_dir,
     };
     let run_dir = r.run_dir.display().to_string();
     let ctx = RenderContext {
@@ -787,4 +790,345 @@ fn the_close_seats_own_branch_and_rule_set_do_not_change() {
     }
     assert_eq!(with.role, without.role);
     assert_eq!(with_rules, without_rules, "the rule set is the same");
+}
+
+// ---- Seat-written git config: the controller reads names and objects from the seat's repository
+// and checks, asks and pushes from a repository of its own.
+
+/// `<run dir>/controller/base-push/` holds no `<unit>.git` once the controller is done.
+fn assert_no_scratch_repository(r: &Rig) {
+    let dir = r.run_dir.join("controller").join("base-push");
+    let left: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.ends_with(".git"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(left.is_empty(), "the controller left {left:?} in {dir:?}");
+}
+
+/// A script that writes `marker` and then runs the rest of its command line.
+fn marker_script(path: &Path, marker: &Path, then: &str) {
+    write_script(
+        path,
+        &format!("#!/bin/sh\ntouch '{}'\n{then}\n", marker.display()),
+    );
+}
+
+/// Every `note:` line of the ledger that names `needle`.
+fn note_lines_with(r: &Rig, needle: &str) -> Vec<String> {
+    r.ledger_lines("note: unit=")
+        .into_iter()
+        .filter(|l| l.contains(needle))
+        .collect()
+}
+
+#[test]
+fn a_seat_written_hooks_path_and_pre_push_hook_do_not_run_and_the_ledger_names_the_setting() {
+    let r = rig_for("base-x");
+    let sha = local_branch(&r.work, "base-x");
+    let (m_path, m_default) = (
+        r.root.path().join("m-path"),
+        r.root.path().join("m-default"),
+    );
+    let seat_hooks = r.root.path().join("seat-hooks");
+    std::fs::create_dir_all(&seat_hooks).unwrap();
+    marker_script(&seat_hooks.join("pre-push"), &m_path, "exit 0");
+    marker_script(&r.work.join(".git/hooks/pre-push"), &m_default, "exit 0");
+    git(
+        &r.work,
+        &["config", "core.hooksPath", seat_hooks.to_str().unwrap()],
+    );
+
+    r.reach_close(UNIT);
+
+    assert_eq!(on_origin(&r, "base-x"), Some(sha), "the base push happened");
+    assert!(!m_path.exists(), "the hook of core.hooksPath ran");
+    assert!(!m_default.exists(), "the hook of .git/hooks ran");
+    let want = format!(
+        "note: unit=u1 base push ignored git config core.hookspath (local) of {}",
+        r.work.display()
+    );
+    let notes = note_lines_with(&r, "base push ignored git config");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains(&want), "{}", notes[0]);
+    let pushes = push_lines(&r, "base-x");
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_no_scratch_repository(&r);
+}
+
+#[test]
+fn seat_written_transport_settings_run_nothing_and_each_gets_one_note() {
+    let r = rig_for("base-x");
+    let sha = local_branch(&r.work, "base-x");
+    let scripts = r.root.path().join("seat-scripts");
+    std::fs::create_dir_all(&scripts).unwrap();
+    let mut markers = Vec::new();
+    for (key, name, then) in [
+        (
+            "remote.origin.receivepack",
+            "receivepack",
+            "exec git-receive-pack \"$@\"",
+        ),
+        ("core.sshCommand", "ssh", "exit 1"),
+        ("core.fsmonitor", "fsmonitor", "exit 0"),
+        ("credential.helper", "credential", "exit 0"),
+    ] {
+        let marker = r.root.path().join(format!("m-{name}"));
+        let script = scripts.join(name);
+        marker_script(&script, &marker, then);
+        let value = if key == "credential.helper" {
+            format!("!{}", script.display())
+        } else {
+            script.display().to_string()
+        };
+        git(&r.work, &["config", key, &value]);
+        markers.push(marker);
+    }
+
+    r.reach_close(UNIT);
+
+    assert_eq!(on_origin(&r, "base-x"), Some(sha), "the base push happened");
+    for m in &markers {
+        assert!(!m.exists(), "a seat-written command ran: {m:?}");
+    }
+    for key in [
+        "remote.origin.receivepack",
+        "core.sshcommand",
+        "core.fsmonitor",
+        "credential.helper",
+    ] {
+        let want = format!(
+            "base push ignored git config {key} (local) of {}",
+            r.work.display()
+        );
+        assert_eq!(note_lines_with(&r, &want).len(), 1, "{key}");
+    }
+    assert_eq!(note_lines_with(&r, "base push ignored git config").len(), 4);
+    // The ledger names the key and never the value.
+    assert!(!r.ledger_text().contains("seat-scripts"));
+    assert_no_scratch_repository(&r);
+}
+
+#[test]
+fn a_push_insteadof_in_the_seats_config_is_refused_and_the_other_repo_gets_no_ref() {
+    let r = rig_for("base-x");
+    local_branch(&r.work, "base-x");
+    let other_bare = r.root.path().join("elsewhere.git");
+    std::fs::create_dir_all(&other_bare).unwrap();
+    git(
+        &other_bare,
+        &["init", "--quiet", "--bare", "--initial-branch=spine"],
+    );
+    let other = other_bare.to_str().unwrap();
+    git(
+        &r.work,
+        &[
+            "config",
+            &format!("url.{other}.pushInsteadOf"),
+            r.bare.to_str().unwrap(),
+        ],
+    );
+
+    through_verify(&r, UNIT);
+
+    let reason = park_reason(&r, UNIT);
+    assert!(
+        reason.contains("pushes to") && reason.contains(other),
+        "the refusal names the other repository: {reason}"
+    );
+    assert!(!close_started(&r, UNIT));
+    assert_eq!(on_origin(&r, "base-x"), None);
+    let in_other = git(&other_bare, &["for-each-ref", "refs/heads"]);
+    assert!(
+        in_other.is_empty(),
+        "nothing reached the other repo: {in_other}"
+    );
+    assert!(forge_push_lines(&r).is_empty());
+    let want = format!(
+        "base push ignored git config url.{other}.pushinsteadof (local) of {}",
+        r.work.display()
+    );
+    assert_eq!(note_lines_with(&r, &want).len(), 1, "{:?}", r.ledger_text());
+    assert_no_scratch_repository(&r);
+}
+
+#[test]
+fn a_seat_that_rewrites_its_config_while_the_controller_asks_changes_nothing_the_push_uses() {
+    // `remote.origin.uploadpack` runs when `ls-remote` asks `origin` of the seat's repository.
+    // It rewrites the seat's config so that the push would go to another repository, and then asks
+    // as git would. The controller asks from its own repository, so the command never runs.
+    let r = rig_for("base-x");
+    let sha = local_branch(&r.work, "base-x");
+    let other_bare = r.root.path().join("elsewhere.git");
+    std::fs::create_dir_all(&other_bare).unwrap();
+    git(
+        &other_bare,
+        &["init", "--quiet", "--bare", "--initial-branch=spine"],
+    );
+    let marker = r.root.path().join("m-uploadpack");
+    let script = r.root.path().join("swap-url");
+    marker_script(
+        &script,
+        &marker,
+        &format!(
+            "git config --file '{cfg}' 'url.{other}.pushInsteadOf' '{forge}'\nexec git-upload-pack \"$@\"",
+            cfg = r.work.join(".git/config").display(),
+            other = other_bare.display(),
+            forge = r.bare.display()
+        ),
+    );
+    git(
+        &r.work,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            script.to_str().unwrap(),
+        ],
+    );
+
+    r.reach_close(UNIT);
+
+    assert!(!marker.exists(), "the seat's uploadpack command ran");
+    assert_eq!(
+        on_origin(&r, "base-x"),
+        Some(sha),
+        "the forge got the branch"
+    );
+    let in_other = git(&other_bare, &["for-each-ref", "refs/heads"]);
+    assert!(in_other.is_empty(), "the other repo got a ref: {in_other}");
+    assert_eq!(push_lines(&r, "base-x").len(), 1);
+    assert_no_scratch_repository(&r);
+}
+
+#[test]
+fn a_tag_that_ends_like_the_branch_does_not_stand_in_for_a_missing_branch() {
+    // The forge holds `refs/tags/refs/heads/base-x` and no `refs/heads/base-x`: at the SHA the
+    // controller pushes, and at another one.
+    for tag_at_the_same_sha in [true, false] {
+        let r = rig_for("base-x");
+        let sha = local_branch(&r.work, "base-x");
+        let tagged = if tag_at_the_same_sha {
+            sha.clone()
+        } else {
+            local_branch(&r.work, "other")
+        };
+        git(
+            &r.work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                &format!("{tagged}:refs/tags/refs/heads/base-x"),
+            ],
+        );
+        assert_eq!(on_origin(&r, "base-x"), None, "{tag_at_the_same_sha}");
+
+        r.reach_close(UNIT);
+
+        assert_eq!(
+            on_origin(&r, "base-x"),
+            Some(sha.clone()),
+            "{tag_at_the_same_sha}: the branch was pushed"
+        );
+        let tag = git(&r.bare, &["rev-parse", "refs/tags/refs/heads/base-x"]);
+        assert_eq!(tag, tagged, "{tag_at_the_same_sha}: the tag did not move");
+        let lines = push_lines(&r, "base-x");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains(&format!("sha={sha} outcome=pushed")),
+            "{}",
+            lines[0]
+        );
+        assert_no_scratch_repository(&r);
+    }
+}
+
+#[test]
+fn a_dir_that_is_not_a_repository_is_refused_naming_the_common_directory_and_pushes_nothing() {
+    let r = Rig::with(&options(), |_| {});
+    let not_a_repo = r.root.path().join("not-a-repo");
+    std::fs::create_dir_all(&not_a_repo).unwrap();
+    item(&r, UNIT, 1, "base-x", &not_a_repo);
+
+    through_verify(&r, UNIT);
+
+    let reason = park_reason(&r, UNIT);
+    assert!(
+        reason.starts_with(
+            "base push of branch `base-x` refused: cannot read the common git directory of "
+        ) && reason.contains(not_a_repo.to_str().unwrap()),
+        "{reason}"
+    );
+    assert!(!close_started(&r, UNIT));
+    assert_eq!(on_origin(&r, "base-x"), None);
+    assert!(forge_push_lines(&r).is_empty());
+    assert_no_scratch_repository(&r);
+}
+
+#[test]
+fn a_second_launch_in_one_park_generation_writes_no_second_note_and_a_new_generation_does() {
+    use pf_engine::render::RenderContext;
+    use pf_workflow::file::BasePush;
+    use pulse_factory::controller::base_push::{Forge, ensure};
+
+    let r = rig_for("base-x");
+    local_branch(&r.work, "base-x");
+    git(&r.work, &["config", "core.hooksPath", "/seat/hooks"]);
+    git(&r.work, &["config", "credential.helper", "!seat-helper"]);
+    r.tick();
+    assert!(r.has_unit(UNIT));
+    let stage = r
+        .package
+        .file
+        .tracks
+        .iter()
+        .flat_map(|t| &t.stages)
+        .find(|s| s.name == "close")
+        .expect("a close stage");
+    let base = BasePush {
+        dir: r.work.display().to_string(),
+        branch: "base-x".to_string(),
+    };
+    let work_dir = r.run_dir.join("controller").join("base-push");
+    let forge = Forge {
+        repo: r.forge.repo(),
+        default_branch: BASE,
+        paper: true,
+        work_dir: &work_dir,
+    };
+    let run_dir = r.run_dir.display().to_string();
+    let ctx = RenderContext {
+        run_id: "r",
+        run_dir: &run_dir,
+        params: &r.params,
+        unit: None,
+    };
+    let go = |generation: u32| ensure(&r.engine, &forge, stage, &base, UNIT, generation, &ctx);
+    let lose = || git(&r.bare, &["update-ref", "-d", "refs/heads/base-x"]);
+    let notes = || note_lines_with(&r, "base push ignored git config");
+
+    // Two launches in generation 0, each with a real push: two push lines and two notes.
+    assert_eq!(go(0).unwrap(), Vec::<String>::new());
+    assert_eq!(notes().len(), 2, "{:?}", notes());
+    lose();
+    go(0).unwrap();
+    assert_eq!(push_lines(&r, "base-x").len(), 2);
+    assert_eq!(
+        notes().len(),
+        2,
+        "a replay writes no second line: {:?}",
+        notes()
+    );
+    // A launch that finds the branch on `origin` has the same two notes.
+    go(0).unwrap();
+    assert_eq!(notes().len(), 2);
+    assert_no_scratch_repository(&r);
+
+    // Another generation (the unit was cleared): the settings are named again.
+    go(1).unwrap();
+    assert_eq!(notes().len(), 4, "{:?}", notes());
+    assert_no_scratch_repository(&r);
 }

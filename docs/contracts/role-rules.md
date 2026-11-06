@@ -36,7 +36,7 @@ The set is closed. There are five values:
 | `delete_own_build_target` | The seat may delete its own build target directory. |
 | `push_own_branch` | The seat may push the branch of its own unit. |
 | `push_own_tag` | The seat may push a tag of its own unit. |
-| `write_own_report_and_run_files` | The seat may write its report and its files under the run directory. |
+| `write_own_report_and_run_files` | The seat may write its report and the files in its own unit's directory under the run directory (`out/<unit>`, and `out/<seed>` for a repeat of a repeating seed). |
 
 A role that does not list a value does not get it. A role that lists no push value may not push.
 
@@ -80,6 +80,42 @@ a command. A rule name is what the audit line and a deny's reason show.
 | a push of another branch | `push-other-branch` (deny) | every role |
 | `gh pr review`, `gh pr comment`, `gh pr edit`, `gh pr close`, `gh pr reopen`, `gh pr ready`, `gh pr lock`, `gh pr unlock`, `gh pr update-branch`, `gh issue comment`, `gh issue edit`, `gh issue close`, `gh issue reopen`, `gh issue lock`, `gh issue unlock`, `gh issue delete` | `gh-pr-write` (deny) | every role |
 | any `gh` command that is not a read (`gh pr create`, `gh issue create`, `gh release create`, `gh workflow run`, …) | `gh-forge-write` (deny) | the `reviewer` role only |
+| `git config <key> <value>` (any scope, `set`, `--add`, `--replace-all`), `git -c <key>=<value>` and `git --config-env <key>=<var>` of a key that redirects git; `git config --rename-section <old> <new>` into one of their sections; `git config --edit`, `-e` and `edit` | `git-config-trust` (deny) | every role |
+
+`git-config-trust` names the keys that redirect git: `core.hooksPath`, `remote.<name>.receivepack`,
+`remote.<name>.uploadpack`, `remote.<name>.vcs`, `remote.<name>.pushurl`,
+`remote.<name>.proxy`, `url.<base>.insteadOf`, `url.<base>.pushInsteadOf`,
+`include.path`, `includeIf.<condition>.path`, and the transport keys that the controller's push reads
+from the global config: `core.sshCommand`, `core.gitProxy`, `http.proxy`, `http.<url>.proxy`,
+`http.sslVerify`, `http.<url>.sslVerify`, `credential.helper` and `credential.<url>.helper`. They
+redirect git, so a seat may not set them, whatever the value: a bare path, a bare host and an empty
+value each redirect. A read, a listing and a removal of such a key stay allowed, but only in a shape the rules read exactly:
+a key alone (`git config <key>`); one read or removal flag (`--get`, `--get-all`, `--get-regexp`,
+`--get-urlmatch`, `--list`, `-l`, `--unset`, `--unset-all`, `--remove-section`); or the verb `get`,
+`list`, `unset` or `remove-section` in first place. Scope flags (`--global`, `--local`, `--system`,
+`--worktree`), type flags (`--bool`, `--int`, `--bool-or-int`, `--bool-or-str`, `--path`,
+`--expiry-date`, `--no-type`), `--includes`, `--no-includes`, `--fixed-value` and the options that
+take a value (`--file <f>`, `--comment`, `--type`, …) may come before the key; so may `--get-color`
+and `--get-colorbool` as read flags. Every other call is denied when any word of it names a key
+that redirects git: the rules do not guess which later word is a flag, and a `--` anywhere in such
+a call is outside every shape. So a value that equals such a key is denied too. A word with an
+unquoted glob has no key text, because the shell expands it to the names of files that a seat can
+create, so a call that has one is denied as `unparsed-command` unless a read flag or verb comes
+first and the glob is an operand; the same holds for the value of `git -c` and `git --config-env`
+and for a section name in a rename. Quote the glob or write the name out. The same holds among the
+options of `git` itself, before the subcommand: a word there with an unquoted glob or a variable
+(`-c*`, `-c$X`) is denied as `unparsed-command`, because it can expand to `-c` and make the next
+word a key; so is a glob or any value that expands as the value of `-C`, `--git-dir`, `--work-tree`
+and the other options that take one, unless the value is one double-quoted string
+(`-C "$WT"`, `-C "$(cmd)"`; the shell does not split these). A quote beside an unquoted part
+(`-C "."$Y`) is denied. `"$@"` and `"${a[@]}"` are denied too, because the shell splits them into
+words even in double quotes, so they can bring in more options; `"$*"` stays one word. A joined option
+word with a variable (`--git-dir="$D"`) is denied too; write the spaced form. The editor opens a config whose writes the
+rules cannot read, so `--edit` is denied too. Git stops reading flags at the first operand, so
+`core.hooksPath --unset` and `core.hooksPath --` write the value `--unset` and `--`; the rules read
+them as writes. A short flag counts inside a cluster (`-ze`). A write into the repository's
+`.git/config` or a hooks directory through a shell redirection or `cp` is not read. That is the known
+limit of the redirection paragraph below.
 
 A relative path means the working directory and the directory of every literal `cd` earlier in the
 call. The `push_dir` of the seat's context is a second place a push may run from. A literal half of a
@@ -106,8 +142,9 @@ command, not the file a `>` or `>>` opens, so `echo x > <worktree>/file` is allo
 `reviewer` as it is for every role. The reviewer's brief (`briefs/review.md`) forbids a redirection
 into the worktree. A test (`reviewer_role.rs`) fails if the rules start to guard redirection, so this
 paragraph is corrected then. The same holds for the other shell writes, such as `sed -i`, `git add`
-and `git commit`: the rules deny a push, not a local change. The `reviewer`'s write path also
-includes the run directory itself, not only `out/<unit>`, so the brief is the guard there too.
+and `git commit`: the rules deny a push, not a local change. The write tools of the `reviewer` reach
+only `out/<unit>` of the run directory. A shell redirection into another unit's directory is still
+this known limit, so the brief is the guard there.
 
 ## The grammar of the shell that `pf-rules` reads
 

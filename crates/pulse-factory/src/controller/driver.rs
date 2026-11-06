@@ -958,12 +958,14 @@ impl Driver {
             let ctx = self.ctx(run_dir, Some((&unit.id, &detail.record.vars)));
             // A stage that names a base branch finds it on `origin` before it launches.
             if let Some(base) = &stage.base_push {
+                let work_dir = self.cfg.run_dir.join("controller").join("base-push");
                 let forge = base_push::Forge {
                     repo: &self.cfg.forge_repo,
                     default_branch: &self.cfg.default_branch,
                     paper: self.cfg.paper,
+                    work_dir: &work_dir,
                 };
-                if let Err(reason) = base_push::ensure(
+                match base_push::ensure(
                     engine,
                     &forge,
                     stage,
@@ -972,8 +974,16 @@ impl Driver {
                     detail.park_generation,
                     &ctx,
                 ) {
-                    self.park(t, &unit.id, &reason);
-                    continue;
+                    // A note the ledger refused is not a park reason: the push goes on.
+                    Ok(note_failures) => {
+                        for why in note_failures {
+                            t.note(format!("unit {}: base push: {why}", unit.id));
+                        }
+                    }
+                    Err(reason) => {
+                        self.park(t, &unit.id, &reason);
+                        continue;
+                    }
                 }
             }
             match run_unit_hook(engine, &unit.id, "before", &stage.before, &ctx) {

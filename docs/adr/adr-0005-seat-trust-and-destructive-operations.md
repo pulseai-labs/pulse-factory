@@ -167,3 +167,37 @@ Rejected alternatives:
   - **Git config in the repo directory is trusted by the base push.** `url.<base>.insteadOf` and
     `pushInsteadOf` rewrite the URL at transport time, and `core.hooksPath` and a `pre-push` hook
     run under the controller (`r0.s3` audit finding 2, PR #20's C9).
+    (Closed by the amendment of 2026-11-06, below.)
+- **Amended 2026-11-06, `r1.s1` (seat-trust hardening): five known limits close.** None changes a
+  decision above.
+  - **Closed:**
+    - The base push trusts no seat-written git config (C9). The controller reads only names and
+      objects from the seat's repository. `ls-remote` and the push run in its own bare repository,
+      which borrows the seat's objects, with hooks and the file-system monitor off. Each
+      seat-written setting that it ignores has a `note:` ledger line that names the key, not the
+      value.
+    - The ref is matched by its full name. The `ls-remote` output must hold `refs/heads/<b>`
+      exactly, and the push names the remote ref by its full name (a glob from a repository that
+      holds one branch). So `refs/tags/refs/heads/<b>` neither hides a missing branch nor takes the
+      push.
+    - A URL rewrite cannot move the push. The URL that the controller checks is the URL that its own
+      repository uses. A seat-written `insteadOf` or `pushInsteadOf` present at the check is refused
+      by name, and one written later changes nothing that the push uses.
+    - Every user-info form of a `scheme://` URL is redacted in park reasons, requests, the ledger,
+      the audit log and `arm`'s refusal.
+    - A seat's write tools reach only its report directory and its own unit's directory of the run
+      (`out/<unit>`, and `out/<seed>` for a repeat of a repeating seed). So a seat of one unit
+      cannot write another unit's `review.md`.
+    - `pf-rules` denies a seat that sets a key that redirects git, in any scope and through
+      `git config`, `git -c` or `git --config-env` (`git-config-trust`).
+  - **Evidence:** d9, `scripts/demo/seat-tamper.sh`, runs a paper seat that tries each of these.
+  - **Still known limits:**
+    - The controller trusts the content of the local ref. A seat that repoints the spine branch
+      before the push makes the controller push that tip. The 2026-11-05 bullet stands, and d9 does
+      not claim it.
+    - A shell write (`>`, `>>`, `cp`, `tee`, `sed -i`, `ln -s`) is not read by path. A seat can
+      still write another unit's run files, `.git/config` or a hooks directory that way. The brief
+      and the review are the guard there. "Shell writes checked by path" is on the feature map.
+    - The operator's global and system git config stay trusted, because the push credential lives
+      there. `git-config-trust` denies a seat's write of the guarded keys there too, and a shell
+      write to that file is the limit above.

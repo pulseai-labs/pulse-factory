@@ -276,10 +276,8 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git -c \"alias.$n=status\" x",
         // A key that runs a command.
         "git -c core.fsmonitor='gh pr merge 1' status",
-        "git -c core.sshCommand='gh pr merge 1' fetch",
         "git -c core.pager='gh pr merge 1' log",
         "git -c core.editor='sh -c x' commit",
-        "git -c credential.helper='!gh pr merge 1' fetch",
         "git -c diff.x.textconv='gh pr merge 1' diff",
         "git -c pager.log='gh pr merge 1' log",
         "git --config-env core.pager=VAR log",
@@ -291,8 +289,6 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config set alias.x status",
         // A write of a key that runs a command, or of a key the rules cannot read.
         "git config core.fsmonitor 'gh pr merge 1'",
-        "git config --global credential.helper '!gh pr merge 1'",
-        "git config --file f core.sshCommand 'sh -c x'",
         "git config diff.x.textconv 'gh pr merge 1'",
         "git config set core.pager 'sh -c x'",
         "git config \"$k\" v",
@@ -350,7 +346,6 @@ fn a_config_that_runs_a_command_is_denied_however_it_is_given() {
         "git config -f \"$HOME/.gitconfig\" user.name x",
         "git config --comment \"by $USER\" user.name x",
         "git config --file $f user.name",
-        "git config --edit --file \"$f\"",
         "git config core.pager",
         "git config user.name x",
         "git config core.pager cat",

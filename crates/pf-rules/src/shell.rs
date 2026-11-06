@@ -41,6 +41,11 @@ pub struct Word {
     pub glob: bool,
     /// True when any part of the word was in quotes.
     pub any_quote: bool,
+    /// True when the word is exactly one double-quoted string (`"$a/b"`, `"$(cmd)"`) with nothing
+    /// outside the quotes. The shell does not split a variable or a substitution inside it into
+    /// words, with one exception: `"$@"` and `"${a[@]}"` do split, so a word with a `$@` in its
+    /// text (see `Word::text`) is `one_dq` and still makes many words.
+    pub one_dq: bool,
     /// The words that an unquoted brace expansion makes of this word, such as `{merge,x}`.
     /// Empty when the word has none. The parser puts these words in the command in its place.
     pub alts: Vec<String>,
@@ -59,6 +64,7 @@ impl Word {
             quoted_var: None,
             glob: false,
             any_quote: false,
+            one_dq: false,
             alts: Vec::new(),
             brace_quoted: false,
         }
@@ -478,6 +484,7 @@ impl Parser<'_> {
                                 quoted_var: None,
                                 glob: word.glob,
                                 any_quote: false,
+                                one_dq: false,
                                 alts: Vec::new(),
                                 brace_quoted: false,
                             })
@@ -836,6 +843,9 @@ impl Parser<'_> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut any_quote = false;
         let mut glob = false;
+        // `dq` counts double-quoted strings; `outside` is set by anything else in the word.
+        let mut dq = 0usize;
+        let mut outside = false;
         let mut lit = String::new();
         macro_rules! flush {
             () => {
@@ -852,12 +862,14 @@ impl Parser<'_> {
                 }
                 '`' if self.closers.last() == Some(&Some('`')) => break,
                 '`' => {
+                    outside = true;
                     self.i += 1;
                     flush!();
                     self.list(Some('`'), depth + 1)?;
                     segs.push(Seg::Subst);
                 }
                 '\\' => {
+                    outside = true;
                     if self.peek_at(1) == Some('\n') {
                         self.i += 2;
                     } else if let Some(n) = self.peek_at(1) {
@@ -869,6 +881,7 @@ impl Parser<'_> {
                     }
                 }
                 '\'' => {
+                    outside = true;
                     self.i += 1;
                     any_quote = true;
                     flush!();
@@ -889,29 +902,34 @@ impl Parser<'_> {
                     segs.push(Seg::Quoted(s));
                 }
                 '"' => {
+                    dq += 1;
                     self.i += 1;
                     any_quote = true;
                     flush!();
                     self.double_quoted(&mut segs, depth)?;
                 }
                 '$' => {
+                    outside = true;
                     flush!();
                     if self.dollar_word(&mut segs, depth)? {
                         any_quote = true;
                     }
                 }
                 '*' | '?' | '[' => {
+                    outside = true;
                     glob = true;
                     lit.push(c);
                     self.i += 1;
                 }
                 _ => {
+                    outside = true;
                     lit.push(c);
                     self.i += 1;
                 }
             }
         }
         flush!();
+        let one_dq = dq == 1 && !outside;
         let raw: String = self.chars[start..self.i].iter().collect();
         let mut text = String::new();
         let mut dynamic = false;
@@ -962,6 +980,7 @@ impl Parser<'_> {
             quoted_var,
             glob,
             any_quote,
+            one_dq,
             alts,
             brace_quoted,
         })
@@ -1165,14 +1184,12 @@ impl Parser<'_> {
                 }
                 (Some(':'), Some('-' | '+')) if !length => {
                     self.i += 2;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 (Some('-' | '+'), _) if !length => {
                     self.i += 1;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 // The trim forms `${NAME#word}`, `${NAME##word}`, `${NAME%word}` and
@@ -1180,14 +1197,12 @@ impl Parser<'_> {
                 // default word.
                 (Some('#' | '%'), Some('#' | '%')) if !length && self.peek() == self.peek_at(1) => {
                     self.i += 2;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 (Some('#' | '%'), _) if !length => {
                     self.i += 1;
-                    self.param_word(quoted, depth + 1)?;
-                    segs.push(Seg::Subst);
+                    self.param_tail(segs, &name, quoted, depth + 1)?;
                     return Ok(());
                 }
                 _ => {}
@@ -1222,6 +1237,34 @@ impl Parser<'_> {
             "`{raw}` (a parameter expansion that the grammar does not list)"
         ));
         self.scan_text(&inner, depth)?;
+        // `${a[@]}`, `${@:2}` and `${!a[@]}` expand to many words, as `$@` does.
+        if inner.contains("[@]") || inner.trim_start_matches('!').starts_with('@') {
+            segs.push(Seg::Var {
+                name: "@".to_string(),
+                quoted,
+            });
+        }
+        segs.push(Seg::Subst);
+        Ok(())
+    }
+
+    /// The rest of `${NAME:-word}` and the like, after the operator: reads the word, then pushes
+    /// the expansion. It also pushes the variable `@` when the expansion can make many words:
+    /// `NAME` is `@`, or the word holds a `$@`, so the word is marked as one that splits.
+    fn param_tail(
+        &mut self,
+        segs: &mut Vec<Seg>,
+        name: &str,
+        quoted: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        let many = self.param_word(quoted, depth)?;
+        if many || name == "@" {
+            segs.push(Seg::Var {
+                name: "@".to_string(),
+                quoted,
+            });
+        }
         segs.push(Seg::Subst);
         Ok(())
     }
@@ -1229,14 +1272,17 @@ impl Parser<'_> {
     /// The word of `${NAME:-word}`, up to the brace that closes it. It is read as a word is: a
     /// quote, a variable or a substitution in it is found, and a `}` inside one does not close it.
     /// `quoted` is true when the expansion stands in double quotes, where a single quote is text.
-    fn param_word(&mut self, quoted: bool, depth: usize) -> Result<(), String> {
+    /// It returns true when the word holds a `$@` (or a `${a[@]}`) that can make many words.
+    fn param_word(&mut self, quoted: bool, depth: usize) -> Result<bool, String> {
         let mut scratch: Vec<Seg> = Vec::new();
         loop {
             match self.peek() {
                 None => return Err("a ${…} is not closed".to_string()),
                 Some('}') => {
                     self.i += 1;
-                    return Ok(());
+                    return Ok(scratch
+                        .iter()
+                        .any(|s| matches!(s, Seg::Var { name, .. } if name == "@")));
                 }
                 Some('\\') => self.i += 2,
                 Some('\'') if !quoted => {
@@ -1565,6 +1611,14 @@ mod tests {
         assert_eq!(w[3].quoted_var.as_deref(), Some("b"));
         assert!(w[4].dynamic && w[4].quoted_var.is_none());
         assert!(w[5].dynamic && w[5].quoted_var.is_none());
+    }
+
+    #[test]
+    fn a_word_that_is_one_double_quoted_string_is_marked() {
+        let p = parse("x \"$a/b\" \"$(c d)\" \".\"$y $z \"a\"\"b\" \"a\"{p,q} 'a' lit").unwrap();
+        let w = &p.cmds[0].words;
+        assert!(w[1].one_dq && w[2].one_dq);
+        assert!(w[3..].iter().all(|w| !w.one_dq));
     }
 
     #[test]
