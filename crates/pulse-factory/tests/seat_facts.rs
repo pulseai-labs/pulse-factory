@@ -14,7 +14,9 @@ use pf_adapter_fake::FakeAdapter;
 use pf_engine::port::agent::*;
 use pf_workflow::rules::RoleRules;
 use pulse_factory::controller::ports::{LivePorts, Ports, RunSpec, omp_config};
-use pulse_factory::controller::seat::{SeatFacts, SeatPort, SeatTable};
+use pulse_factory::controller::seat::{
+    RepeatSeed, SeatFacts, SeatPort, SeatTable, own_run_dirs, repeat_seeds,
+};
 use serde_json::json;
 
 fn rules_of(role: &str, allow: &[&str]) -> RoleRules {
@@ -52,6 +54,7 @@ fn facts(dir: &std::path::Path) -> SeatFacts {
         target_dir: String::new(),
         plugins: vec![dir.join("plugins/methodkit")],
         rules,
+        repeat_seeds: Vec::new(),
         binary: PathBuf::from("/bin/pf"),
         random_device: PathBuf::from(pulse_factory::controller::seat::RANDOM_DEVICE),
     }
@@ -152,6 +155,135 @@ fn seat_port_adds_every_setting_with_its_value() {
     );
     assert!(!k1.is_empty() && k1 != k2, "a fresh key for each launch");
     assert_eq!(fake.launch_count(), 2);
+}
+
+fn lane_seed() -> Vec<RepeatSeed> {
+    vec![RepeatSeed {
+        id: "lane".into(),
+        stages: vec!["lane".into()],
+    }]
+}
+
+fn dirs(unit: &str, stage: &str, seeds: &[RepeatSeed]) -> Vec<PathBuf> {
+    own_run_dirs(std::path::Path::new("/run"), unit, stage, seeds)
+}
+
+/// AC-2 (`r1.s1.w4`): the run directories a seat may write.
+#[test]
+fn own_run_dirs_names_the_unit_directory_and_the_seed_directory_of_a_repeat() {
+    let lane = lane_seed();
+    let only = |unit: &str| vec![PathBuf::from(format!("/run/out/{unit}"))];
+    // An item unit owns its own directory only.
+    assert_eq!(dirs("u1", "implement", &lane), only("u1"));
+    // The seed's first unit owns `out/lane`, which is its own directory.
+    assert_eq!(dirs("lane", "lane", &lane), only("lane"));
+    // A repeat on a stage of the seed's track also owns the first unit's directory.
+    assert_eq!(
+        dirs("lane.2", "lane", &lane),
+        vec![
+            PathBuf::from("/run/out/lane.2"),
+            PathBuf::from("/run/out/lane")
+        ]
+    );
+    assert_eq!(
+        dirs("lane.12", "lane", &lane),
+        vec![
+            PathBuf::from("/run/out/lane.12"),
+            PathBuf::from("/run/out/lane")
+        ]
+    );
+    // A queue record may take any ID with a dot. An item unit `lane.2` is on an item stage.
+    assert_eq!(dirs("lane.2", "implement", &lane), only("lane.2"));
+    // The suffix must be a count of 2 or more, all digits.
+    for unit in [
+        "lane.x", "lane.0", "lane.1", "lane.", "lane.2x", "lane.-2", "lane.+2", "lane.02",
+        "lane.2.3", "lanex.2", "lane2",
+    ] {
+        assert_eq!(dirs(unit, "lane", &lane), only(unit), "{unit}");
+    }
+    // A seed with no `repeat` is not in the list, so its unit gets nothing extra.
+    assert_eq!(dirs("spine.2", "spine_close", &lane), only("spine.2"));
+    assert_eq!(dirs("lane.2", "lane", &[]), only("lane.2"));
+    // A unit ID that names the run directory itself or its parent owns no directory.
+    for unit in ["", ".", ".."] {
+        assert!(dirs(unit, "lane", &lane).is_empty(), "{unit:?}");
+    }
+}
+
+/// AC-2 (`r1.s1.w4`): through `SeatPort`, on the test package. Its lane seed repeats and its spine
+/// seed does not.
+#[test]
+fn a_seat_port_gives_a_repeat_of_the_lane_its_seed_directory_and_no_other() {
+    let text = workflow_yaml(&Options {
+        spine_close: true,
+        ..Options::default()
+    });
+    let file = pf_workflow::WorkflowFile::parse(&text).unwrap();
+    assert_eq!(repeat_seeds(&file), lane_seed());
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = facts(dir.path());
+    f.repeat_seeds = repeat_seeds(&file);
+    f.rules.insert(
+        "lane".to_string(),
+        (
+            dir.path().join("package/rules/lane.yaml"),
+            rules_of("lane", &["write_own_report_and_run_files"]),
+        ),
+    );
+    f.rules.insert(
+        "close".to_string(),
+        (
+            dir.path().join("package/rules/close.yaml"),
+            rules_of("close", &["write_own_report_and_run_files"]),
+        ),
+    );
+    let fake = Arc::new(FakeAdapter::new());
+    let plans = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rec = Arc::new(Recording {
+        inner: fake,
+        plans: plans.clone(),
+        gate: Arc::new(Gate::default()),
+        pids: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+    });
+    let table = Arc::new(SeatTable::default());
+    let port = SeatPort::new(rec, f, table.clone());
+    let report = dir.path().join("spine").display().to_string();
+    let run = dir.path().display().to_string();
+    let launch = |role: &str, unit: &str, stage: &str| {
+        let mut p = plan(role, &[("report_dir", &report), ("cwd", &run)]);
+        p.unit_id = unit.into();
+        p.stage = stage.into();
+        port.launch(&p).unwrap();
+        plans.lock().unwrap().last().unwrap().settings["env.PF_SESSION_KEY"].clone()
+    };
+    let writes = |key: &str, rel: &str| {
+        let path = format!("{run}/{rel}");
+        let d = table.answer(&json!({ "key": key, "tool": "write", "path": path }));
+        d["decision"].as_str().unwrap().to_string()
+    };
+
+    let repeat = launch("lane", "lane.2", "lane");
+    assert_eq!(writes(&repeat, "out/lane/queue/u3.json"), "allow");
+    assert_eq!(writes(&repeat, "out/lane/rounds.done"), "allow");
+    assert_eq!(writes(&repeat, "out/lane.2/lane.done"), "allow");
+    assert_eq!(writes(&repeat, "out/u1/review.md"), "deny");
+    assert_eq!(writes(&repeat, "queue/u3.json"), "deny");
+    assert_eq!(writes(&repeat, "rounds.done"), "deny");
+
+    let first = launch("lane", "lane", "lane");
+    assert_eq!(writes(&first, "out/lane/rounds.done"), "allow");
+    assert_eq!(writes(&first, "out/lane.2/lane.done"), "deny");
+
+    // The spine seed does not repeat: its unit gets its own directory only.
+    let spine = launch("close", "spine.2", "spine_close");
+    assert_eq!(writes(&spine, "out/spine.2/stop"), "allow");
+    assert_eq!(writes(&spine, "out/spine/stop"), "deny");
+
+    // An item unit named like a repeat, on an item stage, gets no seed directory.
+    let item = launch("close", "lane.2", "close");
+    assert_eq!(writes(&item, "out/lane.2/stop"), "allow");
+    assert_eq!(writes(&item, "out/lane/queue/u3.json"), "deny");
 }
 
 #[test]

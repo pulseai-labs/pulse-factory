@@ -268,6 +268,17 @@ impl Live {
         unit: &str,
         settings: &[(&str, String)],
     ) -> Result<LaunchPlan, AgentError> {
+        self.launch_in_stage(role, unit, "stage", settings)
+    }
+
+    /// Like [`Live::launch`], for a unit on the named stage of its track.
+    pub fn launch_in_stage(
+        &self,
+        role: &str,
+        unit: &str,
+        stage: &str,
+        settings: &[(&str, String)],
+    ) -> Result<LaunchPlan, AgentError> {
         let mut map: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in settings {
             map.insert((*k).to_string(), v.clone());
@@ -275,7 +286,7 @@ impl Live {
         let plan = LaunchPlan {
             run_id: self.handle().info.run_id.clone(),
             unit_id: unit.into(),
-            stage: "stage".into(),
+            stage: stage.into(),
             role: role.into(),
             model: "m".into(),
             runtime: "omp".into(),

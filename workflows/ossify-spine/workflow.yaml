@@ -78,8 +78,10 @@ plan_check:
 # A working directory that a seat's record names must lie under one of these.
 roots: ["{param.worktree_root}"]
 
+# The queue and `rounds.done` are the lane's files. They live under the lane's own directory, so a
+# seat writes only in its own unit's directory (`out/<unit>`; a lane repeat also owns `out/lane`).
 unit_sources:
-  - dir: "{run.dir}/queue"
+  - dir: "{run.dir}/out/lane/queue"
     track: item
     vars: [worktree_path, branch, handoff_path, base_sha]
 
@@ -92,16 +94,17 @@ seeds:
     vars: {}
     repeat:
       when_units_done: item
-      until_file: "{run.dir}/rounds.done"
+      until_file: "{run.dir}/out/lane/rounds.done"
       max: 12
-  # The spine close starts once the lane wrote `rounds.done` and every item is done. It runs once.
+  # The spine close starts once the lane wrote `out/lane/rounds.done` and every item is done. It runs
+  # once.
   - id: spine
     group: spine
     order: 2
     track: spine
     vars: {}
     start_when:
-      file: "{run.dir}/rounds.done"
+      file: "{run.dir}/out/lane/rounds.done"
       units_done: item
 
 tracks:
@@ -112,15 +115,17 @@ tracks:
         brief: [briefs/common.md, briefs/lane.md]
         message: >-
           Read {param.briefs}/common.md, then {param.briefs}/lane.md, and follow them.
-          Spine: {param.spine}. Queue directory: {run.dir}/queue.
+          Spine: {param.spine}. Queue directory: {run.dir}/out/lane/queue.
           OUT: {run.dir}/out/{unit.id}. Lane done file: {run.dir}/out/{unit.id}/lane.done.
-          Rounds done file: {run.dir}/rounds.done. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rounds done file: {run.dir}/out/lane/rounds.done. Stop file: {run.dir}/out/{unit.id}/stop.
           Rulings: {run.dir}/out/{unit.id}/rulings.md.
           Decisions file: {run.dir}/out/{unit.id}/decisions.md.
         cwd: "{param.method_root}"
         slots: [session]
+        # The queue directory exists before any lane repeat writes to it.
         before:
           - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [mkdir, -p, "{run.dir}/out/lane/queue"]
         stop_file:
           file: "{run.dir}/out/{unit.id}/stop"
           on_answer:

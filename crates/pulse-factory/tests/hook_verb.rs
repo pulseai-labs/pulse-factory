@@ -164,6 +164,84 @@ fn write_tools_are_judged_on_their_path() {
     );
 }
 
+/// AC-3 (`r1.s1.w4`): a write tool reaches only the seat's own unit directory of the run, and a
+/// denial is one line of the seat's audit log.
+#[test]
+fn a_seat_writes_only_its_own_units_run_files() {
+    let live = Live::start();
+    live.arm();
+    let run_dir = live.run_dir();
+    let plan = seat(&live, "implementer", "u1");
+    let write = |plan: &pf_engine::port::agent::LaunchPlan, path: &std::path::Path| {
+        let (out, code) = run_hook(
+            plan,
+            &call(
+                "write",
+                json!({ "path": path.display().to_string(), "content": "PASS" }),
+            ),
+            |_| {},
+        );
+        assert_eq!(code, 0, "{out}");
+        decision(&out)
+    };
+
+    // Another unit's verdict file: denied, audited, and not created.
+    let other = run_dir.join("out/u2/review.md");
+    let d = write(&plan, &other);
+    assert_eq!(d["decision"], "deny", "{d}");
+    assert!(
+        !other.exists(),
+        "the denied write created {}",
+        other.display()
+    );
+    let log = std::fs::read_to_string(run_dir.join("out/u1/audit.log")).unwrap();
+    let denials: Vec<&str> = log.lines().filter(|l| l.contains("outcome=deny")).collect();
+    assert_eq!(denials.len(), 1, "{log}");
+    assert!(
+        denials[0].contains("rule=write-outside-worktree")
+            && denials[0].contains(&other.display().to_string()),
+        "{log}"
+    );
+    // The run directory itself and its run-level paths are not the seat's either.
+    for rel in ["queue/u3.json", "rounds.done", "out/lane/rounds.done"] {
+        let d = write(&plan, &run_dir.join(rel));
+        assert_eq!(d["decision"], "deny", "{rel}: {d}");
+    }
+    // Its own unit directory is.
+    let own = run_dir.join("out/u1/notes.md");
+    assert_eq!(write(&plan, &own)["decision"], "allow");
+
+    // A repeat of the lane owns the first lane unit's directory, and no item's.
+    let repeat = live
+        .launch_in_stage(
+            "lane",
+            "lane.2",
+            "lane",
+            &live.role_settings("lane", "lane.2"),
+        )
+        .unwrap();
+    for rel in ["out/lane/queue/u3.json", "out/lane/rounds.done"] {
+        let d = write(&repeat, &run_dir.join(rel));
+        assert_eq!(d["decision"], "allow", "{rel}: {d}");
+    }
+    let verdict = run_dir.join("out/u1/review.md");
+    let d = write(&repeat, &verdict);
+    assert_eq!(d["decision"], "deny", "{d}");
+    assert!(
+        !verdict.exists(),
+        "the denied write created {}",
+        verdict.display()
+    );
+    let log = std::fs::read_to_string(run_dir.join("out/lane.2/audit.log")).unwrap();
+    let denials: Vec<&str> = log.lines().filter(|l| l.contains("outcome=deny")).collect();
+    assert_eq!(denials.len(), 1, "{log}");
+    assert!(
+        denials[0].contains("rule=write-outside-worktree")
+            && denials[0].contains(&verdict.display().to_string()),
+        "{log}"
+    );
+}
+
 #[test]
 fn a_write_call_with_two_mib_of_content_is_answered() {
     let live = Live::start();

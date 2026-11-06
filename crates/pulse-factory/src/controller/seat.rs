@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use pf_engine::port::agent::*;
 use pf_rules::{Context, OwnPaths, ToolCall, audit_line, decide, is_write_tool};
+use pf_workflow::WorkflowFile;
 use pf_workflow::commands::run_argv;
 use pf_workflow::rules::RoleRules;
 use serde_json::{Value, json};
@@ -194,11 +195,73 @@ pub struct SeatFacts {
     pub plugins: Vec<PathBuf>,
     /// The rule file of each role, in the run's `package/`, and its parsed rules.
     pub rules: BTreeMap<String, (PathBuf, RoleRules)>,
+    /// The seeds that declare `repeat`, for the run directories a repeat of them owns.
+    pub repeat_seeds: Vec<RepeatSeed>,
     /// The binary's canonical path.
     pub binary: PathBuf,
     /// The source of random bytes for the session keys: `/dev/urandom`. A test points it
     /// elsewhere.
     pub random_device: PathBuf,
+}
+
+/// A seed that declares `repeat`, with the names of the stages of its track. A repeat of the seed
+/// is `<id>.2`, `<id>.3` and so on, each a new unit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepeatSeed {
+    pub id: String,
+    pub stages: Vec<String>,
+}
+
+/// The seeds of a workflow file that declare `repeat`, with the stages of their tracks.
+pub fn repeat_seeds(file: &WorkflowFile) -> Vec<RepeatSeed> {
+    file.seeds
+        .iter()
+        .filter(|seed| seed.repeat.is_some())
+        .map(|seed| RepeatSeed {
+            id: seed.id.clone(),
+            stages: file
+                .tracks
+                .iter()
+                .filter(|track| track.name == seed.track)
+                .flat_map(|track| track.stages.iter().map(|stage| stage.name.clone()))
+                .collect(),
+        })
+        .collect()
+}
+
+/// Whether `n` is the count of a repeat: decimal digits only, no leading zero, and 2 or more. The
+/// seed's first unit has the bare ID, and the engine counts its repeats from 2.
+fn is_repeat_count(n: &str) -> bool {
+    n.bytes().all(|b| b.is_ascii_digit())
+        && !n.starts_with('0')
+        && (n.len() > 1 || n.as_bytes().first().is_some_and(|b| *b >= b'2'))
+}
+
+/// The directories of the run that a seat of `unit_id` on `stage` may write: `out/<unit_id>`, and
+/// also `out/<seed>` when the unit is a repeat `<seed>.<n>` of a seed that declares `repeat` and
+/// the stage is one of that seed's track. The rule names no method word. A unit ID that cannot
+/// name a directory of its own (`""`, `.` and `..`) owns none.
+pub fn own_run_dirs(
+    run_dir: &Path,
+    unit_id: &str,
+    stage: &str,
+    repeat_seeds: &[RepeatSeed],
+) -> Vec<PathBuf> {
+    if matches!(unit_id, "" | "." | "..") {
+        return Vec::new();
+    }
+    let out = run_dir.join("out");
+    let mut dirs = vec![out.join(unit_id)];
+    for seed in repeat_seeds {
+        let is_repeat = unit_id
+            .strip_prefix(seed.id.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(is_repeat_count);
+        if is_repeat && seed.stages.iter().any(|s| s == stage) {
+            dirs.push(out.join(&seed.id));
+        }
+    }
+    dirs
 }
 
 pub struct SeatPort {
@@ -309,7 +372,14 @@ impl SeatPort {
                 scratch,
                 build_target: PathBuf::from(&f.target_dir),
                 worktree: worktree.clone(),
-                report_and_run: vec![PathBuf::from(&report_dir), f.run_dir.clone()],
+                report_and_run: std::iter::once(PathBuf::from(&report_dir))
+                    .chain(own_run_dirs(
+                        &f.run_dir,
+                        &plan.unit_id,
+                        &plan.stage,
+                        &f.repeat_seeds,
+                    ))
+                    .collect(),
             },
         };
         let entry = SeatEntry {
