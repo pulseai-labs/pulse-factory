@@ -92,7 +92,7 @@ redirect git, so a seat may not set them, whatever the value: a bare path, a bar
 value each redirect. A read, a listing and a removal of such a key stay allowed. The editor opens a
 config whose writes the rules cannot read, so `--edit` is denied too. The rules read a flag of
 `git config` only where git reads one: the value of an option that takes one (`--comment --get`) and
-every word after `--` are operands, and a short flag counts inside a cluster (`-ze`). A write into the repository's
+every word after `--` or after the first operand (`core.hooksPath --unset` writes the value `--unset`) are operands, and a short flag counts inside a cluster (`-ze`). A write into the repository's
 `.git/config` or a hooks directory through a shell redirection or `cp` is not read. That is the known
 limit of the redirection paragraph below.
 

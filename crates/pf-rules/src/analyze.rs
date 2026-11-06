@@ -959,9 +959,15 @@ impl<'a> Analyzer<'a> {
                 }
             }
             "worktree" if rest.first().is_some_and(|w| w.text == "remove") => {
+                // After a `--`, a word that starts with `-` is a path, not an option.
+                let mut after_dashes = false;
                 let targets: Vec<Word> = rest[1..]
                     .iter()
-                    .filter(|w| !w.text.starts_with('-'))
+                    .filter(|w| {
+                        let is_path = after_dashes || !w.text.starts_with('-');
+                        after_dashes |= w.text == "--";
+                        is_path
+                    })
                     .cloned()
                     .collect();
                 self.delete_targets("git worktree remove", &targets, false, false);
@@ -1873,8 +1879,12 @@ const CONFIG_VALUE_OPTIONS: [&str; 7] =
     ["file", "blob", "default", "comment", "type", "value", "url"];
 
 /// Read the words of a `git config …` call. A flag counts only where git reads it as a flag: not
-/// as the value of an option that takes one (`--comment --get`), and not after a `--`. The words
-/// after `--` are all operands. A short flag is read inside a cluster (`-ze`).
+/// as the value of an option that takes one (`--comment --get`), not after a `--`, and not after
+/// the first operand (`core.hooksPath --unset` writes the value `--unset`). Git stops reading
+/// flags at the first operand. The one word before it that does not end the flags is a verb
+/// (`set`, `get`, …) in first place, which keeps reading them up to its own operand. The words
+/// after `--` or after the first operand are all operands. A short flag is read inside a cluster
+/// (`-ze`).
 fn config_call(rest: &[Word]) -> ConfigCall<'_> {
     let mut call = ConfigCall {
         reads: false,
@@ -1888,6 +1898,12 @@ fn config_call(rest: &[Word]) -> ConfigCall<'_> {
         let t = rest[i].text.as_str();
         if t == "--" {
             call.positional.extend(rest[i + 1..].iter());
+            break;
+        }
+        // Past the first operand, every word is an operand, whatever it looks like.
+        let verb_first = rest.first().is_some_and(|w| config_verb(&w.text));
+        if !call.positional.is_empty() && !(call.positional.len() == 1 && verb_first) {
+            call.positional.extend(rest[i..].iter());
             break;
         }
         if let Some(long) = t.strip_prefix("--") {
@@ -1927,6 +1943,14 @@ fn config_call(rest: &[Word]) -> ConfigCall<'_> {
         i += 1;
     }
     call
+}
+
+/// The verbs of `git config` that git reads in first place, before any flag.
+fn config_verb(word: &str) -> bool {
+    matches!(
+        word,
+        "get" | "set" | "list" | "unset" | "edit" | "rename-section" | "remove-section"
+    )
 }
 
 /// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,

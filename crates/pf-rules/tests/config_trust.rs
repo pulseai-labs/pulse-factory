@@ -224,6 +224,37 @@ fn an_option_value_or_an_operand_is_not_read_as_a_flag() {
     }
 }
 
+/// PR #28, C3 (round 2): git stops reading flags at the first operand, so `--unset`, `--get`,
+/// `--list` and `-l` after the key are values, not flags: `core.hooksPath --unset` writes the
+/// value `--unset`. A guard that read them as flags let the write through.
+#[test]
+fn a_flag_after_the_first_operand_is_an_operand() {
+    for c in [
+        "git config core.hooksPath --unset",
+        "git config core.hooksPath /tmp/x --get",
+        "git config core.hooksPath /tmp/x --list",
+        "git config core.hooksPath /tmp/x -l",
+        "git config core.hooksPath /tmp/x --add",
+        "git config core.hooksPath /tmp/x -e",
+        "git config --global remote.forge.pushurl /tmp/x.git --get",
+        "git config --global core.sshCommand /tmp/x.sh --list",
+        "git config --global core.sshCommand /tmp/x.sh --unset",
+        "git config core.hooksPath /tmp/x --comment --get",
+        "git config core.hooksPath --rename-section",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+    // A flag before the key is still a flag, after a verb too.
+    for c in [
+        "git config --unset core.hooksPath",
+        "git config --get core.hooksPath",
+        "git config get --all core.hooksPath",
+        "git config unset --all core.hooksPath",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
 /// A short flag inside a cluster is a flag: `-ze` is `-z` and `--edit`.
 #[test]
 fn a_short_flag_in_a_cluster_is_read() {

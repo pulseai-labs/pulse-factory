@@ -311,6 +311,9 @@ fn delete_is_judged_on_the_target() {
         "ls /scratch/u1 | xargs rm -rf",
         "git clean -fdx",
         "git worktree remove /work/u2",
+        // After a `--`, `-x` is a path (PR #28, C3).
+        "git worktree remove -- -x",
+        "git worktree remove --force -- -x",
     ] {
         let d = bash(&implementer, c);
         assert!(!d.is_allow(), "{c} should be denied: {d:?}");
