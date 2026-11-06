@@ -118,6 +118,8 @@ enum Gen {
     Park(usize, usize),
     Halt(usize),
     Launch(usize),
+    /// A `Note` of unit `u`, with the note ID `n` and the text `t`.
+    Note(usize, usize, usize),
 }
 
 fn arb_op() -> impl Strategy<Value = (usize, Gen)> {
@@ -127,6 +129,7 @@ fn arb_op() -> impl Strategy<Value = (usize, Gen)> {
             (0..2usize, 0..3usize).prop_map(|(u, r)| Gen::Park(u, r)),
             (0..3usize).prop_map(Gen::Halt),
             (0..2usize).prop_map(Gen::Launch),
+            (0..2usize, 0..2usize, 0..3usize).prop_map(|(u, n, t)| Gen::Note(u, n, t)),
         ],
     )
 }
@@ -142,6 +145,17 @@ fn build(id: usize, op: &Gen) -> Command {
             },
         },
         Gen::Launch(u) => launch(&id, &format!("u{}", u + 1)),
+        // The command ID is `note:<event ID>`, so a repeat of one event ID under another text is
+        // the case the property must see: the same ID returns the same record, changed text is a
+        // conflict.
+        Gen::Note(u, n, t) => Command {
+            id: format!("note:n{n}"),
+            body: CommandBody::Note {
+                unit_id: format!("u{}", u + 1),
+                event_id: format!("n{n}"),
+                text: format!("text {t}"),
+            },
+        },
     }
 }
 
