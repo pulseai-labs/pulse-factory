@@ -1717,14 +1717,16 @@ enum Subsection {
 /// not set one, whatever the value: a bare path, a bare host and an empty value each redirect.
 ///
 /// Source: git-config(1): `core.hooksPath`, `core.sshCommand`, `core.gitProxy`,
-/// `remote.<name>.receivepack|uploadpack|vcs`, `url.<base>.insteadOf|pushInsteadOf`, `http.proxy`,
+/// `remote.<name>.receivepack|uploadpack|vcs|pushurl|proxy`, `url.<base>.insteadOf|pushInsteadOf`, `http.proxy`,
 /// `http.<url>.proxy`, `http.sslVerify`, `http.<url>.sslVerify`, `credential.helper`,
 /// `credential.<url>.helper` and, under "Includes", `include.path` and `includeIf.<condition>.path`.
-const REDIRECT_KEYS: [(&str, &str, Subsection); 13] = [
+const REDIRECT_KEYS: [(&str, &str, Subsection); 15] = [
     ("core", "hookspath", Subsection::Without),
     ("remote", "receivepack", Subsection::With),
     ("remote", "uploadpack", Subsection::With),
     ("remote", "vcs", Subsection::With),
+    ("remote", "pushurl", Subsection::With),
+    ("remote", "proxy", Subsection::With),
     ("url", "insteadof", Subsection::With),
     ("url", "pushinsteadof", Subsection::With),
     ("include", "path", Subsection::Without),
@@ -1864,41 +1866,68 @@ struct ConfigCall<'a> {
     positional: Vec<&'a Word>,
 }
 
+/// The long options of `git config` that take a value: `--file`, `--blob`, `--default`, `--comment`,
+/// `--type`, and `--value` and `--url` of the `get` and `set` verbs. Without an `=`, the next word
+/// is their value, whatever it looks like.
+const CONFIG_VALUE_OPTIONS: [&str; 7] = [
+    "file", "blob", "default", "comment", "type", "value", "url",
+];
+
+/// Read the words of a `git config …` call. A flag counts only where git reads it as a flag: not
+/// as the value of an option that takes one (`--comment --get`), and not after a `--`. The words
+/// after `--` are all operands. A short flag is read inside a cluster (`-ze`).
 fn config_call(rest: &[Word]) -> ConfigCall<'_> {
-    let has = |names: &[&str]| rest.iter().any(|w| names.contains(&w.text.as_str()));
-    let mut positional: Vec<&Word> = Vec::new();
+    let mut call = ConfigCall {
+        reads: false,
+        writes_more: false,
+        edit: false,
+        rename: false,
+        positional: Vec::new(),
+    };
     let mut i = 0;
     while i < rest.len() {
         let t = rest[i].text.as_str();
-        if matches!(
-            t,
-            "-f" | "--file" | "--blob" | "--default" | "--comment" | "-t" | "--type"
-        ) {
-            i += 2;
-            continue;
+        if t == "--" {
+            call.positional.extend(rest[i + 1..].iter());
+            break;
         }
-        if !(t.starts_with('-') && t.len() > 1) {
-            positional.push(&rest[i]);
+        if let Some(long) = t.strip_prefix("--") {
+            let (name, has_value) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            match name {
+                "get" | "get-all" | "get-regexp" | "get-urlmatch" | "list" | "unset"
+                | "unset-all" | "remove-section" => call.reads = true,
+                "add" | "replace-all" => call.writes_more = true,
+                "edit" => call.edit = true,
+                "rename-section" => call.rename = true,
+                _ => {}
+            }
+            if !has_value && CONFIG_VALUE_OPTIONS.contains(&name) {
+                i += 1;
+            }
+        } else if t.starts_with('-') && t.len() > 1 {
+            for (at, c) in t.char_indices().skip(1) {
+                match c {
+                    'l' => call.reads = true,
+                    'e' => call.edit = true,
+                    // `-f` and `-t` end the cluster. The rest of the word is the value, or the
+                    // next word is.
+                    'f' | 't' => {
+                        if at + 1 == t.len() {
+                            i += 1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            call.positional.push(&rest[i]);
         }
         i += 1;
     }
-    ConfigCall {
-        reads: has(&[
-            "--get",
-            "--get-all",
-            "--get-regexp",
-            "--get-urlmatch",
-            "--list",
-            "-l",
-            "--unset",
-            "--unset-all",
-            "--remove-section",
-        ]),
-        writes_more: has(&["--add", "--replace-all"]),
-        edit: has(&["--edit", "-e"]),
-        rename: has(&["--rename-section"]),
-        positional,
-    }
+    call
 }
 
 /// Does `git config …` write a config that runs a command the rules cannot read? Reading a key,

@@ -197,6 +197,77 @@ fn a_read_a_listing_a_removal_and_another_key_stay_allowed() {
     }
 }
 
+/// PR #28, C3: git reads an option's value and an operand after `--` as words, not as flags. A guard
+/// that read a flag from any word let `--comment --get` hide a write, and let `-- --list` hide one.
+#[test]
+fn an_option_value_or_an_operand_is_not_read_as_a_flag() {
+    for c in [
+        "git config --global --comment --get core.sshCommand /tmp/x",
+        "git config --comment --list core.hooksPath x",
+        "git config --comment --edit core.hooksPath x",
+        "git config --type --unset core.hooksPath x",
+        "git config --default --get core.hooksPath x",
+        "git config core.hooksPath -- --list",
+        "git config core.hooksPath -- --get",
+        "git config core.hooksPath -- -x",
+        "git config -- core.hooksPath x",
+        "git config --file f -- core.hooksPath x",
+        "git config set --value p core.hooksPath x",
+        "git config set --global --value p core.sshCommand /tmp/x.sh",
+        "git config set --value=p core.hooksPath x",
+        "git config --comm c core.hooksPath x",
+        "git config -f f core.hooksPath x",
+        "git config -ff core.hooksPath x",
+        "git config -t bool core.hooksPath x",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+}
+
+/// A short flag inside a cluster is a flag: `-ze` is `-z` and `--edit`.
+#[test]
+fn a_short_flag_in_a_cluster_is_read() {
+    for c in ["git config -ze", "git config -ez", "git config -z -e"] {
+        denied_for_every_role(c, RULE);
+    }
+    for c in ["git config -zl", "git config -lz", "git config -z --get core.hooksPath"] {
+        allowed_for_every_role(c);
+    }
+}
+
+/// The controller's push reads `remote.<name>.pushurl` and `remote.<name>.proxy` of the global
+/// config again after its check (PR #28, C1).
+#[test]
+fn a_push_url_or_proxy_key_of_a_remote_is_denied() {
+    for c in [
+        "git config remote.origin.pushurl /tmp/x.git",
+        "git config --global remote.forge.pushurl /tmp/x.git",
+        "git config --add remote.origin.pushurl /tmp/x.git",
+        "git config remote.origin.proxy http://127.0.0.1:1",
+        "git -c remote.origin.pushurl=x push origin work/u1",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+}
+
+/// The options that take a value hide it from the guards, so a read or a removal that uses them is
+/// still a read or a removal.
+#[test]
+fn a_read_that_uses_an_option_with_a_value_stays_allowed() {
+    for c in [
+        "git config --comment c --unset core.hooksPath",
+        "git config --type bool --get core.hooksPath",
+        "git config --get --default x core.hooksPath",
+        "git config get --value p core.hooksPath",
+        "git config get --url https://github.com/ http.proxy",
+        "git config --file f --get core.hooksPath",
+        "git config -f f --list",
+        "git config --get core.hooksPath -- x",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
 #[test]
 fn a_key_that_is_a_variable_stays_unparsed_command() {
     for c in [

@@ -57,10 +57,11 @@ pub const CLEAN_OPTIONS: [&str; 1] = ["dry-run"];
 /// Long options of `git config` that a guard reads: the ones that read or remove (`--get` to
 /// `--remove-section`), the ones that write more (`--add`, `--replace-all`), the ones that open the
 /// config in an editor or rename a section (`--edit`, `--rename-section`) and the ones that take a
-/// value (`--file` to `--type`).
+/// value (`--file` to `--url`).
 ///
-/// Source: git-config(1), OPTIONS and ACTIONS.
-pub const CONFIG_OPTIONS: [&str; 17] = [
+/// Source: git-config(1), OPTIONS and ACTIONS; `--value` and `--url` are options of the `get` and
+/// `set` verbs.
+pub const CONFIG_OPTIONS: [&str; 19] = [
     "get",
     "get-all",
     "get-regexp",
@@ -78,6 +79,8 @@ pub const CONFIG_OPTIONS: [&str; 17] = [
     "default",
     "comment",
     "type",
+    "value",
+    "url",
 ];
 
 /// Long options of `git switch` and `git checkout` that a guard reads: the ones that name a
