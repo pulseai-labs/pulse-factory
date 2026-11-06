@@ -359,14 +359,19 @@ impl ForgePort for BareForge {
                 redact(&text(&merged.stderr))
             )));
         }
-        // No force: a base that moved since the clone makes the push fail, and the call errors.
+        // No force and no `+`: a base that moved since the clone makes the push fail, and the call
+        // errors. A plain `HEAD:refs/heads/<base>` is not safe on a forge that holds
+        // `refs/tags/refs/heads/<base>`: git cannot tell which ref the destination means, and the
+        // push stops with "matches more than one". The scratch clone holds only the base branch, and
+        // a glob refspec names the remote ref by its full name, so the push reaches that one ref.
+        let ref_name = format!("refs/heads/{}", file.base);
         git_ok(
             dir,
             &[
                 "push",
                 "--quiet",
                 "origin",
-                &format!("HEAD:refs/heads/{}", file.base),
+                &format!("{ref_name}*:{ref_name}*"),
             ],
         )?;
         Ok(self.effect(pr, &file.head_branch, &head, ForgeOutcome::Merged))

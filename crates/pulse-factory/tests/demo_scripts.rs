@@ -1,14 +1,21 @@
-//! AC-14 and AC-8 (`r0.s2.w3`) and AC-5 (`r0.s3.w1`): the four demo scripts run against the built
-//! binary, and each fails when its journey is broken. The scripts run the paper env: no model, no spend, no network, no
-//! `gh`, and no build.
+//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`) and AC-3 to AC-7 (`r1.s1.w5`): the five demo
+//! scripts run against the built binary, and each fails when its journey is broken. The scripts run
+//! the paper env: no model, no spend, no network, no `gh`, and no build.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const LIMIT: Duration = Duration::from_secs(120);
 /// The limit of `spine-base.sh`: one round, one item.
 const BASE_LIMIT: Duration = Duration::from_secs(60);
+/// The limit of `seat-tamper.sh`: two runs, about ten paper seats.
+const TAMPER_LIMIT: Duration = Duration::from_secs(60);
+
+/// Two tamper demos never run at once. A test that panicked leaves the mutex poisoned, so each
+/// holder takes the guard with `unwrap_or_else(|e| e.into_inner())`.
+static TAMPER: Mutex<()> = Mutex::new(());
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -19,6 +26,8 @@ fn script(name: &str) -> PathBuf {
 }
 
 fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
+    let _one_tamper_demo =
+        (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
     let mut cmd = Command::new("bash");
     cmd.arg(script(name))
         .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
@@ -79,12 +88,13 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
 }
 
 #[test]
-fn all_four_scripts_exit_0_within_their_limit() {
+fn every_demo_script_exits_0_within_its_limit() {
     for (name, limit) in [
         ("golden-journey-a.sh", LIMIT),
         ("golden-journey-b.sh", LIMIT),
         ("arm-dry-run.sh", LIMIT),
         ("spine-base.sh", BASE_LIMIT),
+        ("seat-tamper.sh", TAMPER_LIMIT),
     ] {
         let (out, took) = run(name, &[]);
         assert!(
@@ -103,6 +113,14 @@ fn paper_base_copy() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let paper = dir.path().join("paper-base");
     copy_dir(&root().join("scripts/demo/paper-base"), &paper);
+    (dir, paper)
+}
+
+/// A copy of `scripts/demo/paper-tamper` that a test may break.
+fn paper_tamper_copy() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-tamper");
+    copy_dir(&root().join("scripts/demo/paper-tamper"), &paper);
     (dir, paper)
 }
 
@@ -156,6 +174,134 @@ fn the_base_push_demo_fails_without_the_base_push() {
 }
 
 #[test]
+fn seat_tamper_reports_what_it_checked() {
+    let (out, took) = run("seat-tamper.sh", &[]);
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < TAMPER_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "base push: before item.close, push spine-tamper1 to origin when origin lacks it",
+        "ended: every item merged",
+        "refused: origin of",
+        "seat-tamper: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
+/// Run `seat-tamper.sh` on a copy of the package that a test broke. The demo must fail.
+fn tamper_fails_with(paper: &Path) -> (Output, Duration) {
+    let (out, took) = run("seat-tamper.sh", &[("PAPER_SRC", paper.to_str().unwrap())]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(took < TAMPER_LIMIT, "{took:?}");
+    (out, took)
+}
+
+#[test]
+fn seat_tamper_fails_when_a_denied_write_lands() {
+    // The seat writes a file only on allow. Without that line it writes after a deny too, so the
+    // verdict file of item-1 holds the text of item-2.
+    let (dir, paper) = paper_tamper_copy();
+    edit(&paper, "seats/implementer.sh", |t| {
+        t.lines()
+            .filter(|l| l.trim() != "[ \"$decision\" = allow ] || return 0")
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    });
+    let (out, _) = tamper_fails_with(&paper);
+    assert!(
+        stderr(&out).contains("the verdict file of item-1 changed"),
+        "{}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
+fn seat_tamper_fails_when_a_seat_written_hook_runs() {
+    // The close seat pushes through `origin` with its hooks on. It then runs the pre-push hook and
+    // the receive-pack wrapper that the implementer wrote into the shared git config.
+    let (dir, paper) = paper_tamper_copy();
+    edit(&paper, "seats/close.sh", |t| {
+        t.replacen(
+            "git -c core.hooksPath=/dev/null push -q \"$forge\" \"$PAPER_BRANCH\"",
+            "git push -q origin \"$PAPER_BRANCH\"",
+            1,
+        )
+    });
+    let (out, _) = tamper_fails_with(&paper);
+    assert!(
+        stderr(&out).contains("a seat-written hook or transport command ran"),
+        "{}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
+fn seat_tamper_fails_without_the_base_push() {
+    // With `base_push` removed, the controller pushes nothing. The forge holds only the decoy tag
+    // `refs/tags/refs/heads/spine-tamper1`, which `ls-remote` matches by its tail. The close seat
+    // matches the full name, does not find the branch, writes its stop file, and the unit parks.
+    let (dir, paper) = paper_tamper_copy();
+    edit(&paper, "workflow/workflow.yaml", |t| {
+        let start = t
+            .find("        base_push:\n")
+            .expect("the demo names a base push");
+        let end = t[start..]
+            .find("        before:")
+            .expect("a `before` follows")
+            + start;
+        format!("{}{}", &t[..start], &t[end..])
+    });
+    let (out, _) = tamper_fails_with(&paper);
+    assert!(
+        stderr(&out).contains("FAIL") && stderr(&out).contains("stuck"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("spine branch not on origin"),
+        "the seat's own words are in the failure: {}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
+fn seat_tamper_fails_when_the_hook_is_not_called() {
+    // A seat that never asks the hook is denied nothing: it writes nothing, and no audit line
+    // exists. The audit check of item-1 runs before the check of item-2, so it names the failure.
+    let (dir, paper) = paper_tamper_copy();
+    edit(&paper, "seats/implementer.sh", |t| {
+        t.lines()
+            .map(|l| {
+                if l.trim() == "out=\"$(printf '%s\\n' \"$call\" | /bin/sh -c \"$PF_HOOK_CMD\")\"" {
+                    "  out='{\"decision\":\"deny\",\"reason\":\"no hook\"}'"
+                } else {
+                    l
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    });
+    let (out, _) = tamper_fails_with(&paper);
+    assert!(
+        stderr(&out).contains("the audit log of item-1 names no refused git config"),
+        "{}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
 fn the_golden_journey_reports_what_it_checked() {
     let (out, _) = run("golden-journey-a.sh", &[]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -193,6 +339,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "golden-journey-b.sh",
         "arm-dry-run.sh",
         "spine-base.sh",
+        "seat-tamper.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [
