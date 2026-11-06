@@ -550,6 +550,29 @@ fn replace_ends_the_first_run_and_a_finished_run_blocks_nothing() {
 }
 
 #[test]
+fn an_origin_with_a_bare_token_as_user_info_reaches_no_refusal() {
+    let sb = Sandbox::new();
+    sb.set_origin("https://s3cr3tvalue@gitlab.example/acme/widgets");
+    for json in [false, true] {
+        let mut args = sb.arm_args();
+        args.push("--dry-run".into());
+        if json {
+            args.push("--json".into());
+        }
+        let out = sb.run(&args);
+        assert_ne!(code(&out), 0, "json={json}: {}", stdout(&out));
+        let err = stderr(&out);
+        assert!(err.contains("arm refused"), "json={json}: {err}");
+        assert!(
+            err.contains("[redacted]@gitlab.example"),
+            "json={json}: {err}"
+        );
+        assert!(!err.contains("s3cr3tvalue"), "json={json}: {err}");
+        assert!(!stdout(&out).contains("s3cr3tvalue"), "json={json}");
+    }
+}
+
+#[test]
 fn a_failed_pin_leaves_the_first_run_as_it_was() {
     use std::os::unix::fs::PermissionsExt;
     let sb = Sandbox::new();
