@@ -824,9 +824,11 @@ impl<'a> Analyzer<'a> {
         // become a file named `-c`, and `-c$X` the flag `-c`, so the next word is then a key. The
         // value of an option that takes one can bring in more options when it splits or expands.
         let option_unreadable = |w: &Word| w.dynamic || w.glob;
-        let value_unreadable = |w: Option<&Word>| {
-            w.is_some_and(|w| w.glob || (w.dynamic && w.quoted_var.is_none() && !w.any_quote))
-        };
+        // A value that expands is readable only when it is one double-quoted string, such as
+        // `-C "$WT"` or `-C "$(cmd)"`: the shell does not split or expand it. A quote beside an
+        // unquoted part (`"."$Y`) does not help, because the shell splits that part into words.
+        let value_unreadable =
+            |w: Option<&Word>| w.is_some_and(|w| w.glob || (w.dynamic && !w.one_dq));
         while i < words.len() {
             if option_unreadable(&words[i]) {
                 self.deny(
@@ -838,8 +840,12 @@ impl<'a> Analyzer<'a> {
             let t = words[i].text.as_str();
             if matches!(
                 t,
-                "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
-                    | "--super-prefix" | "--attr-source"
+                "-C" | "--git-dir"
+                    | "--work-tree"
+                    | "--namespace"
+                    | "--exec-path"
+                    | "--super-prefix"
+                    | "--attr-source"
             ) && value_unreadable(words.get(i + 1))
             {
                 self.deny(

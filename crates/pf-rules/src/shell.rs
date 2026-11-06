@@ -41,6 +41,9 @@ pub struct Word {
     pub glob: bool,
     /// True when any part of the word was in quotes.
     pub any_quote: bool,
+    /// True when the word is exactly one double-quoted string (`"$a/b"`, `"$(cmd)"`) with nothing
+    /// outside the quotes. The shell does not split or expand what is inside it.
+    pub one_dq: bool,
     /// The words that an unquoted brace expansion makes of this word, such as `{merge,x}`.
     /// Empty when the word has none. The parser puts these words in the command in its place.
     pub alts: Vec<String>,
@@ -59,6 +62,7 @@ impl Word {
             quoted_var: None,
             glob: false,
             any_quote: false,
+            one_dq: false,
             alts: Vec::new(),
             brace_quoted: false,
         }
@@ -478,6 +482,7 @@ impl Parser<'_> {
                                 quoted_var: None,
                                 glob: word.glob,
                                 any_quote: false,
+                                one_dq: false,
                                 alts: Vec::new(),
                                 brace_quoted: false,
                             })
@@ -836,6 +841,9 @@ impl Parser<'_> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut any_quote = false;
         let mut glob = false;
+        // `dq` counts double-quoted strings; `outside` is set by anything else in the word.
+        let mut dq = 0usize;
+        let mut outside = false;
         let mut lit = String::new();
         macro_rules! flush {
             () => {
@@ -852,12 +860,14 @@ impl Parser<'_> {
                 }
                 '`' if self.closers.last() == Some(&Some('`')) => break,
                 '`' => {
+                    outside = true;
                     self.i += 1;
                     flush!();
                     self.list(Some('`'), depth + 1)?;
                     segs.push(Seg::Subst);
                 }
                 '\\' => {
+                    outside = true;
                     if self.peek_at(1) == Some('\n') {
                         self.i += 2;
                     } else if let Some(n) = self.peek_at(1) {
@@ -869,6 +879,7 @@ impl Parser<'_> {
                     }
                 }
                 '\'' => {
+                    outside = true;
                     self.i += 1;
                     any_quote = true;
                     flush!();
@@ -889,29 +900,34 @@ impl Parser<'_> {
                     segs.push(Seg::Quoted(s));
                 }
                 '"' => {
+                    dq += 1;
                     self.i += 1;
                     any_quote = true;
                     flush!();
                     self.double_quoted(&mut segs, depth)?;
                 }
                 '$' => {
+                    outside = true;
                     flush!();
                     if self.dollar_word(&mut segs, depth)? {
                         any_quote = true;
                     }
                 }
                 '*' | '?' | '[' => {
+                    outside = true;
                     glob = true;
                     lit.push(c);
                     self.i += 1;
                 }
                 _ => {
+                    outside = true;
                     lit.push(c);
                     self.i += 1;
                 }
             }
         }
         flush!();
+        let one_dq = dq == 1 && !outside;
         let raw: String = self.chars[start..self.i].iter().collect();
         let mut text = String::new();
         let mut dynamic = false;
@@ -962,6 +978,7 @@ impl Parser<'_> {
             quoted_var,
             glob,
             any_quote,
+            one_dq,
             alts,
             brace_quoted,
         })
@@ -1565,6 +1582,14 @@ mod tests {
         assert_eq!(w[3].quoted_var.as_deref(), Some("b"));
         assert!(w[4].dynamic && w[4].quoted_var.is_none());
         assert!(w[5].dynamic && w[5].quoted_var.is_none());
+    }
+
+    #[test]
+    fn a_word_that_is_one_double_quoted_string_is_marked() {
+        let p = parse("x \"$a/b\" \"$(c d)\" \".\"$y $z \"a\"\"b\" \"a\"{p,q} 'a' lit").unwrap();
+        let w = &p.cmds[0].words;
+        assert!(w[1].one_dq && w[2].one_dq);
+        assert!(w[3..].iter().all(|w| !w.one_dq));
     }
 
     #[test]
