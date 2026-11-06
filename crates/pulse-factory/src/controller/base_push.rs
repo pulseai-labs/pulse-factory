@@ -196,6 +196,7 @@ fn is_listed_key(key: &str) -> bool {
         "sshcommand",
         "gitproxy",
         "askpass",
+        "alternaterefscommand",
     ];
     let origin = ["receivepack", "uploadpack", "vcs", "proxy"];
     if let Some(name) = key.strip_prefix("core.") {
@@ -216,7 +217,7 @@ fn is_listed_key(key: &str) -> bool {
 
 /// The extended regular expression that `git config --get-regexp` takes: the keys of
 /// [`is_listed_key`], in the lower case git prints them in.
-const CONFIG_KEYS: &str = r"^(core\.(hookspath|fsmonitor|sshcommand|gitproxy|askpass)|credential\..*|url\..*\.(insteadof|pushinsteadof)|remote\.origin\.(receivepack|uploadpack|vcs|proxy)|http\..*|protocol\..*|include\.path|includeif\..*)$";
+const CONFIG_KEYS: &str = r"^(core\.(hookspath|fsmonitor|sshcommand|gitproxy|askpass|alternaterefscommand)|credential\..*|url\..*\.(insteadof|pushinsteadof)|remote\.origin\.(receivepack|uploadpack|vcs|proxy)|http\..*|protocol\..*|include\.path|includeif\..*)$";
 
 /// The settings of the seat's own config, from the output of
 /// `git config -z --show-scope --get-regexp`: `(key, scope)`, in output order and once per key.
@@ -287,6 +288,90 @@ fn make_scratch(forge: &Forge, unit: &str, common: &Path) -> Result<Scratch, Str
     )
     .map_err(|e| format!("cannot write {alternates:?}: {e}"))?;
     Ok(scratch)
+}
+
+/// Is the fetch URL and every push URL of the controller's remote `forge` the run's forge? The
+/// controller asks this twice: before it asks the forge for the branch, and again right before the
+/// push. Git reads the global and system config at each call, and a seat can write the operator's
+/// global config from its shell, so the second ask narrows the time in which a `pushurl` or a
+/// `pushInsteadOf` written there could move the push. It does not close that time (ADR-0005).
+/// `Err` is the refusal.
+fn check_own_remote(
+    forge: &Forge,
+    git_dir: &Path,
+    dir: &str,
+    refuse: &dyn Fn(String) -> String,
+) -> Result<(), String> {
+    let in_own = |args: &[&str]| own(git_dir, args);
+    for push in [false, true] {
+        let urls = remote_urls(&in_own, "forge", push).map_err(|cause| {
+            refuse(with_cause(
+                format!(
+                    "cannot read the {} URL of the controller's remote for {dir}",
+                    if push { "push" } else { "fetch" }
+                ),
+                &cause,
+            ))
+        })?;
+        if let Some(bad) = urls.iter().find(|u| !is_run_forge(forge, u)) {
+            return Err(refuse(format!(
+                "the controller's remote for {dir} is {bad}, which is not the run's forge {}",
+                forge.repo
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The refs, one per line, that `git for-each-ref --format=%(refname)` printed, other than
+/// `pattern`. The glob refspec of the base push sends every ref whose name starts with `pattern`,
+/// so the push is safe only when `pattern` is the only ref of the controller's repository.
+fn refs_besides<'a>(stdout: &'a str, pattern: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && *l != pattern)
+        .collect()
+}
+
+/// Make `pattern` in the controller's repository `git_dir` point at `sha`, check that it is the
+/// only ref there, and push it to `forge`. Never a force flag and never a `+`. The push sends the
+/// one SHA to the one ref `pattern` (`refs/heads/<branch>`). A plain `<sha>:refs/heads/<branch>` is
+/// not safe on a forge that holds `refs/tags/refs/heads/<branch>`: git reads the destination as an
+/// abbreviation and aims the push at that tag. A glob refspec names the remote ref by its full
+/// name, so the push can reach nothing else on the forge. But the glob also sends every ref of the
+/// controller's repository whose name starts with `pattern`. That repository is made fresh for
+/// this call and a seat can reach it only by a shell write (ADR-0005), so the controller lists its
+/// refs after it makes its own and sends nothing when another is there.
+///
+/// `Err` is the cause, for the ledger line of a failed push.
+fn push_armed_ref(git_dir: &Path, pattern: &str, sha: &str) -> Result<(), String> {
+    stdout_of(own(git_dir, &["update-ref", pattern, sha]))
+        .map_err(|cause| with_cause("cannot make the ref to push".to_string(), &cause))?;
+    let listed = stdout_of(own(git_dir, &["for-each-ref", "--format=%(refname)"]))
+        .map_err(|cause| with_cause("cannot list the refs to push".to_string(), &cause))?;
+    let others = refs_besides(&listed, pattern);
+    if !others.is_empty() {
+        return Err(redact(&format!(
+            "the controller's repository holds {} besides {pattern}, and nothing was pushed",
+            others.join(", ")
+        )));
+    }
+    let refspec = format!("{pattern}*:{pattern}*");
+    match own(git_dir, &["push", "forge", &refspec]) {
+        Ok(out) if out.exit_code == Some(0) => Ok(()),
+        Ok(out) => {
+            let line = stderr_line(&out);
+            Err(if line.is_empty() {
+                out.exit_code.map_or("ended by a signal".to_string(), |n| {
+                    format!("exited with code {n}")
+                })
+            } else {
+                line
+            })
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Make sure `origin` holds the branch of the stage's `base_push`, before the stage launches.
@@ -420,24 +505,7 @@ pub fn ensure(
             &cause,
         ))
     })?;
-    let in_own = |args: &[&str]| own(git_dir, args);
-    for push in [false, true] {
-        let urls = remote_urls(&in_own, "forge", push).map_err(|cause| {
-            refuse(with_cause(
-                format!(
-                    "cannot read the {} URL of the controller's remote for {dir}",
-                    if push { "push" } else { "fetch" }
-                ),
-                &cause,
-            ))
-        })?;
-        if let Some(bad) = urls.iter().find(|u| !is_run_forge(forge, u)) {
-            return Err(refuse(format!(
-                "the controller's remote for {dir} is {bad}, which is not the run's forge {}",
-                forge.repo
-            )));
-        }
-    }
+    check_own_remote(forge, git_dir, &dir, &refuse)?;
 
     let unreadable = |how: String| format!("cannot read {branch} on origin of {dir} ({how})");
     let pattern = format!("refs/heads/{branch}");
@@ -520,29 +588,9 @@ pub fn ensure(
         return Err(failed("", format!("no local branch {branch}")));
     }
 
-    // Never a force flag and never a `+`. The push sends the one SHA to the one ref
-    // `refs/heads/<branch>`. A plain `<sha>:refs/heads/<branch>` is not safe on a forge that holds
-    // `refs/tags/refs/heads/<branch>`: git reads the destination as an abbreviation and aims the
-    // push at that tag. The controller's repository holds only this one branch, and a glob refspec
-    // names the remote ref by its full name, so the push can reach nothing else.
-    let refspec = format!("{pattern}*:{pattern}*");
-    let pushed = stdout_of(own(git_dir, &["update-ref", &pattern, &sha]))
-        .map_err(|cause| with_cause("cannot make the ref to push".to_string(), &cause));
-    let cause = match pushed.map(|_| own(git_dir, &["push", "forge", &refspec])) {
-        Err(cause) => Some(cause),
-        Ok(Ok(out)) if out.exit_code == Some(0) => None,
-        Ok(Ok(out)) => {
-            let line = stderr_line(&out);
-            Some(if line.is_empty() {
-                out.exit_code.map_or("ended by a signal".to_string(), |n| {
-                    format!("exited with code {n}")
-                })
-            } else {
-                line
-            })
-        }
-        Ok(Err(e)) => Some(e.to_string()),
-    };
+    // The URL check again, right before the push (see `check_own_remote`).
+    check_own_remote(forge, git_dir, &dir, &refuse)?;
+    let cause = push_armed_ref(git_dir, &pattern, &sha).err();
     match cause {
         Some(cause) => Err(failed(&sha, cause)),
         None => record(&sha, PushOutcome::Pushed)
@@ -728,6 +776,7 @@ mod tests {
             "core.sshcommand",
             "core.gitproxy",
             "core.askpass",
+            "core.alternaterefscommand",
             "credential.helper",
             "credential.https://x.helper",
             "url.https://x/.insteadof",
@@ -827,5 +876,105 @@ mod tests {
             )),
             "false"
         );
+    }
+    #[test]
+    fn refs_besides_keeps_every_ref_but_the_armed_one() {
+        let pattern = "refs/heads/work/u1";
+        assert!(refs_besides("refs/heads/work/u1\n", pattern).is_empty());
+        assert!(refs_besides("", pattern).is_empty());
+        // The glob refspec `refs/heads/work/u1*` would send each of these.
+        assert_eq!(
+            refs_besides(
+                "refs/heads/work/u1\nrefs/heads/work/u1x\nrefs/heads/work/u1/y\n",
+                pattern
+            ),
+            vec!["refs/heads/work/u1x", "refs/heads/work/u1/y"]
+        );
+    }
+
+    /// Run `git <args>` and panic unless it exits 0.
+    fn git_ok(args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare forge, a seat repository with one commit, and a controller repository that borrows
+    /// the seat's objects and has the forge as `forge`. Returns (dir, forge, controller, sha).
+    fn push_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let forge = dir.path().join("forge.git");
+        let seat = dir.path().join("seat");
+        let own_git = dir.path().join("own.git");
+        git_ok(&["init", "--quiet", "--bare", forge.to_str().unwrap()]);
+        git_ok(&["init", "--quiet", seat.to_str().unwrap()]);
+        git_ok(&[
+            "-C",
+            seat.to_str().unwrap(),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let sha = git_ok(&["-C", seat.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git_ok(&["init", "--quiet", "--bare", own_git.to_str().unwrap()]);
+        std::fs::write(
+            own_git.join("objects/info/alternates"),
+            format!("{}\n", seat.join(".git/objects").display()),
+        )
+        .unwrap();
+        git_ok(&[
+            "--git-dir",
+            own_git.to_str().unwrap(),
+            "config",
+            "remote.forge.url",
+            forge.to_str().unwrap(),
+        ]);
+        (dir, forge, own_git, sha)
+    }
+
+    fn forge_refs(forge: &Path) -> String {
+        git_ok(&[
+            "--git-dir",
+            forge.to_str().unwrap(),
+            "for-each-ref",
+            "--format=%(refname)",
+        ])
+    }
+
+    #[test]
+    fn the_push_sends_the_armed_ref_and_nothing_else() {
+        let (_dir, forge, own_git, sha) = push_fixture();
+        push_armed_ref(&own_git, "refs/heads/work/u1", &sha).unwrap();
+        assert_eq!(forge_refs(&forge), "refs/heads/work/u1");
+    }
+
+    /// PR #28, C1: with the refspec `refs/heads/*`, or with no check of the refs, a ref that a
+    /// seat wrote into the controller's repository would reach the forge.
+    #[test]
+    fn the_push_sends_nothing_when_another_ref_starts_with_the_armed_name() {
+        // `refs/heads/work/u1/y` cannot exist beside the armed ref: git refuses the pair.
+        for extra in ["refs/heads/work/u1x", "refs/heads/work/u1-evil"] {
+            let (_dir, forge, own_git, sha) = push_fixture();
+            git_ok(&[
+                "--git-dir",
+                own_git.to_str().unwrap(),
+                "update-ref",
+                extra,
+                &sha,
+            ]);
+            let cause = push_armed_ref(&own_git, "refs/heads/work/u1", &sha).unwrap_err();
+            assert!(cause.contains(extra), "{cause}");
+            assert!(cause.contains("nothing was pushed"), "{cause}");
+            assert_eq!(forge_refs(&forge), "", "{extra}");
+        }
     }
 }

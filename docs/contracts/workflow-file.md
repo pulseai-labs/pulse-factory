@@ -275,7 +275,7 @@ pin check and before the stage's `before` commands:
 4. It makes the controller's repository (above).
 5. It names each seat-written setting it ignores. `seat_read` runs
    `config -z --show-scope --get-regexp <keys>`. The keys are `core.hookspath`, `core.fsmonitor`,
-   `core.sshcommand`, `core.gitproxy`, `core.askpass`, `credential.*`, `url.*.insteadof`,
+   `core.sshcommand`, `core.gitproxy`, `core.askpass`, `core.alternaterefscommand`, `credential.*`, `url.*.insteadof`,
    `url.*.pushinsteadof`, `remote.origin.receivepack`, `remote.origin.uploadpack`,
    `remote.origin.vcs`, `remote.origin.proxy`, `http.*`, `protocol.*`, `include.path` and
    `includeif.*`. The controller keeps the entries of the `local` and `worktree` scopes, once per
@@ -295,6 +295,10 @@ pin check and before the stage's `before` commands:
    and system config. Each URL must again be the run's forge. So the URL the controller checked
    is the URL git uses. No call reads `origin` of `dir` after this, so a seat that changes the
    config of `dir` during the check changes nothing the push uses.
+   The controller reads these URLs a second time right before the push. Git reads the global and
+   system config at each call, and a seat's shell can write the operator's global config, so the
+   second read narrows the time in which a `pushurl` or `pushInsteadOf` written there could move
+   the push. It does not close that time: a shell write is the limit of ADR-0005.
 8. It runs `ls-remote forge refs/heads/<branch>` with `own`, without `--exit-code`.
    `ls-remote` matches a pattern by the tail of a ref, so it also prints
    `refs/tags/refs/heads/<branch>`. The controller counts only a line whose second field is
@@ -312,9 +316,12 @@ pin check and before the stage's `before` commands:
 as an abbreviation, so on a forge that holds only `refs/tags/refs/heads/<branch>` the plain form
 aims at that tag, and git reports the tag as up to date or as already existing. The controller
 therefore makes `refs/heads/<branch>` at `<sha>` in its own repository with `update-ref`. That
-repository holds no other branch. It then pushes the glob
-`refs/heads/<branch>*:refs/heads/<branch>*`. The remote ref of a glob is matched by its full name.
-The glob can reach no other ref, because the repository holds the one.
+repository is made fresh for the call and holds no other branch. It then lists the refs of that
+repository and pushes nothing when one besides `refs/heads/<branch>` is there. Then it pushes the
+glob `refs/heads/<branch>*:refs/heads/<branch>*`. The remote ref of a glob is matched by its full
+name. The glob sends each ref of the repository whose name starts with `refs/heads/<branch>`, so
+the check of the refs is what makes the push send the one. A seat reaches that repository only by
+a shell write, within the time of one call: the limit of ADR-0005.
 
 **The ledger lines.** Every push is an admitted `Push` command, so it writes
 `push: repo=<forge> branch=<branch> sha=<sha> outcome=pushed` or `outcome=failed: <cause>`. The

@@ -1869,9 +1869,8 @@ struct ConfigCall<'a> {
 /// The long options of `git config` that take a value: `--file`, `--blob`, `--default`, `--comment`,
 /// `--type`, and `--value` and `--url` of the `get` and `set` verbs. Without an `=`, the next word
 /// is their value, whatever it looks like.
-const CONFIG_VALUE_OPTIONS: [&str; 7] = [
-    "file", "blob", "default", "comment", "type", "value", "url",
-];
+const CONFIG_VALUE_OPTIONS: [&str; 7] =
+    ["file", "blob", "default", "comment", "type", "value", "url"];
 
 /// Read the words of a `git config …` call. A flag counts only where git reads it as a flag: not
 /// as the value of an option that takes one (`--comment --get`), and not after a `--`. The words

@@ -230,7 +230,11 @@ fn a_short_flag_in_a_cluster_is_read() {
     for c in ["git config -ze", "git config -ez", "git config -z -e"] {
         denied_for_every_role(c, RULE);
     }
-    for c in ["git config -zl", "git config -lz", "git config -z --get core.hooksPath"] {
+    for c in [
+        "git config -zl",
+        "git config -lz",
+        "git config -z --get core.hooksPath",
+    ] {
         allowed_for_every_role(c);
     }
 }
