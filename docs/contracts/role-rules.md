@@ -93,10 +93,16 @@ value each redirect. A read, a listing and a removal of such a key stay allowed,
 a key alone (`git config <key>`); one read or removal flag (`--get`, `--get-all`, `--get-regexp`,
 `--get-urlmatch`, `--list`, `-l`, `--unset`, `--unset-all`, `--remove-section`); or the verb `get`,
 `list`, `unset` or `remove-section` in first place. Scope flags (`--global`, `--local`, `--system`,
-`--worktree`) and the options that take a value (`--file <f>`, `--comment`, `--type`, …) may come
-before the key. Every other call is denied when any word of it names a key that redirects git: the
-rules do not guess which later word is a flag, and a `--` anywhere in such a call is outside every
-shape. So a value that equals such a key is denied too. The editor opens a config whose writes the
+`--worktree`), type flags (`--bool`, `--int`, `--bool-or-int`, `--bool-or-str`, `--path`,
+`--expiry-date`, `--no-type`), `--includes`, `--no-includes`, `--fixed-value` and the options that
+take a value (`--file <f>`, `--comment`, `--type`, …) may come before the key; so may `--get-color`
+and `--get-colorbool` as read flags. Every other call is denied when any word of it names a key
+that redirects git: the rules do not guess which later word is a flag, and a `--` anywhere in such
+a call is outside every shape. So a value that equals such a key is denied too. A word with an
+unquoted glob has no key text, because the shell expands it to the names of files that a seat can
+create, so a call that has one is denied as `unparsed-command` unless a read flag or verb comes
+first and the glob is an operand; the same holds for the value of `git -c` and `git --config-env`
+and for a section name in a rename. Quote the glob or write the name out. The editor opens a config whose writes the
 rules cannot read, so `--edit` is denied too. Git stops reading flags at the first operand, so
 `core.hooksPath --unset` and `core.hooksPath --` write the value `--unset` and `--`; the rules read
 them as writes. A short flag counts inside a cluster (`-ze`). A write into the repository's

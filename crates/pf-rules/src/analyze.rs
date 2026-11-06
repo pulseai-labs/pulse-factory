@@ -839,7 +839,7 @@ impl<'a> Analyzer<'a> {
                         self.deny(CONFIG_TRUST, config_trust_reason(&format!("git {t}"), key));
                     } else {
                         match words.get(i + 1) {
-                            Some(v) if v.dynamic => self.deny(
+                            Some(v) if v.dynamic || v.glob => self.deny(
                                 "unparsed-command",
                                 format!("git {t} sets a config that cannot be read"),
                             ),
@@ -864,7 +864,10 @@ impl<'a> Analyzer<'a> {
                             CONFIG_TRUST,
                             config_trust_reason("git --config-env", setting_key(setting)),
                         );
-                    } else if words[i].dynamic || config_runs_command(setting, true) {
+                    } else if words[i].dynamic
+                        || words[i].glob
+                        || config_runs_command(setting, true)
+                    {
                         self.deny(
                             "unparsed-command",
                             "git --config-env sets a config that runs a command that cannot be read",
@@ -1912,8 +1915,10 @@ fn config_call(rest: &[Word]) -> ConfigCall<'_> {
                 .split_once('=')
                 .map_or((long, false), |(name, _)| (name, true));
             match name {
-                "get" | "get-all" | "get-regexp" | "get-urlmatch" | "list" | "unset"
-                | "unset-all" | "remove-section" => call.reads = true,
+                "get" | "get-all" | "get-regexp" | "get-urlmatch" | "get-color"
+                | "get-colorbool" | "list" | "unset" | "unset-all" | "remove-section" => {
+                    call.reads = true;
+                }
                 "add" | "replace-all" => call.writes_more = true,
                 "edit" => call.edit = true,
                 "rename-section" => call.rename = true,
@@ -2021,6 +2026,15 @@ fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
     if config_read_shape(rest) {
         return None;
     }
+    // A word with an unquoted glob has no key text here: the shell expands it to the names of
+    // files in the seat's directory, and a seat can create those. It can become a key, a value or
+    // a flag, so a call outside the read shapes that has one is not readable, as a variable is not.
+    if rest.iter().any(|w| w.glob) {
+        return Some((
+            "unparsed-command",
+            "git config has a word with a glob outside the shapes that only read, and the shell can expand it to a key; quote it or write the name out".to_string(),
+        ));
+    }
     if verb == Some("rename-section") {
         positional.remove(0);
         if let Some(deny) = config_rename_deny(&positional) {
@@ -2047,7 +2061,7 @@ fn config_trust_deny(rest: &[Word]) -> Option<(&'static str, String)> {
 
 /// The flags of `git config` that name no action and change no write: a scope, and the format
 /// flags. They are the only ones `config_read_shape` skips besides the actions that read.
-const CONFIG_NEUTRAL_FLAGS: [&str; 9] = [
+const CONFIG_NEUTRAL_FLAGS: [&str; 18] = [
     "global",
     "local",
     "system",
@@ -2057,22 +2071,33 @@ const CONFIG_NEUTRAL_FLAGS: [&str; 9] = [
     "show-origin",
     "show-scope",
     "includes",
+    "no-includes",
+    "bool",
+    "int",
+    "bool-or-int",
+    "bool-or-str",
+    "path",
+    "expiry-date",
+    "no-type",
+    "fixed-value",
 ];
 
 /// The flags of the verbs `get` and `unset` that name no action.
-const CONFIG_VERB_FLAGS: [&str; 4] = ["all", "regexp", "show-names", "fixed-value"];
+const CONFIG_VERB_FLAGS: [&str; 3] = ["all", "regexp", "show-names"];
 
 /// Is this `git config …` call one of the shapes that only read or remove, written so the guard
 /// reads it exactly? The shapes are:
-/// - `git config <key>`, with scope, format and value-taking options before the key;
-/// - one read or removal flag (`--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`, `--list`,
-///   `-l`, `--unset`, `--unset-all`, `--remove-section`) among those options, then its operands;
+/// - `git config <key>`, with scope, format, type and value-taking options before the key;
+/// - one read or removal flag (`--get`, `--get-all`, `--get-regexp`, `--get-urlmatch`,
+///   `--get-color`, `--get-colorbool`, `--list`, `-l`, `--unset`, `--unset-all`,
+///   `--remove-section`) among those options, then its operands;
 /// - the verb `get`, `list`, `unset` or `remove-section` in first place, with its own flags
 ///   (`--all`, `--regexp`, …) and those options, then its operands.
 ///
 /// Every other word before the first operand, a `--` anywhere, a word that is a variable or a
-/// glob before the first operand, and a key with more than one operand and no read flag are
-/// not a shape. The caller denies such a call when any word names a key that redirects git.
+/// glob before the first operand, a glob operand when no flag reads, and a key with more than one
+/// operand and no read flag are not a shape. The caller denies such a call when any word names a
+/// key that redirects git, or is a glob.
 fn config_read_shape(rest: &[Word]) -> bool {
     let verb = rest
         .first()
@@ -2082,7 +2107,9 @@ fn config_read_shape(rest: &[Word]) -> bool {
     while i < rest.len() {
         let w = &rest[i];
         let t = w.text.as_str();
-        if w.dynamic || w.glob || t == "--" {
+        // A glob that stands where an operand does is the first operand: the end check reads it.
+        // A glob that stands among the flags may expand to one, so it is not a shape.
+        if w.dynamic || t == "--" || w.glob && t.starts_with('-') {
             return false;
         }
         if let Some(long) = t.strip_prefix("--") {
@@ -2106,6 +2133,8 @@ fn config_read_shape(rest: &[Word]) -> bool {
                     | "get-all"
                     | "get-regexp"
                     | "get-urlmatch"
+                    | "get-color"
+                    | "get-colorbool"
                     | "list"
                     | "unset"
                     | "unset-all"
@@ -2155,7 +2184,8 @@ fn config_read_shape(rest: &[Word]) -> bool {
     }
     // A read flag or a verb makes every operand an operand of a read. Without one, a key alone
     // reads; a value after it writes.
-    action || operands.len() <= 1
+    // A glob operand with no action may expand to a key and a value: that is a write.
+    action || (operands.len() <= 1 && !operands.iter().any(|w| w.glob))
 }
 
 /// `git config --rename-section <old> <new>`: is `<new>` a section that holds a key that redirects

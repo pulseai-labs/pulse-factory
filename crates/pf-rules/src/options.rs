@@ -55,17 +55,22 @@ pub const BRANCH_OPTIONS: [&str; 1] = ["delete"];
 pub const CLEAN_OPTIONS: [&str; 1] = ["dry-run"];
 
 /// Long options of `git config` that a guard reads: the ones that read or remove (`--get` to
-/// `--remove-section`), the ones that write more (`--add`, `--replace-all`), the ones that open the
-/// config in an editor or rename a section (`--edit`, `--rename-section`) and the ones that take a
-/// value (`--file` to `--url`).
+/// `--remove-section`, `--get-color`, `--get-colorbool`), the ones that write more (`--add`,
+/// `--replace-all`), the ones that open the config in an editor or rename a section (`--edit`,
+/// `--rename-section`), the ones that take a value (`--file` to `--url`), and the flags that name
+/// no action (a scope, a format, a type, `--includes`, `--fixed-value`). A prefix of one
+/// is written in full, so `--glo` reads as `--global` and `--bo` is refused as ambiguous, as git
+/// refuses it.
 ///
 /// Source: git-config(1), OPTIONS and ACTIONS; `--value` and `--url` are options of the `get` and
 /// `set` verbs.
-pub const CONFIG_OPTIONS: [&str; 19] = [
+pub const CONFIG_OPTIONS: [&str; 39] = [
     "get",
     "get-all",
     "get-regexp",
     "get-urlmatch",
+    "get-color",
+    "get-colorbool",
     "list",
     "unset",
     "unset-all",
@@ -81,6 +86,24 @@ pub const CONFIG_OPTIONS: [&str; 19] = [
     "type",
     "value",
     "url",
+    "global",
+    "local",
+    "system",
+    "worktree",
+    "null",
+    "name-only",
+    "show-origin",
+    "show-scope",
+    "includes",
+    "no-includes",
+    "no-type",
+    "bool",
+    "int",
+    "bool-or-int",
+    "bool-or-str",
+    "path",
+    "expiry-date",
+    "fixed-value",
 ];
 
 /// Long options of `git switch` and `git checkout` that a guard reads: the ones that name a

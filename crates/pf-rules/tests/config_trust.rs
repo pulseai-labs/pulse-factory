@@ -339,6 +339,82 @@ fn a_call_outside_every_modeled_shape_that_names_a_redirect_key_is_denied() {
     }
 }
 
+/// PR #28, C19: a word with an unquoted glob has no key text. The shell expands it to the names of
+/// files in the seat's directory, which a seat can create, and git then sets the key. A call
+/// outside the read shapes that has such a word is not readable, as a variable is not.
+#[test]
+fn a_glob_word_in_a_call_outside_the_read_shapes_is_denied() {
+    for c in [
+        "git config core.hooks[P]ath /evil",
+        "git config core.hooks[P]ath",
+        "git config *",
+        "git config --global core.hooks[P]ath x",
+        "git config --add core.hooks[P]ath x",
+        "git config ali[a]s.x '!gh pr merge 1'",
+        "git config alias.x '!gh pr merge'*",
+        "git config --rename-section old htt[p]",
+        "git config --rename-section ht* x",
+        "git config --file * core.hooksPath x",
+        "git config --bool core.hooks[P]ath",
+        "git -c core.hooks[P]ath=x status",
+        "git -c 'core.x=1' -c core.hooks[P]ath=x status",
+        "git --config-env=core.hooks[P]ath=VAR status",
+    ] {
+        denied_for_every_role(c, "unparsed-command");
+    }
+}
+
+/// PR #28, C19: a glob that no shape reads as a key stays allowed: after a read flag or a verb it
+/// is an operand of a read, and git refuses a flag that the shell expands into it.
+#[test]
+fn a_glob_operand_of_a_read_and_a_quoted_glob_stay_allowed() {
+    for c in [
+        "git config --get-regexp core.*",
+        "git config --unset core.hooks[P]ath",
+        "git config get core.*",
+        "git config --get-regexp 'core.*'",
+        "git config user.name 'Foo*'",
+        "git -c 'core.x=*' status",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
+/// PR #28, C20: a read of a key that redirects git with a type flag, `--no-includes`, a color
+/// flag or a unique prefix of a flag stays allowed, as it was before the closed form. A write
+/// with the same flags is still denied.
+#[test]
+fn a_read_with_a_type_flag_or_a_prefix_stays_allowed() {
+    for c in [
+        "git config --bool http.sslVerify",
+        "git config --int core.hooksPath",
+        "git config --bool-or-int http.sslVerify",
+        "git config --bool-or-str http.sslVerify",
+        "git config --path http.sslVerify",
+        "git config --expiry-date core.hooksPath",
+        "git config --no-includes http.sslVerify",
+        "git config --no-type core.hooksPath",
+        "git config --fixed-value --get core.hooksPath x",
+        "git config --get --bool http.sslVerify",
+        "git config --get-color core.hooksPath red",
+        "git config --get-colorbool core.hooksPath",
+        "git config --glo core.hooksPath",
+        "git config --glo --get core.hooksPath",
+        "git config --incl --get core.hooksPath",
+    ] {
+        allowed_for_every_role(c);
+    }
+    for c in [
+        "git config --bool core.hooksPath x",
+        "git config --path http.sslVerify x",
+        "git config --no-includes http.sslVerify x",
+        "git config --glo core.hooksPath x",
+        "git config --int core.hooksPath x --",
+    ] {
+        denied_for_every_role(c, RULE);
+    }
+}
+
 /// A short flag inside a cluster is a flag: `-ze` is `-z` and `--edit`.
 #[test]
 fn a_short_flag_in_a_cluster_is_read() {
