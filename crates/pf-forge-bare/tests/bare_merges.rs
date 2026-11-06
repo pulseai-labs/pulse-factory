@@ -63,6 +63,32 @@ fn a_green_pr_merges_and_the_base_holds_the_merge() {
 }
 
 #[test]
+fn a_merge_lands_when_the_forge_holds_a_tag_named_like_the_base() {
+    // `refs/tags/refs/heads/<BASE>` makes `<BASE>` ambiguous for a push to `HEAD:refs/heads/<BASE>`:
+    // git stops with "dst refspec refs/heads/<BASE> matches more than one". The merge names the
+    // remote ref by its full name, so the tag neither blocks the push nor moves.
+    let f = Fixture::new();
+    let other = f.commit("other", BASE, "other.txt", "not the base\n");
+    let tag = format!("refs/tags/refs/heads/{BASE}");
+    f.set_ref(&tag, &other);
+    let before = f.head(BASE);
+    let head = f.commit("work/u1", BASE, "a.txt", "from u1\n");
+    f.forge
+        .write_pr(1, "work/u1", BASE, PrChecks::Green)
+        .unwrap();
+
+    let effect = f.forge.merge(&pr(&f, 1), &head).unwrap();
+    assert_eq!(effect.outcome, ForgeOutcome::Merged, "{effect:?}");
+
+    let after = f.head(BASE);
+    assert_ne!(after, before);
+    assert_eq!(f.parents(&after), vec![before, head], "a --no-ff merge");
+    assert_eq!(f.show(BASE, "a.txt"), "from u1\n");
+    assert_eq!(f.ref_target(&tag), Some(other), "the tag did not move");
+    assert!(f.scratch_leftovers().is_empty());
+}
+
+#[test]
 fn a_pr_that_is_not_merged_has_not_landed() {
     let f = Fixture::new();
     f.commit("work/u1", BASE, "a.txt", "from u1\n");

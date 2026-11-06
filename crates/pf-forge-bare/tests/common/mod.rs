@@ -132,6 +132,19 @@ impl Fixture {
         git(&self.bare, &["rev-parse", &format!("refs/heads/{branch}")])
     }
 
+    /// Point `refname` of the bare repo at `commit`. A test uses it to make a ref beside a branch.
+    pub fn set_ref(&self, refname: &str, commit: &str) {
+        git(&self.bare, &["update-ref", refname, commit]);
+    }
+
+    /// The commit a ref of the bare repo names, or `None` when the ref does not exist.
+    pub fn ref_target(&self, refname: &str) -> Option<String> {
+        let out = git_out(&self.bare, &["rev-parse", "--verify", "--quiet", refname]);
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
     pub fn has_branch(&self, branch: &str) -> bool {
         git_out(
             &self.bare,

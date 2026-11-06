@@ -1,0 +1,4 @@
+version: 1
+role: reviewer
+allow:
+  - write_own_report_and_run_files

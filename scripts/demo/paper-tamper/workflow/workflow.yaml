@@ -1,0 +1,219 @@
+# The paper workflow of the tamper demo (`seat-tamper.sh`): two rounds of one item each, on a bare
+# forge that holds a decoy tag named like the spine branch and not the branch itself. The spine
+# branch exists only in a local repo, so the item `close` stage names it with `base_push`.
+#
+# The first item's implementer plays a seat that tries every gap that `r1.s1` closed. It writes the
+# git config that the base push used to trust, makes refs beside the spine branch, and puts a hook
+# and two transport commands where git would run them. In the second run (`tamper=redirect`) it
+# writes a URL rewrite instead. The second item's implementer tries to write the first item's
+# verdict file with its write tool. Every call of a tool goes through the hook first. Nothing here
+# reaches a model, a network or a real forge.
+version: 1
+name: paper-seat-tamper
+
+# What `arm` must supply.
+#   spine         the spine ID (arm sets it)
+#   spine_branch  the branch the item PRs merge into; it exists in `repo` and not on the forge
+#   spine_dir     the directory that holds the reports
+#   worktree_root the directory that holds the item worktrees
+#   repo          the local repository that holds the spine branch; the item worktrees link to it
+#   forge_repo    the bare repo; `arm --paper` sets it to <paper>/forge.git
+#   briefs        the run's own copy of the briefs (arm sets it)
+#   tamper        `steer` (the seat writes config that steers the base push) or `redirect` (the
+#                 seat writes a URL rewrite)
+#   decoy         a bare repo that must get nothing
+#   markers       the directory where a seat-written hook or transport command leaves a file
+params: [spine, spine_branch, spine_dir, worktree_root, repo, forge_repo, briefs, tamper, decoy, markers]
+
+roles:
+  lane:
+    runtime: paper
+    model: paper/lane
+    rules: rules/lane.yaml
+  implementer:
+    runtime: paper
+    model: paper/implementer
+    rules: rules/implementer.yaml
+  verifier:
+    runtime: paper
+    model: paper/verifier
+    rules: rules/verifier.yaml
+  close:
+    runtime: paper
+    model: paper/close
+    rules: rules/close.yaml
+  reviewer:
+    runtime: paper
+    model: paper/reviewer
+    rules: rules/reviewer.yaml
+
+settings:
+  model_sessions: 2
+  cold_builds: 1
+
+# `arm` runs this to learn how many items the spine has.
+plan_check: [echo, "2"]
+
+roots: ["{param.worktree_root}"]
+
+# The queue and `rounds.done` are the lane's files. They live under the lane's own directory, so a
+# seat writes only in its own unit's directory (`out/<unit>`; a lane repeat also owns `out/lane`).
+unit_sources:
+  - dir: "{run.dir}/out/lane/queue"
+    track: item
+    vars: [worktree_path, branch]
+
+# The first lane queues item-1. When item-1 is done, the lane runs again as `lane.2`, queues item-2
+# and writes `rounds.done`. So item-2 starts after item-1 has merged, and its review file is final.
+seeds:
+  - id: lane
+    group: lane
+    order: 1
+    track: lane
+    vars: {}
+    repeat:
+      when_units_done: item
+      until_file: "{run.dir}/out/lane/rounds.done"
+      max: 2
+
+tracks:
+  lane:
+    stages:
+      - name: lane
+        role: lane
+        brief: [briefs/common.md]
+        message: "Paper lane for {param.spine}."
+        cwd: "{param.spine_dir}"
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [mkdir, -p, "{run.dir}/out/lane/queue"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_LANE_DONE: "{run.dir}/out/{unit.id}/lane.done"
+          env.PAPER_QUEUE: "{run.dir}/out/lane/queue"
+          env.PAPER_REPO: "{param.repo}"
+          env.PAPER_ROUNDS_DONE: "{run.dir}/out/lane/rounds.done"
+          env.PAPER_SPINE_BRANCH: "{param.spine_branch}"
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_WORKTREE_ROOT: "{param.worktree_root}"
+          report_dir: "{param.spine_dir}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/lane.done"
+
+  item:
+    stages:
+      - name: implement
+        role: implementer
+        brief: [briefs/common.md]
+        message: "Paper implement for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_DECOY: "{param.decoy}"
+          env.PAPER_MARKERS: "{param.markers}"
+          env.PAPER_REPORT_DIR: "{param.spine_dir}/work-{unit.id}"
+          env.PAPER_REPO: "{param.repo}"
+          env.PAPER_RUN_DIR: "{run.dir}"
+          env.PAPER_SPINE_BRANCH: "{param.spine_branch}"
+          env.PAPER_TAMPER: "{param.tamper}"
+          env.PAPER_UNIT: "{unit.id}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{param.spine_dir}/work-{unit.id}/report.md"
+
+      - name: verify
+        role: verifier
+        brief: [briefs/common.md]
+        message: "Paper verify for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_VERDICT: "{run.dir}/out/{unit.id}/verdict.json"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/verdict.json"
+
+      - name: close
+        role: close
+        brief: [briefs/common.md]
+        message: "Paper close for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        # The close seat's own branch is the work branch, so it may not push the spine branch. The
+        # controller does, before this stage launches, when the forge lacks the branch.
+        base_push:
+          dir: "{param.repo}"
+          branch: "{param.spine_branch}"
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_BRANCH: "{unit.vars.branch}"
+          env.PAPER_BASE: "{param.spine_branch}"
+          env.PAPER_PR_URL: "{run.dir}/out/{unit.id}/pr.url"
+          env.PAPER_STOP: "{run.dir}/out/{unit.id}/stop"
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - pr:
+              argv: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+              test: url
+
+      # The paper reviewer reads the item branch's head in the bare repo and passes it. Its review
+      # file is the verdict that no other unit's seat may write.
+      - name: review
+        role: reviewer
+        brief: [briefs/common.md]
+        message: "Paper review for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/review.md"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_FORGE: "{param.forge_repo}"
+          env.PAPER_BRANCH: "{unit.vars.branch}"
+          env.PAPER_REVIEW: "{run.dir}/out/{unit.id}/review.md"
+          report_dir: "{run.dir}/out/{unit.id}"
+        done:
+          - exit0:
+              - grep
+              - -Eq
+              - "^verdict: (pass|block)$"
+              - "{run.dir}/out/{unit.id}/review.md"
+
+    merge:
+      rule: green_checks_in_declared_order
+      repo: "{param.forge_repo}"
+      base: "{param.spine_branch}"
+      pr: [cat, "{run.dir}/out/{unit.id}/pr.url"]
+      head_check: true
+      after_merge:
+        - [sh, -c, "echo {unit.id} >> {run.dir}/after_merge.log"]
