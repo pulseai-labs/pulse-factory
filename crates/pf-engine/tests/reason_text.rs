@@ -179,13 +179,79 @@ fn the_secret_in_a_url_is_removed() {
     assert!(!out.contains("hunter2"), "{out}");
     assert!(out.contains("https://alice:"), "{out}");
     assert!(out.contains("@example.com/org/repo.git"), "{out}");
-    // A URL with no password, or an @ in the path, is left alone.
+    // A URL whose whole user info is the credential loses it, and it keeps host and path.
+    assert_eq!(
+        redact("https://alice@example.com/repo"),
+        "https://[redacted]@example.com/repo"
+    );
+    // A URL with an @ in the path, or with a port and no user info, is left alone.
     for text in [
         "https://example.com/a@b",
-        "https://alice@example.com/repo",
         "see https://example.com:8080/path",
     ] {
         assert_eq!(redact(text), text);
+    }
+}
+
+#[test]
+fn every_user_info_form_in_a_url_is_removed() {
+    let cases = [
+        (
+            "push to https://s3cr3tvalue@github.com/o/r failed",
+            "push to https://[redacted]@github.com/o/r failed",
+        ),
+        (
+            "https://x-access-token:s3cr3t@github.com/o/r",
+            "https://x-access-token:[redacted]@github.com/o/r",
+        ),
+        ("https://s3cr3tvalue:@host/p", "https://[redacted]:@host/p"),
+        (
+            "http://s3cr3tvalue@host/p?q=1#f",
+            "http://[redacted]@host/p?q=1#f",
+        ),
+        (
+            "ssh://git@github.com:22/ACME/Widgets",
+            "ssh://[redacted]@github.com:22/ACME/Widgets",
+        ),
+        (
+            "git://s3cr3tvalue@host/r.git",
+            "git://[redacted]@host/r.git",
+        ),
+        (
+            "file://s3cr3tvalue@host/srv/r.git",
+            "file://[redacted]@host/srv/r.git",
+        ),
+        (
+            "fatal: unable to access 'https://s3cr3tvalue@github.com/o/r/': 403",
+            "fatal: unable to access 'https://[redacted]@github.com/o/r/': 403",
+        ),
+        ("at https://s3cr3tvalue@host", "at https://[redacted]@host"),
+        (
+            "a https://t1@h1/p and https://u:t2@h2/q",
+            "a https://[redacted]@h1/p and https://u:[redacted]@h2/q",
+        ),
+        ("https://a%40b@host/p", "https://[redacted]@host/p"),
+        ("https://us@er@host/p", "https://[redacted]@host/p"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(redact(input), expected, "input: {input}");
+        assert_eq!(
+            one_line_reason(input),
+            expected,
+            "one_line_reason, input: {input}"
+        );
+    }
+    // Left alone: no user info, an @ outside the authority, or the scp-like form.
+    for text in [
+        "https://example.com/a@b",
+        "https://example.com/?q=a@b",
+        "https://example.com#a@b",
+        "https://@host/p",
+        "see https://example.com:8080/path",
+        "git@github.com:acme/widgets.git",
+        "mail alice@example.com about it",
+    ] {
+        assert_eq!(redact(text), text, "input: {text}");
     }
 }
 
@@ -362,7 +428,7 @@ fn halt_for_from_two_sources_and_halt_after_halt_for_are_admitted() {
 #[test]
 fn a_second_pass_over_redacted_text_changes_nothing() {
     let text = format!(
-        "a {GH} b\nAuthorization: Basic dXNlcjpwYXNz\nGITHUB_TOKEN=abc --api-key xyz https://u:pw@h/p Bearer qrs"
+        "a {GH} b\nAuthorization: Basic dXNlcjpwYXNz\nGITHUB_TOKEN=abc --api-key xyz https://u:pw@h/p Bearer qrs\nhttps://s3cr3tvalue@h/p https://s3cr3tvalue:@h/p ssh://git@h:22/r"
     );
     let once = redact(&text);
     assert_eq!(redact(&once), once);

@@ -51,8 +51,12 @@ pub struct RunInfo {
     pub running_sessions: u64,
 }
 
+/// An arm refusal. The cause is redacted first: it can hold a URL, such as the origin of a repo.
 fn refuse(cause: impl std::fmt::Display) -> String {
-    format!("pulse-factory: arm refused: {cause}")
+    format!(
+        "pulse-factory: arm refused: {}",
+        pf_engine::status::redact(&cause.to_string())
+    )
 }
 
 fn absolute(p: &Path) -> PathBuf {
