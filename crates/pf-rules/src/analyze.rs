@@ -820,8 +820,34 @@ impl<'a> Analyzer<'a> {
         let mut i = 1;
         let mut dir: Option<Word> = None;
         let mut dirs: Vec<Word> = Vec::new();
+        // A word that the shell expands is not readable among the options of git: `-c*` can
+        // become a file named `-c`, and `-c$X` the flag `-c`, so the next word is then a key. The
+        // value of an option that takes one can bring in more options when it splits or expands.
+        let option_unreadable = |w: &Word| w.dynamic || w.glob;
+        let value_unreadable = |w: Option<&Word>| {
+            w.is_some_and(|w| w.glob || (w.dynamic && w.quoted_var.is_none() && !w.any_quote))
+        };
         while i < words.len() {
+            if option_unreadable(&words[i]) {
+                self.deny(
+                    "unparsed-command",
+                    "a word among the options of git has a glob or a variable and cannot be read",
+                );
+                return;
+            }
             let t = words[i].text.as_str();
+            if matches!(
+                t,
+                "-C" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
+                    | "--super-prefix" | "--attr-source"
+            ) && value_unreadable(words.get(i + 1))
+            {
+                self.deny(
+                    "unparsed-command",
+                    format!("the value of git {t} has a glob or a variable and cannot be read"),
+                );
+                return;
+            }
             match t {
                 "-C" => {
                     dir = words.get(i + 1).cloned();

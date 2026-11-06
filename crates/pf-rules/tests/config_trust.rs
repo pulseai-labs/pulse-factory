@@ -364,6 +364,43 @@ fn a_glob_word_in_a_call_outside_the_read_shapes_is_denied() {
     }
 }
 
+/// PR #28, C22: a word among the options of `git` itself that has an unquoted glob or a variable
+/// is not readable. The shell expands `-c*` to a file named `-c` (a seat can create it), and the
+/// next word is then the key of `-c`. The word of a value option can bring in more options as well.
+#[test]
+fn a_glob_or_variable_word_among_the_options_of_git_is_denied() {
+    for c in [
+        "git -c* core.hooksPath=/evil status",
+        "git -[c] core.hooksPath=/evil status",
+        "git -C* core.hooksPath=/evil status",
+        "git --config-env* core.hooksPath=X status",
+        "git --git-dir* core.hooksPath=/evil status",
+        "git -c$X core.hooksPath=/evil status",
+        "git \"-c$X\" core.hooksPath=/evil status",
+        "git --no-pager -c* remote.origin.pushurl=/evil push",
+        "git -C * status",
+        "git --git-dir * status",
+        "git --work-tree $X status",
+    ] {
+        denied_for_every_role(c, "unparsed-command");
+    }
+}
+
+/// PR #28, C22: a quoted glob, a quoted variable as a directory and a literal option stay allowed.
+#[test]
+fn a_literal_or_quoted_option_of_git_stays_allowed() {
+    for c in [
+        "git --no-pager status",
+        "git -C \"$DIR\" status",
+        "git --git-dir \"$D\" status",
+        "git -C 'a*' status",
+        "git -c 'user.name=*' status",
+        "git status *",
+    ] {
+        allowed_for_every_role(c);
+    }
+}
+
 /// PR #28, C19: a glob that no shape reads as a key stays allowed: after a read flag or a verb it
 /// is an operand of a read, and git refuses a flag that the shell expands into it.
 #[test]

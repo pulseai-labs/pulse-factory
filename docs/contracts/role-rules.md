@@ -102,7 +102,11 @@ a call is outside every shape. So a value that equals such a key is denied too. 
 unquoted glob has no key text, because the shell expands it to the names of files that a seat can
 create, so a call that has one is denied as `unparsed-command` unless a read flag or verb comes
 first and the glob is an operand; the same holds for the value of `git -c` and `git --config-env`
-and for a section name in a rename. Quote the glob or write the name out. The editor opens a config whose writes the
+and for a section name in a rename. Quote the glob or write the name out. The same holds among the
+options of `git` itself, before the subcommand: a word there with an unquoted glob or a variable
+(`-c*`, `-c$X`) is denied as `unparsed-command`, because it can expand to `-c` and make the next
+word a key; so is a glob or an unquoted variable as the value of `-C`, `--git-dir`, `--work-tree`
+and the other options that take one. A quoted variable as a directory stays allowed. The editor opens a config whose writes the
 rules cannot read, so `--edit` is denied too. Git stops reading flags at the first operand, so
 `core.hooksPath --unset` and `core.hooksPath --` write the value `--unset` and `--`; the rules read
 them as writes. A short flag counts inside a cluster (`-ze`). A write into the repository's
