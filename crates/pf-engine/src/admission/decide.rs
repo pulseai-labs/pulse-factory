@@ -207,6 +207,15 @@ pub fn decide(
             d.ledger = Some(format!("decision: unit={unit_id} {text}"));
             Ok(d)
         }
+        CommandBody::Note { unit_id, text, .. } => {
+            view.node(unit_id)
+                .filter(|n| n.kind == NodeKind::Unit)
+                .ok_or_else(|| format!("unit {unit_id} is unknown"))?;
+            let mut d = Decision::admitted();
+            d.unit_id = Some(unit_id.clone());
+            d.ledger = Some(format!("note: unit={unit_id} {text}"));
+            Ok(d)
+        }
         CommandBody::EndRun { reason } => {
             let reason = check_reason(reason).map_err(|e| e.to_string())?;
             let mut r = run.clone();

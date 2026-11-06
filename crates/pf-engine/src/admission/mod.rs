@@ -122,6 +122,14 @@ pub enum CommandBody {
         line_number: u64,
         text: String,
     },
+    /// A line the controller writes about a unit, such as a setting it ignored. It is recorded in
+    /// every run state and for a unit in any state, as a push is. `text` is one clean line.
+    Note {
+        unit_id: String,
+        /// The caller's ID for this note. A repeat of one ID is a replay.
+        event_id: String,
+        text: String,
+    },
     /// End the run. Its open requests are withdrawn in the same commit.
     EndRun { reason: String },
     /// Open a request. A park opens its own, so this is for a request that no park carries.
@@ -245,6 +253,7 @@ impl CommandBody {
             CommandBody::MergeResult { .. } => "merge_result",
             CommandBody::Push { .. } => "push",
             CommandBody::Decision { .. } => "decision",
+            CommandBody::Note { .. } => "note",
             CommandBody::EndRun { .. } => "end_run",
             CommandBody::OpenRequest { .. } => "open_request",
             CommandBody::ReviseRequest { .. } => "revise_request",

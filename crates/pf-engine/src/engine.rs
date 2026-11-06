@@ -515,6 +515,26 @@ impl Engine {
         })
     }
 
+    /// Record one note about a unit, such as a setting the controller ignored. It writes one
+    /// ledger line, in every run state and for a unit in any state. The command ID is
+    /// `note:<event_id>`: a repeat of one ID with the same text is a replay, and another text under
+    /// a used ID is a `Conflict`. The text is outside text, so it is cleaned to one line first.
+    pub fn record_note(
+        &self,
+        unit_id: &str,
+        event_id: &str,
+        text: &str,
+    ) -> Result<Admission, EngineError> {
+        self.submit(Command {
+            id: format!("note:{event_id}"),
+            body: CommandBody::Note {
+                unit_id: unit_id.to_string(),
+                event_id: event_id.to_string(),
+                text: one_line_reason(text),
+            },
+        })
+    }
+
     /// The last push of a unit that succeeded, as the admissions record it. A later failed push
     /// does not hide it.
     pub fn last_successful_push(&self, unit_id: &str) -> Result<Option<PushRecord>, EngineError> {
