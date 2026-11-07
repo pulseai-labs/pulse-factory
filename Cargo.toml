@@ -10,6 +10,7 @@ members = [
     "crates/pf-forge-github",
     "crates/pf-forge-bare",
     "crates/pf-ipc",
+    "crates/pf-api",
     "crates/pulse-factory",
 ]
 
@@ -28,6 +29,18 @@ rusqlite = { version = "=0.41.0", features = ["bundled"] }
 yaml-rust2 = "=0.13.0"
 portable-pty = "=0.9.0"
 clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
+# the network API (ADR-0012): HTTP, TLS with the `ring` provider only (no aws-lc-rs, so no cmake
+# build), a self-signed certificate, and the TypeScript types for the clients
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "service"] }
+http-body-util = "=0.1.5"
+bytes = "=1.12.1"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat"] }
 # dev-only test crates
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 proptest = "1.11.0"
 tempfile = "3"

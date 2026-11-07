@@ -10,7 +10,8 @@ A controller (a systemd user service) then drives the seats until each item PR h
 spine branch. A spine-close seat then opens the spine PR, and the PR merges into the base branch
 only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
 `status`, `halt`, `hook` and `controller`, the verbs of requests and the claim: `requests`,
-`show`, `claim`, `answer`, `clear` and `ack`, and `project`, which lists the operator's projects.
+`show`, `claim`, `answer`, `clear` and `ack`, `project`, which lists the operator's projects, and
+`device` and `api`, which pair and revoke the devices that reach the controller over the network.
 
 ## Arm a run
 
@@ -143,6 +144,35 @@ pulse-factory project remove P-2                              # the row stays; t
 Every `add` and `remove`, admitted or refused, is one line of `<state dir>/controller.ledger`. A seat
 cannot `add` or `remove`; it can `list`.
 
+## Pair a device
+
+The controller can serve a network API over TLS (ADR-0012). It is off until the operator sets
+`PF_API_LISTEN` (`docs/install.md`). A paired device calls the project verbs and nothing else: no
+`answer`, `claim`, `clear`, `ack`, `arm` or `halt`.
+
+```bash
+pulse-factory api status          # off | waiting for <addr> | listening on <addr> | failed: <why>
+pulse-factory device pair         # prints one code, and when it stops working
+pulse-factory device list         # D-1  <name>  paired …  last seen … from <peer>
+pulse-factory device revoke D-1   # the device's next call is refused
+```
+
+1. `device pair` prints one `pf1-` code. It works once, it expires after 10 minutes, and a new code
+   replaces the live one. The code is a secret: give it to the operator, who types it into the
+   device. Do not write it to a file, a ledger, a request or a message to anyone else.
+2. `device list` shows each device with its pairing time, its last call and the peer address of that
+   call. A revoked device is listed last, with its revoke time. `--json` gives
+   `{"schema_version": 1, "devices": [...]}`. A record never holds a token.
+3. `device revoke <id>` refuses that device's next call at once. The device pairs again with a new
+   code. A retry sends the same `--command-id`, as for `project`.
+4. `api status` says whether the API is `off`, `waiting for` an address that is not on the host yet,
+   `listening on` it, or `failed`. It also prints the SPKI hash of the server key. A lost key means
+   a new hash: revoke every device and pair again.
+
+Each `device pair` redeem and each `device revoke` is one line of `<state dir>/controller.ledger`.
+The line names the device and never the code or the token. A seat cannot run `device pair` or
+`device revoke`; `device list` and `api status` are reads.
+
 ## Halt a run
 
 `pulse-factory halt [<run>] --reason "<why>"` stops new launches and new merges. Seats that run
@@ -155,5 +185,5 @@ finish their stage. A repeat is safe, and the first reason stays.
 - `pulse-factory hook` judges one tool call of a seat. The seat's extension runs it. You do not run
   it yourself.
 
-A seat cannot arm or halt a run, and it cannot add or remove a project: those verbs refuse when
-`PF_SEAT_TOKEN` is set. `halt` applies to runs only.
+A seat cannot arm or halt a run, it cannot add or remove a project, and it cannot pair or revoke a
+device: those verbs refuse when `PF_SEAT_TOKEN` is set. `halt` applies to runs only.

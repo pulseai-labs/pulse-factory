@@ -8,6 +8,9 @@ Restart=on-failure
 RestartSec=5
 # Seats inherit this environment. `gh` and `git` take their credentials from the operator's home.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# The operator turns the network API on here: PF_API_LISTEN=<tailnet address>:<port> (ADR-0012). The
+# leading `-` makes the file optional. With no file or no address, the API is off.
+EnvironmentFile=-%h/.config/pulse-factory/controller.env
 
 [Install]
 WantedBy=default.target

@@ -4,9 +4,9 @@
 //! writes and the outbox line, together or not at all.
 
 use pf_engine::port::store::{
-    AdmissionOutcome, AdmissionRow, ClaimRow, Commit, Committed, Effect, LedgerLine, NEW_ID,
-    NewProject, NewRequest, NodeKind, NodeRow, ProjectRow, RequestKind, RequestRow, RequestStatus,
-    RunRow, RunState, SessionRow, Store, StoreError,
+    AdmissionOutcome, AdmissionRow, ClaimRow, Commit, Committed, DeviceRow, Effect, LedgerLine,
+    NEW_ID, NewDevice, NewProject, NewRequest, NodeKind, NodeRow, ProjectRow, RequestKind,
+    RequestRow, RequestStatus, RunRow, RunState, SessionRow, Store, StoreError,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -301,6 +301,71 @@ fn remove_project(tx: &Transaction<'_>, id: &str, removed_at: &str) -> Result<()
     }
 }
 
+const DEVICE_COLUMNS: &str = "id, name, paired_at, last_seen_at, last_peer, revoked_at";
+
+fn device_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
+    Ok(DeviceRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        paired_at: r.get(2)?,
+        last_seen_at: r.get(3)?,
+        last_peer: r.get(4)?,
+        revoked_at: r.get(5)?,
+    })
+}
+
+/// Add a device and return its new ID, `D-<n>`. The number is the highest of the table plus one.
+/// A revoked row stays in the table, so no ID and no token hash is used twice.
+fn add_device(tx: &Transaction<'_>, n: &NewDevice) -> Result<String, EffectError> {
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM devices",
+        [],
+        |r| r.get(0),
+    )?;
+    let id = format!("D-{next}");
+    let inserted = tx.execute(
+        "INSERT INTO devices (id, name, token_sha256, paired_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, n.name, n.token_sha256, n.paired_at],
+    );
+    match inserted {
+        Ok(_) => Ok(id),
+        // The unique index of `token_sha256` is the only constraint a caller can break here. The
+        // text never holds the hash itself.
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Err(EffectError::Rejected(
+                "a device holds this token already".to_string(),
+            ))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Mark a live device revoked. The row stays.
+fn revoke_device(tx: &Transaction<'_>, id: &str, revoked_at: &str) -> Result<(), EffectError> {
+    let row = tx
+        .query_row(
+            &format!("SELECT {DEVICE_COLUMNS} FROM devices WHERE id = ?1"),
+            [id],
+            device_from,
+        )
+        .optional()?;
+    match row {
+        None => Err(EffectError::Rejected(format!("no device {id}"))),
+        Some(d) if d.revoked_at.is_some() => Err(EffectError::Rejected(format!(
+            "device {id} is revoked already"
+        ))),
+        Some(_) => {
+            tx.execute(
+                "UPDATE devices SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                params![id, revoked_at],
+            )?;
+            Ok(())
+        }
+    }
+}
+
 /// Apply one effect. It returns the ID the effect assigned, when it assigns one.
 fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Option<String>, EffectError> {
     match effect {
@@ -312,6 +377,8 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Option<String>, Effect
         Effect::PutClaim(c) => put_claim(tx, c)?,
         Effect::AddProject(n) => return add_project(tx, n).map(Some),
         Effect::RemoveProject { id, removed_at } => remove_project(tx, id, removed_at)?,
+        Effect::AddDevice(n) => return add_device(tx, n).map(Some),
+        Effect::RevokeDevice { id, revoked_at } => revoke_device(tx, id, revoked_at)?,
     }
     Ok(None)
 }
@@ -556,6 +623,53 @@ impl Store for SqliteStore {
                 project_from,
             )
             .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn devices(&self) -> Result<Vec<DeviceRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {DEVICE_COLUMNS} FROM devices \
+                     ORDER BY revoked_at IS NOT NULL, rowid"
+                ),
+                [],
+                device_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn device_by_token(&self, token_sha256: &str) -> Result<Option<DeviceRow>, StoreError> {
+        let token_sha256 = token_sha256.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {DEVICE_COLUMNS} FROM devices \
+                     WHERE token_sha256 = ?1 AND revoked_at IS NULL"
+                ),
+                [&token_sha256],
+                device_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn touch_device(&self, id: &str, at: &str, peer: &str) -> Result<bool, StoreError> {
+        let (id, at, peer) = (id.to_string(), at.to_string(), peer.to_string());
+        self.call(move |conn| {
+            // One statement decides and writes, so the minute holds under any interleaving. A time
+            // that SQLite cannot read makes the comparison NULL, and nothing is written.
+            conn.execute(
+                "UPDATE devices SET last_seen_at = ?2, last_peer = ?3 \
+                 WHERE id = ?1 AND revoked_at IS NULL AND (last_seen_at IS NULL OR \
+                     CAST(strftime('%s', ?2) AS INTEGER) - CAST(strftime('%s', last_seen_at) AS INTEGER) >= 60)",
+                params![id, at, peer],
+            )
+            .map(|changed| changed > 0)
             .map_err(sql_error)
         })?
     }

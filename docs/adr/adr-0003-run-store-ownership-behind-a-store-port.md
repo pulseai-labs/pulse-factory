@@ -6,6 +6,8 @@
   2026-10-31: the spine-plan row and the run queue row.
 - **Amended:** 2026-11-07, at `r1.s2.w1`: projects, the `@controller` admission scope and the
   controller ledger. The revisit trigger changes. Nothing else above changes.
+- **Amended:** 2026-11-07, at `r1.s2.w2`: devices (migration 0004), the device commands under the
+  `@controller` scope, and the one store write outside admission. Nothing else above changes.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
@@ -72,3 +74,27 @@ Known limits:
   rotation yet (feature map: "controller ledger rotation").
 - Migration 0003, like every migration, refuses under an active run. The controller does not start
   until no run is active, so install with no active run.
+
+## Amendment, 2026-11-07 (`r1.s2.w2`)
+
+The store gains devices, and the `@controller` scope holds device commands too (ADR-0012).
+
+- **Devices.** Migration 0004 adds the table `devices`: an ID (`D-<n>`, never reused), a name, the
+  token's SHA-256 (unique), `paired_at`, `last_seen_at`, `last_peer` and `revoked_at`. The store
+  never holds a token, only its hash. A revoked row stays. The store port reads and writes devices
+  (`DeviceRow`, `NewDevice`, `Effect::AddDevice`, `Effect::RevokeDevice`, `Store::devices`,
+  `Store::device_by_token`). `RevokeDevice` must name a live device, and a refusal writes nothing.
+- **Device commands are controller commands.** `device_pair` (the redeem of a pairing code) and
+  `device_revoke` are admissions under `@controller`, with a command ID and one controller-ledger
+  line each, as the project commands are. The same ID with the same content returns the first
+  record, and changed content is a conflict. The command ID of a redeem is the SHA-256 of the code's
+  secret, so the store sees one secret at most once. A line names the device, its name and the peer,
+  and never the code or the token.
+- **`touch_device` is the one store write outside admission.** `Store::touch_device(id, at, peer)`
+  writes `last_seen_at` and `last_peer` with no admission row and no ledger line, at most once a
+  minute for a device, and only for a live device. The reason: the API authenticates every call by a
+  read of the store, and a read must not cost an admission row or a ledger line per request. Last
+  seen is telemetry, not a state transition. Nothing decides on it in this item. The idle expiry of
+  `r1.s2.w5` reads it.
+- **Migration 0004** follows the posture above: forward-only, and it refuses under an active run.
+  Install with no active run.
