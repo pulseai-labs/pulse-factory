@@ -4,6 +4,8 @@
 - **Date:** 2026-10-25
 - **Amended:** 2026-11-07, at `r1.s2.w2`: the network API's crates, and two claims move from
   "Unverified" to "Verified". Nothing above changes except where the amendment says.
+- **Amended:** 2026-11-08, at `r1.s2.w4`: the pinned client's crates and features, and the Mac app's
+  separate cargo workspace. Nothing above changes except where the amendment says.
 
 ## Context
 - The architecture spec chose Rust, Tokio, SQLite through rusqlite, portable-pty as the first PTY
@@ -103,3 +105,42 @@ verified now:
 - yaml-rust2 rejects duplicate keys, and its markers give `pf-workflow` a position for each
   unknown-field and duplicate-key error (`crates/pf-workflow/tests/parse_strict.rs`: "a duplicate
   key is refused at the second key", and the unknown-field tests).
+
+## Amendment, 2026-11-08 (`r1.s2.w4`)
+
+The pinned client (`crates/pf-client`, ADR-0012) is a workspace member. It adds one crate and three
+feature choices to the workspace, and the Mac app brings Tauri in a cargo workspace of its own.
+
+**New crate.** `security-framework` **3.7.0** is pinned with `=` in the workspace `Cargo.toml`.
+`pf-client` takes it under `[target.'cfg(target_os = "macos")'.dependencies]` only, for the Keychain
+(`KeychainStore`). The Linux build and its tests never compile it. `Cargo.lock` gains it and three
+crates under it: `security-framework-sys` 2.17.0, `core-foundation` 0.10.1 and `core-foundation-sys`
+0.8.7. It was created 2026-02-20, is the newest release and is not yanked (crates.io, 2026-11-08).
+
+**New features, on crates already in the workspace.**
+- `hyper`: `client`, in `pf-client` only. It adds `try-lock` 0.2.5 and `want` 0.3.2 to `Cargo.lock`.
+  The client uses `hyper::client::conn::http1` over the pinned TLS stream, so `hyper-util`'s client
+  features stay off.
+- `tokio`: `rt`, `net`, `time`, `sync`, `io-util` and `macros` in `pf-client`. The crate uses no
+  multi-thread runtime: the bridge binary runs on a current-thread runtime.
+- `rustls`: `tls12`, in `pf-client`'s `[dev-dependencies]` only. A test server offers TLS 1.2 so a test
+  can show that the client refuses it. Cargo unifies features in a test build, so `rustls` also has
+  `tls12` there. The client and the listener each name TLS 1.3 only in code, so no production path
+  offers 1.2.
+- `axum` serves the bridge with the features the workspace already has (`http1`, `json`, `tokio`).
+  `http-body-util`, `bytes`, `tokio-rustls` and `rcgen` (dev only) are reused as pinned.
+
+**The Mac app.** `apps/desktop/src-tauri` (`pulse-factory-desktop`) is its own cargo workspace with a
+committed `Cargo.lock`, and the root `Cargo.toml` excludes `apps/desktop`. No build on draco-desk
+compiles it. It pins `tauri` **2.11.5** and `tauri-build` **2.6.3** with `=` (ADR-0013 holds the check),
+and depends on `pf-client` and `pf-api` by path, so it uses the versions that this workspace pins for
+every shared crate. Its lock file was resolved from the local registry cache, which holds some
+dependencies of Tauri at older versions than the newest.
+
+**First-use check.** The workspace builds and its tests pass with these versions on draco-desk
+(`cargo test --workspace --locked`, AC-13 of `r1.s2.w4`). The Keychain code and the Tauri app build only
+on GitHub's `macos-latest` runner, in the `macos-app` job of the item PR. **Unverified until that run is
+green:** `KeychainStore` compiles against `security-framework` 3.7.0 and its tests pass on the runner.
+
+**Reversibility.** `security-framework` sits behind the `DeviceStore` trait; a file store replaces it.
+Tauri sits behind the same six-operation `Transport`, and the UI does not change if it is replaced.

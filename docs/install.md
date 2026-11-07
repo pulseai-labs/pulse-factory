@@ -31,9 +31,14 @@ The script does these steps and no others:
    binary lands in `~/.local/bin`. **This is a cold build.** It writes a lot to disk, so it runs at low
    priority. Run it once, not in a loop, and never at the same time as another build. It uses your
    `~/.cargo/config.toml` as it is, and it never edits that file.
-2. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
-3. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`.
-4. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
+2. `nice -n 10 ionice -c3 cargo install --path crates/pf-client --bin pf-client-bridge --locked --root
+   ~/.local`. This is the test bridge, `pf-client-bridge`, beside the main binary. It is for the UI demo
+   (`scripts/demo/ui-pair.sh`, d12) and for tests. The Mac app does not use it, and the controller does
+   not need it. It uses the workspace's target, so this second install is incremental.
+3. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
+4. Builds the UI bundle (`scripts/install-ui.sh`, Node 22 and `npm`) into `~/.local/share/pulse-factory/ui/`.
+5. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`.
+6. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
    bus. Then it runs `systemctl --user daemon-reload`, `enable --now pulse-factory` and
    `try-restart pulse-factory`.
 
@@ -82,6 +87,67 @@ and no key exists until then.
 To turn the API off, remove the line and restart the unit. The key and the paired devices stay. If
 the key files are deleted, the next start makes a new key: every paired device then fails closed.
 Revoke them all and pair again.
+
+## Install the Mac app
+
+The Mac app is a Tauri 2 shell over the same UI bundle. Its Rust side makes the pinned TLS call and
+keeps the device token in the macOS Keychain (ADR-0012, ADR-0013). GitHub's `macos-latest` runner
+builds it for Apple silicon (`aarch64-apple-darwin`) and signs it ad hoc. The signature has no Apple
+identity, so the app is not notarized (`macos-signing` waits for Release 2). Do these steps on the
+MacBook unless a step says draco-desk.
+
+Before you start, on draco-desk:
+
+- **No active run.** Install the controller binary that serves the API only when no run is active.
+  The controller refuses to migrate while a run is active (see "Build and install"). End or halt every
+  run first.
+- **The API is on, on the tailnet address.** `PF_API_LISTEN` is draco-desk's tailnet address (see "Turn
+  on the network API"), and `pulse-factory api status` prints `listening on <addr>`. The MacBook must be
+  on the same tailnet.
+
+On the MacBook, with `gh` logged in:
+
+1. Find the newest green `macos-app` run on `main`:
+
+   ```bash
+   gh run list -R pulseai-labs/pulse-factory --workflow macos-app --branch main --status success -L 1
+   ```
+
+   The first column of the line is the run's ID.
+2. Download the artifact, unpack it and move the app. Replace `<id>` with the run's ID:
+
+   ```bash
+   gh run download <id> -R pulseai-labs/pulse-factory -n pulse-factory-macos-app
+   ditto -x -k pulse-factory-macos-app.zip .
+   mv "Pulse Factory.app" /Applications/
+   ```
+3. Check the quarantine flag:
+
+   ```bash
+   xattr -p com.apple.quarantine "/Applications/Pulse Factory.app"
+   ```
+
+   A file that `gh` downloads carries no quarantine flag, and `xattr` then prints an error such as
+   `No such xattr: com.apple.quarantine`. That is the good answer. A copy that came through a browser
+   carries the flag. Gatekeeper refuses an ad-hoc-signed app that carries it, so clear it:
+
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Pulse Factory.app"
+   ```
+4. Open `Pulse Factory` from `/Applications`. It shows the pair screen (3a).
+5. On draco-desk, over ssh, make a pairing code: `pulse-factory device pair`. Paste the code into the
+   pair screen and give the device a name. The app checks the key's SPKI hash against the code before
+   it sends the code, then keeps the token in the login Keychain (service `pulse-factory.device-token`).
+6. On draco-desk, check the pairing: `pulse-factory device list` shows exactly one row for the
+   MacBook. Add a project in the app and see it listed.
+
+If the app shows `server key changed: re-pair`, the controller's key is not the one the app pinned.
+Run `pulse-factory device revoke <id>` for the old device on draco-desk and pair again. If it shows
+that this device is no longer paired, the device was revoked or idle for 30 days: pair again.
+
+`scripts/demo/community-edition.sh` (d14) says whether the public repo's CI passed on the checked-out
+commit, with its `Smoke` step green. It asks GitHub once, never waits and needs the network: with no
+run for the commit it says to push, and with a run that has not finished it says so.
 
 ## Try it with no model and no spend
 

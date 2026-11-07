@@ -10,10 +10,12 @@ Two things implement the interface:
 - **The Mac app** (`r1.s2.w4`): the Tauri shell's Rust side holds the token in the Keychain, makes
   the pinned TLS call and exposes the six methods as Tauri commands with the names and shapes
   below.
-- **The test bridge** (`scripts/demo/ui-bridge/`, Node 22, no npm dependency): the `desktop-bridge`
-  fake (`SPINE.md`, Fakes). It stands in for the Tauri shell's Rust side where the Mac app cannot
-  run, such as headless Chromium on draco-desk. It is for `scripts/demo/ui-pair.sh` (d12) and tests
-  only. The Mac app does not use it.
+- **The test bridge**, `pf-client-bridge` (`crates/pf-client`; `scripts/demo/ui-bridge/README.md`): the
+  `desktop-bridge` fake (`SPINE.md`, Fakes), now with the real pinned client behind it. It stands in
+  for the Tauri shell's Rust side where the Mac app cannot run, such as headless Chromium on
+  draco-desk. It is for `scripts/demo/ui-pair.sh` (d12) and tests only. The Mac app does not use it.
+  It was a Node script until `r1.s2.w4`. After that item the fake covers only the Tauri `invoke` glue
+  and the Keychain.
 
 ## The interface
 
@@ -103,8 +105,31 @@ and these routes:
 {"kind": "<TransportErrorKind>", "message": "<text>"}}`. No answer holds the device token or the
 code.
 
-w4's `pf-client` bridge binary speaks the same protocol, and its Tauri commands carry the same names
-and shapes.
+`pf-client-bridge` serves this protocol, and the Mac app's Tauri commands carry the same names and
+shapes (next section).
+
+## The Tauri commands
+
+`apps/desktop/src-tauri` registers six commands. Each is one method of the interface, in snake case,
+and each calls `pf-client`'s `Transport<KeychainStore>`. `apps/ui/src/transport/tauri.ts` calls them
+with `invoke` from `@tauri-apps/api/core`, which turns a JavaScript argument name in camel case into
+the Rust one in snake case.
+
+| Command | `invoke` arguments | Returns |
+|---|---|---|
+| `paired` | none | `PairedServer`, or `null`. No network call. |
+| `pair` | `{code, deviceName}` | `PairedServer`. The token goes to the Keychain. |
+| `status` | none | `ApiStatus`. |
+| `project_list` | none | `ProjectList`. |
+| `project_add` | `{args}`: a `ProjectAddArgs` | `ProjectChanged`. |
+| `forget` | none | nothing. Deletes the Keychain item and the pairing file. |
+
+A command returns the wire type itself, with no `{"ok": …}` envelope. A command that fails rejects
+with `{"kind": "<TransportErrorKind>", "message": "<text>"}`, the shape of the `error` member of a
+bridge answer. The UI turns a rejection into a `TransportError` of that kind. A rejection of any other
+shape, or with a kind that is not one of the nine, becomes a `server` error. No command takes or
+returns the device token. The webview's content security policy allows the bundle's own assets and
+Tauri's IPC only, so the webview opens no network connection.
 
 ### What the bridge does
 
@@ -114,9 +139,10 @@ and shapes.
   SHA-256 with the hash in the code, and only then sends `POST /v1/pair`. A mismatch destroys the
   socket **before any byte is written** and answers `key_changed`. Every later call pins the same
   hash the same way, so a key that changes after pairing fails closed too.
-  - The SPKI comes from the raw certificate (`getPeerCertificate().raw`, read with
-    `crypto.X509Certificate`), not from `getPeerCertificate().pubkey`: for an ECDSA P-256 key
-    `pubkey` is the bare 65-byte point, and the server hashes the 91-byte DER SubjectPublicKeyInfo.
+  - The SPKI comes from the DER of the peer's end-entity certificate. `pf-client` reads it in Rust
+    (`crates/pf-client/src/pin.rs`) and hashes the whole SubjectPublicKeyInfo element: for an ECDSA
+    P-256 key that is 91 bytes, not the bare 65-byte point. The verifier also checks the handshake
+    signature against the certificate's key, so the peer must hold the pinned key.
 - **The token.** The token, the pin and the address are in `<state>/device.json`, mode 0600, and
   nowhere else (it also keeps the device record, which `paired` returns). The bridge never writes the
   token or the code to stdout, stderr or an answer. It prints one line, `listening
@@ -124,13 +150,17 @@ and shapes.
 - **Who may call it.** The bridge refuses (HTTP 403, plain text) a request whose `Host` is not its own
   `127.0.0.1:<port>`, whose `Origin` is not its own origin, or a `POST` that is not
   `application/json`. A page on another origin cannot call it, and a DNS rebinding cannot either.
-- **The files.** `server.mjs --ui <dir> --state <dir>` serves `<dir>` and nothing outside it, with a
-  content security policy that allows the bundle's own origin only.
+- **The files.** `pf-client-bridge --ui <dir> --state <dir>` serves `<dir>` and nothing outside it (a
+  path with `..` is refused, and so is a link that leads outside), with a content security policy that
+  allows the bundle's own origin only.
 
 ## Verified by
 
 - `apps/ui/src/test/*.test.tsx` (Vitest, the fake transport): every screen, every error kind, the
   retry schedule and the no-polling rule.
-- `scripts/demo/ui-bridge/test/bridge.test.mjs` (`node --test`): the pin check against a local TLS
-  server, the mapping of every status, the device file and the output.
+- `crates/pf-client/tests/` (`cargo test -p pf-client`): the pin check against a local TLS server, the
+  mapping of every status, the device file and the verb allowlist. `crates/pulse-factory/tests/
+  client_pinned.rs` and `client_bridge.rs`: the client and the bridge against a real controller.
+- `apps/ui/src/test/tauri-transport.test.ts` (Vitest, `invoke` mocked): each command name and its
+  arguments, every error kind, and the choice of transport in `main.tsx`.
 - `scripts/demo/ui-pair.sh` (d12): the whole journey in headless Chromium against the built binary.

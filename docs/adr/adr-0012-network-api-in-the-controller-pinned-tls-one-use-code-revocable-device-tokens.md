@@ -131,8 +131,9 @@ Rejected alternatives:
 - The bind retry when Tailscale starts after the controller. The test uses a tailnet address
   (`100.100.1.1`) that is never on the host; the walk on draco-desk with a real tailnet address (demo
   line d13) verifies the retry.
-- The Tauri 2 macOS client keeps and uses the pin. `r1.s2.w4` verifies it with the `pf-client`
-  bridge and its Rust tests.
+- The Mac app itself (the Tauri shell and the Keychain store) keeps and uses the pin. `pf-client` is
+  verified on draco-desk (see "The pinned client (r1.s2.w4)"). The shell's glue and the Keychain run on
+  GitHub's macOS runner (the `macos-app` job) and in the d13 walk after the spine merges.
 
 ## Guards (r1.s2.w5)
 
@@ -195,6 +196,52 @@ planning audit items C2, C4, C7, C11 and C13 and the guards rulings of `SPINE.md
 - The server cannot see a client's pin, so this is a client rule (`docs/contracts/api.md`, "The pin
   check"): a client that holds a pin and sees another key closes the connection before it sends
   anything and tells its user `server key changed: re-pair`. The server writes no line for it.
+
+## The pinned client (r1.s2.w4)
+
+*Added 2026-11-08, at `r1.s2.w4`.* This section records the client side of the pin check. It adds no
+verb, no route and no wire type to the API, and it changes no decision above.
+
+- **`crates/pf-client` is the pinned client.** One crate serves the Mac app's Rust side and the test
+  bridge `pf-client-bridge` (`docs/contracts/ui-transport.md`). Both use the same `Transport` and the
+  same verifier, so the app and d12 make the same call.
+- **The verifier.** `PinVerifier` is a rustls `ServerCertVerifier`. It ignores the chain, the host name
+  and the clock. It reads the end-entity certificate's DER SubjectPublicKeyInfo, hashes it with SHA-256
+  and fails the handshake unless the hash is the pin. It still checks the TLS 1.3 handshake signature
+  against the certificate's key, so the peer must hold the pinned key. The client config offers TLS 1.3
+  only. The handshake fails on the client before the client writes any HTTP byte, and the error is
+  `key_changed` with the message `server key changed: re-pair`. A failure before the pin check (a
+  refused connection, a timeout, a server that offers TLS 1.2 only) is `unreachable`.
+- **The admission rule on the client.** The one function that builds a `/v1/verbs/<verb>` request
+  refuses a verb that is not in `pf_api::ALLOWLIST` as `bad_request`, before it connects.
+- **`pf-client` reuses `pf-api`** for the wire types and the code decoder (`PairingCode::decode`, the
+  allowlist). This pulls the server's crates (`pf-api` and, through it, `pf-engine`) into the Mac app's
+  build. The code the client trusts is the code the server uses, so the two cannot drift. Limit: the app
+  carries server code it never runs. A later spine may split a wire-only crate out of `pf-api`.
+- **Tokens.** `pair` stores the token from `POST /v1/pair` in the device store and does not return it.
+  No error message holds the token or the code: a server text is cut to 300 characters and replaced by
+  `the server answered <status>` when it holds a secret or any run of 64 hex digits. On the Mac the token
+  is a generic password in the login Keychain (ADR-0013); for the bridge and the tests it is one file of
+  mode 0600, written by a rename.
+- **Limits.** One request per connection, with a 10-second connect timeout and a 30-second request
+  timeout. A pin is trust on first use: the code carries the hash, so a code that reaches the app through
+  a hostile channel pins that channel's key. The operator carries the code over ssh.
+
+### Verified claims (r1.s2.w4)
+- The verifier accepts a self-signed certificate whose SPKI hash is the pin, with any server name and any
+  time, and refuses one whose hash is not. A TLS 1.2 server is refused. A wrong pin fails the handshake
+  with zero HTTP bytes read by the server (`crates/pf-client/tests/pinned_tls.rs`, 2026-11-08).
+- Each API status maps to its kind, a message is cut to 300 characters and never holds a 64-hex token,
+  `FileStore` writes mode 0600 by a rename and `forget` removes the file, and `halt`, `ack` and an
+  unknown verb are `bad_request` with no connection (`crates/pf-client/tests/`, 2026-11-08).
+- Against a real controller: `pair` returns `D-1` and keeps the token in the store, `status`,
+  `project_add` and `project_list` work, a used code is `code_refused`, a code for another key is
+  `key_changed`, `device revoke D-1` makes the next call `unauthorized`, a controller restarted on a new
+  key makes the next call `key_changed` and `api.ledger` gains no line for it, a blocked peer gets
+  `rate_limited`, a closed port is `unreachable`, `pair`'s return holds no token, and the token is in no
+  error, stderr line or ledger line (`crates/pulse-factory/tests/client_pinned.rs`, 2026-11-08).
+- `pf-client-bridge` serves the bridge protocol with the same checks, and d12 passes with it
+  (`crates/pulse-factory/tests/client_bridge.rs`, `scripts/demo/ui-pair.sh`, 2026-11-08).
 
 Revisit this ADR when a second operator, a device outside the operator's tailnet, or a browser
 client served by the server is planned.

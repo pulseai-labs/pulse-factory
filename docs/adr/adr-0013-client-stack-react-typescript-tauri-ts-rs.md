@@ -25,10 +25,42 @@ app (a Tauri 2 shell, `r1.s2.w4`) and, later, Android load the same bundle.
 interface (`docs/contracts/ui-transport.md`): `paired`, `pair`, `status`, `projectList`,
 `projectAdd` and `forget`.
 - No method takes or returns the device token. It lives on the native side.
-- The implementations are the test bridge now (`scripts/demo/ui-bridge`, the `desktop-bridge` fake,
-  Node 22 with no npm dependency) and the Tauri shell's Rust side in `r1.s2.w4`. Both speak the same
-  protocol and make the pinned TLS call (ADR-0012, A8).
+- The implementations are the test bridge, `pf-client-bridge` (`crates/pf-client`, the `desktop-bridge`
+  fake; a Node script until `r1.s2.w4`), and the Tauri shell's Rust side. Both are `pf-client`'s
+  `Transport`, and both make the pinned TLS call with the same verifier (ADR-0012, A8). The bridge
+  speaks the bridge protocol over HTTP on `127.0.0.1`. The shell exposes the same six operations as
+  Tauri commands.
 - The bridge is for d12 and tests. The Mac app never uses it.
+
+**The Tauri shell (`r1.s2.w4`).** `apps/desktop/src-tauri` is a Tauri 2 shell over the same bundle. It
+is its own cargo package and workspace (`pulse-factory-desktop`, with a committed `Cargo.lock`), and
+the root `Cargo.toml` excludes `apps/desktop`, so no build on draco-desk compiles Tauri.
+- **Versions.** `tauri` **2.11.5** and `tauri-build` **2.6.3** (exact `=` pins in its `Cargo.toml`),
+  `@tauri-apps/api` **2.11.1** and `@tauri-apps/cli` **2.11.4** (exact pins in `apps/ui/package.json`).
+  Tauri's CLI refuses an `@tauri-apps/api` and a `tauri` crate with different minor versions, so the
+  four stay on the 2.11 line together. Each is not yanked or deprecated and is more than four months
+  old (checked 2026-11-08 against crates.io and the npm registry). Newer releases exist (2.12.x); move
+  all four together when the line moves.
+- **The app.** Product name `Pulse Factory`, identifier `dev.pulse-factory.desktop`, `bundle.targets`
+  `["app"]`, one window of 1440 × 900 with `titleBarStyle` `Transparent` and a hidden title, so the
+  shell's own title bar (2a) is the one the operator sees. `build.frontendDist` is `../../ui/dist`.
+- **The CSP (A8).** `default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';
+  connect-src ipc: http://ipc.localhost`. The bundle's own assets and Tauri's IPC only: the webview
+  opens no network connection. No remote domain has IPC access, and the app declares no capability
+  file that grants a plugin.
+- **Six commands.** `paired`, `pair`, `status`, `project_list`, `project_add` and `forget`, each over
+  `Transport<KeychainStore>`. A command returns the wire type or rejects with `{kind, message}`
+  (`docs/contracts/ui-transport.md`, "The Tauri commands").
+- **The Keychain.** The device token is a generic password in the login Keychain: service
+  `pulse-factory.device-token`, account = the server address. The address, the pin and the device record
+  are in `pairing.json` in the app's data directory, which holds no secret. `forget()` deletes both.
+- **The build.** GitHub's `macos-latest` runner builds `aarch64-apple-darwin` only (the Mac is Apple
+  silicon; `universal-apple-darwin` is a one-line change when someone needs it). The workflow signs ad
+  hoc (`codesign --force --deep -s -`), verifies (`codesign --verify --deep --strict`), zips with `ditto`
+  and uploads the artifact `pulse-factory-macos-app` for 30 days. The signature has no identity, so the
+  app is not notarized, and a copy that carries the quarantine flag needs `xattr -dr` (`docs/install.md`).
+  Developer ID signing and notarization are the `macos-signing` deferral (expiry `r2`).
+- **Licence and openness (ADR-0010).** The app ships from the public repo's CI, with no private input.
 
 **API types are generated (Q6).** `ts-rs` renders them from the Rust types into
 `apps/api-client/src/gen/`. A cargo test fails when the committed files drift
@@ -72,6 +104,8 @@ below; the engines accept Node 22.23.4):
 | `@playwright/test` | **1.64.1** | the UI line; the release that drives Chromium 1248 |
 | `@types/react`, `@types/react-dom`, `@types/node` | 19.3.0, 19.3.0, 22.20.5 | types (`@types/node` follows the Node 22 floor) |
 | `@fontsource-variable/geist`, `@fontsource-variable/geist-mono` | 5.3.0 | the faces, bundled |
+| `@tauri-apps/api` | 2.11.1 | `invoke` and `isTauri` for the Mac app's transport (`r1.s2.w4`) |
+| `@tauri-apps/cli` | 2.11.4 | `tauri build` on the macOS runner (a dev dependency; the install here fetches only the Linux binary) |
 
 `vitest` is 5.1.0 although it is only five days old: with npm 10.9.9 the resolver crashes
 (`Cannot read properties of null (reading 'edgesOut')`) on every vitest 4.1.x and 5.0.x release that
@@ -98,7 +132,12 @@ older Node 22.
 - Every wire change reaches the UI as a TypeScript error: change a Rust type, write the generated
   files, and `npm --prefix apps run typecheck --workspace ui` shows what to fix.
 - The install now needs Node 22 and `npm` beside the Rust toolchain (`docs/install.md`).
-- The bridge protocol is a contract that w4's `pf-client` bridge must keep.
+- The bridge protocol is a contract that `pf-client-bridge` keeps
+  (`crates/pulse-factory/tests/client_bridge.rs`).
+- The Mac app builds only on GitHub's macOS runner. A change to `apps/desktop` or to `pf-client`'s
+  macOS code is seen first on a PR's `macos-app` job, not on draco-desk.
+- The Mac app's Rust side pulls `pf-api` (the wire types and the code decoder) into its build, and so
+  the server's crates. A later spine may split a wire-only crate out (ADR-0012).
 - Each later spine that adds a verb to the allowlist (ADR-0012) adds the matching `Transport` method
   and its screen here.
 
@@ -120,18 +159,39 @@ older Node 22.
   the sidebar state (`apps/ui/src/test/shell.test.tsx`, 2026-11-07).
 - The bridge pins the key before any byte is sent, answers `key_changed` for a wrong or a changed key
   with zero bytes written, maps every API status to its kind, keeps the token in a mode-0600 file only,
-  and prints no token or code (`scripts/demo/ui-bridge/test/bridge.test.mjs`, 2026-11-07).
-- `getPeerCertificate().pubkey` is not the SPKI for an ECDSA P-256 key (65-byte point against the
-  91-byte DER). The bridge reads the SPKI from the raw certificate instead (`pinned-https.mjs`, and
-  the pairing tests above, which would fail on a wrong hash, 2026-11-07).
+  and prints no token or code. This was checked on the Node bridge (2026-11-07). `pf-client-bridge`
+  keeps it: `crates/pf-client/tests/pinned_tls.rs`, `crates/pulse-factory/tests/client_pinned.rs` and
+  `client_bridge.rs` (2026-11-08).
+- The SPKI of an ECDSA P-256 key is the 91-byte DER SubjectPublicKeyInfo, not the 65-byte point that
+  Node's `getPeerCertificate().pubkey` returns. `pf-client` reads the SPKI from the DER certificate
+  (`crates/pf-client/src/pin.rs`, tested against `rcgen`'s own SPKI, and by the pairing tests, which
+  fail on a wrong hash, 2026-11-08).
+- The Tauri config names the identifier `dev.pulse-factory.desktop` and the frontend `../../ui/dist`,
+  builds `app` only, and has a CSP with `default-src 'self'` and no network origin but Tauri's
+  `http://ipc.localhost`. `tauri` is pinned with `=`, and the cargo workspace does not hold the
+  desktop package (the AC-7 command of `r1.s2.w4`, 2026-11-08).
+- The Mac app's transport invokes the command of each method's name with the arguments of
+  `docs/contracts/ui-transport.md`, turns a rejection of each of the nine kinds into a `TransportError`
+  of that kind, and `main.tsx` picks it inside Tauri and the bridge elsewhere
+  (`apps/ui/src/test/tauri-transport.test.ts`, 2026-11-08).
+- `@tauri-apps/api` is pinned exactly with the other npm dependencies
+  (`apps/ui/package.json`, AC-11 of `r1.s2.w4`, 2026-11-08).
 - The built bundle names no network URL in its HTML or CSS (`scripts/install-ui.sh` with AC-5).
 - The whole journey runs in headless Chromium 1248 against the built binary and bundle: pair, add a
   project, revoke the device and see 3c; every request goes to the bridge's origin; no token or code
   is in browser storage, the console or a bridge answer (`scripts/demo/ui-pair.sh`, d12, 2026-11-07).
 
 ### Unverified claims
-- The Tauri 2 macOS webview runs the same bundle, keeps the token in the Keychain and makes the pinned
-  call. `r1.s2.w4` verifies it and adds its lines here.
+- The Tauri app builds on `macos-latest`, its ad-hoc signature verifies, and `pf-client`'s Keychain
+  tests pass there. Draco-desk cannot run any of it. This moves to Verified when the `macos-app` run on
+  the item PR is green (the report links the run).
+- The Tauri 2 macOS webview runs the same bundle, shows the transparent title bar as the shell's 2a, keeps
+  the token in the login Keychain under service `pulse-factory.device-token`, makes the pinned call, and
+  opens no connection. Gatekeeper opens the ad-hoc-signed app when it carries no quarantine flag. This
+  waits for the d13 walk after the spine merges.
+- The six Tauri commands' Rust glue (`apps/desktop/src-tauri/src/main.rs`) matches the argument names
+  that the UI sends (`deviceName` becomes `device_name`). No test on draco-desk compiles it. The
+  `macos-app` build compiles it, and the d13 walk runs it.
 - The screens match the canvas pixel for pixel. This item follows the layout, the type, the colours
   and the copy of the approved screens and departs where `SPINE.md` rules it (3a's one code field,
   3b's server row, 3c's retry rule, Q5's rail). The operator compares the screenshots with the canvas.
