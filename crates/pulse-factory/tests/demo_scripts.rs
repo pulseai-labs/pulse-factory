@@ -1,6 +1,6 @@
-//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`) and AC-3 to AC-7 (`r1.s1.w5`): the five demo
-//! scripts run against the built binary, and each fails when its journey is broken. The scripts run
-//! the paper env: no model, no spend, no network, no `gh`, and no build.
+//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`) and AC-6 (`r1.s2.w5`): the
+//! demo scripts run against the built binary, and each fails when its journey is broken. The scripts
+//! run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`, and no build.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -332,6 +332,36 @@ fn golden_journey_b_reports_what_it_checked() {
     }
 }
 
+/// The limit of `pair-api.sh`: two controller starts and about thirty `curl` calls.
+const PAIR_API_LIMIT: Duration = Duration::from_secs(60);
+
+#[test]
+fn pair_api_passes() {
+    // d11: pairing, the verbs, the 401 answers, the revoke, one peer blocked while another pairs,
+    // the request ledger, and a restart on a new key. `127.0.0.2` and `127.0.0.3` are on the
+    // loopback interface on Linux.
+    let (out, took) = run("pair-api.sh", &[]);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < PAIR_API_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1: paired D-1",
+        "step 5: 127.0.0.3 blocked after 5 bad codes",
+        "step 6: 127.0.0.2 paired D-2 while 127.0.0.3 was blocked",
+        "step 7: api.ledger has 13 lines and no secret is in any log",
+        "server key changed: re-pair",
+        "pair-api: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
 #[test]
 fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
     for name in [
@@ -340,6 +370,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "arm-dry-run.sh",
         "spine-base.sh",
         "seat-tamper.sh",
+        "pair-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [

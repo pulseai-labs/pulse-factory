@@ -25,7 +25,7 @@
   a device token: 32 random bytes, shown as 64 hex digits. The server keeps only the SHA-256, as for
   the claim token (A5).
 - There is no passphrase. The operator's access to the host (ssh) is what proves the operator.
-- The rate limit on failed codes and failed token calls belongs to `r1.s2.w5`, not to this item.
+- The rate limit on failed codes and failed token calls is `r1.s2.w5`'s (see "Guards (r1.s2.w5)").
 
 **Q2, TLS is in-process rustls in the controller.**
 - On the first start with the API on, the controller makes an ECDSA P-256 key and a self-signed
@@ -96,9 +96,9 @@ Rejected alternatives:
 - The server key is a single point of identity. Losing it costs a re-pair of every device.
 - The API's types are the clients' types: `ts-rs` renders them, and a test fails when the committed
   files drift (`apps/api-client/src/gen/`).
-- Out of this item, and done in `r1.s2.w5`: the rate limit, one ledger line per API request, a bind
-  guard for addresses outside loopback and the tailnet, idle expiry (30 days) and the "server key
-  changed" message.
+- Out of this item, and done in `r1.s2.w5`: the rate limit, one request-ledger line per API request, a
+  bind guard for addresses outside loopback and the tailnet, idle expiry (30 days) and the "server key
+  changed" message. The decisions and their limits are in "Guards (r1.s2.w5)" below.
 
 ### Verified claims
 - A pinned `curl` completes `POST /v1/pair` and the verb calls on `127.0.0.1`, refuses a changed key
@@ -114,12 +114,87 @@ Rejected alternatives:
   (`crates/pf-api/tests/ts_types.rs`, 2026-11-07).
 - The dependency set has no `aws-lc-rs` (`cargo tree`, 2026-11-07). Versions are in ADR-0008.
 
+- A peer with 5 bad codes, or 5 bad tokens, is blocked on every route for 10 minutes while a second
+  address still pairs, the window slides, the map holds at most 4096 peers, and a blocked peer's
+  429s are counted in one record a minute (`crates/pf-api/tests/guard.rs`,
+  `crates/pf-api/tests/audit.rs`, 2026-11-07).
+- `listen_allowed` accepts the first and last address of each range and refuses the addresses next to
+  them (`crates/pf-api/tests/listen_range.rs`, 2026-11-07).
+- On a real controller, an address outside loopback and the tailnet leaves the API `failed` with no key
+  and the socket still served, `api.ledger` has one line for each request with no secret in it, and a
+  device that is idle for the configured time is refused and still listed
+  (`crates/pulse-factory/tests/api_guards.rs`, 2026-11-07).
+- `scripts/demo/pair-api.sh` (d11) passes against the built binary on `127.0.0.1`, including the
+  restart on a new key (`crates/pulse-factory/tests/demo_scripts.rs`, 2026-11-07).
+
 ### Unverified claims
-- The bind retry when Tailscale starts after the controller. The test uses a TEST-NET address that
-  is never on the host; the walk on draco-desk with a real tailnet address (demo line d13) verifies
-  the retry.
+- The bind retry when Tailscale starts after the controller. The test uses a tailnet address
+  (`100.100.1.1`) that is never on the host; the walk on draco-desk with a real tailnet address (demo
+  line d13) verifies the retry.
 - The Tauri 2 macOS client keeps and uses the pin. `r1.s2.w4` verifies it with the `pf-client`
   bridge and its Rust tests.
+
+## Guards (r1.s2.w5)
+
+*Added 2026-11-07, at `r1.s2.w5`.* This section adds the five guards that "Out of this item" left to
+this item. It adds no verb, no route and no wire type, and it changes no decision above. The
+planning audit items C2, C4, C7, C11 and C13 and the guards rulings of `SPINE.md` are its source.
+
+**The rate limit (audit C4).**
+- Two counters per peer address, each over a sliding 10 minutes: failed codes (a `/v1/pair` answer of
+  400 or 401) and failed token calls (a 401 on `/v1/status` or `/v1/verbs/<verb>`).
+- The 5th failure of either kind inside the window blocks that peer for 10 minutes on every route. A
+  success does not clear a count. The block answers 429 with `Retry-After` before the token, the body
+  or the path is read, and it reaches no host method but `audit`.
+- Each peer is counted alone, so a second address with a valid code still pairs while the first is
+  blocked. The state is in memory: a restart clears every count and block (and voids the live code).
+  The map holds at most 4096 peers and drops the oldest entry when full.
+- Limit: an address behind which several clients sit shares one count. A per-device limit, a ban list
+  that survives a restart and a limit on successful calls are out of scope.
+
+**One request-ledger line per API request (audit C7).**
+- Ruling at the `r1.s2.w5` barrier: the request ledger is its own file, `<state dir>/api.ledger`.
+  `controller.ledger` holds one line per store admission, keyed by its sequence number, and recovery
+  rewrites missing outbox lines. A per-request line there would need a store row per request, and
+  the amendment of ADR-0003 rules that a read must not cost one (`touch_device`). The admission lines
+  of w1 and w2 stay in `controller.ledger`, so a state-changing call has both lines.
+- The router calls `ApiHost::audit` once for every request it answers. The controller appends one line
+  under one writer: `<UTC time> api route=<route> verb=<verb|-> device=<D-n|-> peer=<ip>
+  status=<code> outcome=<outcome>`. Replays and auth refusals are included. A verb name is written
+  only when it is a verb of the controller's dispatch table, else as `verb=? verb_len=<n>`, so a token
+  or a code sent as a verb name never reaches the file. No line holds a token, a code, its secret or a
+  key. Only the device ID names the caller.
+- A blocked peer's 429s are counted in one line a minute: the first writes `count=1`, and a later one
+  writes a line only 60 seconds after that peer's last `blocked` line, with `count=<n>` for every 429
+  since it, itself included. A peer that floods while blocked cannot fill the disk (the host's write
+  budget; audit C15's unbounded-ledger limit). The 429s of the last minute of a flood that then stops
+  stay uncounted.
+- The file is append-only, with no `fsync` per line, and it is not in the store. A crash can lose the
+  last lines. A failed append prints one stderr line, and the request still gets its answer. A TLS
+  failure before HTTP is no request and writes no line. Rotation and a size cap of both ledgers are
+  the feature map's "controller ledger rotation" (audit C15).
+
+**The bind guard (audit C11).**
+- Before it makes or loads a key, the controller checks the API address. Allowed: `127.0.0.0/8`,
+  `::1`, `100.64.0.0/10` and `fd7a:115c:a1e0::/48`, on any port. Any other address leaves the API
+  `failed` with `the API address <ip> is outside loopback and the tailnet (127.0.0.0/8, ::1,
+  100.64.0.0/10, fd7a:115c:a1e0::/48)`. No key is made and nothing listens. The tailnet is the fence
+  (Q3), and this makes the fence a check, not a habit.
+
+**Idle device expiry (audit C2).**
+- A device with no call for 30 days (its `last_seen_at`, or its `paired_at` when it never called) is
+  refused with the one 401 text, and the refusal does not touch the device. It stays in `device list`,
+  unrevoked. The operator pairs it again with a new code, and may revoke the old row.
+- The refusal counts as a failed token call. The router cannot tell an idle token from a guessed one,
+  so a client that keeps calling with an idle token blocks its own address, `/v1/pair` included, for
+  10 minutes. The UI of `r1.s2.w3` stops at the first 401. A blocked operator waits 10 minutes or
+  restarts the controller.
+- `last_seen_at` lags by up to a minute (the touch throttle), which does not matter at 30 days.
+
+**A changed server key (audit C11).**
+- The server cannot see a client's pin, so this is a client rule (`docs/contracts/api.md`, "The pin
+  check"): a client that holds a pin and sees another key closes the connection before it sends
+  anything and tells its user `server key changed: re-pair`. The server writes no line for it.
 
 Revisit this ADR when a second operator, a device outside the operator's tailnet, or a browser
 client served by the server is planned.

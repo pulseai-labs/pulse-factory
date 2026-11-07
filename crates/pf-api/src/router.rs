@@ -12,6 +12,10 @@
 //! The router checks the token before it reads a body or looks at the verb, so a caller with no
 //! token learns nothing else. It runs each host call on a blocking thread: a verb may wait on the
 //! store.
+//!
+//! Before any of that, the peer guard (`guard.rs`) checks the peer address. A peer that has sent 5
+//! bad codes, or 5 bad tokens, inside 10 minutes answers 429 on every route for 10 minutes, and its
+//! request reaches no host method.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -25,7 +29,8 @@ use http_body_util::{BodyExt, LengthLimitError, Limited};
 use serde::Serialize;
 
 use crate::code::{PairingCode, hex, token_sha256};
-use crate::host::{ApiHost, Refusal, is_allowed};
+use crate::guard::{Blocked, Clock, Failure, Guard, GuardConfig, system_clock};
+use crate::host::{ApiHost, Outcome, Refusal, RequestRecord, Route, is_allowed};
 use crate::types::{ApiError, DeviceRecord, PairRequest, check_device_name};
 
 /// The longest request body, in bytes.
@@ -39,9 +44,69 @@ const NOT_AUTHORIZED: &str = "not authorized";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerAddr(pub IpAddr);
 
-/// The router of the API over a host.
+/// What every request needs: the host and the peer guard. Clones share the one guard.
+#[derive(Clone)]
+struct App {
+    host: Arc<dyn ApiHost>,
+    guard: Arc<Guard>,
+}
+
+/// The router of the API over a host, with the default numbers of the peer guard and the system
+/// clock.
 pub fn router(host: Arc<dyn ApiHost>) -> Router {
-    Router::new().fallback(handle).with_state(host)
+    router_with(host, GuardConfig::default(), system_clock())
+}
+
+/// The router of the API with its own guard numbers and clock. A test moves time with the clock.
+pub fn router_with(host: Arc<dyn ApiHost>, config: GuardConfig, clock: Clock) -> Router {
+    let app = App {
+        host,
+        guard: Arc::new(Guard::new(config, clock)),
+    };
+    Router::new().fallback(handle).with_state(app)
+}
+
+/// An answer, and what the router learned while it made it.
+struct Answer {
+    response: Response,
+    /// The device whose token matched.
+    device: Option<String>,
+    /// A 200 whose verb answer says `"replayed": true`.
+    replayed: bool,
+}
+
+impl From<Response> for Answer {
+    fn from(response: Response) -> Answer {
+        Answer {
+            response,
+            device: None,
+            replayed: false,
+        }
+    }
+}
+
+/// The outcome the audit record names for a status.
+fn outcome_of(status: StatusCode, replayed: bool) -> Outcome {
+    match status {
+        StatusCode::OK if replayed => Outcome::Replayed,
+        StatusCode::OK => Outcome::Ok,
+        StatusCode::UNAUTHORIZED => Outcome::Unauthorized,
+        StatusCode::FORBIDDEN => Outcome::Forbidden,
+        StatusCode::UNPROCESSABLE_ENTITY => Outcome::Refused,
+        StatusCode::BAD_REQUEST => Outcome::BadRequest,
+        StatusCode::PAYLOAD_TOO_LARGE => Outcome::TooLarge,
+        StatusCode::NOT_FOUND => Outcome::NotFound,
+        StatusCode::METHOD_NOT_ALLOWED => Outcome::MethodNotAllowed,
+        StatusCode::TOO_MANY_REQUESTS => Outcome::Blocked,
+        _ => Outcome::Failed,
+    }
+}
+
+/// Hand one record to the host on a blocking thread: a host may write a file. A host that panics
+/// costs the request nothing.
+async fn audit(host: &Arc<dyn ApiHost>, record: RequestRecord) {
+    let host = host.clone();
+    let _ = tokio::task::spawn_blocking(move || host.audit(&record)).await;
 }
 
 fn json(status: StatusCode, body: &impl Serialize) -> Response {
@@ -77,7 +142,34 @@ fn failed_inside() -> Response {
     )
 }
 
-async fn handle(State(host): State<Arc<dyn ApiHost>>, request: Request) -> Response {
+/// The route a path names, and the verb text when it names one. The method is not looked at.
+fn classify(path: &str) -> (Route, Option<&str>) {
+    match path {
+        "/v1/pair" => (Route::Pair, None),
+        "/v1/status" => (Route::Status, None),
+        other => match other.strip_prefix("/v1/verbs/") {
+            Some(verb) if !verb.is_empty() && !verb.contains('/') => (Route::Verb, Some(verb)),
+            _ => (Route::Other, None),
+        },
+    }
+}
+
+/// The 429 of a blocked peer.
+fn blocked_answer(block: &Blocked) -> Response {
+    let mut response = error(
+        StatusCode::TOO_MANY_REQUESTS,
+        format!(
+            "too many failed attempts from this address: try again after {}",
+            block.until
+        ),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from(block.retry_after));
+    response
+}
+
+async fn handle(State(app): State<App>, request: Request) -> Response {
     let peer = request
         .extensions()
         .get::<PeerAddr>()
@@ -85,20 +177,60 @@ async fn handle(State(host): State<Arc<dyn ApiHost>>, request: Request) -> Respo
     let post = request.method() == axum::http::Method::POST;
     let get = request.method() == axum::http::Method::GET;
     let path = request.uri().path().to_string();
-    match path.as_str() {
-        "/v1/pair" if post => pair(host, peer, request).await,
-        "/v1/status" if get => status(host, peer, request).await,
-        "/v1/pair" | "/v1/status" => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
-        other => match other.strip_prefix("/v1/verbs/") {
-            Some(verb) if !verb.is_empty() && !verb.contains('/') && post => {
-                verb_call(host, peer, verb.to_string(), request).await
-            }
-            Some(verb) if !verb.is_empty() && !verb.contains('/') => {
-                error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
-            }
-            _ => error(StatusCode::NOT_FOUND, "not found"),
-        },
+    let (route, verb) = classify(&path);
+    let verb_text = verb.map(str::to_string);
+    // The block check comes first: before the token, the body and the verb. The path is read only
+    // to name the route in the record.
+    if let Some(block) = app.guard.blocked(peer) {
+        // A blocked peer's 429s are counted: one record for the first, then one a minute.
+        if let Some(count) = app.guard.count_blocked(peer) {
+            let record = RequestRecord {
+                peer,
+                route,
+                verb: verb_text,
+                device: None,
+                status: StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                outcome: Outcome::Blocked,
+                count,
+                blocked_until: None,
+            };
+            audit(&app.host, record).await;
+        }
+        return blocked_answer(&block);
     }
+    let host = app.host.clone();
+    let answer: Answer = match route {
+        Route::Pair if post => pair(host, peer, request).await,
+        Route::Status if get => status(host, peer, request).await,
+        Route::Verb if post => {
+            verb_call(host, peer, verb.unwrap_or_default().to_string(), request).await
+        }
+        Route::Pair | Route::Status | Route::Verb => {
+            error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into()
+        }
+        Route::Other => error(StatusCode::NOT_FOUND, "not found").into(),
+    };
+    let code = answer.response.status();
+    let failure = match route {
+        Route::Pair if code == StatusCode::BAD_REQUEST || code == StatusCode::UNAUTHORIZED => {
+            Some(Failure::Code)
+        }
+        Route::Status | Route::Verb if code == StatusCode::UNAUTHORIZED => Some(Failure::Token),
+        _ => None,
+    };
+    let blocked_until = failure.and_then(|kind| app.guard.fail(peer, kind));
+    let record = RequestRecord {
+        peer,
+        route,
+        verb: verb_text,
+        device: answer.device,
+        status: code.as_u16(),
+        outcome: outcome_of(code, answer.replayed),
+        count: 1,
+        blocked_until,
+    };
+    audit(&app.host, record).await;
+    answer.response
 }
 
 /// The token of a request, as the SHA-256 the store keeps. `None` for a missing header, another
@@ -149,62 +281,80 @@ async fn read_body(request: Request) -> Result<Bytes, Box<Response>> {
     }
 }
 
-async fn status(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Response {
+async fn status(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Answer {
     let device = match authenticate(&host, bearer_sha256(&request), peer).await {
         Ok(d) => d,
-        Err(refusal) => return *refusal,
+        Err(refusal) => return (*refusal).into(),
     };
-    match tokio::task::spawn_blocking(move || host.status()).await {
+    let id = device.id.clone();
+    let response = match tokio::task::spawn_blocking(move || host.status()).await {
         Ok(mut status) => {
             status.device = Some(device);
             json(StatusCode::OK, &status)
         }
         Err(_) => failed_inside(),
+    };
+    Answer {
+        response,
+        device: Some(id),
+        replayed: false,
     }
 }
 
-async fn verb_call(
-    host: Arc<dyn ApiHost>,
-    peer: IpAddr,
-    verb: String,
-    request: Request,
-) -> Response {
+async fn verb_call(host: Arc<dyn ApiHost>, peer: IpAddr, verb: String, request: Request) -> Answer {
     let device = match authenticate(&host, bearer_sha256(&request), peer).await {
         Ok(d) => d,
-        Err(refusal) => return *refusal,
+        Err(refusal) => return (*refusal).into(),
+    };
+    let id = device.id.clone();
+    let named = |response: Response| Answer {
+        response,
+        device: Some(id.clone()),
+        replayed: false,
     };
     if !is_allowed(&verb) {
         let shown: String = verb.chars().take(64).collect();
-        return error(
+        return named(error(
             StatusCode::FORBIDDEN,
             format!("the verb {shown:?} is not open to devices"),
-        );
+        ));
     }
     let body = match read_body(request).await {
         Ok(b) => b,
-        Err(refusal) => return *refusal,
+        Err(refusal) => return named(*refusal),
     };
     let args = if body.iter().all(u8::is_ascii_whitespace) {
         serde_json::json!({})
     } else {
         match serde_json::from_slice(&body) {
             Ok(v) => v,
-            Err(_) => return error(StatusCode::BAD_REQUEST, "the body is not JSON"),
+            Err(_) => return named(error(StatusCode::BAD_REQUEST, "the body is not JSON")),
         }
     };
     match tokio::task::spawn_blocking(move || host.call(&device, &verb, args)).await {
-        Ok(answer) if answer.ok => json(StatusCode::OK, &answer.result),
-        Ok(answer) => error(
+        Ok(answer) if answer.ok => {
+            let replayed = answer.result.get("replayed") == Some(&serde_json::Value::Bool(true));
+            Answer {
+                response: json(StatusCode::OK, &answer.result),
+                device: Some(id.clone()),
+                replayed,
+            }
+        }
+        Ok(answer) => named(error(
             StatusCode::UNPROCESSABLE_ENTITY,
             answer
                 .error
                 .unwrap_or_else(|| "the controller refused".to_string()),
-        ),
-        Err(_) => failed_inside(),
+        )),
+        Err(_) => named(failed_inside()),
     }
 }
 
-async fn pair(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Response {
+async fn pair(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Answer {
+    pair_response(host, peer, request).await.into()
+}
+
+async fn pair_response(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Response {
     let body = match read_body(request).await {
         Ok(b) => b,
         Err(refusal) => return *refusal,
