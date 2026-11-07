@@ -4,9 +4,9 @@
 //! writes and the outbox line, together or not at all.
 
 use pf_engine::port::store::{
-    AdmissionOutcome, AdmissionRow, ClaimRow, Commit, Committed, Effect, LedgerLine, NewRequest,
-    NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow, Store,
-    StoreError,
+    AdmissionOutcome, AdmissionRow, ClaimRow, Commit, Committed, Effect, LedgerLine, NEW_ID,
+    NewProject, NewRequest, NodeKind, NodeRow, ProjectRow, RequestKind, RequestRow, RequestStatus,
+    RunRow, RunState, SessionRow, Store, StoreError,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -203,6 +203,119 @@ fn put_claim(tx: &Transaction<'_>, c: &ClaimRow) -> rusqlite::Result<()> {
     Ok(())
 }
 
+const PROJECT_COLUMNS: &str = "id, name, root, created_at, removed_at";
+
+fn project_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    Ok(ProjectRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        root: r.get(2)?,
+        created_at: r.get(3)?,
+        removed_at: r.get(4)?,
+    })
+}
+
+/// Why one effect did not apply.
+enum EffectError {
+    /// The effect cannot apply to this state. The commit is refused and rolls back.
+    Rejected(String),
+    /// SQLite failed. The commit rolls back and the call fails.
+    Sql(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for EffectError {
+    fn from(e: rusqlite::Error) -> EffectError {
+        EffectError::Sql(e)
+    }
+}
+
+/// Add a project and return its new ID, `P-<n>`. The number is the highest of the table plus one.
+/// A removed row stays in the table, so no ID is used twice.
+fn add_project(tx: &Transaction<'_>, n: &NewProject) -> Result<String, EffectError> {
+    let taken = |column: &str, value: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM projects WHERE {column} = ?1 AND removed_at IS NULL)"
+            ),
+            [value],
+            |r| r.get(0),
+        )
+    };
+    if taken("root", &n.root)? {
+        return Err(EffectError::Rejected(format!(
+            "a live project already has the root {}",
+            n.root
+        )));
+    }
+    if taken("name", &n.name)? {
+        return Err(EffectError::Rejected(format!(
+            "a live project already has the name {}",
+            n.name
+        )));
+    }
+    let next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(CAST(substr(id, 3) AS INTEGER)), 0) + 1 FROM projects",
+        [],
+        |r| r.get(0),
+    )?;
+    let id = format!("P-{next}");
+    let inserted = tx.execute(
+        "INSERT INTO projects (id, name, root, created_at, removed_at) VALUES (?1, ?2, ?3, ?4, NULL)",
+        params![id, n.name, n.root, n.created_at],
+    );
+    match inserted {
+        Ok(_) => Ok(id),
+        // The unique indexes are the backstop of the two checks above.
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Err(EffectError::Rejected(
+                "a live project already has this root or name".to_string(),
+            ))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Mark a live project removed. The row stays.
+fn remove_project(tx: &Transaction<'_>, id: &str, removed_at: &str) -> Result<(), EffectError> {
+    let row = tx
+        .query_row(
+            &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"),
+            [id],
+            project_from,
+        )
+        .optional()?;
+    match row {
+        None => Err(EffectError::Rejected(format!("no project {id}"))),
+        Some(p) if p.removed_at.is_some() => Err(EffectError::Rejected(format!(
+            "project {id} is removed already"
+        ))),
+        Some(_) => {
+            tx.execute(
+                "UPDATE projects SET removed_at = ?2 WHERE id = ?1 AND removed_at IS NULL",
+                params![id, removed_at],
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// Apply one effect. It returns the ID the effect assigned, when it assigns one.
+fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Option<String>, EffectError> {
+    match effect {
+        Effect::PutRun(r) => put_run(tx, r)?,
+        Effect::PutNode(n) => put_node(tx, n)?,
+        Effect::PutSession(s) => put_session(tx, s)?,
+        Effect::OpenRequest(n) => open_request(tx, n)?,
+        Effect::PutRequest(r) => put_request(tx, r)?,
+        Effect::PutClaim(c) => put_claim(tx, c)?,
+        Effect::AddProject(n) => return add_project(tx, n).map(Some),
+        Effect::RemoveProject { id, removed_at } => remove_project(tx, id, removed_at)?,
+    }
+    Ok(None)
+}
+
 fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = find_admission(&tx, &c.run_id, &c.command_id)? {
@@ -223,19 +336,30 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
         ],
     )?;
     let admission_seq = tx.last_insert_rowid();
+    let mut assigned: Option<String> = None;
     for effect in &c.effects {
-        match effect {
-            Effect::PutRun(r) => put_run(&tx, r)?,
-            Effect::PutNode(n) => put_node(&tx, n)?,
-            Effect::PutSession(s) => put_session(&tx, s)?,
-            Effect::OpenRequest(n) => open_request(&tx, n)?,
-            Effect::PutRequest(r) => put_request(&tx, r)?,
-            Effect::PutClaim(c) => put_claim(&tx, c)?,
+        match apply(&tx, effect) {
+            Ok(Some(id)) => assigned = Some(id),
+            Ok(None) => {}
+            // The transaction ends here without a commit, so it rolls back: nothing is written.
+            Err(EffectError::Rejected(why)) => return Ok(Committed::Rejected(why)),
+            Err(EffectError::Sql(e)) => return Err(e),
         }
+    }
+    if let Some(id) = &assigned {
+        tx.execute(
+            "UPDATE admissions SET unit_id = ?1 WHERE seq = ?2 AND unit_id = ?3",
+            params![id, admission_seq, NEW_ID],
+        )?;
     }
     let ledger = match &c.ledger {
         None => None,
         Some(entry) => {
+            let body = match &assigned {
+                // The first stand-in only: a name or a path in the line may hold the same text.
+                Some(id) => entry.body.replacen(NEW_ID, id, 1),
+                None => entry.body.clone(),
+            };
             let seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM ledger_outbox WHERE ledger_file = ?1",
                 [&entry.ledger_file],
@@ -244,13 +368,13 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
             tx.execute(
                 "INSERT INTO ledger_outbox (ledger_file, seq, run_id, admission_seq, body, written) \
                  VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-                params![entry.ledger_file, seq, c.run_id, admission_seq, entry.body],
+                params![entry.ledger_file, seq, c.run_id, admission_seq, body],
             )?;
             Some(LedgerLine {
                 ledger_file: entry.ledger_file.clone(),
                 seq: to_u64(seq),
                 run_id: c.run_id.clone(),
-                body: entry.body.clone(),
+                body,
                 written: false,
             })
         }
@@ -405,6 +529,33 @@ impl Store for SqliteStore {
                     })
                 },
             )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn projects(&self) -> Result<Vec<ProjectRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {PROJECT_COLUMNS} FROM projects WHERE removed_at IS NULL ORDER BY rowid"
+                ),
+                [],
+                project_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn project(&self, id: &str) -> Result<Option<ProjectRow>, StoreError> {
+        let id = id.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"),
+                [&id],
+                project_from,
+            )
+            .optional()
             .map_err(sql_error)
         })?
     }

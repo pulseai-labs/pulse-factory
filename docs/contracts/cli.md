@@ -2,14 +2,26 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has eleven verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), and `requests`, `show`,
-`claim`, `answer`, `clear` and `ack` (`r0.s2`). `requests.md` holds the records and the rules.
+has twelve verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+`claim`, `answer`, `clear` and `ack` (`r0.s2`), and `project` (`r1.s2`), which has the three forms
+`add`, `list` and `remove`. `requests.md` holds the records and the rules.
 
 ## Common rules
 
 - **State directory.** `$PF_STATE_DIR`, else `~/.local/state/pulse-factory`, mode 0700. The socket
   is `<state dir>/controller.sock`, mode 0600. The controller owns the store, the queue and the
-  ledger (ADR-0003). A client never writes there.
+  ledgers (ADR-0003). A client never writes there.
+- **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
+  ledger of the controller's own commands (`project`, and the device commands that follow). It is
+  not a run's ledger. Each command is admitted once under the admission scope `@controller`, where
+  a run's commands are admitted under the run's ID, and each admitted or refused new command is one
+  line, `- #<n> <command> …`, written by the controller as the only writer. A replay writes no line.
+  A start recovers the file as a run's ledger is recovered: a line that was committed and not
+  appended is appended once, and no line appears twice. A run ID can never hold `@`, so no run can
+  share the scope. The file is operator-local: it is not committed and it has no rotation yet. A
+  path and a reason in a line pass the redaction of every ledger, and a line names no secret.
+- **`halt` and the projects.** `halt` applies to runs only. A `project` command launches nothing and
+  changes no run, so a halt neither stops it nor needs it.
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -18,8 +30,10 @@ has eleven verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), an
   `schema_version` (now `1`). A change that removes or renames a field raises the version.
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
   `--yes`, and a command line that clap refuses.
-- **A seat cannot spend.** `arm`, `halt`, `claim`, `answer`, `clear` and `ack` refuse when
-  `PF_SEAT_TOKEN` is in the environment. The controller checks the caller of `claim`, `answer`,
+- **A seat cannot spend.** `arm`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add` and
+  `project remove` refuse when `PF_SEAT_TOKEN` is in the environment (a seat launch is an
+  irreversible spend, ADR-0005, and a seat has no need to change the list of projects).
+  `project list` is a read and stays open. The controller checks the caller of `claim`, `answer`,
   `clear` and `ack` again (see `claim`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
@@ -209,6 +223,56 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
 - The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `verb`
   (`ack`), `pr`, `base`, `head_sha`, `merged` (true when the merge landed), `outcome` (`landed`, or
   the cause of the park) and `after_merge_failure` (the cause, or null).
+
+## `project`
+
+```
+pulse-factory project add <root> [--name <name>] [--command-id <id>] [--json]
+pulse-factory project list [--json]
+pulse-factory project remove <id> [--command-id <id>] [--json]
+```
+
+A project is an ID, a name and one root. Nothing else is decided: the project has no repo, pairing,
+worktree or kind field, and the rest of its schema waits for the project hierarchy brainstorm
+(operator, 2026-11-07). The verbs launch nothing and change no run, so `halt` does not apply to
+them. Each change is a controller command with a command ID and one line of the controller ledger
+(see Common rules).
+
+- **The root.** `<root>` is an existing directory, a git repo or a plain folder. The CLI resolves a
+  relative `<root>` against its current directory and sends an absolute path. The controller makes
+  it canonical (`std::fs::canonicalize`): two spellings of one directory, such as a symlink or a
+  `..`, are one root. It refuses a root that does not exist, is not a directory, or is `/`. It does
+  not look inside the root: a git repo and a plain folder are the same to it. A live project holds
+  its root alone: a second `add` of the same root is refused until the first is removed.
+- **The name.** `--name` defaults to the last path component of the root. A name is 1 to 64
+  characters, has no control character and no line break, and is unique among live projects. The
+  check is exact: `Alpha` and `alpha` are two names.
+- **The ID.** A project ID is `P-<n>`, in the order of creation. `remove` marks the project removed
+  and the row stays, so an ID is never used twice, and a removed root or name can be added again
+  under a new ID.
+- **The command ID.** `--command-id` is 1 to 128 characters of letters, digits and `. _ - :`. With
+  none, the CLI makes a random one (128 bits, as 32 hex digits) for each call. A caller that retries
+  sends the same one. The same ID with the same arguments returns the first record's project:
+  `replayed` is true in the JSON, and the ledger gets no line. The same ID with other arguments
+  exits 1 and names the command ID. A refused command is stored too: its replay is the same
+  refusal.
+- **`add`** prints `project P-1 added: <name> (<root>)`.
+- **`list`** prints one line per live project in creation order, `P-1  <name>  <root>`, or
+  `no projects`. It needs no claim and is open to a seat.
+- **`remove`** prints `project P-1 removed: <name> (<root>)`.
+- **JSON.** `add` and `remove` print `{"schema_version": 1, "replayed": <bool>, "project": {"id",
+  "name", "root", "created_at", "removed_at"}}`, where `removed_at` is null for a live project.
+  `list` prints `{"schema_version": 1, "projects": [...]}` with the live projects only, in creation
+  order. The controller verbs are `project_add`, `project_list` and `project_remove`.
+- **Refusals** (exit 1, nothing on stdout, the reason on stderr, one admission and one ledger
+  line): a root that does not exist, is not a directory, is `/`, or is held by a live project; a name
+  that is empty, longer than 64 characters, holds a control character or a line break, or is held by
+  a live project; an unknown or removed ID on `remove`. A command ID that is not valid, and
+  `PF_SEAT_TOKEN` set on `add` or `remove`, are refused before any command is admitted: nothing is
+  stored.
+- **Ledger lines.** `project_add P-1 admitted name=<name> root=<root> command=<id>`,
+  `project_remove P-1 admitted command=<id>`, and `project_add refused reason="<reason>"
+  command=<id>`. A value with a space is quoted.
 
 ## `hook`
 

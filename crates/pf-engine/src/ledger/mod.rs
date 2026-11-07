@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::admission::EngineError;
 use crate::engine::Engine;
+use crate::port::store::{LedgerLine, Store};
 
 /// Format one ledger line, with its newline.
 ///
@@ -143,6 +144,65 @@ impl RecoveryReport {
     }
 }
 
+/// Append one outbox line to the ledger file, flush it, and mark the outbox row written. The
+/// error text names the step that failed.
+pub fn append_and_mark_line(
+    store: &dyn Store,
+    ledger: &mut dyn LedgerFile,
+    line: &LedgerLine,
+) -> Result<(), String> {
+    ledger
+        .append(&format_line(line.seq, &line.body))
+        .map_err(|e| format!("ledger append failed: {e}"))?;
+    store
+        .mark_ledger_written(&line.ledger_file, line.seq)
+        .map_err(|e| format!("marking ledger line {} written failed: {e}", line.seq))
+}
+
+/// Recover one ledger file after a stop: cut a torn last line, read the lines left in the file,
+/// append each unwritten outbox line of `ledger_file` that is missing (or present only with
+/// foreign text), in order, and mark it written. The error text is the reason a caller records
+/// when recovery fails.
+///
+/// A run's engine and the controller's own ledger share this one recovery.
+pub fn recover_ledger_file(
+    store: &dyn Store,
+    ledger: &mut dyn LedgerFile,
+    ledger_file: &str,
+) -> Result<RecoveryReport, String> {
+    let mut report = RecoveryReport::default();
+
+    let cut = ledger.truncate_torn_tail();
+    report.truncated_torn_tail = cut.map_err(|e| format!("ledger recovery failed: {e}"))?;
+    let mut present = ledger
+        .lines()
+        .map_err(|e| format!("ledger recovery failed: {e}"))?;
+
+    let pending = store
+        .unwritten_ledger_lines(ledger_file)
+        .map_err(|e| format!("ledger recovery failed: store read failed: {e}"))?;
+    for line in pending {
+        let want = format_line(line.seq, &line.body);
+        let want = want.trim_end_matches('\n');
+        let held = present.get(&line.seq);
+        if held.is_some_and(|texts| texts.iter().any(|t| t == want)) {
+            store
+                .mark_ledger_written(&line.ledger_file, line.seq)
+                .map_err(|e| format!("marking ledger line {} written failed: {e}", line.seq))?;
+            report.already_present.push(line.seq);
+        } else {
+            if held.is_some() {
+                report.foreign.push(line.seq);
+            }
+            append_and_mark_line(store, ledger, &line)
+                .map_err(|why| format!("ledger recovery failed: {why}"))?;
+            present.entry(line.seq).or_default().push(want.to_string());
+            report.appended.push(line.seq);
+        }
+    }
+    Ok(report)
+}
+
 impl Engine {
     /// Recover the ledger file after a stop. Run it before any other work at start-up.
     ///
@@ -154,47 +214,8 @@ impl Engine {
         if let Some(why) = &inner.degraded {
             return Err(EngineError::Degraded(why.clone()));
         }
-        let mut report = RecoveryReport::default();
-
-        let cut = inner.ledger.truncate_torn_tail();
-        report.truncated_torn_tail =
-            cut.map_err(|e| self.degrade(&mut inner, format!("ledger recovery failed: {e}")))?;
-        let present = inner.ledger.lines();
-        let mut present = present
-            .map_err(|e| self.degrade(&mut inner, format!("ledger recovery failed: {e}")))?;
-
-        let pending = self.store.unwritten_ledger_lines(&self.ledger_file());
-        let pending = pending.map_err(|e| {
-            self.degrade(
-                &mut inner,
-                format!("ledger recovery failed: store read failed: {e}"),
-            )
-        })?;
-        for line in pending {
-            let want = format_line(line.seq, &line.body);
-            let want = want.trim_end_matches('\n');
-            let held = present.get(&line.seq);
-            if held.is_some_and(|texts| texts.iter().any(|t| t == want)) {
-                self.store
-                    .mark_ledger_written(&line.ledger_file, line.seq)
-                    .map_err(|e| {
-                        self.degrade(
-                            &mut inner,
-                            format!("marking ledger line {} written failed: {e}", line.seq),
-                        )
-                    })?;
-                report.already_present.push(line.seq);
-            } else {
-                if held.is_some() {
-                    report.foreign.push(line.seq);
-                }
-                self.append_and_mark(&mut inner, &line).map_err(|why| {
-                    self.degrade(&mut inner, format!("ledger recovery failed: {why}"))
-                })?;
-                present.entry(line.seq).or_default().push(want.to_string());
-                report.appended.push(line.seq);
-            }
-        }
-        Ok(report)
+        let file = self.ledger_file();
+        recover_ledger_file(self.store.as_ref(), inner.ledger.as_mut(), &file)
+            .map_err(|why| self.degrade(&mut inner, why))
     }
 }

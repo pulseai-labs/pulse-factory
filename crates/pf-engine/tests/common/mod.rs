@@ -181,6 +181,8 @@ impl Store for FakeStore {
                         None => s.claims.push(c),
                     }
                 }
+                // The engine tests carry no controller entities: the engine makes no such effect.
+                Effect::AddProject(_) | Effect::RemoveProject { .. } => {}
             }
         }
         let ledger = commit.ledger.map(|entry| {
@@ -261,6 +263,14 @@ impl Store for FakeStore {
 
     fn claims(&self) -> Result<Vec<ClaimRow>, StoreError> {
         Ok(self.state.lock().unwrap().claims.clone())
+    }
+
+    fn projects(&self) -> Result<Vec<ProjectRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn project(&self, _id: &str) -> Result<Option<ProjectRow>, StoreError> {
+        Ok(None)
     }
 
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError> {

@@ -1,5 +1,5 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `hook` and `controller`.
+//! `clear`, `ack`, `project`, `hook` and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -40,6 +40,8 @@ pub enum Verb {
     Clear(ClearArgs),
     /// Ack a merge request: the spine PR merges with the head SHA the request names.
     Ack(AckArgs),
+    /// Add, list and remove the projects on this host. A project is an ID, a name and one root.
+    Project(ProjectArgs),
     /// Judge one tool call of a seat (the extension runs this; stdin holds the call).
     Hook,
     /// Run the controller in the foreground.
@@ -186,6 +188,59 @@ pub struct AckArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ProjectArgs {
+    #[command(subcommand)]
+    pub verb: ProjectVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProjectVerb {
+    /// Register a directory as a project.
+    Add(ProjectAddArgs),
+    /// List the projects.
+    List(ProjectListArgs),
+    /// Take a project off the list.
+    Remove(ProjectRemoveArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectAddArgs {
+    /// The root: an existing directory, a git repo or a plain folder. A relative path is taken
+    /// from the current directory.
+    pub root: PathBuf,
+    /// The name: 1 to 64 characters. The default is the last component of the root.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectListArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectRemoveArgs {
+    /// The project, such as `P-1`.
+    pub id: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ControllerArgs {
     /// Milliseconds between two ticks.
     #[arg(long, default_value_t = 2000)]
@@ -211,6 +266,11 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Verb::Answer(a) => crate::controller::client::answer(&a),
         Verb::Clear(a) => crate::controller::client::clear(&a),
         Verb::Ack(a) => crate::controller::client::ack(&a),
+        Verb::Project(a) => match a.verb {
+            ProjectVerb::Add(a) => crate::controller::client::project_add(&a),
+            ProjectVerb::List(a) => crate::controller::client::project_list(&a),
+            ProjectVerb::Remove(a) => crate::controller::client::project_remove(&a),
+        },
         Verb::Hook => crate::hook::run(),
         Verb::Controller(a) => crate::controller::run(&a),
     }

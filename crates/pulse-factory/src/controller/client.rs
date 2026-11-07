@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AckArgs, AnswerArgs, ClaimArgs, ClearArgs, HaltArgs, RequestsArgs, ShowArgs, StatusArgs,
+    AckArgs, AnswerArgs, ClaimArgs, ClearArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
+    ProjectRemoveArgs, RequestsArgs, ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -550,6 +551,116 @@ pub fn ack(a: &AckArgs) -> i32 {
             eprintln!("pulse-factory: {why}");
             1
         }
+    }
+}
+
+// ------------------------------------------------------------------ projects
+
+/// A command ID for one call: 128 random bits as 32 hex digits.
+fn random_command_id() -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open(super::seat::RANDOM_DEVICE)
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| format!("no command ID can be made ({e}); give one with --command-id"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Print a refusal or an error of a project verb and give the exit code 1.
+fn project_failed(verb: &str, why: &str) -> i32 {
+    eprintln!("pulse-factory: project {verb}: {}", tame(why));
+    1
+}
+
+/// One line of the text forms: `<id>  <name>  <root>` is built from tamed parts.
+fn project_parts(p: &Value) -> (String, String, String) {
+    (
+        tame(&s_of(&p["id"])),
+        tame(&s_of(&p["name"])),
+        tame(&s_of(&p["root"])),
+    )
+}
+
+pub fn project_add(a: &ProjectAddArgs) -> i32 {
+    if let Some(code) = refuse_seat("project add") {
+        return code;
+    }
+    // The controller runs in another directory, so the CLI sends an absolute path.
+    let root = if a.root.is_absolute() {
+        a.root.clone()
+    } else {
+        match std::env::current_dir() {
+            Ok(dir) => dir.join(&a.root),
+            Err(e) => {
+                return project_failed("add", &format!("cannot read the current directory: {e}"));
+            }
+        }
+    };
+    let Some(root) = root.to_str() else {
+        return project_failed("add", "the root is not valid UTF-8");
+    };
+    let command_id = match a.command_id.clone().map_or_else(random_command_id, Ok) {
+        Ok(id) => id,
+        Err(why) => return project_failed("add", &why),
+    };
+    let args = json!({ "root": root, "name": a.name, "command_id": command_id });
+    match call("project_add", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let (id, name, root) = project_parts(&v["project"]);
+                println!("project {id} added: {name} ({root})");
+            }
+            0
+        }
+        Err(why) => project_failed("add", &why),
+    }
+}
+
+pub fn project_list(a: &ProjectListArgs) -> i32 {
+    match call("project_list", json!({})) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let list = v["projects"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("no projects");
+                }
+                for p in &list {
+                    let (id, name, root) = project_parts(p);
+                    println!("{id}  {name}  {root}");
+                }
+            }
+            0
+        }
+        Err(why) => project_failed("list", &why),
+    }
+}
+
+pub fn project_remove(a: &ProjectRemoveArgs) -> i32 {
+    if let Some(code) = refuse_seat("project remove") {
+        return code;
+    }
+    let command_id = match a.command_id.clone().map_or_else(random_command_id, Ok) {
+        Ok(id) => id,
+        Err(why) => return project_failed("remove", &why),
+    };
+    match call(
+        "project_remove",
+        json!({ "id": a.id, "command_id": command_id }),
+    ) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let (id, name, root) = project_parts(&v["project"]);
+                println!("project {id} removed: {name} ({root})");
+            }
+            0
+        }
+        Err(why) => project_failed("remove", &why),
     }
 }
 
