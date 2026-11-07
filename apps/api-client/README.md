@@ -1,8 +1,9 @@
 # apps/api-client
 
 This directory holds only the generated TypeScript types of the controller's network API
-(`docs/contracts/api.md`, ADR-0012, ADR-0013). It holds no package and no client code yet: `r1.s2.w3`
-adds the package.
+(`docs/contracts/api.md`, ADR-0012, ADR-0013), as the package `@pulse-factory/api-client`. It has
+no client code and no build step: `src/index.ts` re-exports every file of `src/gen/`, and a client
+imports types only (`import type`).
 
 The files in `src/gen/` are written by `ts-rs` from the Rust types in `crates/pf-api/src/types.rs`.
 Do not edit them by hand. A cargo test fails when they differ from what `ts-rs` renders:

@@ -16,6 +16,10 @@ mkdir -p "$share" "$unit_dir"
 rm -rf "$share/workflows" "$share/skill"
 cp -R "$root/workflows" "$share/workflows"
 cp -R "$root/skill" "$share/skill"
+
+# The UI bundle: install-ui.sh builds apps/ui with Node 22 and npm, and replaces "$share/ui".
+PF_SHARE_DIR="$share" bash "$root/scripts/install-ui.sh"
+
 cp "$root/deploy/systemd/pulse-factory.service" "$unit_dir/pulse-factory.service"
 
 # A shell with no login session has no XDG_RUNTIME_DIR, and `systemctl --user` then cannot find
