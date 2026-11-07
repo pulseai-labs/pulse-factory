@@ -25,6 +25,9 @@ use super::{Controller, lock};
 /// The controller ledger's file name in the state directory.
 pub const LEDGER_FILE: &str = "controller.ledger";
 
+/// The one command kind that still commits while the ledger is stopped.
+pub const DEVICE_REVOKE: &str = "device_revoke";
+
 /// A command ID is 1 to 128 characters.
 pub const COMMAND_ID_MAX_CHARS: usize = 128;
 
@@ -119,6 +122,11 @@ pub enum Plan {
 }
 
 impl Controller {
+    /// Why the controller's commands are stopped, or `None` while they run.
+    pub(super) fn commands_stopped(&self) -> Option<String> {
+        lock(&self.controller_ledger).stopped.clone()
+    }
+
     /// Commit one controller command, append its ledger line, and return the stored admission and
     /// whether it was a replay. A refused command comes back as `Err` with its reason, which is
     /// redacted and cut to one line. So does every failure: a stopped ledger, a conflict, a store
@@ -131,7 +139,13 @@ impl Controller {
         plan: Plan,
     ) -> Result<(AdmissionRow, bool), String> {
         let mut ledger = lock(&self.controller_ledger);
-        if let Some(why) = &ledger.stopped {
+        // A stopped ledger refuses every command but a revoke. A revoke cuts a device off, and the
+        // API reads the store on each call, so the operator must still be able to make one. It
+        // commits to the store and its line waits in the outbox for the next start to append.
+        let stopped = ledger.stopped.clone();
+        if let Some(why) = &stopped
+            && kind != DEVICE_REVOKE
+        {
             return Err(format!("controller commands are stopped: {why}"));
         }
         let committed = match plan {
@@ -177,6 +191,7 @@ impl Controller {
                 ledger: line,
             } => {
                 if let Some(line) = line
+                    && stopped.is_none()
                     && let Err(why) = self.append_line(&mut ledger, &line)
                 {
                     return Err(format!(

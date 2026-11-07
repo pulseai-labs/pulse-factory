@@ -26,7 +26,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::api::LiveCode;
-use super::commands::{Plan, check_command_id, field, now};
+use super::commands::{DEVICE_REVOKE, Plan, check_command_id, field, now};
 use super::seat::random_bytes;
 use super::{Controller, lock};
 
@@ -213,7 +213,7 @@ impl Controller {
                 args.command_id
             ),
         };
-        match self.run_command("device_revoke", &args.command_id, content, plan) {
+        match self.run_command(DEVICE_REVOKE, &args.command_id, content, plan) {
             Ok((admission, replayed)) => {
                 let Some(id) = &admission.unit_id else {
                     return Response::err("the admission names no device");
@@ -255,6 +255,12 @@ impl Controller {
             .ok_or(Refusal::Code)?;
         // A bad name costs the operator no code.
         check_device_name(device_name).map_err(Refusal::Name)?;
+        // A stopped ledger pairs nothing, so it must not use up the code either.
+        if let Some(why) = self.commands_stopped() {
+            return Err(Refusal::Server(format!(
+                "controller commands are stopped: {why}"
+            )));
+        }
         {
             let mut live = lock(&self.api.pairing);
             match live.as_ref() {

@@ -21,6 +21,11 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
   appended is appended once, and no line appears twice. A run ID can never hold `@`, so no run can
   share the scope. The file is operator-local: it is not committed and it has no rotation yet. A
   path and a reason in a line pass the redaction of every ledger, and a line names no secret.
+  When the file cannot be recovered at start or a line cannot be appended, the controller's
+  commands stop until it restarts with a good file: a `project` command, and the redeem of a
+  pairing code, are refused with the reason (the redeem leaves the live code unused). `device
+  revoke` is the one exception: it still commits to the store, so the device is refused at once,
+  and its line waits in the outbox for the next start to append. The reads still work.
 - **`halt` and the projects.** `halt` applies to runs only. A `project` command launches nothing and
   changes no run, so a halt neither stops it nor needs it. The same holds for `device` commands.
   `halt` is not open to a device over the API either (`api.md`).

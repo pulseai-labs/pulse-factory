@@ -804,6 +804,78 @@ fn device_revoke_with_the_same_command_id_is_a_replay() {
     assert!(stderr(&out).contains("rev-1"), "{}", stderr(&out));
 }
 
+// ------------------------------------------------------------------ a stopped controller ledger
+
+/// Put a directory in the ledger file's place and run one project command. The commit stands, its
+/// append fails, and the controller's commands stop.
+fn stop_the_ledger(rig: &Rig) {
+    let ledger = rig.sb.state.join("controller.ledger");
+    let _ = std::fs::remove_file(&ledger);
+    std::fs::create_dir(&ledger).unwrap();
+    let root = rig.sb.root.path().join("work/stop-the-ledger");
+    std::fs::create_dir_all(&root).unwrap();
+    let out = rig.cli(&["project", "add", &root.display().to_string()]);
+    assert_eq!(code(&out), 1, "{}", stdout(&out));
+    assert!(stderr(&out).contains("committed"), "{}", stderr(&out));
+    let again = rig.cli(&["project", "remove", "P-1"]);
+    assert!(stderr(&again).contains("stopped"), "{}", stderr(&again));
+}
+
+#[test]
+fn a_stopped_controller_ledger_still_revokes_a_device_at_once() {
+    let mut rig = Rig::on();
+    let token = rig.paired("macbook");
+    stop_the_ledger(&rig);
+    assert_eq!(
+        rig.http("GET", "/v1/status", Some(&token), None).status,
+        200,
+        "the device still authenticates while the commands are stopped"
+    );
+
+    let out = rig.cli(&["device", "revoke", "D-1"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(stdout(&out), "device D-1 revoked: macbook\n");
+    assert_eq!(
+        rig.http("GET", "/v1/status", Some(&token), None).status,
+        401,
+        "the next call is refused"
+    );
+
+    // The revoke's line waits in the outbox: the next start with a good file appends it.
+    std::fs::remove_dir(rig.sb.state.join("controller.ledger")).unwrap();
+    rig.stop();
+    let addr = rig.addr();
+    rig.start(&["--api-listen", &addr]);
+    rig.wait_state("listening");
+    let lines = rig.ledger();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("device_revoke D-1 admitted")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|l| l.contains("device_revoke")).count(),
+        1,
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn a_stopped_controller_ledger_refuses_a_pairing_and_leaves_the_live_code_unused() {
+    let rig = Rig::on();
+    let code = rig.code();
+    stop_the_ledger(&rig);
+    // A code that was used up would answer 401 the second time.
+    for _ in 0..2 {
+        let reply = rig.pair(&code, "macbook");
+        assert_eq!(reply.status, 500, "{}", reply.body);
+        assert!(reply.body.contains("stopped"), "{}", reply.body);
+    }
+    let devices = ok_json(&rig.cli(&["device", "list", "--json"]));
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 0);
+}
+
 // ------------------------------------------------------------------ the key
 
 #[test]
