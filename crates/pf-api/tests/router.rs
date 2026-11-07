@@ -8,8 +8,9 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use pf_api::code::{PairingCode, hex, token_sha256};
+use pf_api::guard::{GuardConfig, system_clock};
 use pf_api::types::{ApiStatus, DeviceRecord, PairResult};
-use pf_api::{ALLOWLIST, ApiHost, MAX_BODY_BYTES, PeerAddr, Refusal, router};
+use pf_api::{ALLOWLIST, ApiHost, MAX_BODY_BYTES, PeerAddr, Refusal, router_with};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -103,7 +104,14 @@ fn rig() -> (Router, Arc<Fake>) {
             json!({ "schema_version": 1, "projects": [] }),
         )),
     });
-    (router(fake.clone()), fake)
+    // These tests send dozens of bad tokens and codes from the one peer address, to check the
+    // answers. The peer guard (`guard.rs`, `r1.s2.w5`) would block that peer on the fifth, so this
+    // rig turns its limit up out of reach. The guard has its own tests (`tests/guard.rs`).
+    let no_limit = GuardConfig {
+        max_failures: usize::MAX,
+        ..GuardConfig::default()
+    };
+    (router_with(fake.clone(), no_limit, system_clock()), fake)
 }
 
 struct Reply {

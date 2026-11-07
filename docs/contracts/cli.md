@@ -303,7 +303,9 @@ allowlist"). They launch nothing and change no run, so `halt` does not apply to 
   `{"schema_version": 1, "devices": [{"id", "name", "paired_at", "last_seen_at", "last_peer",
   "revoked_at"}]}`, where the last three are null when unset. A record holds no token and no hash of
   one. `last_seen_at` and `last_peer` are telemetry: the store writes them at most once a minute for
-  a device (ADR-0003, amended).
+  a device (ADR-0003, amended). A device that has made no call for 30 days is refused by the API
+  (401) and must pair again. It stays in the list, unrevoked: read its age from `last seen`
+  (`api.md`, "Idle expiry").
 - **`revoke`** marks the device revoked. Its next call over the API is refused with 401, because the
   API reads the store on each call. The row stays, so an ID (`D-<n>`) is never used again, and the
   device pairs again as a new device with a new code. The text form is
@@ -337,7 +339,11 @@ Shows the state of the network API listener. It is a read: it needs no claim and
     starts. The controller tries again every 5 seconds and keeps serving the socket.
   - `listening on <addr>`: the listener is bound.
   - `failed: <why>`: another bind error, or the key or certificate could not be made. The controller
-    does not try again, and it keeps serving the socket.
+    does not try again, and it keeps serving the socket. An address outside loopback and the tailnet
+    (`127.0.0.0/8`, `::1`, `100.64.0.0/10`, `fd7a:115c:a1e0::/48`) is refused before any key is made:
+    `failed: the API address <ip> is outside loopback and the tailnet (127.0.0.0/8, ::1,
+    100.64.0.0/10, fd7a:115c:a1e0::/48)`. Nothing listens, and `device pair` refuses with the same
+    text.
 - The JSON is `{"schema_version": 1, "state": "off" | "listening" | "waiting" | "failed", "listen":
   <addr or null>, "key_spki_sha256": <hex or null>, "error": <text or null>}`.
 - The hash is the one a pairing code carries. A client pins it. A new key (the key files were

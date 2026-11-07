@@ -1,9 +1,11 @@
 //! The TLS listener (ADR-0012): accept a TCP connection, run the TLS 1.3 handshake with the server
 //! key, and serve HTTP/1.1 from the router. Each request carries the peer's address.
 //!
-//! The rate limit and the per-request audit lines are `r1.s2.w5`'s. This listener only keeps a slow
-//! or idle connection from holding resources for ever: a handshake and a request head each have
-//! a time limit, and the number of open connections has a ceiling.
+//! The peer guard and the per-request audit lines are in the router (`guard.rs`, `router.rs`,
+//! `r1.s2.w5`). A TLS failure before HTTP (a pin mismatch, a handshake timeout) is no request and
+//! writes no audit record. This listener only keeps a slow or idle connection from holding resources
+//! for ever: a handshake and a request head each have a time limit, and the number of open
+//! connections has a ceiling.
 
 use std::future::Future;
 use std::sync::Arc;

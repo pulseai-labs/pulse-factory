@@ -54,6 +54,9 @@ pub struct Config {
     /// How long a bind that cannot happen yet (the address is not on this host) waits before it
     /// tries again: 5 seconds.
     pub api_retry: Duration,
+    /// How long a device may make no call before the API refuses it and it must pair again: 30
+    /// days (ADR-0012). A test sets a short time.
+    pub device_idle: Duration,
 }
 
 impl Config {
@@ -68,9 +71,13 @@ impl Config {
             api_listen: None,
             pair_ttl: Duration::from_secs(600),
             api_retry: api::DEFAULT_RETRY,
+            device_idle: DEFAULT_DEVICE_IDLE,
         }
     }
 }
+
+/// How long a device may be idle: 30 days.
+pub const DEFAULT_DEVICE_IDLE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// One run the controller knows.
 pub struct RunHandle {

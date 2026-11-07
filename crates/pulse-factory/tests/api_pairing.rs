@@ -375,8 +375,10 @@ fn an_address_not_on_this_host_waits_and_the_controller_still_serves_the_socket(
         port: free_port(),
         proc: None,
     };
-    // TEST-NET-1 is not on any host. A 127.x address would bind: Linux holds all of 127/8.
-    let addr = format!("192.0.2.1:{}", rig.port);
+    // A tailnet address that is not on this host. The bind guard (`r1.s2.w5`) refuses TEST-NET-1 and
+    // every other address outside loopback and the tailnet, and a 127.x address would bind: Linux
+    // holds all of 127/8.
+    let addr = format!("100.100.1.1:{}", rig.port);
     rig.start(&["--api-listen", &addr]);
     rig.wait_state("waiting");
     let out = rig.cli(&["api", "status"]);

@@ -6,20 +6,127 @@
 //! available" is tried again every few seconds, so the controller can start before Tailscale does.
 //! Any other bind error is printed, and the controller keeps serving the socket.
 //!
+//! The controller refuses an address outside loopback and the tailnet (`pf_api::guard::listen_allowed`)
+//! before it makes a key, so the API is never on a LAN or a public address.
+//!
 //! `ApiBridge` is the host port of `pf-api`: it gives the router the pairing, the token check and
-//! the verb handler that the socket uses.
+//! the verb handler that the socket uses. It also writes the request ledger, `api.ledger`: one line
+//! for each API request that the router reports through `audit`.
 
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use pf_api::guard::listen_allowed;
 use pf_api::types::{ApiState, ApiStatus, DeviceRecord, ListenState, PairResult, SCHEMA_VERSION};
-use pf_api::{ApiHost, Refusal, tls};
+use pf_api::{ApiHost, Outcome, Refusal, RequestRecord, tls};
 use pf_ipc::{Handler, Request, Response};
 use serde_json::Value;
 
+use super::commands::{field, now};
 use super::{Controller, lock};
+
+/// The request ledger's file name in the state directory.
+pub const REQUEST_LEDGER_FILE: &str = "api.ledger";
+
+/// The verbs of the controller's own dispatch table (`Controller::handle`). The request ledger names
+/// a verb only when it is one of these, so a token, a code or a line break sent as a verb name never
+/// reaches the file. A verb added to the table is added here.
+pub const VERBS: &[&str] = &[
+    "runs",
+    "arm",
+    "hook",
+    "status",
+    "halt",
+    "requests",
+    "show",
+    "project_add",
+    "project_list",
+    "project_remove",
+    "device_list",
+    "api_status",
+    "claim",
+    "answer",
+    "clear",
+    "ack",
+    "device_pair",
+    "device_revoke",
+];
+
+/// The text of the failure for an address outside the allowed ranges.
+fn out_of_range(ip: IpAddr) -> String {
+    format!(
+        "the API address {ip} is outside loopback and the tailnet (127.0.0.0/8, ::1, 100.64.0.0/10, \
+         fd7a:115c:a1e0::/48)"
+    )
+}
+
+/// The request ledger and its one writer. The file is append-only, with no `fsync` per line, and it
+/// is not in the store: a crash can lose the last lines (ADR-0012).
+pub(super) struct RequestLedger {
+    path: PathBuf,
+    /// One writer at a time, so two lines never mix.
+    writer: Mutex<()>,
+}
+
+impl RequestLedger {
+    fn new(path: PathBuf) -> RequestLedger {
+        RequestLedger {
+            path,
+            writer: Mutex::new(()),
+        }
+    }
+
+    /// Append one line. A failure prints one line on stderr and costs the request nothing.
+    fn append(&self, line: &str) {
+        let _one = lock(&self.writer);
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&self.path)
+            .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
+        if let Err(e) = result {
+            eprintln!(
+                "pulse-factory: controller: the request ledger {} could not be appended to: {e}",
+                self.path.display()
+            );
+        }
+    }
+}
+
+/// One line of the request ledger: `<time> api route=<route> verb=<verb|-> device=<D-n|-> peer=<ip>
+/// status=<code> outcome=<outcome>`. A verb that is not in the dispatch table is `verb=?` with its
+/// length. A blocked record adds `count=<n>`, and the record of the failure that starts a block adds
+/// `blocked_until=<time>`. Every value goes through `field()`.
+pub(super) fn request_line(at: &str, record: &RequestRecord) -> String {
+    let verb = match record.verb.as_deref() {
+        None => "-".to_string(),
+        Some(v) if VERBS.contains(&v) => field(v),
+        Some(v) => format!("? verb_len={}", v.chars().count()),
+    };
+    let mut line = format!(
+        "{at} api route={} verb={verb} device={} peer={} status={} outcome={}",
+        record.route.as_str(),
+        record
+            .device
+            .as_deref()
+            .map_or_else(|| "-".to_string(), field),
+        field(&record.peer.to_string()),
+        record.status,
+        record.outcome.as_str(),
+    );
+    if record.outcome == Outcome::Blocked {
+        line.push_str(&format!(" count={}", record.count));
+    }
+    if let Some(until) = &record.blocked_until {
+        line.push_str(&format!(" blocked_until={}", field(until)));
+    }
+    line
+}
 
 /// Where the listener stands, inside the controller.
 enum Standing {
@@ -44,6 +151,8 @@ pub(super) struct ApiRuntime {
     standing: Mutex<Standing>,
     /// At most one code is live: a new code replaces it, and a restart voids it.
     pub(super) pairing: Mutex<Option<LiveCode>>,
+    /// The request ledger, `<state dir>/api.ledger`.
+    requests: RequestLedger,
 }
 
 impl ApiRuntime {
@@ -51,11 +160,13 @@ impl ApiRuntime {
     /// address, or a key that cannot be made, leaves the state `failed` with the reason. The
     /// controller still starts.
     pub(super) fn start(state_dir: &Path, setting: Option<&str>) -> ApiRuntime {
+        let requests = || RequestLedger::new(state_dir.join(REQUEST_LEDGER_FILE));
         let off = |standing: Standing, listen: Option<SocketAddr>| ApiRuntime {
             listen,
             key: None,
             standing: Mutex::new(standing),
             pairing: Mutex::new(None),
+            requests: requests(),
         };
         let Some(text) = setting.map(str::trim).filter(|t| !t.is_empty()) else {
             return off(Standing::Off, None);
@@ -70,12 +181,20 @@ impl ApiRuntime {
                 return off(Standing::Failed(why), None);
             }
         };
+        // The address is checked before a key is made: an address outside loopback and the tailnet
+        // gets no key and no listener, and the controller keeps serving the socket.
+        if !listen_allowed(listen.ip()) {
+            let why = out_of_range(listen.ip());
+            eprintln!("pulse-factory: controller: {why}");
+            return off(Standing::Failed(why), Some(listen));
+        }
         match tls::load_or_create(&tls::api_dir(state_dir), &listen) {
             Ok(key) => ApiRuntime {
                 listen: Some(listen),
                 key: Some(key),
                 standing: Mutex::new(Standing::Waiting),
                 pairing: Mutex::new(None),
+                requests: requests(),
             },
             Err(why) => {
                 eprintln!("pulse-factory: controller: the API has no key: {why}");
@@ -196,6 +315,13 @@ impl ApiHost for ApiBridge {
         // A device acts as the operator (ADR-0009), through the code the socket runs.
         let _ = device;
         self.controller.handle(Request::new(verb, args))
+    }
+
+    fn audit(&self, record: &RequestRecord) {
+        self.controller
+            .api
+            .requests
+            .append(&request_line(&now(), record));
     }
 
     fn status(&self) -> ApiStatus {

@@ -60,6 +60,67 @@ fn record(d: DeviceRow) -> DeviceRecord {
     }
 }
 
+/// Milliseconds since the Unix epoch of UTC text such as `2026-11-07T10:00:00.000Z`, the text that
+/// `now()` writes. `None` for any other text.
+fn parse_utc_millis(text: &str) -> Option<u64> {
+    let num = |range: std::ops::Range<usize>| -> Option<i64> {
+        let part = text.get(range)?;
+        part.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| part.parse().ok())
+            .flatten()
+    };
+    let bytes = text.as_bytes();
+    let fixed = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
+    if text.len() < 20 || fixed.iter().any(|&(i, c)| bytes[i] != c) {
+        return None;
+    }
+    let (year, month, day) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hour, minute, second) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let (millis, end) = if bytes[19] == b'.' {
+        (num(20..23)?, 23)
+    } else {
+        (0, 19)
+    };
+    if text.get(end..) != Some("Z")
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    // Days from a civil date (proleptic Gregorian calendar): the inverse of `format_utc`.
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(secs * 1_000 + millis).ok()
+}
+
+/// Whether a device has made no call for `idle` or longer: its last-seen time, or its pairing time
+/// when it has never called. A time that cannot be read counts as idle, so the check fails closed.
+fn is_idle(row: &DeviceRow, idle: std::time::Duration) -> bool {
+    let at = row.last_seen_at.as_deref().unwrap_or(&row.paired_at);
+    let Some(then) = parse_utc_millis(at) else {
+        return true;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let age = u128::from(
+        u64::try_from(now.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_sub(then),
+    );
+    age >= idle.as_millis()
+}
+
 /// Compare two secrets without stopping at the first byte that differs.
 fn same_secret(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -254,7 +315,56 @@ impl Controller {
         peer: IpAddr,
     ) -> Option<DeviceRecord> {
         let row = self.store.device_by_token(token_sha256).ok().flatten()?;
+        // An idle device is refused as a token that is not known. The refusal does not touch the
+        // device, so the idle state holds until the operator pairs the device again.
+        if is_idle(&row, self.cfg.device_idle) {
+            return None;
+        }
         let _ = self.store.touch_device(&row.id, &now(), &peer.to_string());
         Some(record(row))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_utc_millis;
+    use pf_engine::engine::format_utc;
+
+    #[test]
+    fn the_parser_reads_what_format_utc_writes() {
+        for (secs, millis) in [
+            (0u64, 0u32),
+            (951_782_400, 5), // 2000-02-29
+            (1_700_000_000, 123),
+            (1_800_000_000, 999),
+            (4_102_444_800, 0), // 2100-01-01
+            (1_782_864_000, 1), // 2026-07-01
+        ] {
+            let text = format_utc(secs, millis);
+            assert_eq!(
+                parse_utc_millis(&text),
+                Some(secs * 1_000 + u64::from(millis)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_parser_refuses_other_text() {
+        for text in [
+            "",
+            "yesterday",
+            "2026-11-07",
+            "2026-11-07T10:00:00.000",
+            "2026-13-07T10:00:00.000Z",
+            "2026-11-07 10:00:00.000Z",
+            "2026-11-07T25:00:00.000Z",
+            "2026-11-07T10:00:00.00xZ",
+            "2026-11-07T10:00:00.000Zjunk",
+        ] {
+            assert_eq!(parse_utc_millis(text), None, "{text:?}");
+        }
+        // Without milliseconds is fine.
+        assert_eq!(parse_utc_millis("1970-01-01T00:00:01Z"), Some(1_000));
     }
 }
