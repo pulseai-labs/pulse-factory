@@ -46,6 +46,42 @@ pulse-factory status        # exits 1 with a clear message when no run exists ye
 The unit sets `PATH` to `~/.local/bin`, `~/.cargo/bin` and the system directories. Seats inherit it,
 so `gh`, `git` and `omp` must be on one of those paths.
 
+**Install with no active run.** Each release of the binary can migrate the store (migration 0004
+adds the `devices` table). The controller refuses to migrate while a run is active, so it does not
+start until no run is active (ADR-0003, ADR-0007). End or halt every run, then install.
+
+## Turn on the network API
+
+The controller serves a network API over TLS, so a paired device on your tailnet can call the project
+verbs (ADR-0012, `docs/contracts/api.md`). The API is off until you set an address. Nothing listens
+and no key exists until then.
+
+1. Write the address to the controller's environment file. Use the address of this host on your
+   tailnet (draco-desk uses `100.90.203.21`) and a free port:
+
+   ```bash
+   mkdir -p ~/.config/pulse-factory
+   echo 'PF_API_LISTEN=100.90.203.21:7443' > ~/.config/pulse-factory/controller.env
+   ```
+
+   The unit reads the file through `EnvironmentFile=-%h/.config/pulse-factory/controller.env`. The
+   `controller --api-listen <addr>` flag does the same and wins over the variable.
+2. Restart the unit so it reads the file: `systemctl --user restart pulse-factory`. On the first
+   start with the API on, the controller makes an ECDSA P-256 key and a self-signed certificate in
+   `~/.local/state/pulse-factory/api/` (`key.pem`, mode 0600, and `cert.pem`).
+3. Check it. `pulse-factory api status` prints `listening on <addr>` and the SPKI hash of the key. It
+   prints `waiting for <addr>` when the address is not on this host yet, for example before Tailscale
+   starts. The controller tries again every 5 seconds and keeps serving the socket meanwhile.
+4. Pair a device: run `pulse-factory device pair` on this host (over ssh, if you are elsewhere). It
+   prints one code that works once, for 10 minutes. Type the code and a device name into the device.
+   The device checks the key's SPKI hash against the code before it sends the code.
+5. See and cut off devices with `pulse-factory device list` and `pulse-factory device revoke <id>`.
+   A revoked device's next call is refused.
+
+To turn the API off, remove the line and restart the unit. The key and the paired devices stay. If
+the key files are deleted, the next start makes a new key: every paired device then fails closed.
+Revoke them all and pair again.
+
 ## Try it with no model and no spend
 
 The paper env runs the whole journey with scripts in place of seats, against a bare git repository:

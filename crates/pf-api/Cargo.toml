@@ -1,0 +1,29 @@
+[package]
+name = "pf-api"
+description = "The controller's network API: the wire types, the router over a host port, and the TLS listener with the key pinned at pairing (ADR-0012)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pf-engine = { path = "../pf-engine" }
+pf-ipc = { path = "../pf-ipc" }
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros", "io-util"] }

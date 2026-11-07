@@ -182,7 +182,10 @@ impl Store for FakeStore {
                     }
                 }
                 // The engine tests carry no controller entities: the engine makes no such effect.
-                Effect::AddProject(_) | Effect::RemoveProject { .. } => {}
+                Effect::AddProject(_)
+                | Effect::RemoveProject { .. }
+                | Effect::AddDevice(_)
+                | Effect::RevokeDevice { .. } => {}
             }
         }
         let ledger = commit.ledger.map(|entry| {
@@ -271,6 +274,18 @@ impl Store for FakeStore {
 
     fn project(&self, _id: &str) -> Result<Option<ProjectRow>, StoreError> {
         Ok(None)
+    }
+
+    fn devices(&self) -> Result<Vec<DeviceRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn device_by_token(&self, _token_sha256: &str) -> Result<Option<DeviceRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn touch_device(&self, _id: &str, _at: &str, _peer: &str) -> Result<bool, StoreError> {
+        Ok(false)
     }
 
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError> {

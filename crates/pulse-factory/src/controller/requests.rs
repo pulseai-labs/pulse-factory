@@ -99,7 +99,7 @@ impl Controller {
     }
 
     /// Refuse a caller that is, or descends from, a seat (ADR-0005). Every failed read refuses.
-    fn check_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
+    pub(super) fn check_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
         let refuse = |why: String| format!("{verb} refused: {why}");
         let pid = peer.pid.ok_or_else(|| {
             refuse("the controller cannot tell which process called, so it refuses".to_string())

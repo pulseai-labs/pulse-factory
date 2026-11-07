@@ -137,24 +137,25 @@ fn insert_project(
 
 #[test]
 fn the_migration_list_has_projects_as_version_three() {
-    assert_eq!(MIGRATIONS.len(), 3);
+    // Migration 0004 (devices) follows it.
+    assert_eq!(MIGRATIONS.len(), 4);
     assert_eq!(MIGRATIONS[2].version, 3);
     assert_eq!(MIGRATIONS[2].name, "projects");
 }
 
 #[test]
-fn a_version_two_store_migrates_to_three_and_keeps_every_row() {
+fn a_version_two_store_migrates_to_the_latest_and_keeps_every_row() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     version_two(&path, "ended");
     let before = dump(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4]);
     assert_eq!(dump(&conn), before, "no row of version 2 changed");
     assert_eq!(count(&conn, "projects"), 0);
     // The new columns are exactly the ones the spec names, and the table is strict.
@@ -171,14 +172,14 @@ fn a_version_two_store_migrates_to_three_and_keeps_every_row() {
 }
 
 #[test]
-fn a_fresh_file_opens_at_three() {
+fn a_fresh_file_opens_at_the_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4]);
     assert_eq!(count(&conn, "projects"), 0);
 }
 
@@ -196,7 +197,7 @@ fn a_version_two_store_with_an_active_run_refuses_and_stays_at_two() {
         err,
         OpenError::RunActive {
             current: 2,
-            pending: 3
+            pending: 4
         }
     );
 

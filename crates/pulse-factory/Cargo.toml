@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 pf-adapter-fake = { path = "../pf-adapter-fake" }
 pf-adapter-omp = { path = "../pf-adapter-omp" }
+pf-api = { path = "../pf-api" }
 pf-engine = { path = "../pf-engine" }
 pf-forge-bare = { path = "../pf-forge-bare" }
 pf-forge-github = { path = "../pf-forge-github" }

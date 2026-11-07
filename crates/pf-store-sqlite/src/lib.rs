@@ -26,7 +26,7 @@ pub struct Migration {
 
 /// The migrations of this binary. Migration `0001` holds what skeleton A needs. Migration `0002`
 /// adds requests and claims. Migration `0003` adds projects, and a trigger that keeps `@` out of a
-/// run id, so the admission scope `@controller` can never be a run.
+/// run id, so the admission scope `@controller` can never be a run. Migration `0004` adds devices.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -42,6 +42,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "projects",
         sql: include_str!("../migrations/0003_projects.sql"),
+    },
+    Migration {
+        version: 4,
+        name: "devices",
+        sql: include_str!("../migrations/0004_devices.sql"),
     },
 ];
 

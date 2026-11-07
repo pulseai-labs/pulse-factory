@@ -77,16 +77,16 @@ fn a_version_one_store_migrates_to_the_latest_and_keeps_every_row() {
     let path = dir.path().join("store.sqlite");
     version_one(&path, "ended");
     {
-        // Migration 0003 follows 0002 in the same open: the file ends at version 3.
+        // Migrations 0003 and 0004 follow 0002 in the same open: the file ends at version 4.
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 4);
     }
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "runs"), 1);
     assert_eq!(count(&conn, "nodes"), 3);
     assert_eq!(count(&conn, "admissions"), 1);
     assert_eq!(count(&conn, "ledger_outbox"), 1);
-    assert_eq!(count(&conn, "schema_version"), 3);
+    assert_eq!(count(&conn, "schema_version"), 4);
     let name: String = conn
         .query_row(
             "SELECT name FROM schema_version WHERE version = 2",
@@ -105,7 +105,7 @@ fn a_version_one_store_migrates_to_the_latest_and_keeps_every_row() {
 #[test]
 fn the_migration_list_holds_version_two_after_version_one() {
     let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
-    assert_eq!(versions, vec![1, 2, 3]);
+    assert_eq!(versions, vec![1, 2, 3, 4]);
     assert_eq!(MIGRATIONS[1].name, "requests");
 }
 
@@ -119,7 +119,7 @@ fn a_store_never_migrates_under_an_active_run() {
         err,
         OpenError::RunActive {
             current: 1,
-            pending: 3
+            pending: 4
         }
     );
     // The refusal changed nothing.
@@ -251,14 +251,14 @@ fn a_unit_has_at_most_one_open_request_and_one_claim_is_current() {
 }
 
 #[test]
-fn a_store_at_version_four_refuses_to_open_and_names_both_versions() {
+fn a_store_at_version_five_refuses_to_open_and_names_both_versions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     drop(SqliteStore::open(&path).unwrap());
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_version (version, name, applied_at) VALUES (4, 'future', 't')",
+            "INSERT INTO schema_version (version, name, applied_at) VALUES (5, 'future', 't')",
             [],
         )
         .unwrap();
@@ -267,13 +267,13 @@ fn a_store_at_version_four_refuses_to_open_and_names_both_versions() {
     assert_eq!(
         err,
         OpenError::SchemaNewer {
-            database: 4,
-            supported: 3
+            database: 5,
+            supported: 4
         }
     );
     let text = err.to_string();
     assert!(
-        text.contains("version 4") && text.contains("version 3"),
+        text.contains("version 5") && text.contains("version 4"),
         "{text}"
     );
 }
@@ -296,7 +296,7 @@ fn migrating_twice_is_a_no_op() {
         (count(&conn, "schema_version"), applied)
     };
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(store.schema_version().unwrap(), 4);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     let applied: String = conn

@@ -201,3 +201,26 @@ Rejected alternatives:
     - The operator's global and system git config stay trusted, because the push credential lives
       there. `git-config-trust` denies a seat's write of the guarded keys there too, and a shell
       write to that file is the limit above.
+
+## Amendment, 2026-11-07 (`r1.s2.w2`): a paired device is a principal that acts as the operator
+
+ADR-0012 adds a second kind of caller beside the operator's OS user and the seats.
+
+- **A device is a principal.** A device that paired with a one-use code holds a token, and the
+  controller's API takes the token as the operator's authority for the verbs on the allowlist. The
+  claim carries the same authority for `answer`, `clear` and `ack`, and a device has none of those:
+  no ack, answer, claim, clear, arm or halt is on the allowlist. A device has no scope of its own
+  in this spine (ADR-0009, amended). The human confirm of a merge-ack on a device comes with
+  `r1.s4`.
+- **Seats cannot pair or revoke.** `device pair` and `device revoke` refuse when `PF_SEAT_TOKEN` is
+  in the CLI's environment. The controller checks the caller again, as it does for `claim`: a caller
+  that is, or descends from, a seat is refused, and a failed `/proc` read refuses. The API offers
+  neither verb, so a device cannot let another device in or cut one off.
+- **No secret in a log.** No token, pairing code or private key is written to a log, a ledger line,
+  a request, a park reason or an error. The token shows in the one answer of `POST /v1/pair`, and
+  the code shows in the output of `device pair`.
+- **A revoke takes effect at once.** The API reads the store on each call, so the revoked device's
+  next call is refused.
+- **Still a known limit:** a stolen device token acts as the operator on the allowlist until the
+  operator revokes the device. The idle expiry (30 days), the rate limit and the per-request audit
+  line come with `r1.s2.w5`.

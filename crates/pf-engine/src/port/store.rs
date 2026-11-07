@@ -299,7 +299,7 @@ pub struct ClaimRow {
     pub fenced_at: Option<String>,
 }
 
-/// The admission scope of the controller's own commands (projects now, devices later). A run's
+/// The admission scope of the controller's own commands (projects and devices). A run's
 /// commands commit under the run's ID. The store refuses a run ID that holds `@`, so no run can
 /// share this scope.
 pub const CONTROLLER_SCOPE: &str = "@controller";
@@ -332,6 +332,30 @@ pub struct NewProject {
     pub created_at: String,
 }
 
+/// One device: a client paired with a one-use code. It holds a revocable token, and the row never
+/// holds the token or its hash. A controller entity: the engine core never reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRow {
+    /// `D-<n>`, from one sequence for the whole store. A revoked row keeps its ID.
+    pub id: String,
+    pub name: String,
+    pub paired_at: String,
+    /// Telemetry, written by [`Store::touch_device`] outside admission.
+    pub last_seen_at: Option<String>,
+    pub last_peer: Option<String>,
+    /// Set when the device is revoked. The row stays.
+    pub revoked_at: Option<String>,
+}
+
+/// A device before the store gives it an ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewDevice {
+    pub name: String,
+    /// SHA-256 of the token, as 64 hex digits. The token itself is never stored.
+    pub token_sha256: String,
+    pub paired_at: String,
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -352,6 +376,15 @@ pub enum Effect {
     RemoveProject {
         id: String,
         removed_at: String,
+    },
+    /// Add a device. The store gives it the next `D-<n>`. A token hash that a device holds already
+    /// makes the commit [`Committed::Rejected`].
+    AddDevice(NewDevice),
+    /// Mark a live device revoked. An unknown or revoked ID makes the commit
+    /// [`Committed::Rejected`].
+    RevokeDevice {
+        id: String,
+        revoked_at: String,
     },
 }
 
@@ -398,7 +431,7 @@ pub enum Committed {
     /// The same ID with other content was stored before. Nothing changed.
     Conflict(AdmissionRow),
     /// An effect cannot apply (a duplicate live project root or name, an unknown or removed
-    /// project). The reason is one line. Nothing was written: no admission, no outbox line. The
+    /// project, a token hash in use, an unknown or revoked device). The reason is one line. Nothing was written: no admission, no outbox line. The
     /// caller may commit a refused admission for the same command.
     Rejected(String),
 }
@@ -435,6 +468,14 @@ pub trait Store: Send + Sync {
     fn projects(&self) -> Result<Vec<ProjectRow>, StoreError>;
     /// Read one project by ID, live or removed.
     fn project(&self, id: &str) -> Result<Option<ProjectRow>, StoreError>;
+    /// Read every device, live ones first and each group in pairing order.
+    fn devices(&self) -> Result<Vec<DeviceRow>, StoreError>;
+    /// Read the live device whose token has this SHA-256. A revoked device is not returned.
+    fn device_by_token(&self, token_sha256: &str) -> Result<Option<DeviceRow>, StoreError>;
+    /// Write a live device's last-seen time and peer. This is telemetry, not a transition: it makes
+    /// no admission and no ledger line (ADR-0003). It writes at most once a minute per device and
+    /// answers whether it wrote. A revoked or unknown device is never written.
+    fn touch_device(&self, id: &str, at: &str, peer: &str) -> Result<bool, StoreError>;
     /// Read a run's admissions, in admission order.
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError>;
     /// Read one admission by command ID.

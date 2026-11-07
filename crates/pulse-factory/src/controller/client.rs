@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AckArgs, AnswerArgs, ClaimArgs, ClearArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
-    ProjectRemoveArgs, RequestsArgs, ShowArgs, StatusArgs,
+    AckArgs, AnswerArgs, ApiStatusArgs, ClaimArgs, ClearArgs, DeviceListArgs, DevicePairArgs,
+    DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs, ProjectRemoveArgs, RequestsArgs,
+    ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -662,6 +663,139 @@ pub fn project_remove(a: &ProjectRemoveArgs) -> i32 {
         }
         Err(why) => project_failed("remove", &why),
     }
+}
+
+// ------------------------------------------------------------------ devices and the API
+
+/// Print a refusal or an error of a device verb and give the exit code 1. The text is tamed: a
+/// device chose its own name.
+fn device_failed(verb: &str, why: &str) -> i32 {
+    eprintln!("pulse-factory: device {verb}: {}", tame(why));
+    1
+}
+
+/// `device pair`: print one code and when it stops working. The code is printed here and nowhere
+/// else: the operator copies it from this output.
+pub fn device_pair(a: &DevicePairArgs) -> i32 {
+    if let Some(code) = refuse_seat("device pair") {
+        return code;
+    }
+    match call("device_pair", json!({})) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!("{}", s_of(&v["code"]));
+                println!("expires {} (one use)", s_of(&v["expires_at"]));
+            }
+            0
+        }
+        Err(why) => device_failed("pair", &why),
+    }
+}
+
+pub fn device_list(a: &DeviceListArgs) -> i32 {
+    match call("device_list", json!({})) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let list = v["devices"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("no devices");
+                }
+                for d in &list {
+                    println!("{}", device_line(d));
+                }
+            }
+            0
+        }
+        Err(why) => device_failed("list", &why),
+    }
+}
+
+/// One line of the text form: `<id>  <name>  paired <t>  last seen <t> from <peer>`, and
+/// `  revoked <t>` for a revoked device. Every part is tamed.
+fn device_line(d: &Value) -> String {
+    let last = match d["last_seen_at"].as_str() {
+        Some(at) => format!(
+            "last seen {} from {}",
+            tame(at),
+            tame(d["last_peer"].as_str().unwrap_or("?"))
+        ),
+        None => "never seen".to_string(),
+    };
+    let revoked = d["revoked_at"]
+        .as_str()
+        .map(|t| format!("  revoked {}", tame(t)))
+        .unwrap_or_default();
+    format!(
+        "{}  {}  paired {}  {last}{revoked}",
+        tame(&s_of(&d["id"])),
+        tame(&s_of(&d["name"])),
+        tame(&s_of(&d["paired_at"])),
+    )
+}
+
+pub fn device_revoke(a: &DeviceRevokeArgs) -> i32 {
+    if let Some(code) = refuse_seat("device revoke") {
+        return code;
+    }
+    let command_id = match a.command_id.clone().map_or_else(random_command_id, Ok) {
+        Ok(id) => id,
+        Err(why) => return device_failed("revoke", &why),
+    };
+    match call(
+        "device_revoke",
+        json!({ "id": a.id, "command_id": command_id }),
+    ) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!(
+                    "device {} revoked: {}",
+                    tame(&s_of(&v["device"]["id"])),
+                    tame(&s_of(&v["device"]["name"]))
+                );
+            }
+            0
+        }
+        Err(why) => device_failed("revoke", &why),
+    }
+}
+
+/// `api status`: `off`, `waiting for <addr>`, `listening on <addr>` or `failed: <why>`, and on a
+/// second line the SPKI hash of the key when the key exists.
+pub fn api_status(a: &ApiStatusArgs) -> i32 {
+    match call("api_status", json!({})) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                print!("{}", api_status_text(&v));
+            }
+            0
+        }
+        Err(why) => {
+            eprintln!("pulse-factory: api status: {}", tame(&why));
+            1
+        }
+    }
+}
+
+pub fn api_status_text(v: &Value) -> String {
+    let listen = tame(&s_of(&v["listen"]));
+    let mut t = match v["state"].as_str() {
+        Some("listening") => format!("listening on {listen}\n"),
+        Some("waiting") => format!("waiting for {listen}\n"),
+        Some("failed") => format!("failed: {}\n", tame(&s_of(&v["error"]))),
+        _ => "off\n".to_string(),
+    };
+    if let Some(hash) = v["key_spki_sha256"].as_str() {
+        t.push_str(&format!("key spki sha256: {}\n", tame(hash)));
+    }
+    t
 }
 
 fn s_of(v: &Value) -> String {

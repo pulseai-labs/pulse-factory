@@ -3,6 +3,8 @@
 - **Status:** Accepted, 2026-11-05, at the Release 0 close, after `scripts/install.sh` ran from a
   clean checkout (see "Verified claims").
 - **Date:** 2026-10-25
+- **Amended:** 2026-11-07, at `r1.s2.w2`: the controller also serves a network API, as a listener
+  beside the socket. The unit gains an optional environment file. Nothing above changes.
 
 ## Context
 A Pulse Factory run lasts hours after the operator closes the session that armed it. The project
@@ -42,3 +44,21 @@ Rejected alternatives:
 
 ### Unverified claims
 None.
+
+## Amendment, 2026-11-07 (`r1.s2.w2`)
+
+The second listener that "Consequences" allowed has come (ADR-0012).
+
+- **The API listener lives in the controller.** `pulse-factory controller` serves the network API on
+  its own Tokio runtime, beside the Unix socket. It is the same process, so there is still one
+  control authority. The listener calls the controller's verb handler, the code that the socket
+  runs. The socket stays the CLI's transport, and it stays mode 0600 for the operator's OS user.
+- **Off by default.** The listener binds only the address in `--api-listen` or `PF_API_LISTEN`.
+  With neither, nothing listens. A bind that cannot happen yet does not stop the controller: it keeps
+  serving the socket and tries again.
+- **The unit gains `EnvironmentFile=-%h/.config/pulse-factory/controller.env`.** The leading `-`
+  makes the file optional. The operator turns the API on by writing `PF_API_LISTEN=<address>:<port>`
+  there and restarting the unit (`docs/install.md`).
+- **The rejected alternative "an HTTPS API now" is superseded**, for the reason in ADR-0012: the
+  run view and the MacBook app need it, and the login, the pinned key and the revocable devices that
+  the Release 0 decision waited for exist now.

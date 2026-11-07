@@ -6,6 +6,8 @@
   2026-10-31: declared plugins, unit sources and seed
   units.
 - **Amended:** 2026-11-01, at `r0.s1.w2`: `roots` and the role rule files. Nothing above changes.
+- **Amended:** 2026-11-07, at `r1.s2.w2`: the network API mirrors the CLI's verbs under `/v1`, and the
+  CLI gains the verbs `device` and `api`. Nothing above changes.
 
 ## Context
 - Every session acts on a run through the Pulse Factory CLI and its skill.
@@ -49,3 +51,25 @@ Rejected alternatives:
 ## Consequences
 - Every workflow file declares its version.
 - Agents learn the CLI from the skill, so the skill changes with the verbs.
+
+## Amendment, 2026-11-07 (`r1.s2.w2`)
+
+The API and the CLI share one set of verbs (ADR-0012).
+
+- **The API mirrors the CLI under `/v1`.** Each verb that a device may call is a controller verb
+  with JSON arguments and a JSON answer, and `POST /v1/verbs/<verb>` returns the same JSON that the
+  CLI prints with `--json`. The CLI is a client of the controller's verb handler, and so is the
+  API, so a verb has one implementation. An allowlist sets which verbs a device may call
+  (`docs/contracts/api.md`). In this spine it holds `project_add`, `project_list` and
+  `project_remove`.
+- **The wire types are shared.** The project and device shapes live in `crates/pf-api` and derive
+  `ts_rs::TS`. The CLI, the controller and the generated TypeScript types use one definition. A
+  change that removes or renames a field raises `schema_version`, as the breaking-change policy
+  says, and a test fails when the generated types drift.
+- **New verbs.** `device` has the forms `pair`, `list` and `revoke`. `api` has the form `status`.
+  Each takes `--json` and carries `schema_version`. `controller` gains `--api-listen <addr>`
+  (default: the variable `PF_API_LISTEN`). The verbs and flags are in `docs/contracts/cli.md`, and
+  the skill names them.
+- **The decision list names the verbs again:** `arm`, `status`, `halt`, `requests`, `show`, `claim`,
+  `answer`, `clear`, `ack`, `project`, `device` and `api`, plus the internal `controller` and
+  `hook`. No verb waits or watches.
