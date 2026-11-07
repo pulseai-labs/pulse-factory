@@ -9,8 +9,8 @@ Pulse Factory runs the seats of a planned spine with no model session watching. 
 A controller (a systemd user service) then drives the seats until each item PR has merged into the
 spine branch. A spine-close seat then opens the spine PR, and the PR merges into the base branch
 only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
-`status`, `halt`, `hook` and `controller`, and the verbs of requests and the claim: `requests`,
-`show`, `claim`, `answer`, `clear` and `ack`.
+`status`, `halt`, `hook` and `controller`, the verbs of requests and the claim: `requests`,
+`show`, `claim`, `answer`, `clear` and `ack`, and `project`, which lists the operator's projects.
 
 ## Arm a run
 
@@ -119,6 +119,30 @@ holder acks.
 that does not land parks the unit with a `merge_failed` request. `clear` sends it back to the merge,
 which opens a new `merge_ack`. A halted or ended run refuses the ack.
 
+## Register a project
+
+A project is a directory the operator works in: a git repo or a plain folder. It has an ID, a name
+and one root, and nothing more yet. These verbs launch nothing and change no run.
+
+```bash
+pulse-factory project add ~/projects/pulse-factory            # project P-1 added: pulse-factory (…)
+pulse-factory project add ./notes --name "Field notes"        # a relative root is taken from here
+pulse-factory project list                                    # P-1  pulse-factory  /home/…
+pulse-factory project remove P-2                              # the row stays; the ID is not reused
+```
+
+1. `project add <root>` records the root, made canonical, under a name. The name is the root's last
+   component unless `--name` gives one. A missing path, a file, `/`, a root that a live project holds
+   already, and a name that a live project holds already are refused, each with its reason.
+2. `project list` shows the live projects in creation order. `--json` gives
+   `{"schema_version": 1, "projects": [...]}`.
+3. A retry of `add` or `remove` sends the same `--command-id`. The controller admits the command
+   once and returns the first record, with `"replayed": true`. With no `--command-id`, each call
+   makes a random one.
+
+Every `add` and `remove`, admitted or refused, is one line of `<state dir>/controller.ledger`. A seat
+cannot `add` or `remove`; it can `list`.
+
 ## Halt a run
 
 `pulse-factory halt [<run>] --reason "<why>"` stops new launches and new merges. Seats that run
@@ -131,4 +155,5 @@ finish their stage. A repeat is safe, and the first reason stays.
 - `pulse-factory hook` judges one tool call of a seat. The seat's extension runs it. You do not run
   it yourself.
 
-A seat cannot arm or halt a run: both verbs refuse when `PF_SEAT_TOKEN` is set.
+A seat cannot arm or halt a run, and it cannot add or remove a project: those verbs refuse when
+`PF_SEAT_TOKEN` is set. `halt` applies to runs only.

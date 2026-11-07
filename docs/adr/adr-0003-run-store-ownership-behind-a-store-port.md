@@ -4,6 +4,8 @@
 - **Date:** 2026-10-25
 - **Amended:** 2026-10-26, at the planning of spine r0.s1, with text from its review round 1 on
   2026-10-31: the spine-plan row and the run queue row.
+- **Amended:** 2026-11-07, at `r1.s2.w1`: projects, the `@controller` admission scope and the
+  controller ledger. The revisit trigger changes. Nothing else above changes.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
@@ -43,4 +45,30 @@ Rejected alternatives:
 
 ### Unverified claims
 - Whether one store port can carry that atomic commit on both SQLite and Pulse Base. Revisit when
-  Pulse Base offers a store API.
+  the project hierarchy is planned, or Pulse Base offers a store API.
+
+## Amendment, 2026-11-07 (`r1.s2.w1`)
+
+The controller's store gains projects, a second admission scope and a second ledger.
+
+- **Projects.** Migration 0003 adds the table `projects`: an ID (`P-<n>`, never reused), a name, one
+  root, `created_at` and `removed_at`. A removed row stays. Two partial unique indexes keep a live
+  root and a live name unique. The project schema beyond the root waits for the project hierarchy
+  brainstorm (operator, 2026-11-07). The store port reads and writes projects (`ProjectRow`,
+  `Effect::AddProject`, `Effect::RemoveProject`, `Store::projects`, `Store::project`).
+- **The admission scope.** `admissions.run_id` names the admission scope: a run's ID, or
+  `@controller` for the controller's own commands (projects now, devices in `r1.s2.w2`). The scope
+  keeps `UNIQUE (scope, command ID)`, so a replay returns the first record and changed content is a
+  conflict, as it is for a run (ADR-0009). Migration 0003 adds a trigger that refuses a `runs.id`
+  that holds `@`, so no run can take the scope. The scope is one constant of the store port.
+- **The controller ledger.** `<state dir>/controller.ledger` takes one line for each admitted or
+  refused controller command. It is not a run's ledger and it is not in the AI workspace. It uses
+  the outbox, the one writer and the start-up recovery that the run ledgers use.
+- **The revisit trigger.** The claim under Unverified claims is revisited when the project
+  hierarchy is planned, or Pulse Base offers a store API.
+
+Known limits:
+- The controller ledger is operator-local in the state directory, is not committed, and has no
+  rotation yet (feature map: "controller ledger rotation").
+- Migration 0003, like every migration, refuses under an active run. The controller does not start
+  until no run is active, so install with no active run.

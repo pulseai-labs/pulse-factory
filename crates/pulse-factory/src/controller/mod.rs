@@ -1,11 +1,12 @@
 //! The controller: one process, seats as children (ADR-0001). It owns the store, the queue and
-//! the ledger (ADR-0003).
+//! the ledger (ADR-0003). It also owns the projects and their own ledger, `controller.ledger`.
 
 pub mod base_push;
 pub mod client;
 pub mod driver;
 pub mod files;
 pub mod ports;
+pub mod projects;
 pub mod requests;
 pub mod seat;
 pub mod status;
@@ -76,6 +77,9 @@ pub struct Controller {
     /// `claim`, `answer`, `clear` and `ack` run one at a time, so a claim cannot fence between an
     /// answer's check of the generation and its commit.
     claim_lock: Mutex<()>,
+    /// The controller ledger, and the one writer of it. A project command holds this lock from its
+    /// commit to the append of its line.
+    project_ledger: Mutex<projects::ProjectLedger>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -92,6 +96,12 @@ impl Controller {
             SqliteStore::open(cfg.state_dir.join("store.sqlite"))
                 .map_err(|e| format!("cannot open the store: {e}"))?,
         );
+        // The controller ledger is recovered before any command: a stop between a commit and the
+        // append of its line loses no line, and a restart adds no second copy.
+        let project_ledger = projects::ProjectLedger::start(
+            store.as_ref(),
+            cfg.state_dir.join(projects::LEDGER_FILE),
+        );
         let controller = Arc::new(Controller {
             cfg,
             store,
@@ -99,6 +109,7 @@ impl Controller {
             runs: Mutex::new(Vec::new()),
             seats: Arc::new(seat::SeatTable::default()),
             claim_lock: Mutex::new(()),
+            project_ledger: Mutex::new(project_ledger),
         });
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
@@ -567,6 +578,9 @@ impl Handler for Controller {
             "halt" => self.verb_halt(&request.args),
             "requests" => self.verb_requests(&request.args),
             "show" => self.verb_show(&request.args),
+            "project_add" => self.verb_project_add(&request.args),
+            "project_list" => self.verb_project_list(),
+            "project_remove" => self.verb_project_remove(&request.args),
             // These four change who acts and what runs. They need to know who calls.
             "claim" | "answer" | "clear" | "ack" => Response::err(format!(
                 "{} refused: the controller cannot tell which process called",

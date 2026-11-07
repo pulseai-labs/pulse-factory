@@ -7,6 +7,8 @@
   source, and the vocabulary below.
 - **Amended:** 2026-11-01, at `r0.s1.w2`: the vocabulary gains *track* and a seed's *repeat*. Nothing
   above changes.
+- **Amended:** 2026-11-07, at `r1.s2.w1`: the store port also carries controller entities. Nothing
+  above changes.
 
 ## Context
 Pulse Factory is a registry and driver of workflows. The engine is generic. A workflow is data that
@@ -64,3 +66,11 @@ Rejected alternatives:
 - Engine tests use fake ports.
 - The ports must be right before the second implementation of each exists. A port that leaks shows up
   as a change to the engine's own manifest or ports, which this bone's touch surface catches.
+
+## Amendment, 2026-11-07 (`r1.s2.w1`)
+
+The store port also carries controller entities: projects now, devices in `r1.s2.w2`. They are the
+controller's own state. The engine core never reads them, and the engine makes no effect for them.
+Project commands are controller commands (ADR-0003), so the engine gains no method word. No
+planning-method word enters the port: a project is an ID, a name and a root, and the project
+hierarchy is decided elsewhere (planning audit C6).
