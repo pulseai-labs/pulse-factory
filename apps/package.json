@@ -1,0 +1,9 @@
+{
+  "name": "pulse-factory-apps",
+  "version": "0.0.0",
+  "private": true,
+  "workspaces": [
+    "api-client",
+    "ui"
+  ]
+}

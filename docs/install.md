@@ -8,6 +8,7 @@ later see each item PR merged into the spine branch.
 
 - Linux with `systemd --user`. The unit runs as your user. It needs no root.
 - A Rust toolchain (`rust-toolchain.toml` in the repository names the channel), `git` and `jq`.
+- Node 22 and `npm`: the install builds the UI (`scripts/install-ui.sh`) with them.
 - `gh`, logged in as the account that owns the repository. Seats use your `gh` and git credentials
   (ADR-0005), and `arm` reads the forge through `gh repo view`. The controller itself pushes a base
   branch with the same credentials, where a stage names one with `base_push`.
