@@ -5,11 +5,14 @@
 #
 # `PF_BIN` is a built binary (default `pulse-factory` on PATH). `PF_UI_DIR` is the built bundle
 # (default `${PF_SHARE_DIR:-$HOME/.local/share/pulse-factory}/ui`, where scripts/install-ui.sh puts it).
+# `PF_BRIDGE_BIN` is the built `pf-client-bridge` (default: `pf-client-bridge` next to `PF_BIN`, else
+# `pf-client-bridge` on PATH).
 # This script builds nothing. It runs `npm ci` in apps/ only when apps/node_modules is missing, and it
 # downloads no browser: Chromium 1248 must be in the Playwright cache.
 #
 # It starts a controller with the API on 127.0.0.1 in a temp state directory, gets a pairing code, and
-# starts the test bridge (scripts/demo/ui-bridge, the `desktop-bridge` fake). The journey is
+# starts the test bridge, `pf-client-bridge` (the `desktop-bridge` fake with the real pinned client
+# behind it, crates/pf-client). The journey is
 # apps/ui/e2e/pair.spec.ts. It reaches no address beyond 127.0.0.1, prints no code and no token, stops
 # both processes on exit and removes its temp directory. `PF_SHOTS_DIR` names a directory for one
 # screenshot each of 3a, 2c, 3b and 3c.
@@ -28,6 +31,15 @@ for tool in jq node npm; do command -v "$tool" >/dev/null || fail "$tool is not 
 [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ] || fail "Node 22 or later is needed"
 pf_bin="$(command -v "$PF_BIN" || true)"
 [ -n "$pf_bin" ] && [ -x "$pf_bin" ] || fail "PF_BIN=$PF_BIN is not an executable"
+if [ -n "${PF_BRIDGE_BIN:-}" ]; then
+  bridge_bin="$(command -v "$PF_BRIDGE_BIN" || true)"
+  [ -n "$bridge_bin" ] && [ -x "$bridge_bin" ] || fail "PF_BRIDGE_BIN=$PF_BRIDGE_BIN is not an executable (the pf-client-bridge binary)"
+elif [ -x "$(dirname "$pf_bin")/pf-client-bridge" ]; then
+  bridge_bin="$(dirname "$pf_bin")/pf-client-bridge"
+else
+  bridge_bin="$(command -v pf-client-bridge || true)"
+  [ -n "$bridge_bin" ] || fail "no pf-client-bridge binary: set PF_BRIDGE_BIN, or put pf-client-bridge next to PF_BIN or on PATH"
+fi
 [ -f "$PF_UI_DIR/index.html" ] || fail "PF_UI_DIR=$PF_UI_DIR has no index.html: install the UI first with scripts/install-ui.sh (this script builds nothing)"
 [ -d "$browsers/chromium-1248" ] || fail "Chromium 1248 is not in the Playwright cache ($browsers/chromium-1248): it is the browser of @playwright/test 1.64.1, and this script downloads none"
 
@@ -68,7 +80,7 @@ code="$("$pf_bin" device pair --json | jq -r '.code')"
 [ -n "$code" ] && [ "$code" != "null" ] || fail "device pair made no code"
 
 # The bridge, with its state in the temp directory.
-node "$here/ui-bridge/server.mjs" --ui "$PF_UI_DIR" --state "$tmp/bridge" > "$tmp/bridge.log" 2>&1 &
+"$bridge_bin" --ui "$PF_UI_DIR" --state "$tmp/bridge" > "$tmp/bridge.log" 2>&1 &
 bridge_pid=$!
 bridge_url=""
 waited=0

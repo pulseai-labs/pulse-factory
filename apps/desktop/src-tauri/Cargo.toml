@@ -1,0 +1,20 @@
+[package]
+name = "pulse-factory-desktop"
+description = "The Pulse Factory Mac app: a Tauri 2 shell over the UI bundle, with the pinned client of pf-client behind it (ADR-0013)."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+# This package is its own cargo workspace and the root workspace excludes it: no build on draco-desk
+# ever compiles Tauri. GitHub's `macos-latest` runner builds it (`.github/workflows/macos-app.yml`).
+[workspace]
+
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+tauri = "=2.11.5"
+pf-api = { path = "../../../crates/pf-api" }
+pf-client = { path = "../../../crates/pf-client" }

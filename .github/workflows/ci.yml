@@ -24,3 +24,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # The binary run standalone: a dry arm with no model and no spend. `community-edition.sh` (d14)
+      # looks for this step by its name.
+      - name: Smoke
+        run: |
+          cargo build --locked -p pulse-factory
+          PF_BIN=target/debug/pulse-factory scripts/demo/arm-dry-run.sh

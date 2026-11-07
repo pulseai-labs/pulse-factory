@@ -11,8 +11,11 @@ members = [
     "crates/pf-forge-bare",
     "crates/pf-ipc",
     "crates/pf-api",
+    "crates/pf-client",
     "crates/pulse-factory",
 ]
+# The Mac app has its own cargo workspace (ADR-0013). No build on draco-desk compiles it.
+exclude = ["apps/desktop"]
 
 [workspace.package]
 version = "0.1.0"
@@ -40,6 +43,8 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat"] }
+# the Keychain of the Mac app (r1.s2.w4); `pf-client` takes it on macOS only
+security-framework = "=3.7.0"
 # dev-only test crates
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 proptest = "1.11.0"

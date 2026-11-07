@@ -1,0 +1,68 @@
+name: macos-app
+
+# Builds the Mac app on GitHub's macOS runner, signs it ad hoc, and uploads it as an artifact. The repo
+# is public, so this runner costs no minutes. Draco-desk never builds the Tauri app (ADR-0013).
+# `docs/install.md` ("Install the Mac app") says how to download the artifact and pair it.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The toolchain comes from rust-toolchain.toml. This step installs it when the runner lacks it.
+      - name: Install the pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the npm dependencies
+        run: npm --prefix apps ci --no-audit --no-fund
+      - name: Typecheck the UI
+        run: npm --prefix apps run typecheck --workspace ui
+      - name: Test the UI
+        run: npm --prefix apps run test --workspace ui
+      # The Keychain tests write to the default keychain. A fresh unlocked one keeps the runner's own
+      # keychain out of it, and the tests delete their item again.
+      - name: Make a keychain for the tests
+        run: |
+          security create-keychain -p ci "$RUNNER_TEMP/ci.keychain-db"
+          security set-keychain-settings -lut 3600 "$RUNNER_TEMP/ci.keychain-db"
+          security unlock-keychain -p ci "$RUNNER_TEMP/ci.keychain-db"
+          security default-keychain -s "$RUNNER_TEMP/ci.keychain-db"
+      - name: Test pf-client
+        run: cargo test -p pf-client --locked
+      - name: Build the UI bundle
+        run: npm --prefix apps run build --workspace ui
+      - name: Build the app
+        working-directory: apps/desktop
+        run: ../node_modules/.bin/tauri build --bundles app --target aarch64-apple-darwin -- --locked
+      # An ad-hoc signature (`-s -`) has no identity: Developer ID signing and notarization wait for r2.
+      - name: Sign ad hoc
+        working-directory: apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+        run: codesign --force --deep -s - "Pulse Factory.app"
+      - name: Verify the signature
+        working-directory: apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+        run: codesign --verify --deep --strict --verbose=2 "Pulse Factory.app"
+      - name: Zip the app
+        working-directory: apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos
+        run: ditto -c -k --keepParent "Pulse Factory.app" "$RUNNER_TEMP/pulse-factory-macos-app.zip"
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-factory-macos-app
+          path: ${{ runner.temp }}/pulse-factory-macos-app.zip
+          if-no-files-found: error
+          retention-days: 30
