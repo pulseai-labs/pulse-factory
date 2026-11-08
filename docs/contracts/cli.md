@@ -13,7 +13,9 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
   is `<state dir>/controller.sock`, mode 0600. The controller owns the store, the queue and the
   ledgers (ADR-0003). A client never writes there.
 - **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
-  ledger of the controller's own commands (`project`, and the device commands: the redeem of a pairing code and `device revoke`). It is
+  ledger of the controller's own commands (`project`, the device commands, which are the redeem of a
+  pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end` and
+  `chat_item_redact`, with the kind backfill `project_kind` that runs at controller start). It is
   not a run's ledger. Each command is admitted once under the admission scope `@controller`, where
   a run's commands are admitted under the run's ID, and each admitted or refused new command is one
   line, `- #<n> <command> …`, written by the controller as the only writer. A replay writes no line.
@@ -27,8 +29,11 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
   revoke` is the one exception: it still commits to the store, so the device is refused at once,
   and its line waits in the outbox for the next start to append. The reads still work.
 - **`halt` and the projects.** `halt` applies to runs only. A `project` command launches nothing and
-  changes no run, so a halt neither stops it nor needs it. The same holds for `device` commands.
-  `halt` is not open to a device over the API either (`api.md`).
+  changes no run, so a halt neither stops it nor needs it. The same holds for `device` commands, and
+  for the four commands `project_kind`, `chat_session_start`, `chat_session_end` and
+  `chat_item_redact`: they launch nothing and change no run, so `halt` does not apply to them. The
+  verbs that reach the three chat commands, and `halt` over the live chat processes, come with the
+  chat verbs of `r1.s3.w3`. `halt` is not open to a device over the API either (`api.md`).
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -240,18 +245,54 @@ pulse-factory project list [--json]
 pulse-factory project remove <id> [--command-id <id>] [--json]
 ```
 
-A project is an ID, a name and one root. Nothing else is decided: the project has no repo, pairing,
-worktree or kind field, and the rest of its schema waits for the project hierarchy brainstorm
-(operator, 2026-11-07). The verbs launch nothing and change no run, so `halt` does not apply to
-them. Each change is a controller command with a command ID and one line of the controller ledger
-(see Common rules).
+A project is an ID, a name, one root, a kind and a remote key (ADR-0015). The verbs launch nothing
+and change no run, so `halt` does not apply to them. Each change is a controller command with a
+command ID and one line of the controller ledger (see Common rules).
 
 - **The root.** `<root>` is an existing directory, a git repo or a plain folder. The CLI resolves a
   relative `<root>` against its current directory and sends an absolute path. The controller makes
   it canonical (`std::fs::canonicalize`): two spellings of one directory, such as a symlink or a
-  `..`, are one root. It refuses a root that does not exist, is not a directory, or is `/`. It does
-  not look inside the root: a git repo and a plain folder are the same to it. A live project holds
-  its root alone: a second `add` of the same root is refused until the first is removed.
+  `..`, are one root. It refuses a root that does not exist, is not a directory, or is `/`. A live
+  project holds its root alone: a second `add` of the same root is refused until the first is
+  removed.
+- **The kind.** `add` looks inside the root once and stores its kind. The kind never changes. After
+  a `git init` in a `folder` project, remove the project and add it again.
+  - `git`: the root is the main worktree of a git repository.
+  - `folder`: the root is a plain folder, or a subdirectory of a repository. Its git operations
+    would reach outside it, so it is a folder.
+  - Git runs as a subprocess with a 10-second timeout and with the controller's own `GIT_*`
+    variables removed. A failed detection is never `folder`: it is a refusal that names the cause.
+  - `add` refuses a linked worktree (`the root is a linked worktree; add its main worktree instead:
+    <main>`), a bare repository, the inside of a git directory, a repository that git refuses for
+    dubious ownership, a submodule checkout or a `--separate-git-dir` checkout (`the root is not a
+    main worktree: its git directory is <dir>`), and any other git failure, with git's first stderr
+    line. The last two are a known limit of `r1.s3`.
+- **The remote key.** A `git` project has a `remote_key` and a `folder` project has none. The key is
+  the host and path of the project's remote, for example `github.com/pulseai-labs/pulse-factory`.
+  The remote is `origin`, else the one remote when there is exactly one, else there is no key. The
+  key drops the user, the password and the port, lowercases the host, and drops one trailing `/` and
+  one trailing `.git`. A local path, a `file://` URL or a URL with no path gives no key.
+  - `list` reads the key again from git for each live `git` project, and writes nothing: a read
+    never costs an admission. When the read fails, or the root is not a directory, it answers the
+    stored key.
+  - The stored key is set by `add`, by the kind backfill and by each chat session start, each inside
+    a command that is already admitted.
+  - The remote URL is never stored, printed, written to a ledger line or put in a JSON field,
+    because it can hold a token.
+- **The kind backfill.** A project that was added before the kind existed has no kind. At each
+  controller start, the controller runs the detection of `add` for each live project with no kind.
+  It never guesses.
+  - A project it detects gets one admitted `project_kind` command (command ID
+    `backfill-kind:<P-id>`).
+  - A project it cannot detect keeps no kind, and the cause is reported in four places: a refused
+    `project_kind` admission (command ID `backfill-kind:<P-id>:refused`, replayed at the next start,
+    so its line appears once); a stderr line at each start, `pulse-factory: project P-1 has no kind:
+    <cause>`; `list`, with `"kind": null`, the cause in `kind_error` and the text marker below; and
+    the refusal of a chat session start, `project P-1 has no kind (<cause>); remove it and add it
+    again`.
+  - Each start tries again, so a cause that the operator fixes gives the kind at the next start.
+  - A controller ledger that is stopped skips the backfill and prints why. A removed project is never
+    backfilled.
 - **The name.** `--name` defaults to the last path component of the root. A name is 1 to 64
   characters, has no control character and no line break, and is unique among live projects. The
   check is exact: `Alpha` and `alpha` are two names.
@@ -266,21 +307,46 @@ them. Each change is a controller command with a command ID and one line of the 
   refusal.
 - **`add`** prints `project P-1 added: <name> (<root>)`.
 - **`list`** prints one line per live project in creation order, `P-1  <name>  <root>`, or
-  `no projects`. It needs no claim and is open to a seat.
-- **`remove`** prints `project P-1 removed: <name> (<root>)`.
+  `no projects`. A project with no kind ends its line with `  (no kind: <cause>)`. It needs no claim
+  and is open to a seat.
+- **`remove`** prints `project P-1 removed: <name> (<root>)`. It is refused while the project has a
+  live chat session (`project P-1 has a live chat session S-2; end it first`). It marks the project's
+  live worktree rows removed in the same command.
 - **JSON.** `add` and `remove` print `{"schema_version": 1, "replayed": <bool>, "project": {"id",
-  "name", "root", "created_at", "removed_at"}}`, where `removed_at` is null for a live project.
+  "name", "root", "created_at", "removed_at", "kind", "remote_key", "kind_error"}}`, where
+  `removed_at` is null for a live project, `kind` is `"git"` or `"folder"`, `remote_key` is a string
+  or null, and `kind_error` is null unless the project has no kind. `kind` is null only for a project
+  that the backfill could not detect, and `kind_error` is then the cause from a fresh detection. A
+  new field does not raise `schema_version`.
   `list` prints `{"schema_version": 1, "projects": [...]}` with the live projects only, in creation
   order. The controller verbs are `project_add`, `project_list` and `project_remove`.
 - **Refusals** (exit 1, nothing on stdout, the reason on stderr, one admission and one ledger
-  line): a root that does not exist, is not a directory, is `/`, or is held by a live project; a name
+  line): a root that does not exist, is not a directory, is `/`, or is held by a live project; a root
+  that has no kind (a linked worktree, a bare repository, the inside of a git directory, a repository
+  git refuses for dubious ownership, a submodule or `--separate-git-dir` checkout, or a git failure,
+  as under "The kind"); a name
   that is empty, longer than 64 characters, holds a control character or a line break, or is held by
-  a live project; an unknown or removed ID on `remove`. A command ID that is not valid, and
+  a live project; an unknown or removed ID on `remove`, and a `remove` of a project with a live chat
+  session. A command ID that is not valid, and
   `PF_SEAT_TOKEN` set on `add` or `remove`, are refused before any command is admitted: nothing is
   stored.
-- **Ledger lines.** `project_add P-1 admitted name=<name> root=<root> command=<id>`,
+- **Ledger lines.** `project_add P-1 admitted name=<name> root=<root> kind=<kind> command=<id>`,
   `project_remove P-1 admitted command=<id>`, and `project_add refused reason="<reason>"
-  command=<id>`. A value with a space is quoted.
+  command=<id>`. A value with a space is quoted. The commands that the chat sessions add:
+  - `project_kind P-1 admitted kind=<kind> remote_key=<key or none> command=backfill-kind:P-1`, and
+    `project_kind refused reason="project P-1: <cause>" command=backfill-kind:P-1:refused`;
+  - `chat_session_start S-1 admitted project=P-1 worktree=W-1 path=<root> agent=orchestrator
+    command=<id>`. When the start changed the stored remote key, the line ends
+    `remote_key=<key or none>` before `command=`. A refused start is `chat_session_start refused
+    reason="<reason>" command=<id>`;
+  - `chat_session_end S-1 admitted command=<id>`;
+  - `chat_item_redact S-1 seq=4 admitted command=<id>`. The line never holds the item's text.
+
+  The chat commands have no verb yet. They are controller functions that `r1.s3.w3`'s verbs call. A
+  chat session start checks the root live (a git failure or a gone root is a refusal), records the
+  main worktree at the project's first Orchestrator start, allows one live Orchestrator for each
+  project, and starts a new chat after an end with a fresh CLI context. A `chat_session_start` that
+  is replayed answers the first record and writes no line.
 
 ## `device`
 

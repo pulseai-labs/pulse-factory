@@ -979,6 +979,7 @@ dependencies = [
  "pf-rules",
  "pf-store-sqlite",
  "pf-workflow",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

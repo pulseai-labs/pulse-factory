@@ -14,6 +14,7 @@ export type * from "./gen/PairRequest";
 export type * from "./gen/PairResult";
 export type * from "./gen/ProjectAddArgs";
 export type * from "./gen/ProjectChanged";
+export type * from "./gen/ProjectKind";
 export type * from "./gen/ProjectList";
 export type * from "./gen/ProjectRecord";
 export type * from "./gen/ProjectRemoveArgs";

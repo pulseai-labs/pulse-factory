@@ -631,7 +631,11 @@ pub fn project_list(a: &ProjectListArgs) -> i32 {
                 }
                 for p in &list {
                     let (id, name, root) = project_parts(p);
-                    println!("{id}  {name}  {root}");
+                    // A project that no detection could give a kind ends its line with the cause.
+                    match (p["kind"].is_null(), p["kind_error"].as_str()) {
+                        (true, Some(cause)) => println!("{id}  {name}  {root}  (no kind: {cause})"),
+                        _ => println!("{id}  {name}  {root}"),
+                    }
                 }
             }
             0

@@ -30,7 +30,21 @@ pub struct ProjectRemoveArgs {
     pub command_id: String,
 }
 
+/// What a project is (ADR-0015): a git repository's main worktree, or a plain folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+pub enum ProjectKind {
+    Git,
+    Folder,
+}
+
 /// One project, as every verb shows it.
+///
+/// `kind` is null only for a project that was added before the kind existed and that the
+/// controller could not detect at its start. `kind_error` is then the cause, from a fresh detection
+/// at list time, and it is null otherwise. `remote_key` is `host/path` of the git remote, for a
+/// `git` project with one: never a URL, because a URL can hold a token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ProjectRecord {
     pub id: String,
@@ -38,6 +52,9 @@ pub struct ProjectRecord {
     pub root: String,
     pub created_at: String,
     pub removed_at: Option<String>,
+    pub kind: Option<ProjectKind>,
+    pub remote_key: Option<String>,
+    pub kind_error: Option<String>,
 }
 
 /// The answer of `project_add` and `project_remove`. `replayed` is true when the command ID was
@@ -168,6 +185,7 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ProjectAddArgs::export_all(cfg)?;
     ProjectRemoveArgs::export_all(cfg)?;
     ProjectRecord::export_all(cfg)?;
+    ProjectKind::export_all(cfg)?;
     ProjectChanged::export_all(cfg)?;
     ProjectList::export_all(cfg)?;
     DeviceRecord::export_all(cfg)?;
