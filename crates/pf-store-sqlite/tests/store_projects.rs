@@ -4,7 +4,7 @@
 
 use pf_engine::port::store::{
     AdmissionOutcome, CONTROLLER_SCOPE, Commit, Committed, Effect, LedgerEntry, NEW_ID,
-    NewAdmission, NewProject, Store,
+    NewAdmission, NewProject, ProjectKind, Store,
 };
 use pf_store_sqlite::SqliteStore;
 
@@ -39,6 +39,8 @@ fn add_commit(command_id: &str, name: &str, root: &str) -> Commit {
             name: name.to_string(),
             root: root.to_string(),
             created_at: "t1".to_string(),
+            kind: ProjectKind::Git,
+            remote_key: None,
         })],
         ledger: Some(LedgerEntry {
             ledger_file: "controller.ledger".to_string(),

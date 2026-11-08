@@ -185,7 +185,13 @@ impl Store for FakeStore {
                 Effect::AddProject(_)
                 | Effect::RemoveProject { .. }
                 | Effect::AddDevice(_)
-                | Effect::RevokeDevice { .. } => {}
+                | Effect::RevokeDevice { .. }
+                | Effect::SetProjectKind { .. }
+                | Effect::SetProjectRemoteKey { .. }
+                | Effect::StartChatSession(_)
+                | Effect::EndChatSession { .. }
+                | Effect::SetChatSessionRuntime { .. }
+                | Effect::RedactChatItem { .. } => {}
             }
         }
         let ledger = commit.ledger.map(|entry| {
@@ -336,6 +342,85 @@ impl Store for FakeStore {
             }
         }
         Ok(())
+    }
+
+    // The engine tests carry no hierarchy: the engine reads none of it, so these reads are empty
+    // and these writes change nothing.
+    fn worktree(&self, _id: &str) -> Result<Option<WorktreeRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn worktrees(&self, _project_id: &str) -> Result<Vec<WorktreeRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn live_worktree_at(&self, _path: &str) -> Result<Option<WorktreeRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn agents(&self) -> Result<Vec<AgentRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn agent(&self, _id: &str) -> Result<Option<AgentRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn chat_session(&self, _id: &str) -> Result<Option<ChatSessionRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn chat_sessions(&self, _project_id: &str) -> Result<Vec<ChatSessionRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn live_chat_sessions(&self) -> Result<Vec<ChatSessionRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn chat_items_after(
+        &self,
+        _session_id: &str,
+        _after_seq: u64,
+        _limit: u32,
+    ) -> Result<Vec<ChatItemRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn chat_item(&self, _session_id: &str, _seq: u64) -> Result<Option<ChatItemRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn pending_requests(&self, _session_id: &str) -> Result<Vec<ChatItemRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn mark_worktree_gone(&self, _id: &str, _at: &str) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn set_chat_session_state(
+        &self,
+        _id: &str,
+        _state: ChatSessionState,
+        _at: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn set_chat_runtime_ref(
+        &self,
+        _id: &str,
+        _runtime_session_ref: &str,
+        _at: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn append_chat_item(&self, _item: NewChatItem) -> Result<ChatItemRow, StoreError> {
+        Err(StoreError(
+            "the engine's test store holds no chat items".to_string(),
+        ))
     }
 }
 

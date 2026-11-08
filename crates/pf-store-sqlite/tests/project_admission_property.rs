@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use pf_engine::port::store::{
     AdmissionOutcome, AdmissionRow, CONTROLLER_SCOPE, Commit, Committed, Effect, LedgerEntry,
-    NEW_ID, NewAdmission, NewProject, Store,
+    NEW_ID, NewAdmission, NewProject, ProjectKind, Store,
 };
 use pf_store_sqlite::SqliteStore;
 use proptest::prelude::*;
@@ -177,6 +177,8 @@ impl Rig {
                     name: format!("name-{name}"),
                     root: format!("/root/{root}"),
                     created_at: "t".to_string(),
+                    kind: ProjectKind::Git,
+                    remote_key: None,
                 })],
             ),
             Op::Remove { n, .. } => commit(

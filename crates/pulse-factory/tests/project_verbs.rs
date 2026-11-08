@@ -13,7 +13,7 @@ use common::*;
 use pf_engine::ledger::format_line;
 use pf_engine::port::store::{
     AdmissionOutcome, CONTROLLER_SCOPE, Commit, Committed, Effect, LedgerEntry, NEW_ID,
-    NewAdmission, NewProject, Store,
+    NewAdmission, NewProject, ProjectKind, Store,
 };
 use pulse_factory::controller::{Config, Controller};
 use serde_json::{Value, json};
@@ -126,7 +126,22 @@ fn add_json_holds_the_version_the_replay_flag_and_the_project() {
     let keys: Vec<&str> = p.as_object().unwrap().keys().map(String::as_str).collect();
     let mut sorted = keys.clone();
     sorted.sort_unstable();
-    assert_eq!(sorted, ["created_at", "id", "name", "removed_at", "root"]);
+    assert_eq!(
+        sorted,
+        [
+            "created_at",
+            "id",
+            "kind",
+            "kind_error",
+            "name",
+            "remote_key",
+            "removed_at",
+            "root"
+        ]
+    );
+    assert_eq!(p["kind"], "git");
+    assert_eq!(p["remote_key"], Value::Null);
+    assert_eq!(p["kind_error"], Value::Null);
 }
 
 #[test]
@@ -562,12 +577,12 @@ fn the_controller_ledger_has_one_line_per_new_command_in_order_and_none_for_a_re
     assert_eq!(lines.len(), 5, "{lines:#?}");
     let want = [
         format!(
-            "- #1 project_add P-1 admitted name=a root={} command=id-add-a",
+            "- #1 project_add P-1 admitted name=a root={} kind=folder command=id-add-a",
             a.display()
         ),
         "- #2 project_add refused reason=\"".to_string(),
         format!(
-            "- #3 project_add P-2 admitted name=b root={} command=id-add-b",
+            "- #3 project_add P-2 admitted name=b root={} kind=folder command=id-add-b",
             b.display()
         ),
         "- #4 project_remove P-1 admitted command=id-rm-a".to_string(),
@@ -670,7 +685,7 @@ fn a_name_that_holds_spaces_keeps_the_ledger_line_readable() {
     assert_eq!(
         lines[0],
         format!(
-            "- #1 project_add P-1 admitted name=\"two words\" root={} command=c1",
+            "- #1 project_add P-1 admitted name=\"two words\" root={} kind=folder command=c1",
             a.display()
         )
     );
@@ -726,6 +741,8 @@ fn commit_without_append(live: &Live, command_id: &str, name: &str, root: &Path)
             name: name.to_string(),
             root: path_str(root),
             created_at: "2026-11-07T00:00:00.000Z".to_string(),
+            kind: ProjectKind::Folder,
+            remote_key: None,
         })],
         ledger: Some(LedgerEntry {
             ledger_file: path_str(&ledger_path(live)),

@@ -74,6 +74,33 @@ fn the_committed_types_equal_what_ts_rs_renders_now() {
     );
 }
 
+/// `r1.s3.w2`: a project shows its kind, its remote key and why it has no kind. A remote URL has no
+/// field in any wire type: only the canonical key `host/path` does.
+#[test]
+fn a_project_record_has_its_kind_its_remote_key_and_the_cause_of_no_kind() {
+    let (_dir, now) = rendered();
+    let record = &now["ProjectRecord.ts"];
+    for field in [
+        "kind: ProjectKind | null",
+        "remote_key: string | null",
+        "kind_error: string | null",
+    ] {
+        assert!(
+            record.contains(field),
+            "ProjectRecord.ts lacks {field}: {record}"
+        );
+    }
+    assert!(record.contains("import type { ProjectKind }"), "{record}");
+    let kind = &now["ProjectKind.ts"];
+    assert!(kind.contains("\"git\" | \"folder\""), "{kind}");
+    for (name, text) in &now {
+        assert!(
+            !text.contains("remote_url"),
+            "{name} has a remote URL field"
+        );
+    }
+}
+
 #[test]
 fn the_wire_types_a_client_needs_are_rendered() {
     let (_dir, now) = rendered();
@@ -81,6 +108,7 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "ProjectAddArgs.ts",
         "ProjectRemoveArgs.ts",
         "ProjectRecord.ts",
+        "ProjectKind.ts",
         "ProjectChanged.ts",
         "ProjectList.ts",
         "DeviceRecord.ts",

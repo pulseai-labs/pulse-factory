@@ -88,7 +88,15 @@ fn dump(conn: &Connection) -> Vec<(String, Vec<String>)> {
         .iter()
         .map(|t| {
             let mut stmt = conn
-                .prepare(&format!("SELECT * FROM {t} ORDER BY rowid"))
+                .prepare(&format!(
+                    "SELECT {} FROM {t} ORDER BY rowid",
+                    // Migration 0005 adds two columns to `projects`: a version-N dump reads the old ones.
+                    if *t == "projects" {
+                        "id, name, root, created_at, removed_at"
+                    } else {
+                        "*"
+                    }
+                ))
                 .unwrap();
             let n = stmt.column_count();
             let rows = stmt
@@ -130,7 +138,9 @@ fn insert_project(
     removed_at: Option<&str>,
 ) -> rusqlite::Result<usize> {
     conn.execute(
-        "INSERT INTO projects (id, name, root, created_at, removed_at) VALUES (?1, ?2, ?3, 't1', ?4)",
+        // Migration 0005 gives every new project a kind: the unique indexes are the point here.
+        "INSERT INTO projects (id, name, root, created_at, removed_at, kind) \
+         VALUES (?1, ?2, ?3, 't1', ?4, 'folder')",
         params![id, name, root, removed_at],
     )
 }
@@ -138,7 +148,7 @@ fn insert_project(
 #[test]
 fn the_migration_list_has_projects_as_version_three() {
     // Migration 0004 (devices) follows it.
-    assert_eq!(MIGRATIONS.len(), 4);
+    assert_eq!(MIGRATIONS.len(), 5);
     assert_eq!(MIGRATIONS[2].version, 3);
     assert_eq!(MIGRATIONS[2].name, "projects");
 }
@@ -151,14 +161,14 @@ fn a_version_two_store_migrates_to_the_latest_and_keeps_every_row() {
     let before = dump(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5]);
     assert_eq!(dump(&conn), before, "no row of version 2 changed");
     assert_eq!(count(&conn, "projects"), 0);
-    // The new columns are exactly the ones the spec names, and the table is strict.
+    // The columns are those of migration 0003, and the two that migration 0005 adds.
     let mut stmt = conn.prepare("PRAGMA table_info(projects)").unwrap();
     let columns: Vec<String> = stmt
         .query_map([], |r| r.get::<_, String>(1))
@@ -167,7 +177,16 @@ fn a_version_two_store_migrates_to_the_latest_and_keeps_every_row() {
         .collect();
     assert_eq!(
         columns,
-        ["id", "name", "root", "created_at", "removed_at"].map(String::from)
+        [
+            "id",
+            "name",
+            "root",
+            "created_at",
+            "removed_at",
+            "kind",
+            "remote_key"
+        ]
+        .map(String::from)
     );
 }
 
@@ -176,10 +195,10 @@ fn a_fresh_file_opens_at_the_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 4);
+    assert_eq!(store.schema_version().unwrap(), 5);
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5]);
     assert_eq!(count(&conn, "projects"), 0);
 }
 
@@ -197,7 +216,7 @@ fn a_version_two_store_with_an_active_run_refuses_and_stays_at_two() {
         err,
         OpenError::RunActive {
             current: 2,
-            pending: 4
+            pending: 5
         }
     );
 

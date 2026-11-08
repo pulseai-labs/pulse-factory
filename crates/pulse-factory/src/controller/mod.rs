@@ -2,6 +2,7 @@
 //! the ledger (ADR-0003). It also owns the projects and devices and their own ledger,
 //! `controller.ledger`, and, when the operator sets an address, the network API (ADR-0012).
 
+pub mod agents;
 pub mod api;
 pub mod base_push;
 pub mod client;
@@ -13,7 +14,9 @@ pub mod ports;
 pub mod projects;
 pub mod requests;
 pub mod seat;
+pub mod sessions;
 pub mod status;
+pub mod worktrees;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +60,9 @@ pub struct Config {
     /// How long a device may make no call before the API refuses it and it must pair again: 30
     /// days (ADR-0012). A test sets a short time.
     pub device_idle: Duration,
+    /// Variables added to every git call, after the controller's own `GIT_*` variables are removed.
+    /// Empty. A test sets one, such as `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`.
+    pub git_env: Vec<(String, String)>,
 }
 
 impl Config {
@@ -72,6 +78,7 @@ impl Config {
             pair_ttl: Duration::from_secs(600),
             api_retry: api::DEFAULT_RETRY,
             device_idle: DEFAULT_DEVICE_IDLE,
+            git_env: Vec::new(),
         }
     }
 }
@@ -139,6 +146,10 @@ impl Controller {
             controller_ledger: Mutex::new(controller_ledger),
             api,
         });
+        // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
+        // session is set to wait for `--resume`, as the restart ended its process.
+        controller.backfill_project_kinds();
+        controller.settle_live_chat_sessions();
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
             for entry in entries.flatten() {

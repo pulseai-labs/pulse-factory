@@ -63,6 +63,9 @@ export function project(n: number, name = `project-${n}`): ProjectRecord {
     root: `/home/dev/${name}`,
     created_at: "2026-11-07T10:00:00Z",
     removed_at: null,
+    kind: "git",
+    remote_key: null,
+    kind_error: null,
   };
 }
 
