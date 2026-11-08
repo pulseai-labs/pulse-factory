@@ -6,6 +6,7 @@ members = [
     "crates/pf-workflow",
     "crates/pf-rules",
     "crates/pf-adapter-omp",
+    "crates/pf-adapter-claude",
     "crates/pf-adapter-fake",
     "crates/pf-forge-github",
     "crates/pf-forge-bare",

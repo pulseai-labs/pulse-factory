@@ -7,8 +7,10 @@
 //! that follows a script. The script advances only when the test says so (`advance`, `finish`),
 //! so a test sees each state between two steps.
 
+mod chat;
 mod paper;
 
+pub use chat::FakeChat;
 pub use paper::{PaperAdapter, PaperConfig};
 
 use std::collections::{BTreeMap, HashMap};

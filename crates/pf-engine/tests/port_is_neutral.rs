@@ -7,6 +7,10 @@
 //! renamed or inherited from the workspace. Each check has a case over an inline bad sample that
 //! must fire.
 //!
+//! `pf-engine/src/` is also checked for the chat runtime's name and its vendor's (`claude`,
+//! `anthropic`), because the chat port is neutral (ADR-0014). `pf-rules/src/` keeps the shorter list:
+//! its AI-trailer names are general by design.
+//!
 //! The banned words sit in the lists below, so this file is not under either `src/` on purpose.
 
 use std::path::{Path, PathBuf};
@@ -59,6 +63,20 @@ fn banned_in(text: &str) -> Vec<String> {
     }
     if text.to_ascii_lowercase().contains("--plugin-dir") {
         hits.push("--plugin-dir".to_string());
+    }
+    hits
+}
+
+/// What is wrong with this text in `pf-engine/src`: everything `banned_in` finds, and the name of
+/// the first chat runtime and of its vendor, each as a whole word or an identifier part. The
+/// engine's chat port is neutral (ADR-0014). `pf-rules/src` keeps `banned_in` alone: its
+/// AI-trailer names are general, by design.
+fn banned_in_engine(text: &str) -> Vec<String> {
+    let mut hits = banned_in(text);
+    for part in parts(text) {
+        if part == "claude" || part == "anthropic" {
+            hits.push(part);
+        }
     }
     hits
 }
@@ -171,7 +189,7 @@ fn rules_dir() -> PathBuf {
     engine_dir().join("../pf-rules")
 }
 
-fn assert_source_is_neutral(dir: &Path, min_files: usize) {
+fn assert_source_is_neutral(dir: &Path, min_files: usize, banned: fn(&str) -> Vec<String>) {
     let mut files = Vec::new();
     files_under(&dir.join("src"), &mut files);
     assert!(
@@ -184,7 +202,7 @@ fn assert_source_is_neutral(dir: &Path, min_files: usize) {
     for file in &files {
         let text = std::fs::read_to_string(file).unwrap();
         for (n, line) in text.lines().enumerate() {
-            for hit in banned_in(line) {
+            for hit in banned(line) {
                 findings.push(format!("{}:{}: {hit}", file.display(), n + 1));
             }
         }
@@ -196,12 +214,12 @@ fn assert_source_is_neutral(dir: &Path, min_files: usize) {
 
 #[test]
 fn the_engine_source_needs_no_runtime() {
-    assert_source_is_neutral(&engine_dir(), 10);
+    assert_source_is_neutral(&engine_dir(), 10, banned_in_engine);
 }
 
 #[test]
 fn the_rules_source_needs_no_runtime() {
-    assert_source_is_neutral(&rules_dir(), 3);
+    assert_source_is_neutral(&rules_dir(), 3, banned_in);
 }
 
 #[test]
@@ -353,4 +371,50 @@ fn every_kind_of_adapter_dependency_fires_on_an_inline_bad_sample() {
     }
     let good = "[package]\nname = \"pf-engine\"\ndescription = \"pf-adapter-omp is a neighbour\"\n[dependencies]\nserde.workspace = true\nserde_json = \"1\"\n[dev-dependencies]\ntempfile = \"3\"\n";
     assert_eq!(adapter_dependencies(good, workspace), Vec::<String>::new());
+}
+
+#[test]
+fn the_engine_check_fires_on_the_chat_runtime_names_on_inline_bad_samples() {
+    let bad = [
+        ("the first chat runtime, lower case", "use claude::Session;"),
+        (
+            "the first chat runtime, capitalised",
+            "// Claude Code runs it",
+        ),
+        (
+            "the first chat runtime, as an identifier part",
+            "struct ClaudeChat;",
+        ),
+        (
+            "the first chat runtime, in a constant",
+            "const CLAUDE_X: u32 = 1;",
+        ),
+        ("the vendor name", "let v = \"anthropic\";"),
+        (
+            "the vendor name, capitalised",
+            "// Anthropic ships the binary",
+        ),
+        ("the vendor name, in snake case", "fn anthropic_key() {}"),
+    ];
+    for (name, sample) in bad {
+        assert!(
+            !banned_in_engine(sample).is_empty(),
+            "the {name} sample must fire: {sample}"
+        );
+    }
+    let good = [
+        "// a chat port",
+        "pub trait ChatPort {}",
+        "let claimed = 1; let clause = 2;",
+        "// the runtime's own session id",
+        "let anthology = 1;",
+    ];
+    for sample in good {
+        assert_eq!(banned_in_engine(sample), Vec::<String>::new(), "{sample}");
+    }
+    // The rules check keeps its own list: its AI-trailer names are general, by design.
+    assert_eq!(
+        banned_in("// Claude and Anthropic are AI names"),
+        Vec::<String>::new()
+    );
 }

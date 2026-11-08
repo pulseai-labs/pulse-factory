@@ -9,6 +9,8 @@
   above changes.
 - **Amended:** 2026-11-07, at `r1.s2.w1`: the store port also carries controller entities. Nothing
   above changes.
+- **Amended:** 2026-11-08, at `r1.s3.w1`: the engine defines a fifth port, the chat port. Nothing
+  above changes.
 
 ## Context
 Pulse Factory is a registry and driver of workflows. The engine is generic. A workflow is data that
@@ -74,3 +76,14 @@ controller's own state. The engine core never reads them, and the engine makes n
 Project commands are controller commands (ADR-0003), so the engine gains no method word. No
 planning-method word enters the port: a project is an ID, a name and a root, and the project
 hierarchy is decided elsewhere (planning audit C6).
+
+## Amendment, 2026-11-08 (`r1.s3.w1`): the chat port
+
+The engine defines a fifth port, the **chat port** (`ChatPort`, in `crates/pf-engine/src/port/chat.rs`;
+ADR-0014). It serves the operator's chats with an agent, which are not run seats, so it is separate
+from the agent adapter port. Like every port it names no runtime: no runtime name, flag or
+planning-method word appears in its source, and `port_is_neutral` now also bans `claude` and
+`anthropic` in `pf-engine/src`. A runtime is a new adapter crate that implements the port, and
+`pf-engine` never depends on it. `pf-adapter-claude` implements the chat port for Claude Code and will
+also hold the Release 2 Claude Code seat adapter, one implementation per port. `pf-adapter-fake`
+holds a scripted `FakeChat` beside its other fakes.

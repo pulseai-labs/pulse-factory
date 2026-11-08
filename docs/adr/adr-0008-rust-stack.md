@@ -6,6 +6,9 @@
   "Unverified" to "Verified". Nothing above changes except where the amendment says.
 - **Amended:** 2026-11-08, at `r1.s2.w4`: the pinned client's crates and features, and the Mac app's
   separate cargo workspace. Nothing above changes except where the amendment says.
+- **Amended:** 2026-11-08, at `r1.s3.w1`: the new member `crates/pf-adapter-claude` and its
+  `pf-claude-replay` binary, and the line references of two verified claims. Nothing above changes
+  except where the amendment says.
 
 ## Context
 - The architecture spec chose Rust, Tokio, SQLite through rusqlite, portable-pty as the first PTY
@@ -101,9 +104,9 @@ member. `pulse-factory` depends on it.
 verified now:
 - rusqlite runs WAL with `synchronous=FULL` behind one writer thread. The store opens with
   `journal_mode=wal` and `synchronous=FULL` and reads them back through `PRAGMA`
-  (`crates/pf-store-sqlite/src/lib.rs`, tested in `crates/pf-store-sqlite/tests/store_settings.rs`).
+  (`crates/pf-store-sqlite/src/lib.rs:216-225`, tested in `crates/pf-store-sqlite/tests/store_settings.rs`).
 - yaml-rust2 rejects duplicate keys, and its markers give `pf-workflow` a position for each
-  unknown-field and duplicate-key error (`crates/pf-workflow/tests/parse_strict.rs`: "a duplicate
+  unknown-field and duplicate-key error (`crates/pf-workflow/tests/parse_strict.rs:180`: "a duplicate
   key is refused at the second key", and the unknown-field tests).
 
 ## Amendment, 2026-11-08 (`r1.s2.w4`)
@@ -144,3 +147,21 @@ green:** `KeychainStore` compiles against `security-framework` 3.7.0 and its tes
 
 **Reversibility.** `security-framework` sits behind the `DeviceStore` trait; a file store replaces it.
 Tauri sits behind the same six-operation `Transport`, and the UI does not change if it is replaced.
+
+## Amendment, 2026-11-08 (`r1.s3.w1`)
+
+The chat adapter is a workspace member: `crates/pf-adapter-claude` (ADR-0014). It holds the library
+`pf_adapter_claude` and one binary, `pf-claude-replay`, which stands in for the `claude` CLI and
+plays recorded fixtures back in tests and demos.
+
+**No new third-party crate.** The crate depends on `pf-engine`, `serde`, `serde_json` and `tokio`
+with the `sync` feature, all already in the workspace. `tempfile` is a dev dependency, as elsewhere.
+It does not take `sha2`: the crate has its own streaming SHA-256 (`src/sha256.rs`), checked against
+the FIPS 180-4 vectors and against `pf_engine::claim::sha256_hex`, so the managed CLI binary
+(about 340 MB) is hashed in chunks and never read whole into memory. `crates/pf-engine/src/claim/**`
+is the `claim-authority` gate's surface and is not changed.
+
+**`tokio` `sync`** is now also a feature of `pf-adapter-fake` and `pf-adapter-claude`, for the event
+channel of the chat port (an unbounded `mpsc`, as in `pf-engine`).
+
+**`Cargo.lock`** gains the one member and the `tokio` edge of `pf-adapter-fake`, and no other crate.

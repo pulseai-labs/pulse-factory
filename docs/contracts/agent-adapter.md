@@ -272,3 +272,9 @@ An adapter documents any other key it reads. It does not change the meaning of a
    start a paid session.
 4. Make the hook fail closed, and test it with a call it must deny.
 5. Test the first-turn failure with a silent stub and with a stub that prints a prompt and a token.
+
+## Chat sessions
+
+This contract covers the run seats' port. A chat with an agent runs on a separate port, with its own
+adapters and its own contract: `docs/contracts/chat-adapter.md` (ADR-0014). The nine duties above do not
+apply to it, and its version rule is the chat contract's "Bump the CLI pin".
