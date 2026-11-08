@@ -167,13 +167,34 @@ fn a_main_worktree_is_git_and_a_plain_folder_and_a_subdirectory_are_folders() {
 fn a_repo_that_git_refuses_for_dubious_ownership_is_refused_and_a_folder_is_not() {
     // The seam adds the variable to the controller's git calls only. The helper below runs git
     // outside the controller, so it builds the repos as usual.
+    //
+    // The seam also drops the system and global git config, so that no `safe.directory` entry on
+    // the host (a CI runner sets one) can trust the repo again.
+    let seam = [
+        ("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ];
     let live = Live::start_config(BIN.into(), |c| {
-        c.git_env.push((
-            "GIT_TEST_ASSUME_DIFFERENT_OWNER".to_string(),
-            "1".to_string(),
-        ));
+        for (name, value) in seam {
+            c.git_env.push((name.to_string(), value.to_string()));
+        }
     });
     let main = repo(&live, "main");
+    // Some git builds ignore the test variable. Probe the host git with the same variables: when
+    // it does not refuse, no repo here can be made to look foreign, so the end-to-end case cannot
+    // run. the unit test `a_git_ownership_refusal_is_told_by_its_message` in `worktrees.rs` still covers the classification.
+    let probe = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&main)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .envs(seam)
+        .output()
+        .unwrap();
+    if probe.status.success() {
+        eprintln!("SKIPPED: this git does not honor GIT_TEST_ASSUME_DIFFERENT_OWNER");
+        return;
+    }
     let why = refusal_of(&live, &main);
     assert!(
         why.trim().ends_with(&format!(

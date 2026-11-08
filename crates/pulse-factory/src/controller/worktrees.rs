@@ -480,3 +480,30 @@ enum GitListing {
     Listed(Vec<ListedWorktree>),
     NotARepository,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn out(stderr: &str) -> GitOut {
+        GitOut {
+            code: Some(128),
+            stdout: Vec::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_git_ownership_refusal_is_told_by_its_message() {
+        let refused = out(
+            "fatal: detected dubious ownership in repository at '/srv/repo'\n\
+             To add an exception for this directory, call:\n\n\
+             \tgit config --global --add safe.directory /srv/repo\n",
+        );
+        assert!(refused.dubious_ownership());
+        assert!(!refused.not_a_repository());
+        let plain = out("fatal: not a git repository (or any of the parent directories): .git\n");
+        assert!(!plain.dubious_ownership());
+        assert!(plain.not_a_repository());
+    }
+}
