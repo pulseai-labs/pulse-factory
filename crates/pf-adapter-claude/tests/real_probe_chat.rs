@@ -148,7 +148,59 @@ const EMPTIED: &[&str] = &[
     "agents",
     "mcp_servers",
     "commands",
+    // The `get_context_usage` response spells the same setup lists in camelCase, and holds them
+    // inside objects (`skills.skillFrontmatter`, `slashCommands`).
+    "skillFrontmatter",
+    "slashCommands",
+    "memoryFiles",
+    "mcpTools",
+    "mcpInstructions",
 ];
+
+/// Empty every list inside `v`, whatever its depth. An object keeps its scalar fields (counts
+/// and token totals name nothing) and loses what the operator's setup put in its lists.
+fn empty_lists(v: &mut Value) {
+    match v {
+        Value::Array(a) => a.clear(),
+        Value::Object(o) => o.values_mut().for_each(empty_lists),
+        _ => {}
+    }
+}
+
+/// The directory name every probe makes: `tempfile::Builder::prefix`, then random letters.
+const PROBE_PREFIX: &str = "pf-claude-probe-";
+
+/// Replace each `<prefix><random alphanumerics>` in `t` with `to`.
+fn replace_run(t: &str, prefix: &str, digits_only: bool, to: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut rest = t;
+    while let Some(i) = rest.find(prefix) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + prefix.len()..];
+        let n = after
+            .find(|c: char| {
+                if digits_only {
+                    !c.is_ascii_digit()
+                } else {
+                    !c.is_ascii_alphanumeric()
+                }
+            })
+            .unwrap_or(after.len());
+        out.push_str(to);
+        rest = &after[n..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Replace every form of a probe's temporary path, whichever probe made it: the directory
+/// itself, the dash-encoded project slug Claude Code derives from it, and the per-user state
+/// directory under `/tmp` that holds its scratchpad and task output.
+fn scrub_probe_paths(t: &str) -> String {
+    let t = replace_run(t, &format!("/tmp/{PROBE_PREFIX}"), false, "<TMP>");
+    let t = replace_run(&t, &format!("-tmp-{PROBE_PREFIX}"), false, "<TMP_SLUG>");
+    replace_run(&t, "/tmp/claude-", true, "<CLAUDE_TMP>")
+}
 
 fn token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | '-')
@@ -222,6 +274,8 @@ impl Scrubber {
         for h in &self.homes {
             t = t.replace(h.as_str(), "<HOME>");
         }
+        // A rescrub knows no temp directory, and a path can also be spelled in its slug form.
+        let t = scrub_probe_paths(&t);
         // Token pass: split on separators, keep them.
         let sep = |c: char| {
             c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '(' | '<' | '>' | ',' | '`')
@@ -292,8 +346,8 @@ impl Scrubber {
                     o.insert("messaging_socket_path".into(), json!("<SOCKET>"));
                 }
                 for (k, x) in o.iter_mut() {
-                    if EMPTIED.contains(&k.as_str()) && x.is_array() {
-                        *x = json!([]);
+                    if EMPTIED.contains(&k.as_str()) && (x.is_array() || x.is_object()) {
+                        empty_lists(x);
                     } else if k == "signature" && x.is_string() {
                         *x = json!("<SIGNATURE>");
                     } else {
@@ -310,6 +364,12 @@ impl Scrubber {
 fn dirty(line: &str) -> Option<&'static str> {
     if line.contains("/home/") {
         return Some("a home path");
+    }
+    if line.contains("/Users/") {
+        return Some("a home path");
+    }
+    if line.contains("/tmp/") || line.contains(PROBE_PREFIX) {
+        return Some("a temporary path");
     }
     if line.contains("sk-ant") {
         return Some("an API key");

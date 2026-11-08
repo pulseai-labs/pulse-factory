@@ -35,15 +35,31 @@ const CASES: [&str; 21] = [
     "artifact_publish",
 ];
 
-/// The lists that name the operator's own setup. Each must be empty wherever it is a list.
-const SETUP_LISTS: [&str; 6] = [
+/// The lists that name the operator's own setup. Each must be empty wherever it is a list, and
+/// no list may be left inside it where it is an object (`get_context_usage` answers with
+/// `skills.skillFrontmatter` and `slashCommands`).
+const SETUP_LISTS: [&str; 11] = [
     "plugins",
     "skills",
     "slash_commands",
     "agents",
     "mcp_servers",
     "commands",
+    "skillFrontmatter",
+    "slashCommands",
+    "memoryFiles",
+    "mcpTools",
+    "mcpInstructions",
 ];
+
+/// A path of a list inside `value` that holds an element, if any.
+fn non_empty_list(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(a) if !a.is_empty() => Some(format!("a list of {}", a.len())),
+        Value::Object(o) => o.values().find_map(non_empty_list),
+        _ => None,
+    }
+}
 
 fn has_email(text: &str) -> bool {
     let b = text.as_bytes();
@@ -72,6 +88,12 @@ fn has_email(text: &str) -> bool {
 fn leak(text: &str) -> Option<&'static str> {
     if text.contains("/home/") {
         return Some("a /home/ path");
+    }
+    if text.contains("/Users/") {
+        return Some("a /Users/ path");
+    }
+    if text.contains("/tmp/") || text.contains("pf-claude-probe-") {
+        return Some("a temporary path");
     }
     if text.contains("sk-ant") {
         return Some("an sk-ant key");
@@ -218,6 +240,30 @@ fn the_joining_check_sees_a_secret_that_no_single_delta_holds() {
 }
 
 #[test]
+fn the_check_sees_a_temporary_path_a_mac_home_and_a_setup_list_inside_an_object() {
+    for path in [
+        "output is at /tmp/claude-1001/-tmp-pf-claude-probe-dZnbA1/x/tasks/a.output",
+        "{\"file_path\": \"/tmp/pf-claude-probe-ccPq90/pf-probe.html",
+        "memory at <HOME>/.claude/projects/-tmp-pf-claude-probe-PDg9bs/memory/",
+    ] {
+        assert_eq!(leak(path), Some("a temporary path"), "{path}");
+    }
+    assert_eq!(leak("/Users/someone/.claude"), Some("a /Users/ path"));
+    assert_eq!(
+        leak("<TMP>/pf-probe.html and <CLAUDE_TMP>/<TMP_SLUG>/x"),
+        None
+    );
+    let context_usage = serde_json::json!({"skills": {"totalSkills": 1,
+        "skillFrontmatter": [{"name": "a-plugin-skill"}]}, "slashCommands": {"includedCommands": 1}});
+    assert!(non_empty_list(&context_usage["skills"]).is_some());
+    assert_eq!(non_empty_list(&context_usage["slashCommands"]), None);
+    assert_eq!(
+        non_empty_list(&serde_json::json!({"skillFrontmatter": []})),
+        None
+    );
+}
+
+#[test]
 fn no_account_block_no_foreign_api_key_source_and_no_setup_list_is_left() {
     for f in all_fixtures() {
         for (_, msg) in &f.body {
@@ -227,9 +273,9 @@ fn no_account_block_no_foreign_api_key_source_and_no_setup_list_is_left() {
                     assert_eq!(value, "none", "{}: apiKeySource", f.name);
                 }
                 if SETUP_LISTS.contains(&key)
-                    && let Some(list) = value.as_array()
+                    && let Some(left) = non_empty_list(value)
                 {
-                    assert!(list.is_empty(), "{}: `{key}` is not empty", f.name);
+                    panic!("{}: `{key}` is not empty: it holds {left}", f.name);
                 }
             });
         }
