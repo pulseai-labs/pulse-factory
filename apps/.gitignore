@@ -1,0 +1,5 @@
+# Installed and built output of the npm workspace. `npm ci` makes node_modules once per tree.
+node_modules/
+dist/
+test-results/
+playwright-report/

@@ -17,7 +17,7 @@ use crate::admission::{
     canonical_content, decide,
 };
 use crate::capacity::Capacity;
-use crate::ledger::{FsLedger, LedgerFile, RecoveryReport, format_line};
+use crate::ledger::{FsLedger, LedgerFile, RecoveryReport};
 use crate::merge::PushRecord;
 use crate::port::agent::{AgentPort, Usage};
 use crate::port::forge::{ForgePort, PrRef};
@@ -291,6 +291,9 @@ impl Engine {
             Ok(Committed::Conflict(_)) => Err(EngineError::Conflict {
                 command_id: command.id,
             }),
+            // Only the effects of controller entities are rejected inside a commit. The engine
+            // makes none, so this arm reports the store's reason and nothing was written.
+            Ok(Committed::Rejected(why)) => Err(EngineError::Rejected(why)),
             Ok(Committed::Applied { admission, ledger }) => {
                 if let Some(line) = ledger
                     && let Err(e) = self.append_and_mark(inner, &line)
@@ -313,13 +316,7 @@ impl Engine {
         inner: &mut Inner,
         line: &LedgerLine,
     ) -> Result<(), String> {
-        inner
-            .ledger
-            .append(&format_line(line.seq, &line.body))
-            .map_err(|e| format!("ledger append failed: {e}"))?;
-        self.store
-            .mark_ledger_written(&line.ledger_file, line.seq)
-            .map_err(|e| format!("marking ledger line {} written failed: {e}", line.seq))
+        crate::ledger::append_and_mark_line(self.store.as_ref(), inner.ledger.as_mut(), line)
     }
 
     /// Stop admitting work, write `health.json` and stderr, and return the error.

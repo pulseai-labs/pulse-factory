@@ -1,6 +1,8 @@
-//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`) and AC-3 to AC-7 (`r1.s1.w5`): the five demo
-//! scripts run against the built binary, and each fails when its journey is broken. The scripts run
-//! the paper env: no model, no spend, no network, no `gh`, and no build.
+//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
+//! AC-9 (`r1.s2.w4`): the demo scripts run against the built binary, and each fails when its journey is
+//! broken. The scripts run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`,
+//! and no build. d14 (`community-edition.sh`) is the exception that the five tests at the end cover: it
+//! asks GitHub for a CI run, and here a stub `gh` answers.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -332,6 +334,36 @@ fn golden_journey_b_reports_what_it_checked() {
     }
 }
 
+/// The limit of `pair-api.sh`: two controller starts and about thirty `curl` calls.
+const PAIR_API_LIMIT: Duration = Duration::from_secs(60);
+
+#[test]
+fn pair_api_passes() {
+    // d11: pairing, the verbs, the 401 answers, the revoke, one peer blocked while another pairs,
+    // the request ledger, and a restart on a new key. `127.0.0.2` and `127.0.0.3` are on the
+    // loopback interface on Linux.
+    let (out, took) = run("pair-api.sh", &[]);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < PAIR_API_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1: paired D-1",
+        "step 5: 127.0.0.3 blocked after 5 bad codes",
+        "step 6: 127.0.0.2 paired D-2 while 127.0.0.3 was blocked",
+        "step 7: api.ledger has 13 lines and no secret is in any log",
+        "server key changed: re-pair",
+        "pair-api: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
 #[test]
 fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
     for name in [
@@ -340,6 +372,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "arm-dry-run.sh",
         "spine-base.sh",
         "seat-tamper.sh",
+        "pair-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [
@@ -559,4 +592,214 @@ fn a_spine_pr_that_names_another_base_fails_golden_journey_b() {
     assert!(stderr(&out).contains("stuck"), "{}", stderr(&out));
     assert!(took < LIMIT, "{took:?}");
     drop(dir);
+}
+
+// ------------------------------------------------------------------ d14: community-edition.sh
+
+/// A git repo with one commit, a stub `gh` and the stub's answers. `list` is what `gh run list`
+/// prints, and `view` is what `gh run view` prints.
+struct Ce {
+    dir: tempfile::TempDir,
+    sha: String,
+}
+
+impl Ce {
+    fn new(list: &str, view: &str) -> Ce {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git starts");
+            assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+            stdout(&out).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("list.json"), list).unwrap();
+        std::fs::write(dir.path().join("view.json"), view).unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nd='{}'\necho \"$@\" >> \"$d/gh.calls\"\ncase \"$1 $2\" in\n  'run list') cat \"$d/list.json\" ;;\n  'run view') cat \"$d/view.json\" ;;\n  *) echo 'gh: unexpected call' >&2; exit 9 ;;\nesac\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Ce { dir, sha }
+    }
+
+    fn run(&self) -> Output {
+        let path = format!(
+            "{}:{}",
+            self.dir.path().join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        Command::new("bash")
+            .arg(script("community-edition.sh"))
+            .env("PATH", path)
+            .env("PF_REPO_DIR", self.dir.path().join("repo"))
+            .env("PF_CI_REPO", "acme/widgets")
+            .output()
+            .expect("bash starts")
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("gh.calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The one `gh run list` call that every case makes, and no call that waits or re-runs.
+    fn assert_one_list_call(&self) {
+        let calls = self.calls();
+        let want = format!(
+            "run list -R acme/widgets --workflow ci --commit {} --json databaseId,status,conclusion",
+            self.sha
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c.starts_with("run list")).count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(calls.contains(&want), "{calls:?}");
+        for c in &calls {
+            assert!(
+                !c.contains("rerun") && !c.contains("watch") && !c.contains("--exit-status"),
+                "d14 never waits or re-runs: {c}"
+            );
+        }
+    }
+}
+
+const SMOKE_GREEN: &str = r#"{"jobs":[{"name":"check","conclusion":"success","steps":[{"name":"Test","conclusion":"success"},{"name":"Smoke","conclusion":"success"}]}]}"#;
+
+#[test]
+fn community_edition_says_push_with_no_run() {
+    let ce = Ce::new("[]", "{}");
+    let out = ce.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains(&format!(
+            "community-edition: no ci run for {}: push",
+            ce.sha
+        )),
+        "{}",
+        stderr(&out)
+    );
+    ce.assert_one_list_call();
+}
+
+#[test]
+fn community_edition_says_still_running() {
+    for status in ["in_progress", "queued"] {
+        let list = format!(r#"[{{"databaseId":4242,"status":"{status}","conclusion":""}}]"#);
+        let ce = Ce::new(&list, "{}");
+        let out = ce.run();
+        assert_eq!(out.status.code(), Some(1), "{status}");
+        assert!(
+            stderr(&out).contains(&format!(
+                "community-edition: ci run 4242 for {} is still running",
+                ce.sha
+            )),
+            "{status}: {}",
+            stderr(&out)
+        );
+        ce.assert_one_list_call();
+    }
+}
+
+#[test]
+fn community_edition_fails_a_failed_run() {
+    for conclusion in ["failure", "cancelled"] {
+        let list =
+            format!(r#"[{{"databaseId":77,"status":"completed","conclusion":"{conclusion}"}}]"#);
+        let ce = Ce::new(&list, SMOKE_GREEN);
+        let out = ce.run();
+        assert_eq!(out.status.code(), Some(1), "{conclusion}");
+        let err = stderr(&out);
+        assert!(
+            err.contains(conclusion) && err.contains("77") && err.contains(&ce.sha),
+            "{conclusion}: {err}"
+        );
+        // A failed run is not looked into: the job list is never asked for.
+        assert!(
+            !ce.calls().iter().any(|c| c.starts_with("run view")),
+            "{:?}",
+            ce.calls()
+        );
+        ce.assert_one_list_call();
+    }
+}
+
+#[test]
+fn community_edition_fails_without_a_smoke_step() {
+    let list = r#"[{"databaseId":88,"status":"completed","conclusion":"success"}]"#;
+    for view in [
+        // No Smoke step at all.
+        r#"{"jobs":[{"name":"check","conclusion":"success","steps":[{"name":"Test","conclusion":"success"}]}]}"#,
+        // A Smoke step that is not green.
+        r#"{"jobs":[{"name":"check","conclusion":"failure","steps":[{"name":"Smoke","conclusion":"failure"}]}]}"#,
+        // A Smoke step that was skipped.
+        r#"{"jobs":[{"name":"check","conclusion":"success","steps":[{"name":"Smoke","conclusion":"skipped"}]}]}"#,
+        // No jobs.
+        r#"{"jobs":[]}"#,
+    ] {
+        let ce = Ce::new(list, view);
+        let out = ce.run();
+        assert_eq!(out.status.code(), Some(1), "{view}");
+        assert!(
+            stderr(&out).contains("community-edition: ci run 88 has no green Smoke step"),
+            "{view}: {}",
+            stderr(&out)
+        );
+        ce.assert_one_list_call();
+    }
+}
+
+#[test]
+fn community_edition_passes_a_green_run() {
+    // The newest run is first. An older failed run for the same commit does not count.
+    let list = r#"[{"databaseId":99,"status":"completed","conclusion":"success"},{"databaseId":50,"status":"completed","conclusion":"failure"}]"#;
+    let ce = Ce::new(list, SMOKE_GREEN);
+    let out = ce.run();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert_eq!(
+        stdout(&out),
+        format!("community-edition: ok ({}, run 99)\n", ce.sha)
+    );
+    ce.assert_one_list_call();
+    assert!(
+        ce.calls()
+            .iter()
+            .any(|c| c.starts_with("run view 99 -R acme/widgets")),
+        "{:?}",
+        ce.calls()
+    );
 }

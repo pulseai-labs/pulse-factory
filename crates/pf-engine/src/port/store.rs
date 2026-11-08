@@ -140,7 +140,8 @@ pub struct AdmissionRow {
     pub content: String,
     pub outcome: AdmissionOutcome,
     pub reason: Option<String>,
-    /// For a launch: the unit, role, model and attempt.
+    /// For a launch: the unit, role, model and attempt. For a controller command on a project:
+    /// the ID of the project it names (`unit_id` only), so a replay can find that project.
     pub unit_id: Option<String>,
     pub role: Option<String>,
     pub model: Option<String>,
@@ -298,6 +299,63 @@ pub struct ClaimRow {
     pub fenced_at: Option<String>,
 }
 
+/// The admission scope of the controller's own commands (projects and devices). A run's
+/// commands commit under the run's ID. The store refuses a run ID that holds `@`, so no run can
+/// share this scope.
+pub const CONTROLLER_SCOPE: &str = "@controller";
+
+/// A stand-in for the ID that a commit's own effect assigns. The caller cannot know that ID
+/// before the commit. The store replaces the first copy of this text in the commit's ledger line
+/// with the ID, and the whole `unit_id` of its admission when that is this text, inside the
+/// commit's transaction. A commit has one effect that assigns an ID.
+pub const NEW_ID: &str = "{new-id}";
+
+/// One project: a controller entity. The engine core never reads it. Only the root is decided; the
+/// project's other fields wait for the project hierarchy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectRow {
+    /// `P-<n>`, from one sequence for the whole store. A removed row keeps its ID.
+    pub id: String,
+    pub name: String,
+    /// An absolute, canonical path.
+    pub root: String,
+    pub created_at: String,
+    /// Set when the project is removed. The row stays.
+    pub removed_at: Option<String>,
+}
+
+/// A project before the store gives it an ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewProject {
+    pub name: String,
+    pub root: String,
+    pub created_at: String,
+}
+
+/// One device: a client paired with a one-use code. It holds a revocable token, and the row never
+/// holds the token or its hash. A controller entity: the engine core never reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRow {
+    /// `D-<n>`, from one sequence for the whole store. A revoked row keeps its ID.
+    pub id: String,
+    pub name: String,
+    pub paired_at: String,
+    /// Telemetry, written by [`Store::touch_device`] outside admission.
+    pub last_seen_at: Option<String>,
+    pub last_peer: Option<String>,
+    /// Set when the device is revoked. The row stays.
+    pub revoked_at: Option<String>,
+}
+
+/// A device before the store gives it an ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewDevice {
+    pub name: String,
+    /// SHA-256 of the token, as 64 hex digits. The token itself is never stored.
+    pub token_sha256: String,
+    pub paired_at: String,
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -310,6 +368,24 @@ pub enum Effect {
     PutRequest(RequestRow),
     /// Insert the claim of this generation, or replace it.
     PutClaim(ClaimRow),
+    /// Add a project. The store gives it the next `P-<n>`. A live project with the same root or
+    /// the same name makes the commit [`Committed::Rejected`].
+    AddProject(NewProject),
+    /// Mark a live project removed. An unknown or removed ID makes the commit
+    /// [`Committed::Rejected`].
+    RemoveProject {
+        id: String,
+        removed_at: String,
+    },
+    /// Add a device. The store gives it the next `D-<n>`. A token hash that a device holds already
+    /// makes the commit [`Committed::Rejected`].
+    AddDevice(NewDevice),
+    /// Mark a live device revoked. An unknown or revoked ID makes the commit
+    /// [`Committed::Rejected`].
+    RevokeDevice {
+        id: String,
+        revoked_at: String,
+    },
 }
 
 /// What the engine wants on the ledger. The store assigns the sequence number.
@@ -354,6 +430,10 @@ pub enum Committed {
     Replayed(AdmissionRow),
     /// The same ID with other content was stored before. Nothing changed.
     Conflict(AdmissionRow),
+    /// An effect cannot apply (a duplicate live project root or name, an unknown or removed
+    /// project, a token hash in use, an unknown or revoked device). The reason is one line. Nothing was written: no admission, no outbox line. The
+    /// caller may commit a refused admission for the same command.
+    Rejected(String),
 }
 
 /// Why a store call failed.
@@ -384,6 +464,18 @@ pub trait Store: Send + Sync {
     fn request(&self, id: &str) -> Result<Option<RequestRow>, StoreError>;
     /// Read every claim of the store, by generation.
     fn claims(&self) -> Result<Vec<ClaimRow>, StoreError>;
+    /// Read the live projects, in the order they were added.
+    fn projects(&self) -> Result<Vec<ProjectRow>, StoreError>;
+    /// Read one project by ID, live or removed.
+    fn project(&self, id: &str) -> Result<Option<ProjectRow>, StoreError>;
+    /// Read every device, live ones first and each group in pairing order.
+    fn devices(&self) -> Result<Vec<DeviceRow>, StoreError>;
+    /// Read the live device whose token has this SHA-256. A revoked device is not returned.
+    fn device_by_token(&self, token_sha256: &str) -> Result<Option<DeviceRow>, StoreError>;
+    /// Write a live device's last-seen time and peer. This is telemetry, not a transition: it makes
+    /// no admission and no ledger line (ADR-0003). It writes at most once a minute per device and
+    /// answers whether it wrote. A revoked or unknown device is never written.
+    fn touch_device(&self, id: &str, at: &str, peer: &str) -> Result<bool, StoreError>;
     /// Read a run's admissions, in admission order.
     fn admissions(&self, run_id: &str) -> Result<Vec<AdmissionRow>, StoreError>;
     /// Read one admission by command ID.

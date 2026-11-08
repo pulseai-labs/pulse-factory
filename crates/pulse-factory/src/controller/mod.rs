@@ -1,11 +1,16 @@
 //! The controller: one process, seats as children (ADR-0001). It owns the store, the queue and
-//! the ledger (ADR-0003).
+//! the ledger (ADR-0003). It also owns the projects and devices and their own ledger,
+//! `controller.ledger`, and, when the operator sets an address, the network API (ADR-0012).
 
+pub mod api;
 pub mod base_push;
 pub mod client;
+pub mod commands;
+pub mod devices;
 pub mod driver;
 pub mod files;
 pub mod ports;
+pub mod projects;
 pub mod requests;
 pub mod seat;
 pub mod status;
@@ -41,6 +46,17 @@ pub struct Config {
     pub random_device: PathBuf,
     /// The proc file system the caller check reads: `/proc`. A test points it elsewhere.
     pub proc_root: PathBuf,
+    /// The address of the network API, such as `100.90.203.21:7443`. `None`: the API is off, and
+    /// no key is made (ADR-0012).
+    pub api_listen: Option<String>,
+    /// How long a pairing code works: 10 minutes. A test sets a short time.
+    pub pair_ttl: Duration,
+    /// How long a bind that cannot happen yet (the address is not on this host) waits before it
+    /// tries again: 5 seconds.
+    pub api_retry: Duration,
+    /// How long a device may make no call before the API refuses it and it must pair again: 30
+    /// days (ADR-0012). A test sets a short time.
+    pub device_idle: Duration,
 }
 
 impl Config {
@@ -52,9 +68,16 @@ impl Config {
             binary,
             random_device: PathBuf::from(seat::RANDOM_DEVICE),
             proc_root: PathBuf::from("/proc"),
+            api_listen: None,
+            pair_ttl: Duration::from_secs(600),
+            api_retry: api::DEFAULT_RETRY,
+            device_idle: DEFAULT_DEVICE_IDLE,
         }
     }
 }
+
+/// How long a device may be idle: 30 days.
+pub const DEFAULT_DEVICE_IDLE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// One run the controller knows.
 pub struct RunHandle {
@@ -76,6 +99,11 @@ pub struct Controller {
     /// `claim`, `answer`, `clear` and `ack` run one at a time, so a claim cannot fence between an
     /// answer's check of the generation and its commit.
     claim_lock: Mutex<()>,
+    /// The controller ledger, and the one writer of it. A project or device command holds this lock
+    /// from its commit to the append of its line.
+    controller_ledger: Mutex<commands::ControllerLedger>,
+    /// The network API: its key, its state and the one live pairing code.
+    api: api::ApiRuntime,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -92,6 +120,15 @@ impl Controller {
             SqliteStore::open(cfg.state_dir.join("store.sqlite"))
                 .map_err(|e| format!("cannot open the store: {e}"))?,
         );
+        // The controller ledger is recovered before any command: a stop between a commit and the
+        // append of its line loses no line, and a restart adds no second copy.
+        let controller_ledger = commands::ControllerLedger::start(
+            store.as_ref(),
+            cfg.state_dir.join(commands::LEDGER_FILE),
+        );
+        // With an address set, the key is made now, so `api status` and `device pair` have it
+        // before the listener binds.
+        let api = api::ApiRuntime::start(&cfg.state_dir, cfg.api_listen.as_deref());
         let controller = Arc::new(Controller {
             cfg,
             store,
@@ -99,6 +136,8 @@ impl Controller {
             runs: Mutex::new(Vec::new()),
             seats: Arc::new(seat::SeatTable::default()),
             claim_lock: Mutex::new(()),
+            controller_ledger: Mutex::new(controller_ledger),
+            api,
         });
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
@@ -567,11 +606,18 @@ impl Handler for Controller {
             "halt" => self.verb_halt(&request.args),
             "requests" => self.verb_requests(&request.args),
             "show" => self.verb_show(&request.args),
-            // These four change who acts and what runs. They need to know who calls.
-            "claim" | "answer" | "clear" | "ack" => Response::err(format!(
-                "{} refused: the controller cannot tell which process called",
-                request.verb
-            )),
+            "project_add" => self.verb_project_add(&request.args),
+            "project_list" => self.verb_project_list(),
+            "project_remove" => self.verb_project_remove(&request.args),
+            "device_list" => self.verb_device_list(),
+            "api_status" => self.verb_api_status(),
+            // These change who acts and what runs. They need to know who calls.
+            "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke" => {
+                Response::err(format!(
+                    "{} refused: the controller cannot tell which process called",
+                    request.verb
+                ))
+            }
             other => Response::err(format!("unknown verb {other:?}")),
         }
     }
@@ -582,6 +628,15 @@ impl Handler for Controller {
             "answer" => self.verb_answer(&request.args, peer),
             "clear" => self.verb_clear(&request.args, peer),
             "ack" => self.verb_ack(&request.args, peer),
+            // A seat cannot pair a device or revoke one (ADR-0005).
+            "device_pair" => match self.check_caller("device_pair", peer) {
+                Ok(()) => self.verb_device_pair(),
+                Err(why) => Response::err(why),
+            },
+            "device_revoke" => match self.check_caller("device_revoke", peer) {
+                Ok(()) => self.verb_device_revoke(&request.args),
+                Err(why) => Response::err(why),
+            },
             _ => self.handle(request),
         }
     }
@@ -645,16 +700,20 @@ pub fn run(args: &ControllerArgs) -> i32 {
             return 1;
         }
     };
-    let controller = match Controller::open(
-        Config::new(
-            state,
-            args.tick_ms,
-            std::env::current_exe()
-                .and_then(std::fs::canonicalize)
-                .unwrap_or_else(|_| PathBuf::from("pulse-factory")),
-        ),
-        Arc::new(LivePorts),
-    ) {
+    let mut cfg = Config::new(
+        state,
+        args.tick_ms,
+        std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .unwrap_or_else(|_| PathBuf::from("pulse-factory")),
+    );
+    // The flag wins over the environment variable. Neither set: the API is off.
+    cfg.api_listen = args
+        .api_listen
+        .clone()
+        .or_else(|| std::env::var("PF_API_LISTEN").ok())
+        .filter(|a| !a.trim().is_empty());
+    let controller = match Controller::open(cfg, Arc::new(LivePorts)) {
         Ok(c) => c,
         Err(why) => {
             eprintln!("pulse-factory: controller: {why}");
@@ -678,6 +737,8 @@ pub fn serve_forever(controller: Arc<Controller>, bound: pf_ipc::Bound) -> i32 {
     };
     let period = Duration::from_millis(controller.cfg.tick_ms.max(10));
     rt.block_on(async move {
+        // The API listens beside the socket, on this runtime. It is off with no address.
+        let api_task = api::spawn_api(&controller);
         let ticker = controller.clone();
         let tick_task = tokio::spawn(async move {
             let mut interval =
@@ -705,6 +766,9 @@ pub fn serve_forever(controller: Arc<Controller>, bound: pf_ipc::Bound) -> i32 {
         };
         pf_ipc::serve(bound, controller.clone(), shutdown).await;
         tick_task.abort();
+        if let Some(task) = api_task {
+            task.abort();
+        }
     });
     0
 }

@@ -191,6 +191,9 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "answer",
             "clear",
             "ack",
+            "project",
+            "device",
+            "api",
             "hook",
             "controller"
         ]

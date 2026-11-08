@@ -1,0 +1,132 @@
+//! AC-4 of `r1.s2.w2`: the committed `apps/api-client/src/gen/` equals what `ts-rs` renders now.
+//!
+//! A difference fails with the name of the file. To rewrite the committed files after a change to
+//! a wire type, run this from the repository root:
+//!
+//! ```text
+//! TS_RS_EXPORT_DIR=apps/api-client/src/gen cargo test -p pf-api --test ts_types -- --ignored write
+//! ```
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use pf_api::types::export_all;
+use ts_rs::Config;
+
+/// The workspace root: two levels above this crate.
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn committed_dir() -> PathBuf {
+    root().join("apps/api-client/src/gen")
+}
+
+/// The `.ts` files of a directory: name to text. A missing directory holds none.
+fn read_ts(dir: &Path) -> BTreeMap<String, String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return BTreeMap::new();
+    };
+    entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "ts"))
+        .map(|p| {
+            (
+                p.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// What `ts-rs` renders now, in a temporary directory.
+fn rendered() -> (tempfile::TempDir, BTreeMap<String, String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::new().with_out_dir(dir.path());
+    export_all(&cfg).expect("ts-rs renders every wire type");
+    let files = read_ts(dir.path());
+    (dir, files)
+}
+
+#[test]
+fn the_committed_types_equal_what_ts_rs_renders_now() {
+    let (_dir, now) = rendered();
+    assert!(!now.is_empty(), "ts-rs rendered no file");
+    let committed = read_ts(&committed_dir());
+    let hint = "run: TS_RS_EXPORT_DIR=apps/api-client/src/gen cargo test -p pf-api --test ts_types -- --ignored write";
+    let mut problems = Vec::new();
+    for (name, text) in &now {
+        match committed.get(name) {
+            None => problems.push(format!("{name}: not committed")),
+            Some(old) if old != text => problems.push(format!("{name}: differs from the render")),
+            Some(_) => {}
+        }
+    }
+    for name in committed.keys() {
+        if !now.contains_key(name) {
+            problems.push(format!("{name}: committed, but no type renders it"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "apps/api-client/src/gen/ has drifted:\n  {}\n{hint}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn the_wire_types_a_client_needs_are_rendered() {
+    let (_dir, now) = rendered();
+    for name in [
+        "ProjectAddArgs.ts",
+        "ProjectRemoveArgs.ts",
+        "ProjectRecord.ts",
+        "ProjectChanged.ts",
+        "ProjectList.ts",
+        "DeviceRecord.ts",
+        "PairRequest.ts",
+        "PairResult.ts",
+        "ApiStatus.ts",
+        "ApiError.ts",
+        "ListenState.ts",
+        "ApiState.ts",
+    ] {
+        assert!(now.contains_key(name), "{name} is not rendered");
+    }
+    // The token is a field of the pair answer and of no other type, and no type has a field for
+    // its hash or for the code's secret. (The doc comments may use the word.)
+    assert!(now["PairResult.ts"].contains("token: string"));
+    for (name, text) in &now {
+        if name != "PairResult.ts" {
+            assert!(!text.contains("token:"), "{name} has a token field");
+        }
+        assert!(!text.contains("token_sha256"), "{name} has a hash field");
+        assert!(!text.contains("secret"), "{name} names a secret");
+    }
+    // The listener's states are the four strings of the contract.
+    for state in ["off", "listening", "waiting", "failed"] {
+        assert!(
+            now["ListenState.ts"].contains(&format!("\"{state}\"")),
+            "{state}"
+        );
+    }
+}
+
+/// Rewrite the committed files. `TS_RS_EXPORT_DIR` names the directory, from the repository root
+/// when it is a relative path. Files that no type renders any more are removed.
+#[test]
+#[ignore = "writes files: run it by hand, with TS_RS_EXPORT_DIR set"]
+fn write() {
+    let given = std::env::var("TS_RS_EXPORT_DIR")
+        .expect("set TS_RS_EXPORT_DIR, for example apps/api-client/src/gen");
+    let dir = {
+        let p = PathBuf::from(given);
+        if p.is_absolute() { p } else { root().join(p) }
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    for stale in read_ts(&dir).into_keys() {
+        std::fs::remove_file(dir.join(stale)).unwrap();
+    }
+    let cfg = Config::new().with_out_dir(&dir);
+    export_all(&cfg).expect("ts-rs writes every wire type");
+}

@@ -93,6 +93,61 @@ fn expected_info(c: &Case) -> String {
     }
 }
 
+/// Does the text hold the start of a secret that another rule of `redact` cuts?
+///
+/// This test is about the user info of a URL. The host, the path and the user info are random, so
+/// one of them can spell a token such as `sk-` and 16 more characters, and `redact` cuts it by its
+/// own rule. The tail then changes by design. A text with such a start belongs to the other rules'
+/// tests, so the strategy leaves it out. The check is a plain, case-blind search, so it leaves out
+/// a little more than `redact` cuts. That costs nothing.
+fn holds_another_rule(text: &str) -> bool {
+    const STARTS: [&str; 13] = [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "bearer",
+        "authorization",
+        "--api-key",
+        "_token=",
+        "_key=",
+        "_secret=",
+    ];
+    let lower = text.to_ascii_lowercase();
+    STARTS.iter().any(|s| lower.contains(s))
+}
+
+/// The three texts that failed `cargo test --workspace` (r1.s2.w4 correction, 1 run in 1000). The
+/// path or the host held a token that another rule cuts, so the tail changed by design.
+const SET_ASIDE: [&str; 3] = [
+    "http://0@a/sk-__-a000_____aa_a",
+    "http://A@a/gho_a0a__aa_0_000aa_",
+    "http://a@0/sk-0_aa0a-aa0aa__00",
+];
+
+#[test]
+fn a_text_with_another_rules_token_is_set_aside_and_a_plain_url_is_not() {
+    for text in SET_ASIDE {
+        let out = redact(text);
+        let tail = &text[text.find('@').unwrap()..];
+        assert!(
+            !out.ends_with(tail),
+            "{text} -> {out}: the other rule did not cut"
+        );
+        assert!(holds_another_rule(text), "{text} was not set aside");
+    }
+    for text in [
+        "https://user:pw@host:8080/a/b.c",
+        "ssh://token@10.0.0.1/repo.git",
+        "git://u:@h.example/skip-this/ghost_dir",
+    ] {
+        assert!(!holds_another_rule(text), "{text} was set aside");
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         failure_persistence: None,
@@ -100,7 +155,9 @@ proptest! {
     })]
 
     #[test]
-    fn the_user_info_of_every_url_follows_the_one_rule(c in case()) {
+    fn the_user_info_of_every_url_follows_the_one_rule(
+        c in case().prop_filter("no other rule's token", |c| !holds_another_rule(&c.text))
+    ) {
         let once = redact(&c.text);
         prop_assert_eq!(&redact(&once), &once, "not idempotent");
         prop_assert!(once.ends_with(&c.tail), "tail changed: {} -> {}", c.text, once);

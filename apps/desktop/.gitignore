@@ -1,0 +1,3 @@
+# Build output of the Mac app. It builds on GitHub's macOS runner, never on draco-desk.
+src-tauri/target/
+src-tauri/gen/

@@ -1,5 +1,5 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `hook` and `controller`.
+//! `clear`, `ack`, `project`, `device`, `api`, `hook` and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -40,6 +40,12 @@ pub enum Verb {
     Clear(ClearArgs),
     /// Ack a merge request: the spine PR merges with the head SHA the request names.
     Ack(AckArgs),
+    /// Add, list and remove the projects on this host. A project is an ID, a name and one root.
+    Project(ProjectArgs),
+    /// Pair, list and revoke the devices that call the network API. A device acts as you.
+    Device(DeviceArgs),
+    /// Show whether the network API is off, waiting for its address or listening.
+    Api(ApiArgs),
     /// Judge one tool call of a seat (the extension runs this; stdin holds the call).
     Hook,
     /// Run the controller in the foreground.
@@ -186,10 +192,129 @@ pub struct AckArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct ProjectArgs {
+    #[command(subcommand)]
+    pub verb: ProjectVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProjectVerb {
+    /// Register a directory as a project.
+    Add(ProjectAddArgs),
+    /// List the projects.
+    List(ProjectListArgs),
+    /// Take a project off the list.
+    Remove(ProjectRemoveArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectAddArgs {
+    /// The root: an existing directory, a git repo or a plain folder. A relative path is taken
+    /// from the current directory.
+    pub root: PathBuf,
+    /// The name: 1 to 64 characters. The default is the last component of the root.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectListArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ProjectRemoveArgs {
+    /// The project, such as `P-1`.
+    pub id: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DeviceArgs {
+    #[command(subcommand)]
+    pub verb: DeviceVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeviceVerb {
+    /// Print one pairing code. It works once, for 10 minutes, and a new code replaces it.
+    Pair(DevicePairArgs),
+    /// List the devices: live ones first, then the revoked ones.
+    List(DeviceListArgs),
+    /// Revoke a device. Its next call is refused. The device pairs again with a new code.
+    Revoke(DeviceRevokeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DevicePairArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DeviceListArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DeviceRevokeArgs {
+    /// The device, such as `D-1`.
+    pub id: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ApiArgs {
+    #[command(subcommand)]
+    pub verb: ApiVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ApiVerb {
+    /// Show `off`, `waiting for <addr>`, `listening on <addr>` or `failed`, and the key's hash.
+    Status(ApiStatusArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ApiStatusArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ControllerArgs {
     /// Milliseconds between two ticks.
     #[arg(long, default_value_t = 2000)]
     pub tick_ms: u64,
+    /// Serve the network API on this address, such as `100.90.203.21:7443`. The default is the
+    /// environment variable `PF_API_LISTEN`. With neither, the API is off and no key is made.
+    #[arg(long, value_name = "ADDR")]
+    pub api_listen: Option<String>,
 }
 
 /// Run the command line and return the exit code.
@@ -211,6 +336,19 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Verb::Answer(a) => crate::controller::client::answer(&a),
         Verb::Clear(a) => crate::controller::client::clear(&a),
         Verb::Ack(a) => crate::controller::client::ack(&a),
+        Verb::Project(a) => match a.verb {
+            ProjectVerb::Add(a) => crate::controller::client::project_add(&a),
+            ProjectVerb::List(a) => crate::controller::client::project_list(&a),
+            ProjectVerb::Remove(a) => crate::controller::client::project_remove(&a),
+        },
+        Verb::Device(a) => match a.verb {
+            DeviceVerb::Pair(a) => crate::controller::client::device_pair(&a),
+            DeviceVerb::List(a) => crate::controller::client::device_list(&a),
+            DeviceVerb::Revoke(a) => crate::controller::client::device_revoke(&a),
+        },
+        Verb::Api(a) => match a.verb {
+            ApiVerb::Status(a) => crate::controller::client::api_status(&a),
+        },
         Verb::Hook => crate::hook::run(),
         Verb::Controller(a) => crate::controller::run(&a),
     }
