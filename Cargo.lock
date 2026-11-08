@@ -743,6 +743,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pf-adapter-claude"
+version = "0.1.0"
+dependencies = [
+ "pf-adapter-fake",
+ "pf-engine",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pf-adapter-fake"
 version = "0.1.0"
 dependencies = [
@@ -751,6 +763,7 @@ dependencies = [
  "pf-workflow",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
