@@ -368,7 +368,8 @@ pub fn check_order(events: &[ChatEvent]) -> Result<(), String> {
     let mut requests: BTreeMap<String, bool> = BTreeMap::new();
     // Task id to "finished".
     let mut tasks: BTreeMap<String, bool> = BTreeMap::new();
-    let mut finished_for_task_turn = false;
+    // `TaskFinished` events that no `Task` turn has answered yet: one turn answers one finish.
+    let mut unanswered_finishes: usize = 0;
 
     for (i, event) in events.iter().enumerate() {
         let at = |why: String| format!("event {i} ({}): {why}", event.name());
@@ -381,12 +382,12 @@ pub fn check_order(events: &[ChatEvent]) -> Result<(), String> {
                     return Err(at("a TurnStarted inside an open turn".to_string()));
                 }
                 if *cause == TurnCause::Task {
-                    if !finished_for_task_turn {
+                    if unanswered_finishes == 0 {
                         return Err(at(
                             "a turn with cause Task follows no finished task".to_string()
                         ));
                     }
-                    finished_for_task_turn = false;
+                    unanswered_finishes -= 1;
                 }
                 turn = Some(Turn {
                     cause: *cause,
@@ -405,7 +406,7 @@ pub fn check_order(events: &[ChatEvent]) -> Result<(), String> {
                 Some(true) => return Err(at(format!("task {task_id} finished twice"))),
                 Some(done) => {
                     *done = true;
-                    finished_for_task_turn = true;
+                    unanswered_finishes += 1;
                 }
             },
             ChatEvent::SessionMoved { .. } => {

@@ -397,6 +397,40 @@ fn a_task_starts_finishes_and_then_a_task_turn_follows() {
     c.checked();
 }
 
+#[test]
+fn two_tasks_finishing_in_a_running_turn_give_two_task_turns_the_port_accepts() {
+    let mut c = Chat::new();
+    c.port
+        .send(&c.id, InputKind::Operator, "fake:task 400")
+        .expect("send");
+    c.until_result();
+    c.port
+        .send(&c.id, InputKind::Operator, "fake:task 400")
+        .expect("send");
+    c.until_result();
+    // Both tasks finish while this turn runs, so two Task turns queue behind it.
+    c.port
+        .send(&c.id, InputKind::Operator, "fake:slow 1500")
+        .expect("send");
+    let mut rest = c.until_result();
+    for _ in 0..2 {
+        rest.extend(c.until_result());
+    }
+    let task_turns = rest
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                ChatEvent::TurnStarted {
+                    cause: TurnCause::Task
+                }
+            )
+        })
+        .count();
+    assert_eq!(task_turns, 2, "{rest:?}");
+    c.checked();
+}
+
 // ------------------------------------------------------------------ interrupt, fail, exit
 
 #[test]

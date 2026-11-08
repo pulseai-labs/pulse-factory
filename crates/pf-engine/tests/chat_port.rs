@@ -365,6 +365,21 @@ fn check_order_accepts_the_good_sequences() {
             ],
         ),
         (
+            "two tasks finished in a turn, then one Task turn for each",
+            vec![
+                started(TurnCause::Operator),
+                task_started("k1"),
+                task_started("k2"),
+                task_finished("k1"),
+                task_finished("k2"),
+                result(TurnCause::Operator),
+                started(TurnCause::Task),
+                result(TurnCause::Task),
+                started(TurnCause::Task),
+                result(TurnCause::Task),
+            ],
+        ),
+        (
             "a session move between turns",
             vec![
                 started(TurnCause::Operator),
@@ -487,6 +502,21 @@ fn check_order_rejects_the_bad_sequences_each_with_a_reason() {
             vec![
                 task_started("k1"),
                 task_finished("k1"),
+                started(TurnCause::Task),
+                result(TurnCause::Task),
+                started(TurnCause::Task),
+            ],
+            "task",
+        ),
+        (
+            "a third Task turn for two finished tasks",
+            vec![
+                task_started("k1"),
+                task_started("k2"),
+                task_finished("k1"),
+                task_finished("k2"),
+                started(TurnCause::Task),
+                result(TurnCause::Task),
                 started(TurnCause::Task),
                 result(TurnCause::Task),
                 started(TurnCause::Task),
