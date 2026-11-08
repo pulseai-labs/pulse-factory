@@ -315,9 +315,10 @@ command ID and one line of the controller ledger (see Common rules).
 - **JSON.** `add` and `remove` print `{"schema_version": 1, "replayed": <bool>, "project": {"id",
   "name", "root", "created_at", "removed_at", "kind", "remote_key", "kind_error"}}`, where
   `removed_at` is null for a live project, `kind` is `"git"` or `"folder"`, `remote_key` is a string
-  or null, and `kind_error` is null unless the project has no kind. `kind` is null only for a project
-  that the backfill could not detect, and `kind_error` is then the cause from a fresh detection. A
-  new field does not raise `schema_version`.
+  or null, and `kind_error` is always null in the answer of `add` and `remove`. `kind` is null only
+  for a project that the backfill could not detect. `list` gives such a project's cause from a fresh
+  detection in `kind_error`, and `kind_error` is null in `list` for any other project. A new field
+  does not raise `schema_version`.
   `list` prints `{"schema_version": 1, "projects": [...]}` with the live projects only, in creation
   order. The controller verbs are `project_add`, `project_list` and `project_remove`.
 - **Refusals** (exit 1, nothing on stdout, the reason on stderr, one admission and one ledger

@@ -6,8 +6,8 @@ mod common;
 
 use common::*;
 use pf_engine::port::store::{
-    AdmissionOutcome, CONTROLLER_SCOPE, ChatSessionState, Committed, Effect, ProjectKind,
-    SessionWorktree, Store, WorktreeCreatedBy,
+    AdmissionOutcome, AgentRow, CONTROLLER_SCOPE, ChatSessionRow, ChatSessionState, Committed,
+    Effect, ProjectKind, ProjectRow, SessionWorktree, Store, WorktreeCreatedBy, WorktreeRow,
 };
 
 /// A commit of one effect, with no ledger line.
@@ -24,9 +24,40 @@ fn effect_commit(command_id: &str, kind: &str, effect: Effect) -> pf_engine::por
     )
 }
 
-/// Nothing was written: the same admissions, the same outbox.
-fn assert_unchanged(store: &pf_store_sqlite::SqliteStore, before: (usize, usize)) {
-    assert_eq!(admission_state(store), before, "a rejection writes nothing");
+/// Everything that a command of the hierarchy can write: the admissions and the outbox, the agent
+/// rows, and every project, worktree and chat session row of `P-1` to `P-12`, whole.
+#[derive(Debug, PartialEq, Eq)]
+struct Hierarchy {
+    counts: (usize, usize),
+    agents: Vec<AgentRow>,
+    projects: Vec<(String, Option<ProjectRow>)>,
+    worktrees: Vec<WorktreeRow>,
+    sessions: Vec<ChatSessionRow>,
+}
+
+fn hierarchy(store: &pf_store_sqlite::SqliteStore) -> Hierarchy {
+    let ids: Vec<String> = (1..=12).map(|n| format!("P-{n}")).collect();
+    Hierarchy {
+        counts: admission_state(store),
+        agents: store.agents().unwrap(),
+        projects: ids
+            .iter()
+            .map(|id| (id.clone(), store.project(id).unwrap()))
+            .collect(),
+        worktrees: ids
+            .iter()
+            .flat_map(|id| store.worktrees(id).unwrap())
+            .collect(),
+        sessions: ids
+            .iter()
+            .flat_map(|id| store.chat_sessions(id).unwrap())
+            .collect(),
+    }
+}
+
+/// Nothing was written: the same admissions, the same outbox and the same whole rows.
+fn assert_unchanged(store: &pf_store_sqlite::SqliteStore, before: &Hierarchy) {
+    assert_eq!(&hierarchy(store), before, "a rejection writes nothing");
 }
 
 #[test]
@@ -87,12 +118,12 @@ fn set_project_kind_sets_a_null_kind_once() {
     assert_eq!(row.kind, Some(ProjectKind::Git));
     assert_eq!(row.remote_key.as_deref(), Some("github.com/o/old"));
 
-    let before = admission_state(&store);
+    let before = hierarchy(&store);
     // A second one, one on a removed project, and one on an unknown project.
     assert!(rejected(set("k2", "P-1", ProjectKind::Folder, None)).contains("P-1"));
     assert!(rejected(set("k3", "P-2", ProjectKind::Git, None)).contains("P-2"));
     assert!(rejected(set("k4", "P-9", ProjectKind::Git, None)).contains("P-9"));
-    assert_unchanged(&store, before);
+    assert_unchanged(&store, &before);
     assert_eq!(
         store.project("P-1").unwrap().unwrap().kind,
         Some(ProjectKind::Git)
@@ -133,13 +164,12 @@ fn set_project_remote_key_sets_the_key_of_a_live_git_project_only() {
     applied(set("k2", "P-1", None));
     assert_eq!(store.project("P-1").unwrap().unwrap().remote_key, None);
 
-    let before = admission_state(&store);
+    applied(remove_project(&store, "c4", "P-3"));
+    let before = hierarchy(&store);
     assert!(rejected(set("k3", "P-2", Some("h/p"))).contains("not a git project"));
     assert!(rejected(set("k4", "P-9", Some("h/p"))).contains("P-9"));
-    remove_project(&store, "c4", "P-3");
     assert!(rejected(set("k5", "P-3", Some("h/q"))).contains("P-3"));
-    let before = (before.0 + 1, before.1 + 1); // the remove above
-    assert_unchanged(&store, before);
+    assert_unchanged(&store, &before);
     assert_eq!(store.project("P-2").unwrap().unwrap().remote_key, None);
     assert_eq!(
         store.project("P-3").unwrap().unwrap().remote_key.as_deref(),
@@ -212,14 +242,15 @@ fn a_second_live_orchestrator_is_rejected_and_names_the_first() {
     let (_d, store) = open();
     add_project(&store, "c1", "one", "/r/one", ProjectKind::Git, None);
     applied(start(&store, "s1", "P-1", record("/r/one")));
-    let before = admission_state(&store);
+    let before = hierarchy(&store);
     let why = rejected(start(&store, "s2", "P-1", existing("W-1")));
     assert!(why.contains("S-1"), "{why}");
     let why = rejected(start(&store, "s3", "P-1", record("/r/elsewhere")));
     assert!(why.contains("S-1"), "{why}");
-    assert_unchanged(&store, before);
-    // The refused start made no worktree row either.
+    // No second session, no worktree row for `/r/elsewhere`, and no other row changed.
+    assert_unchanged(&store, &before);
     assert_eq!(store.worktrees("P-1").unwrap().len(), 1);
+    assert_eq!(store.chat_sessions("P-1").unwrap().len(), 1);
 }
 
 #[test]
@@ -271,11 +302,7 @@ fn a_start_that_cannot_apply_is_rejected_and_writes_nothing() {
     applied(end(&store, "e1", "S-2"));
     assert!(store.mark_worktree_gone("W-2", "t8").unwrap());
     remove_project(&store, "r1", "P-3");
-    let before = admission_state(&store);
-    let rows_before = (
-        store.worktrees("P-1").unwrap(),
-        store.chat_sessions("P-1").unwrap(),
-    );
+    let before = hierarchy(&store);
 
     // A gone worktree starts no session.
     let why = rejected(start(&store, "s3", "P-1", existing("W-2")));
@@ -299,14 +326,7 @@ fn a_start_that_cannot_apply_is_rejected_and_writes_nothing() {
     let why = rejected(start(&store, "s9", "P-3", record("/r/three")));
     assert!(why.contains("P-3"), "{why}");
 
-    assert_unchanged(&store, before);
-    assert_eq!(
-        (
-            store.worktrees("P-1").unwrap(),
-            store.chat_sessions("P-1").unwrap()
-        ),
-        rows_before
-    );
+    assert_unchanged(&store, &before);
     assert!(store.worktrees("P-3").unwrap().is_empty());
     assert!(store.worktrees("P-9").unwrap().is_empty());
 }
@@ -319,10 +339,10 @@ fn a_remove_waits_for_the_live_session_and_then_marks_the_worktrees_removed() {
     applied(end(&store, "e1", "S-1"));
     applied(start(&store, "s2", "P-1", existing("W-1")));
 
-    let before = admission_state(&store);
+    let before = hierarchy(&store);
     let why = rejected(remove_project(&store, "r1", "P-1"));
     assert_eq!(why, "project P-1 has a live chat session S-2; end it first");
-    assert_unchanged(&store, before);
+    assert_unchanged(&store, &before);
     assert_eq!(store.projects().unwrap().len(), 1);
     assert_eq!(store.worktree("W-1").unwrap().unwrap().removed_at, None);
 
@@ -369,38 +389,46 @@ fn set_chat_session_runtime_changes_only_the_named_fields_of_a_live_session() {
                 ))
                 .unwrap()
         };
+    // Each update changes the named fields and `updated_at`, and no other column of the row.
     applied(set("m1", "S-1", Some("claude-sonnet-5-5"), None, None));
+    let mut expected = was.clone();
+    expected.model = "claude-sonnet-5-5".to_string();
+    expected.updated_at = "t9".to_string();
     let now = store.chat_session("S-1").unwrap().unwrap();
-    assert_eq!(now.model, "claude-sonnet-5-5");
-    assert_eq!(now.effort, was.effort);
-    assert_eq!(now.permission_mode, was.permission_mode);
-    assert_eq!(now.updated_at, "t9");
-    assert_eq!(now.runtime, was.runtime);
-    assert_eq!(now.worktree_id, was.worktree_id);
+    assert_eq!(now, expected);
+    assert_ne!(now, was, "the update wrote something");
 
     applied(set("m2", "S-1", None, Some("low"), Some("plan")));
-    let now = store.chat_session("S-1").unwrap().unwrap();
-    assert_eq!(
-        (
-            now.model.as_str(),
-            now.effort.as_str(),
-            now.permission_mode.as_str()
-        ),
-        ("claude-sonnet-5-5", "low", "plan")
-    );
+    expected.effort = "low".to_string();
+    expected.permission_mode = "plan".to_string();
+    assert_eq!(store.chat_session("S-1").unwrap().unwrap(), expected);
     // The agent row keeps its defaults: the override belongs to the session.
     let agent = store.agent("orchestrator").unwrap().unwrap();
     assert_eq!(agent.model, was.model);
 
+    // A session with a runtime ref and a state keeps both through an update.
+    assert!(store.set_chat_runtime_ref("S-1", "cli-1", "t10").unwrap());
+    assert!(
+        store
+            .set_chat_session_state("S-1", ChatSessionState::Working, "t11")
+            .unwrap()
+    );
+    let held = store.chat_session("S-1").unwrap().unwrap();
+    assert_eq!(held.runtime_session_ref.as_deref(), Some("cli-1"));
+    applied(set("m5", "S-1", None, Some("high"), None));
+    let mut expected = held.clone();
+    expected.effort = "high".to_string();
+    expected.updated_at = "t9".to_string();
+    assert_eq!(store.chat_session("S-1").unwrap().unwrap(), expected);
+
     applied(end(&store, "e1", "S-1"));
-    let before = admission_state(&store);
+    let ended = store.chat_session("S-1").unwrap().unwrap();
+    assert!(ended.ended_at.is_some());
+    let before = hierarchy(&store);
     assert!(rejected(set("m3", "S-1", Some("x"), None, None)).contains("S-1"));
     assert!(rejected(set("m4", "S-9", Some("x"), None, None)).contains("S-9"));
-    assert_unchanged(&store, before);
-    assert_eq!(
-        store.chat_session("S-1").unwrap().unwrap().model,
-        "claude-sonnet-5-5"
-    );
+    assert_unchanged(&store, &before);
+    assert_eq!(store.chat_session("S-1").unwrap().unwrap(), ended);
 }
 
 #[test]

@@ -377,6 +377,26 @@ fn a_second_open_adds_no_line_and_leaves_the_removed_project_alone() {
 }
 
 #[test]
+fn a_remove_of_a_project_with_no_kind_answers_a_null_kind_error() {
+    // The contract (`docs/contracts/cli.md`, JSON): `list` gives the cause, `add` and `remove` do not.
+    let w = world();
+    let running = Running::start(&w.sb);
+    let listed = running.list_json();
+    assert!(
+        listed["projects"][2]["kind_error"].is_string(),
+        "list gives the cause of P-3: {listed}"
+    );
+    let out = running.cli(&["project", "remove", "P-3", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(v["project"]["id"], "P-3", "{v}");
+    assert_eq!(v["project"]["kind"], Value::Null, "{v}");
+    assert_eq!(v["project"]["kind_error"], Value::Null, "{v}");
+    assert!(v["project"]["removed_at"].is_string(), "{v}");
+    running.stop();
+}
+
+#[test]
 fn a_chat_session_start_on_a_project_with_no_kind_refuses_with_the_cause() {
     let w = world();
     let c = open(&w.sb);
