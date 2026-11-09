@@ -95,6 +95,6 @@ done
 if [ -n "${PF_SHOTS_DIR:-}" ]; then mkdir -p "$PF_SHOTS_DIR"; fi
 export PF_BRIDGE_URL="$bridge_url" PF_CODE="$code" PF_BRIDGE_STATE="$tmp/bridge"
 export PF_BIN="$pf_bin" PF_E2E_OUT="$tmp/playwright-output"
-npm --prefix "$root/apps" run e2e --workspace ui || fail "the Playwright journey failed"
+npm --prefix "$root/apps" run e2e --workspace ui -- e2e/pair.spec.ts || fail "the Playwright journey failed"
 
 echo "ui-pair: ok ($(( $(date +%s) - started )) s)"

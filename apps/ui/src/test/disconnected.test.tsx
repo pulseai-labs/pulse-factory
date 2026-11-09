@@ -38,7 +38,7 @@ describe("the disconnected screen (3c)", () => {
     expect(screen.getByText(`Not connected to ${ADDRESS}`)).toBeTruthy();
     expect(screen.getByText(/Retrying in 4s/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry now" })).toBeTruthy();
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
 
     await advance(1000);
     expect(screen.getByText(/Retrying in 3s/)).toBeTruthy();
@@ -62,18 +62,26 @@ describe("the disconnected screen (3c)", () => {
       expect(fake.count("status")).toBe(total);
     }
     // Only `status()` was called by the timer. The page fetched once, on opening.
-    expect(fake.calls).toEqual(["paired", "projectList", ...Array(6).fill("status")]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream", ...Array(6).fill("status")]);
 
     // The server comes back: the next retry clears the banner and fetches the open page once.
     fake.heal();
     await advance(60_000);
     expect(screen.queryByText(/Not connected/)).toBeNull();
-    expect(fake.calls).toEqual(["paired", "projectList", ...Array(7).fill("status"), "projectList"]);
+    // The page fetches once, and the chat state reads the session list once.
+    expect(fake.calls).toEqual([
+      "paired",
+      "projectList",
+      "openStream",
+      ...Array(7).fill("status"),
+      "projectList",
+      "sessionList",
+    ]);
     expect(within(screen.getByRole("main")).getByText("alpha")).toBeTruthy();
 
     // Connected again: no timer calls.
     await advance(TEN_MINUTES);
-    expect(fake.calls).toHaveLength(10);
+    expect(fake.calls).toHaveLength(12);
   });
 
   it("unreachable: 'Retry now' calls status() at once", async () => {
@@ -115,7 +123,7 @@ describe("the disconnected screen (3c)", () => {
     expect(screen.queryByText(/Retrying/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry now" })).toBeNull();
     await advance(TEN_MINUTES);
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
 
     click("Pair again");
     await advance(0);
@@ -129,7 +137,7 @@ describe("the disconnected screen (3c)", () => {
 
     expect(screen.getByText(/^server key changed: re-pair$/)).toBeTruthy();
     await advance(TEN_MINUTES);
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
 
     click("Pair again");
     await advance(0);
@@ -145,11 +153,11 @@ describe("the disconnected screen (3c)", () => {
     expect(screen.getByText("too many failed calls; wait a minute")).toBeTruthy();
     expect(screen.queryByText(/Retrying/)).toBeNull();
     await advance(TEN_MINUTES);
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
 
     click("Retry now");
     await advance(0);
-    expect(fake.calls).toEqual(["paired", "projectList", "status"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "status"]);
     // Still limited: the banner stays and no timer starts.
     expect(screen.getByText("too many failed calls; wait a minute")).toBeTruthy();
     await advance(TEN_MINUTES);
@@ -159,7 +167,15 @@ describe("the disconnected screen (3c)", () => {
     click("Retry now");
     await advance(0);
     expect(screen.queryByText("too many failed calls; wait a minute")).toBeNull();
-    expect(fake.calls).toEqual(["paired", "projectList", "status", "status", "projectList"]);
+    expect(fake.calls).toEqual([
+      "paired",
+      "projectList",
+      "openStream",
+      "status",
+      "status",
+      "projectList",
+      "sessionList",
+    ]);
   });
 
   it.each([

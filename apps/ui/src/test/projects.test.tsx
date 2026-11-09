@@ -52,7 +52,7 @@ describe("the Projects page (2c)", () => {
     expect(fake.addArgs).toHaveLength(1);
     expect(fake.addArgs[0]).toMatchObject({ root: "/home/dev/shiny", name: "Shiny" });
     expect(fake.addArgs[0]?.command_id).toMatch(/^[0-9a-f-]{16,}$/);
-    expect(fake.calls).toEqual(["paired", "projectList", "projectAdd", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "projectAdd", "projectList"]);
     // The form is empty again.
     expect((screen.getByLabelText("Project root") as HTMLInputElement).value).toBe("");
   });
