@@ -536,6 +536,7 @@ async fn stream(
         Ok(Err(StreamRefusal::BadRequest(why))) => {
             return named(error(StatusCode::BAD_REQUEST, why));
         }
+        Ok(Err(StreamRefusal::NotAuthorized)) => return named(not_authorized()),
         Err(_) => return named(failed_inside()),
     };
     // The client sends nothing: its frames are refused, so a small message bound is enough.

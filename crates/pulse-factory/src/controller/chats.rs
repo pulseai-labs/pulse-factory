@@ -1317,6 +1317,19 @@ impl Controller {
             streams.retain(|(_, tx)| !tx.is_closed());
             streams.push((device.id.clone(), end_tx));
         }
+        // The router authenticated this request before the registration, so a revoke may have
+        // committed in between and already run its close (C13). The stream is registered first and
+        // the store is read after: a revoke that closes before the registration has committed
+        // before this read, and one that closes after it finds the stream. Either way no stream
+        // of a revoked device stays open. The dropped end channel lets the next call prune the entry.
+        match self.store.devices() {
+            Ok(rows)
+                if rows
+                    .iter()
+                    .any(|d| d.id == device.id && d.revoked_at.is_none()) => {}
+            Ok(_) => return Err(StreamRefusal::NotAuthorized),
+            Err(e) => return Err(StreamRefusal::BadRequest(e.to_string())),
+        }
         let (tx, feed) = mpsc::channel(256);
         let me = self.me.clone();
         handle.spawn(forward(

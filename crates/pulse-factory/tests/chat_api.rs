@@ -683,3 +683,36 @@ fn a_revoke_closes_that_devices_streams_and_leaves_the_others() {
     assert_eq!(items(&api.live, &s).len(), before, "nothing was admitted");
     assert_eq!(api.stream(&first, "").err(), Some(401));
 }
+
+/// PR #41, class C3: the router authenticates a stream request, and the host opens the stream a
+/// moment later. A revoke that commits between the two has already run its close, so the open
+/// itself must refuse a device that is revoked, and leave no stream behind.
+#[test]
+fn a_stream_opened_for_a_device_revoked_in_flight_is_refused_and_not_left_open() {
+    use pf_api::ApiHost;
+    let api = api();
+    let token = api.pair("one");
+    let bridge = api::ApiBridge::new(api.live.controller.clone());
+    let peer = std::net::IpAddr::from([127, 0, 0, 1]);
+    let sha = pf_api::code::token_sha256(&token).unwrap();
+    // The router's view: the device authenticated, as it was live then.
+    let device = bridge.device(&sha, peer).expect("a live device");
+
+    let revoked = pf_ipc::call(
+        &api.live.sb.state,
+        "device_revoke",
+        json!({"id": device.id, "command_id": "revoke-race"}),
+    )
+    .unwrap();
+    assert!(revoked.ok, "{:?}", revoked.error);
+
+    // The host's open comes after the revoke's close, with the record read before the revoke. The
+    // router runs it inside a runtime, so the test enters one.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _inside = rt.enter();
+    let opened = bridge.open_stream(&device, None, 0);
+    assert_eq!(opened.err(), Some(pf_api::StreamRefusal::NotAuthorized));
+}

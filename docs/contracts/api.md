@@ -148,7 +148,9 @@ it holds as `after`.
 
 The server pings every 30 seconds. A stream holds one of the listener's 256 connection permits while
 it lives. A revoke closes every open stream of that device within one second, and each verb call
-checks its own token, so a revoked token is refused at once on the verbs as well.
+checks its own token, so a revoked token is refused at once on the verbs as well. A stream request
+that the router authenticated before a revoke committed, and that the host opens after it, is
+refused with 401 at the open, so no stream of a revoked device stays open.
 
 ### Status codes of every route
 

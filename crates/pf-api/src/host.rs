@@ -165,6 +165,9 @@ pub enum StreamRefusal {
     NotFound(String),
     /// The call is no good: 400 with this one-line text.
     BadRequest(String),
+    /// The device was revoked after the router authenticated the request: 401, as for any call
+    /// with a revoked token.
+    NotAuthorized,
 }
 
 pub trait ApiHost: Send + Sync + 'static {
