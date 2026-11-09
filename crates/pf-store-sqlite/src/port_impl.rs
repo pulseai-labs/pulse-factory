@@ -711,14 +711,30 @@ fn set_chat_session_runtime(
     model: &Option<String>,
     effort: &Option<String>,
     permission_mode: &Option<String>,
-    runtime_options: &Option<BTreeMap<String, String>>,
+    option_changes: &Option<BTreeMap<String, String>>,
     updated_at: &str,
 ) -> Result<(), EffectError> {
     live_chat_session(tx, id)?;
-    // A map replaces the stored one as a whole; no map leaves it.
-    let options = runtime_options
-        .as_ref()
-        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()));
+    // The changes merge into the stored map here, inside the commit, so no set builds its map
+    // from a read that another set has since replaced. No changes leave the map as it is. An empty
+    // stored map takes the agent's options as its base, as the controller reads it.
+    let options = match option_changes {
+        None => None,
+        Some(changes) => {
+            let (stored, agent): (String, String) = tx.query_row(
+                "SELECT s.runtime_options, COALESCE(a.runtime_options, '{}') FROM chat_sessions s \
+                 LEFT JOIN agents a ON a.id = s.agent_id WHERE s.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let mut map = option_map(&stored)?;
+            if map.is_empty() {
+                map = option_map(&agent)?;
+            }
+            map.extend(changes.iter().map(|(k, v)| (k.clone(), v.clone())));
+            Some(serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string()))
+        }
+    };
     tx.execute(
         "UPDATE chat_sessions SET model = COALESCE(?2, model), effort = COALESCE(?3, effort), \
              permission_mode = COALESCE(?4, permission_mode), \
@@ -826,7 +842,7 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
             model,
             effort,
             permission_mode,
-            runtime_options,
+            option_changes,
             updated_at,
         } => set_chat_session_runtime(
             tx,
@@ -834,7 +850,7 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
             model,
             effort,
             permission_mode,
-            runtime_options,
+            option_changes,
             updated_at,
         )?,
         Effect::RedactChatItem {

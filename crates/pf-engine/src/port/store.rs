@@ -757,14 +757,16 @@ pub enum Effect {
         ended_at: String,
     },
     /// Change the model, effort, permission mode or runtime options of a live chat session. A `None`
-    /// field stays as it was. A map replaces the session's map as a whole. An unknown or ended
-    /// session makes the commit [`Committed::Rejected`].
+    /// field stays as it was. `option_changes` merge key by key into the session's map inside the
+    /// commit, so two sets that overlap each keep their own keys (when the session's map is empty,
+    /// the agent's options are the base). An unknown or ended session makes the commit
+    /// [`Committed::Rejected`].
     SetChatSessionRuntime {
         id: String,
         model: Option<String>,
         effort: Option<String>,
         permission_mode: Option<String>,
-        runtime_options: Option<BTreeMap<String, String>>,
+        option_changes: Option<BTreeMap<String, String>>,
         updated_at: String,
     },
     /// Redact one chat item (C12): the payload becomes [`REDACTED_PAYLOAD`], each tool text that

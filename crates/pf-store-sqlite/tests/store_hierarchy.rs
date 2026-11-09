@@ -386,7 +386,7 @@ fn set_chat_session_runtime_changes_only_the_named_fields_of_a_live_session() {
                         model: model.map(String::from),
                         effort: effort.map(String::from),
                         permission_mode: mode.map(String::from),
-                        runtime_options: None,
+                        option_changes: None,
                         updated_at: "t9".to_string(),
                     },
                 ))
@@ -435,10 +435,11 @@ fn set_chat_session_runtime_changes_only_the_named_fields_of_a_live_session() {
 }
 
 /// `r1.s3.w3` (P3, Approach 14): a session starts with a copy of its agent's runtime options, a
-/// set that carries a map replaces the session's map, a set that carries none leaves it, and the
-/// agent row never changes.
+/// set that carries changes merges them into the session's map key by key (PR #41, class C2: two
+/// sets that overlap each keep their keys), a set that carries none leaves it, and the agent row
+/// never changes.
 #[test]
-fn a_start_copies_the_agents_options_and_a_set_replaces_them_and_leaves_the_agent_alone() {
+fn a_start_copies_the_agents_options_and_a_set_merges_into_them_and_leaves_the_agent_alone() {
     let (_d, store) = open();
     add_project(&store, "c1", "one", "/r/one", ProjectKind::Git, None);
     applied(start(&store, "s1", "P-1", record("/r/one")));
@@ -460,31 +461,50 @@ fn a_start_copies_the_agents_options_and_a_set_replaces_them_and_leaves_the_agen
                     model: model.map(String::from),
                     effort: None,
                     permission_mode: None,
-                    runtime_options: options,
+                    option_changes: options,
                     updated_at: "t9".to_string(),
                 },
             ))
             .unwrap()
     };
-    // A map replaces the row's map as a whole, not key by key.
+    // Changes merge into the row's map key by key. Two sets that were planned from the same base
+    // each keep their own key: the store merges at the commit, so the later one drops nothing.
     let off: BTreeMap<String, String> = [
         ("artifacts".to_string(), "off".to_string()),
         ("zeta".to_string(), "1".to_string()),
     ]
     .into();
-    applied(set("o1", Some(off.clone()), None));
+    applied(set(
+        "o1",
+        Some([("zeta".to_string(), "1".to_string())].into()),
+        None,
+    ));
+    applied(set(
+        "o1b",
+        Some([("artifacts".to_string(), "off".to_string())].into()),
+        None,
+    ));
     assert_eq!(
         store.chat_session("S-1").unwrap().unwrap().runtime_options,
-        off
+        off,
+        "both changes stand"
     );
-    let replaced: BTreeMap<String, String> = [("artifacts".to_string(), "on".to_string())].into();
-    applied(set("o2", Some(replaced.clone()), None));
+    let replaced: BTreeMap<String, String> = [
+        ("artifacts".to_string(), "on".to_string()),
+        ("zeta".to_string(), "1".to_string()),
+    ]
+    .into();
+    applied(set(
+        "o2",
+        Some([("artifacts".to_string(), "on".to_string())].into()),
+        None,
+    ));
     assert_eq!(
         store.chat_session("S-1").unwrap().unwrap().runtime_options,
         replaced,
-        "the map replaces the old one: `zeta` is gone"
+        "a change to one key leaves `zeta`"
     );
-    // A set that carries no map leaves it.
+    // A set that carries no changes leaves the map.
     applied(set("o3", None, Some("claude-sonnet-5-5")));
     let now = store.chat_session("S-1").unwrap().unwrap();
     assert_eq!(now.runtime_options, replaced);

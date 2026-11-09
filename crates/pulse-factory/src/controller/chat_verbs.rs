@@ -722,12 +722,8 @@ impl Controller {
                 return refuse(why);
             }
         }
-        let mut merged = None;
+        let mut option_changes = None;
         if let Some(changes) = args.options.as_ref().filter(|o| !o.is_empty()) {
-            let agent = self
-                .agent(&row.agent_id)?
-                .ok_or_else(|| format!("no agent {}", row.agent_id))?;
-            let mut map = effective_options(&row, &agent);
             for (option_id, value) in changes {
                 if matches!(option_id.as_str(), "model" | "effort" | "permission_mode") {
                     return refuse(format!(
@@ -744,9 +740,9 @@ impl Controller {
                 if let Err(why) = check_option_value(option, value) {
                     return refuse(why);
                 }
-                map.insert(option_id.clone(), value.clone());
             }
-            merged = Some(map);
+            // The store merges these into the session's map at the commit.
+            option_changes = Some(changes.clone());
         }
         let mut parts = String::new();
         for (label, value) in [
@@ -771,7 +767,7 @@ impl Controller {
                 model: args.model.clone(),
                 effort: args.effort.clone(),
                 permission_mode: args.permission_mode.clone(),
-                runtime_options: merged,
+                option_changes,
                 updated_at: now(),
             }],
             subject: id.to_string(),

@@ -446,6 +446,8 @@ stream (`api.md`).
   With a live process, a changed option that the runtime declares `live` (model, effort and permission
   mode for Claude Code 2.1.319) applies at once. An option that is not live (`artifacts`) shows in
   `pending_options`, and the next `send` to an idle process (no turn, no task, no pending request)
+  Two overlapping `set` calls each keep their own options: the store merges the `--option` values
+  into the session's map key by key at the commit.
   stops it (`chat stop reason=option`) and reopens it with the new value first. A live change that
   fails stops the process and adds a notice; the next send reopens it.
 - **`end`.** Stops the process and its group, closes each pending request as `lost` (`the session
