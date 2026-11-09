@@ -2,6 +2,8 @@
 
 - **Status:** Accepted, 2026-11-07, at `r1.s2.w2`
 - **Date:** 2026-11-07
+- **Amended:** 2026-11-09, at `r1.s3.w3`: the chat verbs on the allowlist, the stream route, the server
+  headers and `upgraded` in the request ledger.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -61,7 +63,8 @@
 - A8: the client's Rust side makes the pinned TLS call. A webview opens no TLS connection itself.
 
 **The allowlist rule.**
-- A device may call exactly `project_add`, `project_list` and `project_remove` in this spine.
+- A device may call exactly `project_add`, `project_list` and `project_remove` in this spine. The chat
+  verbs of `r1.s3.w3` extend the list (see "The chat stream and the chat verbs (r1.s3.w3)" below).
 - There is no `ack`, `answer`, `claim`, `clear`, `arm` or `halt` on the list, and no device verb
   (`device_pair`, `device_list`, `device_revoke`, `api_status`). A device cannot let another device
   in, and it cannot stop the run state.
@@ -91,8 +94,8 @@ Rejected alternatives:
 - A device can be revoked from the CLI, and the next call is refused. A paired device is as
   powerful as the operator within the allowlist, so a stolen unlocked device is the operator's
   problem until the operator revokes it.
-- `last_seen` is the one store write outside admission (ADR-0003, amended): a read must not cost an
-  admission row, and the idle expiry of `r1.s2.w5` reads it.
+- `last_seen` is one of the store's writes outside admission (ADR-0003, amended; ADR-0015 lists the
+  others): a read must not cost an admission row, and the idle expiry of `r1.s2.w5` reads it.
 - The server key is a single point of identity. Losing it costs a re-pair of every device.
 - The API's types are the clients' types: `ts-rs` renders them, and a test fails when the committed
   files drift (`apps/api-client/src/gen/`).
@@ -242,6 +245,56 @@ verb, no route and no wire type to the API, and it changes no decision above.
   error, stderr line or ledger line (`crates/pulse-factory/tests/client_pinned.rs`, 2026-11-08).
 - `pf-client-bridge` serves the bridge protocol with the same checks, and d12 passes with it
   (`crates/pulse-factory/tests/client_bridge.rs`, `scripts/demo/ui-pair.sh`, 2026-11-08).
+
+
+## The chat stream and the chat verbs (r1.s3.w3)
+
+Amendment, 2026-11-09. `r1.s3.w3` adds the chat verbs to the allowlist, a WebSocket stream on the same
+listener and the server's name on every answer. Per the allowlist rule above, this amendment records
+the change.
+
+- **The allowlist** (`pf_api::host::ALLOWLIST`) is now ten verbs: `project_add`, `project_list`,
+  `project_remove`, `session_list`, `session_start`, `session_send`, `session_answer`,
+  `session_interrupt`, `session_set` and `session_end`. Off it, and named by the router test:
+  `session_redact` (CLI-only, so a redaction stays the operator's act on the host), `session_items`
+  (the stream's `after=0` gives the history), `halt`, `ack`, `answer`, `claim`, `clear`, `arm`, the
+  `device_*` verbs and `api_status`. Each chat verb goes through the CLI's handler path, with its
+  command ID, so it is one admission and one `controller.ledger` line. A device acts as the operator
+  (ADR-0009), and `ApiBridge::call` reaches the verbs through `handle`.
+- **The stream route** is `GET /v1/stream[?session=<S-n>&after=<seq>]`, a WebSocket upgrade on the same
+  TLS 1.3 listener with the same pinned key. The token is read from `Authorization: Bearer` **at the
+  upgrade**: a bad token is a 401 with no upgrade and counts as a token failure for the peer guard.
+  After the token come the method (405), the upgrade headers (400), the query (400), the open (404 for
+  an unknown session) and the `101`. A device holds at most 8 streams: the ninth upgrade is 429 `too
+  many open streams`, which is not a guard failure. A stream holds one of the listener's 256
+  connection permits, so the listener serves with `with_upgrades()`. The `ApiHost` trait gains an
+  `open_stream(device, session, after)` call with a default that answers 404, so the router never
+  reaches the store and the test hosts compile unchanged.
+- **The reconnect order** belongs to the host: it subscribes the connection to the live frames, sends
+  `hello`, then the stored items after `after` in pages of 500, then `caught`, then the live frames,
+  dropping an `item` whose `seq` it already sent. No item is lost or doubled between the stored read
+  and the live stream. Text deltas are never stored and are not replayed.
+- **The close codes** are `4001 revoked`, `4002 lagged: reconnect after seq <n>`, `1001` for a
+  controller stop and `1008` for a data frame from the client. The stream is read-only, and the server
+  pings every 30 seconds.
+- **A revoke closes the device's streams.** An admitted `device_revoke` ends every open stream of that
+  device with 4001 within one second. Each verb call authenticates its own request, so a revoked token
+  is refused at once on the verbs too (C13).
+- **The server on every answer.** Every answer, a `101` and each error included, carries
+  `pf-server-id` (the SPKI SHA-256 hex of the pinned key) and `pf-server-name`. `ApiStatus` gains an
+  optional `server`, so an existing client still parses it. The id is no secret: any TLS peer sees the
+  key. This is the groundwork of an app that talks to more than one server.
+- **The request ledger** gains the route `stream` and the outcome `upgraded` (the `101`): one line for
+  each connection, written when the upgrade is answered, and none at the close. The router maps every
+  429 to `blocked`, so a ninth stream's refusal reads `outcome=blocked`.
+- **A new crate.** `tokio-tungstenite` (pinned with `=`) and axum's `ws` feature (ADR-0008, amended).
+- **The device model** keeps `last_seen` as one of the store's writes outside admission. This
+  amendment adds none: the store's writes outside admission stay the five of `r1.s3.w2` and
+  `touch_device`.
+
+Known limits: a stream that lags is closed and must reconnect; a reconnect does not replay the text
+deltas of a turn in progress (its finished items arrive when it ends); `session_redact` cannot recall
+an item that a device already read.
 
 Revisit this ADR when a second operator, a device outside the operator's tailnet, or a browser
 client served by the server is planned.

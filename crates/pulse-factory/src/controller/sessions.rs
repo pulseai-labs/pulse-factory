@@ -2,7 +2,7 @@
 //! redaction of one chat item (ADR-0001, ADR-0003, ADR-0015). They take the path of `commands.rs`: a
 //! command ID, the admission scope `@controller`, one ledger line for each new command, and a refusal
 //! that is an admission of its own. They launch nothing and change no run, so `halt` does not apply
-//! to them. The verbs that reach them are `r1.s3.w3`'s.
+//! to them. The verbs that reach them are in `chat_verbs.rs` (`r1.s3.w3`).
 //!
 //! The display log itself (`append_chat_item` and the writes beside it) is not a command: those are
 //! the store's writes outside admission, and they reach the store directly.
@@ -43,6 +43,9 @@ pub struct ChatSessionStarted {
     pub replayed: bool,
     pub session: ChatSessionRow,
     pub worktree: WorktreeRow,
+    /// Why an admitted start could not act (`r1.s3.w3`): the open that failed after the admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The answer of a chat session end.
@@ -50,6 +53,9 @@ pub struct ChatSessionStarted {
 pub struct ChatSessionEnded {
     pub replayed: bool,
     pub session: ChatSessionRow,
+    /// Why an admitted end could not act fully (`r1.s3.w3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// The arguments of the redaction of one chat item.
@@ -88,7 +94,7 @@ struct RedactContent<'a> {
     session_id: &'a str,
 }
 
-fn check_session_id(id: &str) -> Result<(), String> {
+pub(super) fn check_session_id(id: &str) -> Result<(), String> {
     let n = id.chars().count();
     if n == 0 || n > SESSION_ID_MAX_CHARS {
         return Err(format!(
@@ -115,6 +121,16 @@ impl Controller {
         &self,
         args: &ChatSessionStartArgs,
     ) -> Result<ChatSessionStarted, String> {
+        self.start_chat_session_checked(args, false)
+    }
+
+    /// The admission of a start. With `launch`, the plan also runs the launch check and the cap
+    /// (`r1.s3.w3` Approach 3 and 6), so a start that cannot open is one refused admission.
+    pub(super) fn start_chat_session_checked(
+        &self,
+        args: &ChatSessionStartArgs,
+        launch: bool,
+    ) -> Result<ChatSessionStarted, String> {
         check_command_id(&args.command_id)?;
         let content = serde_json::to_string(&StartContent {
             agent_id: &args.agent_id,
@@ -131,7 +147,7 @@ impl Controller {
         {
             Plan::Refuse("a replay".to_string())
         } else {
-            self.plan_start(args)?
+            self.plan_start(args, launch)?
         };
         let (admission, replayed) =
             self.run_command("chat_session_start", &args.command_id, content, plan)?;
@@ -152,11 +168,12 @@ impl Controller {
             replayed,
             session,
             worktree,
+            note: None,
         })
     }
 
     /// Judge a start: the refusals the controller knows, then the effects.
-    fn plan_start(&self, args: &ChatSessionStartArgs) -> Result<Plan, String> {
+    fn plan_start(&self, args: &ChatSessionStartArgs, launch: bool) -> Result<Plan, String> {
         let refuse = |why: String| Ok(Plan::Refuse(why));
         let id = &args.project_id;
         let project = match self.store.project(id).map_err(|e| e.to_string())? {
@@ -170,14 +187,27 @@ impl Controller {
                 "project {id} has no kind ({cause}); remove it and add it again"
             ));
         };
-        match self.agent(&args.agent_id)? {
+        let agent = match self.agent(&args.agent_id)? {
             None => return refuse(format!("no agent {}", args.agent_id)),
             Some(a) if a.id != ORCHESTRATOR_AGENT => {
                 return refuse(
                     "only the Orchestrator has chat sessions in this release".to_string(),
                 );
             }
-            Some(_) => {}
+            Some(a) => a,
+        };
+        // The launch check (C4, P3, N5): the agent's runtime is on this server, and its settings
+        // pass the runtime's declared options.
+        if launch
+            && let Err(why) = self.launch_ready(
+                &agent.runtime,
+                &agent.model,
+                &agent.effort,
+                &agent.permission_mode,
+                &agent.runtime_options,
+            )
+        {
+            return refuse(why);
         }
 
         // The worktree is the main worktree: the project root. Its row is recorded at the first
@@ -202,6 +232,10 @@ impl Controller {
         };
         if let WorktreeLive::Gone(why) = live {
             return refuse(format!("the worktree {root} is gone: {why}"));
+        }
+        // The cap: no process is released early to make room (Q2 rule 1).
+        if launch && let Some(why) = self.cap_refusal() {
+            return refuse(why);
         }
         let worktree = match &row {
             Some(r) => SessionWorktree::Existing { id: r.id.clone() },
@@ -277,7 +311,11 @@ impl Controller {
             .chat_session(&args.session_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("chat session {} is not in the store", args.session_id))?;
-        Ok(ChatSessionEnded { replayed, session })
+        Ok(ChatSessionEnded {
+            replayed,
+            session,
+            note: None,
+        })
     }
 
     /// The admitted redaction of one chat item (C12): a command with an ID and one ledger line that

@@ -38,6 +38,11 @@ fn unit_problems(unit: &str) -> Vec<String> {
     if unit.contains("CARGO_") {
         p.push("the unit sets a CARGO_ variable".into());
     }
+    // The chat processes are children of the controller. systemd must end any child that is left
+    // in the unit's cgroup, such as a background `Bash` in its own session (ADR-0001, ADR-0015).
+    if !unit.lines().any(|l| l.trim() == "KillMode=control-group") {
+        p.push("no KillMode=control-group".into());
+    }
     p
 }
 
@@ -192,6 +197,8 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "clear",
             "ack",
             "project",
+            "session",
+            "chat-runtime",
             "device",
             "api",
             "hook",
@@ -221,6 +228,15 @@ fn each_check_fires_on_a_bad_sample() {
         ),
         (good_unit.replace(".cargo/bin", "bin"), "PATH"),
         (format!("{good_unit}Environment=CARGO_HOME=/x\n"), "CARGO_"),
+        // No `KillMode` at all, and a mode that leaves the children running.
+        (
+            good_unit.replace("KillMode=control-group\n", ""),
+            "KillMode",
+        ),
+        (
+            good_unit.replace("KillMode=control-group", "KillMode=process"),
+            "KillMode",
+        ),
     ] {
         let p = unit_problems(&bad);
         assert!(

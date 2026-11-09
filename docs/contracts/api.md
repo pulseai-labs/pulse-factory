@@ -22,6 +22,13 @@ verbs that manage it are `device` and `api` in `cli.md`. The Rust types are in `
 - **The token.** A route that needs a device token reads `Authorization: Bearer <token>`. The token is
   64 lower-case hex digits (32 random bytes). The server keeps only the SHA-256 of the 32 bytes. The
   token appears once, in the answer of `POST /v1/pair`, and nowhere else.
+- **The server on every answer.** Every answer of every route, a `101` and every error included,
+  carries two headers: `pf-server-id: <SPKI SHA-256 hex of the key pinned at pairing>` and
+  `pf-server-name: <name>`. The name is `PF_SERVER_NAME`, else the kernel's host name, else `server`,
+  1 to 64 characters of `[A-Za-z0-9._-]`. The id is no secret: any TLS peer sees the key. A client
+  that talks to more than one server tells them apart by these two headers. `GET /v1/status` and the
+  `hello` frame carry the same pair as a `server` object (`{"id": "<hex>"|null, "name": "…"}`; the id
+  is null only with the API off).
 - **Acting as the operator.** A device acts as the operator and has no scope of its own (ADR-0009). A
   call goes through the controller's verb handler, the same code that the Unix socket runs, so each
   admission, refusal and ledger line is the CLI's.
@@ -57,7 +64,9 @@ and the peer address.
 ### `GET /v1/status`
 
 Needs a token. It answers 200 with `{"schema_version": 1, "version": "<server version>",
-"key_spki_sha256": "<64 hex digits>", "device": {…the calling device's record…}}`.
+"key_spki_sha256": "<64 hex digits>", "device": {…the calling device's record…}, "server": {"id":
+"<64 hex digits>", "name": "<name>"}}`. `server` is optional on the wire, so a client written before
+`r1.s3.w3` still parses the answer.
 
 ### `POST /v1/verbs/<verb>`
 
@@ -73,10 +82,79 @@ with `replayed` true.
 - **400** `{"error": "the body is not JSON"}` for a body that is not JSON. **413** for a body over
   1 MiB.
 
+### `GET /v1/stream[?session=<S-n>&after=<seq>]`
+
+A WebSocket upgrade on the same TLS 1.3 listener, for the chat of a paired device. It needs a token
+in `Authorization: Bearer <token>`, as every route does. The stream is read-only: the client acts
+through the verbs, and reads here.
+
+**The order of the checks:** the peer guard's block check (429); the token (401, no upgrade; it
+counts as a token failure for the peer guard, like a 401 on any token route); the method (a
+method other than `GET` is 405); the upgrade headers (400 when absent); the query (400 for a session
+ID that is not `S-<n>` or an `after` that is not a number); the controller's open (404 for an
+unknown session); then `101 Switching Protocols`. A refusal before the `101` is an ordinary JSON
+error answer and no upgrade. At most **8** streams are open per device: the ninth upgrade is
+**429** `{"error": "too many open streams"}`. That 429 is not a guard failure and does not block the
+peer.
+
+**The query.** `session` names the session to follow, and `after` is the last `seq` the client
+already holds (default 0). With no `session` the stream carries the overview only.
+
+**The frames.** Each is one WebSocket text message holding one JSON object with a `type`:
+
+```json
+{"type":"hello","server":{"id":"4673cd6f…933c","name":"demo-server"},"sessions":[{…ChatSessionRecord…}],"following":"S-1","after_seq":0}
+{"type":"session","session":{…ChatSessionRecord…}}
+{"type":"item","item":{"session_id":"S-1","seq":1,"answers_seq":null,"created_at":"2026-11-08T22:54:03.764Z","redacted_at":null,"body":{"kind":"operator_message","text":"hello"}}}
+{"type":"caught","session_id":"S-1","last_seq":6}
+{"type":"delta","session_id":"S-1","text":"The command was denied."}
+{"type":"tool_running","session_id":"S-1","call_id":"toolu_01V9…","tool":"Bash"}
+```
+
+- `hello` comes first. It names the server, holds every live session as a `ChatSessionRecord`
+  (id, project, worktree, branch, state, process with its `qualified` flag and holders, model,
+  effort, permission mode, runtime options, pending options, summed usage, the cache-warm time,
+  the context gauge), `following` (the session ID or null) and `after_seq`.
+- `session` carries a session's record again after anything that changes it: its state, its cost,
+  its holders, its process. The app never polls (A8). A stream with no `session` query carries
+  `hello` and `session` frames only.
+- `item` carries one stored item of the followed session: `operator_message`, `assistant_text`,
+  `tool_call` (with its `input` and `output` as `{text, bytes, truncated}`), `approval_request`,
+  `approval_answer`, `question_request`, `question_answer`, `background_task`, `notice`,
+  `turn_result` (with its `usage` and `cost_micros`), `redacted` and `unknown`. Its `seq` counts
+  from 1 within the session with no gap. A redaction by `session redact` sends the item again with
+  `redacted_at` set and the same `seq`. An open stream receives this frame even though it already
+  holds that `seq`, and the client replaces its copy. A device that was not connected keeps the
+  copy it read before (ADR-0015's known limit).
+- `caught` says the stored items are sent. What follows is live.
+- `delta` carries the text of a turn as it streams. Deltas are never stored, and a reconnect does
+  not replay them. `tool_running` says a tool call started. The finished call arrives as one `item`.
+
+**The reconnect.** The controller subscribes the connection to the live frames first. Then it sends
+`hello`, then the stored items of the followed session with a `seq` above `after` in `seq` order
+(pages of 500), then `caught`, then the live frames, dropping any `item` whose `seq` it already
+sent, except a redaction's re-send (`redacted_at` set), which always passes. No item is lost or
+doubled between the stored read and the live frames. A client that reconnects sends the last `seq`
+it holds as `after`.
+
+**The close codes.** The server closes with:
+
+| Code | Reason | When |
+|---|---|---|
+| `4001` | `revoked` | An admitted `device_revoke` closed the device's streams at once. |
+| `4002` | `lagged: reconnect after seq <n>` | The connection fell behind the live frames. Reconnect with `after=<n>`. |
+| `1001` | `going away` | The controller is stopping. |
+| `1008` | `policy violation` | The client sent a data frame. The stream is read-only. |
+
+The server pings every 30 seconds. A stream holds one of the listener's 256 connection permits while
+it lives. A revoke closes every open stream of that device within one second, and each verb call
+checks its own token, so a revoked token is refused at once on the verbs as well.
+
 ### Status codes of every route
 
 | Code | Meaning |
 |---|---|
+| 101 | The stream upgraded (`GET /v1/stream`). |
 | 200 | The call worked. |
 | 400 | The body is not JSON, or not JSON of the shape the route needs. |
 | 401 | No token, a malformed token, an unknown token, a revoked token, an idle device (on a token route); or a bad code (on `/v1/pair`). |
@@ -85,7 +163,7 @@ with `replayed` true.
 | 405 | A known route with the wrong method. |
 | 413 | The body is over 1 MiB. |
 | 422 | The controller refused the command, or the device name is invalid. |
-| 429 | The peer address is blocked after 5 failures (see "Guards"). |
+| 429 | The peer address is blocked after 5 failures (see "Guards"), or a device has 8 streams open already. |
 | 500 | The controller failed inside the call. |
 
 **One 401 for every reason.** On a token route the 401 is `{"error": "not authorized"}` whether the
@@ -102,11 +180,25 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `project_add` | `project add` |
 | `project_list` | `project list` |
 | `project_remove` | `project remove` |
+| `session_list` | `session list` |
+| `session_start` | `session start` |
+| `session_send` | `session send` |
+| `session_answer` | `session answer` |
+| `session_interrupt` | `session interrupt` |
+| `session_set` | `session set` |
+| `session_end` | `session end` |
 
 Every other verb is 403: `runs`, `status`, `requests`, `show`, `answer`, `claim`, `clear`, `ack`,
-`arm`, `halt`, `hook`, `device_pair`, `device_list`, `device_revoke` and `api_status`. There is no
-way for a device to pair another device, revoke one, claim, answer, ack, arm or halt. `halt` and
-every merge-ack verb stay off the list: the human confirm of an ack comes with `r1.s4`.
+`arm`, `halt`, `hook`, `device_pair`, `device_list`, `device_revoke`, `api_status`, `session_items`
+and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
+read the item before keeps its copy (ADR-0015's known limit), and the operator decides on the host.
+`session_items` is off the list because the stream's `after=0` gives the history. There is no way
+for a device to pair another device, revoke one, claim, answer, ack, arm or halt. `halt` and every
+merge-ack verb stay off the list: the human confirm of an ack comes with `r1.s4`.
+
+The chat verbs take the arguments and give the answers that `cli.md` lists under `session`. Each
+state-changing one takes a `command_id`, and the same ID with the same content returns the first
+record with `replayed` true and acts on nothing.
 
 **Each later spine that adds a verb amends ADR-0012** (planning audit C2). The list lives in
 `pf_api::host::ALLOWLIST`, and the router test names every verb that must stay off it.
@@ -230,7 +322,7 @@ state-changing call has both lines: its admission line in `controller.ledger` an
 <UTC time> api route=<route> verb=<verb|-> device=<D-n|-> peer=<ip> status=<code> outcome=<outcome>
 ```
 
-- `route` is `pair`, `status`, `verb` or `other`. `device` is the device whose token matched, and
+- `route` is `pair`, `status`, `verb`, `stream` or `other`. `device` is the device whose token matched, and
   `-` when none did (a pairing has no token, so it shows `-`). The device ID is the only name of the
   caller.
 - `verb` is the name of a verb of the controller's own dispatch table (`runs`, `status`, `halt`,
@@ -239,14 +331,18 @@ state-changing call has both lines: its admission line in `controller.ledger` an
   file. Every value passes `field()`, so no value can break the line.
 - `outcome` is one of: `ok` (200), `replayed` (a 200 whose answer has `"replayed": true`),
   `unauthorized` (401), `forbidden` (403), `refused` (422), `bad_request` (400), `too_large` (413),
-  `not_found` (404), `method_not_allowed` (405), `blocked` (429) and `failed` (500). The line of the
+  `not_found` (404), `method_not_allowed` (405), `blocked` (429), `failed` (500) and `upgraded` (101). The line of the
   failure that starts a block ends with `blocked_until=<UTC time>`.
 - **A blocked peer's 429s are coalesced.** The first 429 of a block writes a line with `outcome=blocked
   count=1`. A later 429 writes a line only when 60 seconds have passed since that peer's last
   `blocked` line, and its `count=<n>` counts every 429 since that line, itself included. A peer that
   floods while blocked cannot fill the disk. The 429s of the last minute of a flood that then stops
   stay uncounted.
-- **No token, code, secret or key** is in any line.
+- **A stream is one line**, written when the upgrade is answered: `route=stream`, and `outcome=upgraded`
+  for the `101` (a refusal has its usual outcome). The close writes no second line. A ninth open
+  stream of one device is answered 429, and the router maps every 429 to `outcome=blocked`, so that
+  refusal reads `outcome=blocked` in `api.ledger` although it is no guard block.
+- **No token, code, secret, key or message text** is in any line.
 - The file is append-only, with no `fsync` per line, and it is not in the store. A crash can lose the
   last lines. A failed append prints one line on stderr, and the request still gets its answer.
 - A TLS failure before HTTP (a pin mismatch, a handshake timeout) is no request and writes no line.
@@ -288,7 +384,9 @@ There is no key rotation without a re-pair in this version.
 
 ## Out of this version
 
-These come in later items and spines: a stream over WebSocket (`r1.s3`); per-device scopes and the
-merge-ack confirm (`r1.s4`); rotation or a size cap of `api.ledger` and `controller.ledger` (the
-feature map's "controller ledger rotation"); a per-device rate limit, a ban list that survives a
-restart and a limit on successful calls.
+These come in later items and spines: the stream in `pf-client` and the macOS shell (`r1.s3.w4`) and
+the chat screens (`r1.s3.w5`); per-device scopes and the merge-ack confirm (`r1.s4`); rotation or a
+size cap of `api.ledger`, `chat.ledger` and `controller.ledger` (the feature map's "controller ledger
+rotation"); a per-device rate limit, a ban list that survives a restart and a limit on successful
+calls; a `session_items` verb for devices (the stream's `after=0` gives the history); several
+servers in one app (the server headers are its groundwork).

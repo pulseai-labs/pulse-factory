@@ -73,8 +73,10 @@ pub async fn serve(
             let mut http = hyper::server::conn::http1::Builder::new();
             http.timer(TokioTimer::new())
                 .header_read_timeout(HEAD_TIMEOUT);
+            // A stream is an upgraded connection, so the connection serves with upgrades.
             let _ = http
                 .serve_connection(TokioIo::new(tls), TowerToHyperService::new(app))
+                .with_upgrades()
                 .await;
         });
     }

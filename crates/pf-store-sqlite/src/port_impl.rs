@@ -11,8 +11,7 @@ use pf_engine::port::store::{
     NEW_ID, NewChatItem, NewChatSession, NewDevice, NewProject, NewRequest, NodeKind, NodeRow,
     ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
     RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, Store, StoreError,
-    TOOL_TEXT_MAX_BYTES, TOOL_TEXT_TRUNCATION_MARK, ToolText, WORKTREE_ID, WorktreeCreatedBy,
-    WorktreeRow,
+    TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -507,7 +506,18 @@ fn worktree_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRow> {
 
 const CHAT_SESSION_COLUMNS: &str = "id, project_id, worktree_id, agent_id, runtime, runtime_session_ref, \
      state, model, effort, permission_mode, input_tokens, output_tokens, cache_read_tokens, \
-     cache_write_tokens, cost_micros, created_at, updated_at, ended_at";
+     cache_write_tokens, cost_micros, created_at, updated_at, ended_at, runtime_options";
+
+/// A JSON object of text values, read from a row. Any other shape fails the read.
+fn option_map(json: &str) -> rusqlite::Result<BTreeMap<String, String>> {
+    serde_json::from_str::<BTreeMap<String, String>>(json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            18,
+            rusqlite::types::Type::Text,
+            format!("the runtime options are not an object of text values: {e}").into(),
+        )
+    })
+}
 
 fn chat_session_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSessionRow> {
     let state: String = r.get(6)?;
@@ -530,6 +540,7 @@ fn chat_session_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSessionRow> 
         created_at: r.get(15)?,
         updated_at: r.get(16)?,
         ended_at: r.get(17)?,
+        runtime_options: option_map(&r.get::<_, String>(18)?)?,
     })
 }
 
@@ -566,14 +577,14 @@ struct Started {
 /// unique index are the backstop of these checks.
 fn start_chat_session(tx: &Transaction<'_>, n: &NewChatSession) -> Result<Started, EffectError> {
     live_project(tx, &n.project_id)?;
-    let agent: Option<(String, String, String, String)> = tx
+    let agent: Option<(String, String, String, String, String)> = tx
         .query_row(
-            "SELECT runtime, model, effort, permission_mode FROM agents WHERE id = ?1",
+            "SELECT runtime, model, effort, permission_mode, runtime_options FROM agents WHERE id = ?1",
             [&n.agent_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((runtime, model, effort, permission_mode)) = agent else {
+    let Some((runtime, model, effort, permission_mode, runtime_options)) = agent else {
         return Err(EffectError::Rejected(format!("no agent {}", n.agent_id)));
     };
     if n.agent_id == ORCHESTRATOR_AGENT {
@@ -644,8 +655,8 @@ fn start_chat_session(tx: &Transaction<'_>, n: &NewChatSession) -> Result<Starte
     let session_id = format!("S-{}", next_number(tx, "chat_sessions")?);
     tx.execute(
         "INSERT INTO chat_sessions (id, project_id, worktree_id, agent_id, runtime, state, model, \
-             effort, permission_mode, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'idle', ?6, ?7, ?8, ?9, ?9)",
+             effort, permission_mode, runtime_options, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'idle', ?6, ?7, ?8, ?9, ?10, ?10)",
         params![
             session_id,
             n.project_id,
@@ -655,6 +666,7 @@ fn start_chat_session(tx: &Transaction<'_>, n: &NewChatSession) -> Result<Starte
             model,
             effort,
             permission_mode,
+            runtime_options,
             n.created_at
         ],
     )
@@ -699,14 +711,20 @@ fn set_chat_session_runtime(
     model: &Option<String>,
     effort: &Option<String>,
     permission_mode: &Option<String>,
+    runtime_options: &Option<BTreeMap<String, String>>,
     updated_at: &str,
 ) -> Result<(), EffectError> {
     live_chat_session(tx, id)?;
+    // A map replaces the stored one as a whole; no map leaves it.
+    let options = runtime_options
+        .as_ref()
+        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()));
     tx.execute(
         "UPDATE chat_sessions SET model = COALESCE(?2, model), effort = COALESCE(?3, effort), \
-             permission_mode = COALESCE(?4, permission_mode), updated_at = ?5 \
+             permission_mode = COALESCE(?4, permission_mode), \
+             runtime_options = COALESCE(?5, runtime_options), updated_at = ?6 \
          WHERE id = ?1 AND ended_at IS NULL",
-        params![id, model, effort, permission_mode, updated_at],
+        params![id, model, effort, permission_mode, options, updated_at],
     )
     .map_err(backstop)?;
     Ok(())
@@ -808,8 +826,17 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
             model,
             effort,
             permission_mode,
+            runtime_options,
             updated_at,
-        } => set_chat_session_runtime(tx, id, model, effort, permission_mode, updated_at)?,
+        } => set_chat_session_runtime(
+            tx,
+            id,
+            model,
+            effort,
+            permission_mode,
+            runtime_options,
+            updated_at,
+        )?,
         Effect::RedactChatItem {
             session_id,
             seq,
@@ -914,12 +941,10 @@ fn capped(t: &ToolText, what: &str) -> Result<(String, u64, bool), StoreError> {
             t.text.len()
         )));
     }
-    let mut end = TOOL_TEXT_MAX_BYTES - TOOL_TEXT_TRUNCATION_MARK.len();
-    while !t.text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let text = format!("{}{TOOL_TEXT_TRUNCATION_MARK}", &t.text[..end]);
-    Ok((text, t.bytes.max(t.text.len() as u64), true))
+    // The store's own cut is the chat port's: one function and one mark for the adapter, the store
+    // and the stream.
+    let cut = pf_engine::port::chat::cap(&t.text);
+    Ok((cut.text, t.bytes.max(cut.bytes), true))
 }
 
 fn store_err(what: impl std::fmt::Display) -> StoreError {

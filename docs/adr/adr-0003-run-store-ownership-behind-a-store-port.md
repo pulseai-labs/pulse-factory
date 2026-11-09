@@ -11,6 +11,8 @@
 - **Amended:** 2026-11-08, at `r1.s3.w2`: the project hierarchy (migration 0005), the chat sessions'
   display log, the new `@controller` commands, a second ID placeholder and four more writes outside
   admission. The revisit trigger changes. Nothing else above changes.
+- **Amended:** 2026-11-09, at `r1.s3.w3`: migration 0006 (the session's runtime options), the four chat
+  commands of the controller, one truncation mark.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
@@ -153,3 +155,22 @@ The store gains the project hierarchy and the display log of the chat sessions (
 
 Known limit: migration 0005, like every migration, refuses under an active run. Install with no
 active run.
+
+## Amendment, 2026-11-09 (`r1.s3.w3`)
+
+- **Migration 0006** (`0006_session_options.sql`) adds `chat_sessions.runtime_options TEXT NOT NULL
+  DEFAULT '{}'`, a JSON object of text values, with a check that it is an object. It is forward only
+  (ADR-0007). The migrations are now 0001 init, 0002 requests, 0003 projects, 0004 devices, 0005
+  hierarchy and 0006 session options. A session that was live before 0006 reads `{}`.
+- **The chat commands.** `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set` are
+  admissions under `@controller`, beside the three of `r1.s3.w2`, each with a command ID and one
+  controller-ledger line. The store's start copies the agent's runtime options onto the new row in the
+  same admission, and `SetChatSessionRuntime` replaces the row's map when it carries one. The agent row
+  never changes.
+- **One truncation mark.** The store's own cut of a tool text calls the chat port's `cap`, so a text
+  the store cuts gets the adapter's mark (`…[truncated: <bytes> bytes in all]`). The controller passes
+  the adapter's capped text, so in practice the store never cuts.
+- **The writes outside admission** stay `touch_device` and the four of `r1.s3.w2` (`mark_worktree_gone`,
+  `set_chat_session_state`, `set_chat_runtime_ref`, `append_chat_item`). This item adds none: the pump
+  writes through them, and a `SessionMoved` is a `set_chat_runtime_ref`.
+

@@ -10,8 +10,8 @@ publish.workspace = true
 [dependencies]
 pf-engine = { path = "../pf-engine" }
 rusqlite.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-serde_json.workspace = true

@@ -9,6 +9,8 @@
 - **Amended:** 2026-11-08, at `r1.s3.w1`: the new member `crates/pf-adapter-claude` and its
   `pf-claude-replay` binary, and the line references of two verified claims. Nothing above changes
   except where the amendment says.
+- **Amended:** 2026-11-09, at `r1.s3.w3`: `tokio-tungstenite`, axum's `ws` feature, the new dependencies of
+  `pulse-factory` and the `pf-stream-reader` binary.
 
 ## Context
 - The architecture spec chose Rust, Tokio, SQLite through rusqlite, portable-pty as the first PTY
@@ -165,3 +167,25 @@ is the `claim-authority` gate's surface and is not changed.
 channel of the chat port (an unbounded `mpsc`, as in `pf-engine`).
 
 **`Cargo.lock`** gains the one member and the `tokio` edge of `pf-adapter-fake`, and no other crate.
+
+## Amendment, 2026-11-09 (`r1.s3.w3`)
+
+The chat stream and the chat controller add one crate, one feature and three dependencies.
+
+- **`tokio-tungstenite`**, pinned with `=0.29.0`, with `default-features = false` and the `handshake`
+  feature, is a workspace dependency. axum's `ws` feature needs `tokio-tungstenite` 0.29 and
+  `tungstenite` 0.29, so `pf-api` serves the WebSocket upgrade with it. The first build fetches the two
+  crates from crates.io once (draco-desk's offline cache held 0.30 only), and `Cargo.lock` then holds
+  them. The sync `tungstenite` client that `tokio-tungstenite` re-exports serves the readers and the
+  tests, so the item adds no `futures-util`.
+- **axum's `ws` feature** is on, in the `pf-api` dependency.
+- **`pf-adapter-claude` and `pf-client`** are normal dependencies of `pulse-factory`: the controller
+  launches the chat through the adapter, and `pf-stream-reader` builds its TLS config with
+  `pf_client::pin::client_config`. The `pulse-factory` binary links the adapter. `rustls` is a direct
+  dependency of the `pulse-factory` package for the reader, and `proptest` a dev-dependency for the chat
+  property test (its failure persistence stays off).
+- **`pf-stream-reader`** is a second binary of the `pulse-factory` package: a small client of the chat
+  stream for the demo (`scripts/demo/chat-api.sh`) and for tests. It prints each frame as one line of
+  JSON, reads the token from a file, and is no product surface; `pf-client`'s own stream may replace
+  it. `scripts/install.sh` also installs `pf-claude-replay` for the same demo.
+

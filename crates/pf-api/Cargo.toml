@@ -24,6 +24,9 @@ rcgen.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
 
 [dev-dependencies]
+# The stream tests pin the server key as a device does, with pf-client's verifier.
+pf-client = { path = "../pf-client" }
+tokio-tungstenite.workspace = true
 tempfile.workspace = true
 tower.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }

@@ -2,6 +2,8 @@
 
 - **Status:** Proposed, 2026-11-08, at `r1.s3.w2`. It becomes Accepted at the `r1.s3` close.
 - **Date:** 2026-11-08
+- **Amended:** 2026-11-09, at `r1.s3.w3`: the controller's half of the chat: verbs, processes, pump,
+  `chat.ledger`, lifetime, `halt` and the caller rule.
 
 ## Context
 - Release 1's second exit criterion: the operator chats with a project's Orchestrator from the
@@ -162,7 +164,7 @@ project needs one.
 ## Consequences
 - The store holds the hierarchy, and a project's chat has a home that survives a restart without a
   process.
-- The controller's ledger gains four commands. `project list` costs no admission.
+- The controller's ledger gains four commands (and `r1.s3.w3` adds four more). `project list` costs no admission.
 - The port has one more ID placeholder and five writes outside admission. Each write names the
   reason it is not a command, so a later write can be judged against them.
 - A leaked secret in the display log can be removed with one admitted command, and the removal
@@ -179,5 +181,65 @@ project needs one.
   check also asks the file system, so a deleted directory is gone either way.
 - That a restart leaves no chat process alive. ADR-0007 states it. `r1.s3.w3` stops each chat process
   at `halt` and at an end, and this ADR relies on the restart.
+
+
+## Amendment, 2026-11-09 (`r1.s3.w3`): the controller's half of the chat
+
+`r1.s3.w3` adds the verbs, the processes and the stream that sit on the hierarchy.
+
+- **The verbs and their admissions.** `session send`, `answer`, `interrupt` and `set` are the commands
+  `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, beside `chat_session_start`,
+  `chat_session_end` and `chat_item_redact`. Each is one admission under `@controller` with a command
+  ID and one `controller.ledger` line, admitted or refused. A replay returns the first record and
+  makes no port call. A `chat_send` stores the SHA-256 of its text, so the admission row and the line
+  hold no text. A start, a send and a restart are the only things that open a process: a turn begins
+  only on an admitted send or when a background task the chat started finishes.
+- **The runtime overrides on the row (P3).** A session keeps its own model, effort, permission mode and
+  runtime options. They start as the agent's, change with `session set`, survive a release and
+  `--resume`, and never change the agent. Migration 0006 adds `chat_sessions.runtime_options`, a JSON
+  object of text values, default `{}`; a session that was live before it launches with its agent's
+  options.
+- **The persona is in the binary.** The built-in Orchestrator's `instructions` stays NULL in the row.
+  The controller passes the persona as the open's instructions. It names the project, the root, the
+  server and the session, holds no time, and names no plugin, hook or role. The server's own
+  environment setting `PF_AGENT_ENV_<AGENT>` is the interim for an agent's environment (P4).
+- **The launch check and the degrade (N5).** Before the first launch and before each open, the agent's
+  runtime must be on the server, and its model, effort, permission mode and each runtime option must
+  pass the runtime's declared options. A runtime option whose stored value the runtime no longer
+  offers is not a refusal: the controller passes it, the adapter launches with the tools off, and the
+  controller prints one line. The degrade wins over the seed.
+- **The event pump and the item bodies.** One pump for each live process turns the adapter's events
+  into display-log items in event order: `assistant_text`, one `tool_call` for each finished call (the
+  capped texts byte for byte, with their size and flag), `approval_request` and `question_request`
+  (stored when asked, so a reconnect shows the card as pending), an answer item (`answered`, `lost` or
+  `withdrawn`), `background_task`, `turn_result` with the turn's own usage, and `notice`. Deltas go to
+  the stream only. The session's cost is the exact sum of its turns. A tool open at an exit is stored
+  with no output and `finished: false`. The store's cut calls the adapter's `cap`, so one truncation
+  mark serves the adapter, the store and the stream.
+- **`chat.ledger`.** `<state dir>/chat.ledger` records one line for each process open, each turn (with
+  its usage and cost, self-started turns included) and each stop (`end`, `idle`, `halt`, `exited`,
+  `shutdown` or `option`). It is append-only, like `api.ledger`, and holds no message, tool text,
+  token or key. The store's `turn_result` items are the durable record.
+- **The idle release and the cap (Q2 rules 1 to 3, C2, C7).** A process with no running turn, no
+  background task and no pending request is released after 30 idle minutes. A pending card keeps its
+  process and counts against the cap. The cap is `PF_CHAT_MAX_LIVE` (default 4). A refused open names
+  every live chat and why it holds its process, with since when, and no process is released early to
+  make room. A released process is reopened only by the operator's next `send`.
+- **`halt`, a stop and `KillMode=control-group` (C3).** `halt` stops every live chat process and its
+  group, closes each pending request as `lost`, adds a notice and leaves each session live and idle.
+  With no run it still stops the chats. A controller stop (SIGTERM or SIGINT) stops every process, and
+  the unit states `KillMode=control-group`, so systemd also ends any child left in its cgroup, such as
+  a background command in its own session. A controller start settles each live session to `idle`.
+- **Context lost (C15).** `ResumeFailed` marks the session "context lost" with the adapter's text, adds
+  a notice and refuses `send`. Nothing opens a fresh context for a session that has a runtime session
+  ID. The mark is in memory, and the next resume attempt after a restart sets it again.
+- **The caller rule over chat processes.** The controller refuses a state-changing chat verb from a
+  caller that is, or descends from, a seat or a live chat process (`ChatPort::process_id`), so an
+  Orchestrator cannot drive its own chat or another one (Q2 rule 2).
+- **The stream.** The paired device reads the chat on `/v1/stream` (ADR-0012, amended). A revoke closes
+  its streams.
+
+Known limits: a turn run in a terminal stays out of the app's history; a secret that a tool prints
+reaches the store, the stream and the paired devices; `chat.ledger` can lose its last lines in a crash.
 
 Revisit this ADR when custom agents, worktree creation or the multi-server app is planned.

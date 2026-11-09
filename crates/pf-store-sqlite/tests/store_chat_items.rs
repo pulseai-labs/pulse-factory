@@ -7,9 +7,9 @@ mod common;
 
 use common::*;
 use pf_engine::port::agent::Usage;
+use pf_engine::port::chat::cap;
 use pf_engine::port::store::{
-    ChatItemKind, ChatItemRow, NewChatItem, ProjectKind, Store, TOOL_TEXT_MAX_BYTES,
-    TOOL_TEXT_TRUNCATION_MARK, ToolText,
+    ChatItemKind, ChatItemRow, NewChatItem, ProjectKind, Store, TOOL_TEXT_MAX_BYTES, ToolText,
 };
 use pf_store_sqlite::SqliteStore;
 
@@ -160,12 +160,15 @@ fn uncapped_text_over_the_cap_is_cut_to_fit_with_its_mark_and_its_true_size() {
                 "content plus the mark fit the cap: {}",
                 stored.len()
             );
-            assert!(stored.ends_with(TOOL_TEXT_TRUNCATION_MARK));
-            let content = &stored[..stored.len() - TOOL_TEXT_TRUNCATION_MARK.len()];
+            // The store's own cut is the adapter's cut: one function, one mark.
+            let mark = format!("…[truncated: {n} bytes in all]");
+            assert!(stored.ends_with(&mark), "{}", &stored[stored.len() - 40..]);
+            assert_eq!(stored, cap(&original).text, "the store's cut is `cap`");
+            let content = &stored[..stored.len() - mark.len()];
             assert!(original.starts_with(content), "the content is a prefix");
             assert_eq!(
                 content.len(),
-                TOOL_TEXT_MAX_BYTES - TOOL_TEXT_TRUNCATION_MARK.len(),
+                TOOL_TEXT_MAX_BYTES - mark.len(),
                 "an ASCII text is cut to the byte"
             );
         }
@@ -175,7 +178,10 @@ fn uncapped_text_over_the_cap_is_cut_to_fit_with_its_mark_and_its_true_size() {
 #[test]
 fn a_multibyte_character_across_the_cut_is_dropped_and_not_split() {
     let (_d, store) = two_sessions();
-    let room = TOOL_TEXT_MAX_BYTES - TOOL_TEXT_TRUNCATION_MARK.len();
+    // The mark names the original size. Both texts below are 16448 or 16449 bytes, five digits, so
+    // the content room is the same for both.
+    let mark_for = |size: usize| format!("…[truncated: {size} bytes in all]");
+    let room = TOOL_TEXT_MAX_BYTES - mark_for(16_449).len();
     each_side(|make, read| {
         // Two-byte characters, so that the cut falls inside one of them.
         let original = format!("{}{}", "a".repeat(room - 1), "é".repeat(50));
@@ -187,7 +193,7 @@ fn a_multibyte_character_across_the_cut_is_dropped_and_not_split() {
         assert!(truncated);
         assert_eq!(bytes, Some(original.len() as u64));
         assert!(stored.len() <= TOOL_TEXT_MAX_BYTES);
-        let content = &stored[..stored.len() - TOOL_TEXT_TRUNCATION_MARK.len()];
+        let content = &stored[..stored.len() - mark_for(original.len()).len()];
         assert_eq!(
             content,
             "a".repeat(room - 1),
@@ -195,11 +201,12 @@ fn a_multibyte_character_across_the_cut_is_dropped_and_not_split() {
         );
         // The cut at a character boundary keeps the character that ends there.
         let original = format!("{}{}", "a".repeat(room - 2), "é".repeat(50));
+        let size = original.len();
         let row = store
             .append_chat_item(make(ToolText::uncapped(original)))
             .unwrap();
         let stored = read(&row).0.unwrap();
-        let content = &stored[..stored.len() - TOOL_TEXT_TRUNCATION_MARK.len()];
+        let content = &stored[..stored.len() - mark_for(size).len()];
         assert_eq!(content.len(), room);
         assert!(content.ends_with('é'));
     });
@@ -209,8 +216,8 @@ fn a_multibyte_character_across_the_cut_is_dropped_and_not_split() {
 fn text_that_the_adapter_capped_is_stored_byte_for_byte() {
     let (_d, store) = two_sessions();
     each_side(|make, read| {
-        let room = TOOL_TEXT_MAX_BYTES - TOOL_TEXT_TRUNCATION_MARK.len();
-        let capped = format!("{}{TOOL_TEXT_TRUNCATION_MARK}", "b".repeat(room));
+        // As the adapter makes it: `cap` of a 90000-byte text.
+        let capped = cap(&"b".repeat(90_000)).text;
         assert_eq!(capped.len(), TOOL_TEXT_MAX_BYTES);
         let row = store
             .append_chat_item(make(ToolText {
@@ -227,14 +234,18 @@ fn text_that_the_adapter_capped_is_stored_byte_for_byte() {
         // A shorter capped text, as the adapter makes for a small input.
         let row = store
             .append_chat_item(make(ToolText {
-                text: "short\n[truncated]".to_string(),
+                text: "short…[truncated: 5000 bytes in all]".to_string(),
                 bytes: 5_000,
                 truncated: true,
             }))
             .unwrap();
         assert_eq!(
             read(&row),
-            (Some("short\n[truncated]".to_string()), Some(5_000), true)
+            (
+                Some("short…[truncated: 5000 bytes in all]".to_string()),
+                Some(5_000),
+                true
+            )
         );
     });
 }

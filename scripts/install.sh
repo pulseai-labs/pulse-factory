@@ -15,6 +15,10 @@ nice -n 10 ionice -c3 cargo install --path "$root/crates/pulse-factory" --locked
 # workspace's target, so this second install is incremental.
 nice -n 10 ionice -c3 cargo install --path "$root/crates/pf-client" --bin pf-client-bridge --locked --root "$HOME/.local"
 
+# The replay of recorded Claude Code sessions goes beside it, so scripts/demo/chat-api.sh (d18) has it
+# prebuilt. It is the same incremental install.
+nice -n 10 ionice -c3 cargo install --path "$root/crates/pf-adapter-claude" --bin pf-claude-replay --locked --root "$HOME/.local"
+
 # The workflow packages and the skill go to the share directory.
 mkdir -p "$share" "$unit_dir"
 rm -rf "$share/workflows" "$share/skill"
@@ -23,6 +27,13 @@ cp -R "$root/skill" "$share/skill"
 
 # The UI bundle: install-ui.sh builds apps/ui with Node 22 and npm, and replaces "$share/ui".
 PF_SHARE_DIR="$share" bash "$root/scripts/install-ui.sh"
+
+# The managed Claude Code copy for the chat, at the pinned version. A failure prints its cause and the
+# install goes on: the controller tries again at its next start (ADR-0014).
+if ! PF_SHARE_DIR="$share" "$HOME/.local/bin/pulse-factory" chat-runtime install; then
+  echo "the chat runtime is not installed (see the cause above)." >&2
+  echo "the controller tries again at its next start, or run: pulse-factory chat-runtime install" >&2
+fi
 
 cp "$root/deploy/systemd/pulse-factory.service" "$unit_dir/pulse-factory.service"
 

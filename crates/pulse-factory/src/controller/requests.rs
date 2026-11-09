@@ -100,6 +100,26 @@ impl Controller {
 
     /// Refuse a caller that is, or descends from, a seat (ADR-0005). Every failed read refuses.
     pub(super) fn check_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
+        self.check_caller_among(verb, peer, &HashSet::new())
+    }
+
+    /// The same check, and a caller that is, or descends from, one of the live chat processes
+    /// is refused too (ADR-0005, Q2 rule 2): a chat cannot drive its own chat or another one.
+    pub(super) fn check_chat_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
+        let chats: HashSet<u32> = self
+            .live_chats()
+            .iter()
+            .filter_map(|l| l.port.process_id(&l.chat))
+            .collect();
+        self.check_caller_among(verb, peer, &chats)
+    }
+
+    fn check_caller_among(
+        &self,
+        verb: &str,
+        peer: Peer,
+        chat_pids: &HashSet<u32>,
+    ) -> Result<(), String> {
         let refuse = |why: String| format!("{verb} refused: {why}");
         let pid = peer.pid.ok_or_else(|| {
             refuse("the controller cannot tell which process called, so it refuses".to_string())
@@ -123,6 +143,11 @@ impl Controller {
             if seats.contains(&current) {
                 return Err(refuse(format!(
                     "the caller is, or descends from, seat process {current}"
+                )));
+            }
+            if chat_pids.contains(&current) {
+                return Err(refuse(format!(
+                    "the caller is, or descends from, chat process {current}"
                 )));
             }
             let parent = parent_of(proc_root, current).map_err(refuse)?;
