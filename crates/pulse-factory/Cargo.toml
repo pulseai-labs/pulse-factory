@@ -15,10 +15,20 @@ path = "src/lib.rs"
 name = "pulse-factory"
 path = "src/main.rs"
 
+# A small client of the chat stream for the demo and the tests (`r1.s3.w3`): a shell has no pinned
+# WSS client on every runner. w4's `pf-client` stream may replace it later.
+[[bin]]
+name = "pf-stream-reader"
+path = "src/bin/pf-stream-reader.rs"
+
 [dependencies]
+pf-adapter-claude = { path = "../pf-adapter-claude" }
 pf-adapter-fake = { path = "../pf-adapter-fake" }
 pf-adapter-omp = { path = "../pf-adapter-omp" }
 pf-api = { path = "../pf-api" }
+# The stream reader takes its pinned TLS config from pf-client; the `pulse-factory` binary itself
+# does not link it.
+pf-client = { path = "../pf-client" }
 pf-engine = { path = "../pf-engine" }
 pf-forge-bare = { path = "../pf-forge-bare" }
 pf-forge-github = { path = "../pf-forge-github" }
@@ -30,7 +40,10 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros", "sync", "signal"] }
+tokio-tungstenite.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
-pf-client = { path = "../pf-client" }
+proptest.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true

@@ -8,6 +8,11 @@
 //! the routes of the protocol. The device is in a [`FileStore`] at `<state_dir>/device.json` (mode
 //! 0600). The bridge writes nothing to stdout or stderr: the binary prints the one `listening` line.
 //!
+//! `GET /bridge/stream[?session=<S-n>&after=<n>]` carries the chat stream to the page as
+//! Server-Sent Events: one `data: <JSON>` line and a blank line for each `StreamEvent`, in order, and
+//! the response ends after `closed`. When the page drops the response, the bridge drops the stream,
+//! which closes the upstream socket.
+//!
 //! Who may call it: a request whose `Host` is not the bridge's own `127.0.0.1:<port>` or whose
 //! `Origin` is not its own origin gets 403, and so does a `POST` to a bridge route that is not
 //! `application/json`. A page on another origin cannot call the bridge, and a DNS rebinding cannot.
@@ -16,16 +21,24 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::convert::Infallible;
+use std::future::Future;
+
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
+use bytes::Bytes;
+use futures_util::stream;
 use pf_api::types::ProjectAddArgs;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::error::{ClientError, ErrorKind};
 use crate::store::FileStore;
+use crate::stream::{ChatStream, StreamEvent, StreamOptions};
 use crate::transport::Transport;
 
 /// The largest request body: 1 MiB and a little for the envelope.
@@ -36,6 +49,7 @@ const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self' 'u
 
 const BRIDGE_PREFIX: &str = "/bridge/";
 const VERBS_PREFIX: &str = "/bridge/verbs/";
+const STREAM_PATH: &str = "/bridge/stream";
 
 struct Shared {
     ui_root: PathBuf,
@@ -184,6 +198,12 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request) -> Response
         }
         return serve_file(shared.ui_root.clone(), path).await;
     }
+    if path == STREAM_PATH {
+        if parts.method != Method::GET {
+            return text(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+        }
+        return event_stream(&shared.transport, parts.uri.query());
+    }
     if parts.method == Method::POST && !is_json(parts.headers.get(header::CONTENT_TYPE)) {
         return text(StatusCode::FORBIDDEN, "forbidden");
     }
@@ -219,6 +239,83 @@ async fn read_json(body: Body) -> Result<Value, ClientError> {
         return Ok(json!({}));
     }
     serde_json::from_slice(&bytes).map_err(|_| bad("the body is not JSON"))
+}
+
+/// The options of a stream, from the query of `GET /bridge/stream`: `session` and `after`, each at
+/// most once, and no other key.
+fn stream_options(query: Option<&str>) -> Result<StreamOptions, ClientError> {
+    let mut options = StreamOptions::default();
+    let (mut seen_session, mut seen_after) = (false, false);
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "session" if !seen_session => {
+                seen_session = true;
+                options.session = Some(value.to_string());
+            }
+            "after" if !seen_after => {
+                seen_after = true;
+                options.after = value
+                    .parse()
+                    .map_err(|_| bad("after is a whole number: the last seq the page has"))?;
+            }
+            _ => return Err(bad("the stream query has session and after only")),
+        }
+    }
+    Ok(options)
+}
+
+/// One Server-Sent Event: the event as one `data:` line, and a blank line.
+fn sse(event: &StreamEvent) -> Bytes {
+    let json = serde_json::to_string(event).unwrap_or_else(|_| {
+        r#"{"event":"closed","error":{"kind":"server","message":"the event cannot be written"}}"#
+            .to_string()
+    });
+    Bytes::from(format!("data: {json}\n\n"))
+}
+
+/// `GET /bridge/stream`: `200` with the events of the chat stream. A query the bridge cannot read is
+/// one `closed` event, as every other failure of a stream is. The stream is dropped, and with it the
+/// upstream socket, when the page drops the response.
+fn event_stream(transport: &Transport<FileStore>, query: Option<&str>) -> Response {
+    let body = match stream_options(query) {
+        Ok(options) => {
+            let upstream: ChatStream = transport.open_stream(options);
+            Body::from_stream(stream::unfold(
+                (upstream, false),
+                |(mut upstream, done)| async move {
+                    if done {
+                        return None;
+                    }
+                    let event = upstream.next().await?;
+                    let last = matches!(event, StreamEvent::Closed { .. });
+                    Some((Ok::<_, Infallible>(sse(&event)), (upstream, last)))
+                },
+            ))
+        }
+        Err(error) => Body::from(sse(&StreamEvent::Closed { error })),
+    };
+    send(StatusCode::OK, "text/event-stream", body)
+}
+
+/// A verb whose arguments are typed: a malformed argument fails here and not at the server.
+async fn typed<A, T, F, Fut>(body: Value, what: &str, call: F) -> Result<Value, ClientError>
+where
+    A: DeserializeOwned,
+    T: Serialize,
+    F: FnOnce(A) -> Fut,
+    Fut: Future<Output = Result<T, ClientError>>,
+{
+    let args: A = serde_json::from_value(body).map_err(|_| {
+        bad(&format!(
+            "{what} has arguments that are not the documented ones"
+        ))
+    })?;
+    to_value(call(args).await?)
 }
 
 /// A verb name: `[a-z][a-z_]*`, at most 64 characters.
@@ -270,13 +367,25 @@ async fn dispatch(
                     return Err(bad("the verb arguments must be a JSON object"));
                 }
                 // The transport refuses a verb that is not on the allowlist before it connects.
-                // `project_add` is typed so a malformed argument fails here and not at the server.
-                if verb == "project_add" {
-                    let args: ProjectAddArgs = serde_json::from_value(body)
-                        .map_err(|_| bad("project_add needs a root and a command id"))?;
-                    return to_value(transport.project_add(args).await?);
+                // `project_add` and the seven chat verbs are typed, so a malformed argument fails
+                // here and the answers of `session_start` and `session_end` are the transport's own.
+                match verb {
+                    "project_add" => {
+                        let args: ProjectAddArgs = serde_json::from_value(body)
+                            .map_err(|_| bad("project_add needs a root and a command id"))?;
+                        to_value(transport.project_add(args).await?)
+                    }
+                    "session_list" => typed(body, verb, |a| transport.session_list(a)).await,
+                    "session_start" => typed(body, verb, |a| transport.session_start(a)).await,
+                    "session_send" => typed(body, verb, |a| transport.session_send(a)).await,
+                    "session_answer" => typed(body, verb, |a| transport.session_answer(a)).await,
+                    "session_interrupt" => {
+                        typed(body, verb, |a| transport.session_interrupt(a)).await
+                    }
+                    "session_set" => typed(body, verb, |a| transport.session_set(a)).await,
+                    "session_end" => typed(body, verb, |a| transport.session_end(a)).await,
+                    _ => transport.verb(verb, body).await,
                 }
-                transport.verb(verb, body).await
             }
             None => Err(bad("unknown bridge route")),
         },

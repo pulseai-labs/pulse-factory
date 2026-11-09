@@ -6,6 +6,11 @@
   "Unverified" to "Verified". Nothing above changes except where the amendment says.
 - **Amended:** 2026-11-08, at `r1.s2.w4`: the pinned client's crates and features, and the Mac app's
   separate cargo workspace. Nothing above changes except where the amendment says.
+- **Amended:** 2026-11-08, at `r1.s3.w1`: the new member `crates/pf-adapter-claude` and its
+  `pf-claude-replay` binary, and the line references of two verified claims. Nothing above changes
+  except where the amendment says.
+- **Amended:** 2026-11-09, at `r1.s3.w3`: `tokio-tungstenite`, axum's `ws` feature, the new dependencies of
+  `pulse-factory` and the `pf-stream-reader` binary.
 
 ## Context
 - The architecture spec chose Rust, Tokio, SQLite through rusqlite, portable-pty as the first PTY
@@ -101,9 +106,9 @@ member. `pulse-factory` depends on it.
 verified now:
 - rusqlite runs WAL with `synchronous=FULL` behind one writer thread. The store opens with
   `journal_mode=wal` and `synchronous=FULL` and reads them back through `PRAGMA`
-  (`crates/pf-store-sqlite/src/lib.rs`, tested in `crates/pf-store-sqlite/tests/store_settings.rs`).
+  (`crates/pf-store-sqlite/src/lib.rs:216-225`, tested in `crates/pf-store-sqlite/tests/store_settings.rs`).
 - yaml-rust2 rejects duplicate keys, and its markers give `pf-workflow` a position for each
-  unknown-field and duplicate-key error (`crates/pf-workflow/tests/parse_strict.rs`: "a duplicate
+  unknown-field and duplicate-key error (`crates/pf-workflow/tests/parse_strict.rs:180`: "a duplicate
   key is refused at the second key", and the unknown-field tests).
 
 ## Amendment, 2026-11-08 (`r1.s2.w4`)
@@ -144,3 +149,56 @@ green:** `KeychainStore` compiles against `security-framework` 3.7.0 and its tes
 
 **Reversibility.** `security-framework` sits behind the `DeviceStore` trait; a file store replaces it.
 Tauri sits behind the same six-operation `Transport`, and the UI does not change if it is replaced.
+
+## Amendment, 2026-11-08 (`r1.s3.w1`)
+
+The chat adapter is a workspace member: `crates/pf-adapter-claude` (ADR-0014). It holds the library
+`pf_adapter_claude` and one binary, `pf-claude-replay`, which stands in for the `claude` CLI and
+plays recorded fixtures back in tests and demos.
+
+**No new third-party crate.** The crate depends on `pf-engine`, `serde`, `serde_json` and `tokio`
+with the `sync` feature, all already in the workspace. `tempfile` is a dev dependency, as elsewhere.
+It does not take `sha2`: the crate has its own streaming SHA-256 (`src/sha256.rs`), checked against
+the FIPS 180-4 vectors and against `pf_engine::claim::sha256_hex`, so the managed CLI binary
+(about 340 MB) is hashed in chunks and never read whole into memory. `crates/pf-engine/src/claim/**`
+is the `claim-authority` gate's surface and is not changed.
+
+**`tokio` `sync`** is now also a feature of `pf-adapter-fake` and `pf-adapter-claude`, for the event
+channel of the chat port (an unbounded `mpsc`, as in `pf-engine`).
+
+**`Cargo.lock`** gains the one member and the `tokio` edge of `pf-adapter-fake`, and no other crate.
+
+## Amendment, 2026-11-09 (`r1.s3.w3`)
+
+The chat stream and the chat controller add one crate, one feature and three dependencies.
+
+- **`tokio-tungstenite`**, pinned with `=0.29.0`, with `default-features = false` and the `handshake`
+  feature, is a workspace dependency. axum's `ws` feature needs `tokio-tungstenite` 0.29 and
+  `tungstenite` 0.29, so `pf-api` serves the WebSocket upgrade with it. The first build fetches the two
+  crates from crates.io once (draco-desk's offline cache held 0.30 only), and `Cargo.lock` then holds
+  them. The sync `tungstenite` client that `tokio-tungstenite` re-exports serves the readers and the
+  tests, so the item adds no `futures-util`.
+- **axum's `ws` feature** is on, in the `pf-api` dependency.
+- **`pf-adapter-claude` and `pf-client`** are normal dependencies of `pulse-factory`: the controller
+  launches the chat through the adapter, and `pf-stream-reader` builds its TLS config with
+  `pf_client::pin::client_config`. The `pulse-factory` binary links the adapter. `rustls` is a direct
+  dependency of the `pulse-factory` package for the reader, and `proptest` a dev-dependency for the chat
+  property test (its failure persistence stays off).
+- **`pf-stream-reader`** is a second binary of the `pulse-factory` package: a small client of the chat
+  stream for the demo (`scripts/demo/chat-api.sh`) and for tests. It prints each frame as one line of
+  JSON, reads the token from a file, and is no product surface; `pf-client`'s own stream may replace
+  it. `scripts/install.sh` also installs `pf-claude-replay` for the same demo.
+
+## Amendment, 2026-11-09 (`r1.s3.w4`)
+
+The pinned client takes the stream's async client and one new direct dependency.
+
+- **`futures-util`**, pinned with `=0.3.34`, with `default-features = false` and the features `sink` and `std`,
+  is a workspace dependency of `pf-client`, for `StreamExt` and `SinkExt` on the WebSocket. First-use check:
+  it is already in both lock files (through axum and `tokio-tungstenite`), it is not yanked, and draco-desk's
+  offline cache holds it. `Cargo.lock` gains edges (`pf-client` to `futures-util`, `tokio-tungstenite` and,
+  as a dev-dependency, `pf-ipc`) and no new package. `apps/desktop/src-tauri/Cargo.lock` gains the first two.
+- **`tokio-tungstenite`** is now also a dependency of `pf-client`: its async client
+  (`client_async_with_config`) runs the WebSocket upgrade on the pinned TLS stream. The version and the
+  features (`handshake`) do not change.
+- **`rt-multi-thread`** is a dev-dependency feature of `tokio` in `pf-client`, for its stream tests.

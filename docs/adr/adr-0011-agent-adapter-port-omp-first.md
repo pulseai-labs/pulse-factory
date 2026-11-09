@@ -10,6 +10,8 @@
   this ADR already named.
 - **Amended:** 2026-11-01, in `r0.s1.w5`: the port gets a `stop` call (see the duty list). The
   adapter measures a push in git and no longer reads it from a call's output.
+- **Amended:** 2026-11-08, at `r1.s3.w1`: the terminal rule holds for run seats. Chat sessions run
+  on the chat port (ADR-0014).
 
 ## Context
 - Each coding agent gets an adapter with nine duties:
@@ -149,3 +151,13 @@ None. `r0.s1.w3` settled the six that this ADR listed.
 - An extra check passed too: with `ask` left out of `--tools`, the seat had no ask tool.
 - The scratch directory was deleted after the note was written. The bone is written with the spike
   cited as its evidence.
+
+## Amendment, 2026-11-08 (`r1.s3.w1`): chat sessions
+
+The rule "Execution units are interactive terminal sessions" holds for **run seats**, which this port
+serves. A **chat session**, where the operator talks to an agent, runs on a separate chat port
+(`ChatPort`, ADR-0014), with its own adapter crates. A chat adapter drives its runtime headless over a
+structured protocol, not a terminal. It does not replace the nine duties here and adds none to them.
+The version rule above stands for this port. The chat port has its own: each runtime version is
+qualified by a real run recorded in an ADR, and the Claude Code chat adapter pins one CLI version and
+its SHA-256 (ADR-0014).

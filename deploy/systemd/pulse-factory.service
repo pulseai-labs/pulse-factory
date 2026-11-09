@@ -6,6 +6,9 @@ Type=simple
 ExecStart=%h/.local/bin/pulse-factory controller
 Restart=on-failure
 RestartSec=5
+# The chat processes are children of the controller. A stop ends every process left in the unit's
+# cgroup, such as a background command that a chat started in its own session (ADR-0001, ADR-0015).
+KillMode=control-group
 # Seats inherit this environment. `gh` and `git` take their credentials from the operator's home.
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 # The operator turns the network API on here: PF_API_LISTEN=<tailnet address>:<port> (ADR-0012). The

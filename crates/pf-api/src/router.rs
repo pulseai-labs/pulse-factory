@@ -3,6 +3,12 @@
 //! - `POST /v1/pair`, no token: a pairing code and a device name in, a device token out.
 //! - `GET /v1/status`, token: the server's version and key, and the calling device.
 //! - `POST /v1/verbs/<verb>`, token: one allowlisted verb, through the controller's verb handler.
+//! - `GET /v1/stream`, token: a WebSocket upgrade. The token is checked at the upgrade, the host opens
+//!   the stream, and the router carries the host's frames to the socket and ends it with the host's
+//!   close reason (`r1.s3.w3`).
+//!
+//! Every answer, the `101` of an upgrade and every error included, names the server in the headers
+//! `pf-server-id` and `pf-server-name`.
 //!
 //! The token goes in `Authorization: Bearer <token>`. A missing, malformed, unknown or revoked token
 //! answers 401 with one text, so the answer never tells which. A verb off the allowlist answers 403
@@ -17,11 +23,14 @@
 //! bad codes, or 5 bad tokens, inside 10 minutes answers 429 on every route for 10 minutes, and its
 //! request reaches no host method.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -30,8 +39,11 @@ use serde::Serialize;
 
 use crate::code::{PairingCode, hex, token_sha256};
 use crate::guard::{Blocked, Clock, Failure, Guard, GuardConfig, system_clock};
-use crate::host::{ApiHost, Outcome, Refusal, RequestRecord, Route, is_allowed};
-use crate::types::{ApiError, DeviceRecord, PairRequest, check_device_name};
+use crate::host::{
+    ApiHost, Outcome, Refusal, RequestRecord, Route, StreamEnd, StreamEvent, StreamFeed,
+    StreamRefusal, is_allowed,
+};
+use crate::types::{ApiError, DeviceRecord, PairRequest, ServerRef, check_device_name};
 
 /// The longest request body, in bytes.
 pub const MAX_BODY_BYTES: usize = 1 << 20;
@@ -39,16 +51,79 @@ pub const MAX_BODY_BYTES: usize = 1 << 20;
 /// The text of every 401 on a token route. It is one text for every reason.
 const NOT_AUTHORIZED: &str = "not authorized";
 
+/// The most streams one device holds open at once. The next upgrade is 429.
+pub const MAX_STREAMS_PER_DEVICE: usize = 8;
+
+/// How often the server pings an open stream.
+const PING_EVERY: Duration = Duration::from_secs(30);
+
+/// How long the router waits for a client to answer a close frame before it drops the socket.
+const CLOSE_GRACE: Duration = Duration::from_secs(1);
+
+/// The close code of a stream whose client sent data: policy violation.
+const CLOSE_READ_ONLY: u16 = 1008;
+/// The close code of a stream that ends because the controller stops: going away.
+const CLOSE_GOING_AWAY: u16 = 1001;
+/// The close code of a stream whose device was revoked.
+pub const CLOSE_REVOKED: u16 = 4001;
+/// The close code of a stream that fell behind the live frames.
+pub const CLOSE_LAGGED: u16 = 4002;
+
 /// The address of the peer that opened the connection. The listener adds it to each request as an
 /// extension. A request with no such extension counts as from `0.0.0.0`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerAddr(pub IpAddr);
 
-/// What every request needs: the host and the peer guard. Clones share the one guard.
+/// What every request needs: the host, the peer guard, the server's name and the count of open
+/// streams. Clones share the one guard and the one count.
 #[derive(Clone)]
 struct App {
     host: Arc<dyn ApiHost>,
     guard: Arc<Guard>,
+    streams: Arc<Streams>,
+    /// Read from the host once, when the router is made: a controller's key and name do not change
+    /// while it runs, and a blocked peer's request reaches no host method.
+    server: ServerRef,
+}
+
+/// The open streams of each device. A slot is taken before the host opens a stream and given back
+/// when the socket ends or the upgrade fails.
+#[derive(Default)]
+struct Streams {
+    open: Mutex<HashMap<String, usize>>,
+}
+
+/// One place among a device's streams. Dropping it gives the place back.
+struct Slot {
+    streams: Arc<Streams>,
+    device: String,
+}
+
+impl Streams {
+    fn take(self: &Arc<Self>, device: &str) -> Option<Slot> {
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        let held = open.entry(device.to_string()).or_insert(0);
+        if *held >= MAX_STREAMS_PER_DEVICE {
+            return None;
+        }
+        *held += 1;
+        Some(Slot {
+            streams: self.clone(),
+            device: device.to_string(),
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut open = self.streams.open.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(held) = open.get_mut(&self.device) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                open.remove(&self.device);
+            }
+        }
+    }
 }
 
 /// The router of the API over a host, with the default numbers of the peer guard and the system
@@ -60,8 +135,10 @@ pub fn router(host: Arc<dyn ApiHost>) -> Router {
 /// The router of the API with its own guard numbers and clock. A test moves time with the clock.
 pub fn router_with(host: Arc<dyn ApiHost>, config: GuardConfig, clock: Clock) -> Router {
     let app = App {
+        server: host.server(),
         host,
         guard: Arc::new(Guard::new(config, clock)),
+        streams: Arc::new(Streams::default()),
     };
     Router::new().fallback(handle).with_state(app)
 }
@@ -90,6 +167,7 @@ fn outcome_of(status: StatusCode, replayed: bool) -> Outcome {
     match status {
         StatusCode::OK if replayed => Outcome::Replayed,
         StatusCode::OK => Outcome::Ok,
+        StatusCode::SWITCHING_PROTOCOLS => Outcome::Upgraded,
         StatusCode::UNAUTHORIZED => Outcome::Unauthorized,
         StatusCode::FORBIDDEN => Outcome::Forbidden,
         StatusCode::UNPROCESSABLE_ENTITY => Outcome::Refused,
@@ -142,11 +220,27 @@ fn failed_inside() -> Response {
     )
 }
 
+/// Name the server in an answer: `pf-server-id` (when the server has a key) and `pf-server-name`.
+/// A value that is no header value is left out.
+fn name_server(mut response: Response, server: &ServerRef) -> Response {
+    let headers = response.headers_mut();
+    if let Some(id) = server.id.as_deref()
+        && let Ok(value) = HeaderValue::from_str(id)
+    {
+        headers.insert("pf-server-id", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&server.name) {
+        headers.insert("pf-server-name", value);
+    }
+    response
+}
+
 /// The route a path names, and the verb text when it names one. The method is not looked at.
 fn classify(path: &str) -> (Route, Option<&str>) {
     match path {
         "/v1/pair" => (Route::Pair, None),
         "/v1/status" => (Route::Status, None),
+        "/v1/stream" => (Route::Stream, None),
         other => match other.strip_prefix("/v1/verbs/") {
             Some(verb) if !verb.is_empty() && !verb.contains('/') => (Route::Verb, Some(verb)),
             _ => (Route::Other, None),
@@ -196,7 +290,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
             };
             audit(&app.host, record).await;
         }
-        return blocked_answer(&block);
+        return name_server(blocked_answer(&block), &app.server);
     }
     let host = app.host.clone();
     let answer: Answer = match route {
@@ -205,7 +299,8 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         Route::Verb if post => {
             verb_call(host, peer, verb.unwrap_or_default().to_string(), request).await
         }
-        Route::Pair | Route::Status | Route::Verb => {
+        Route::Stream if get => stream(host, app.streams.clone(), peer, request).await,
+        Route::Pair | Route::Status | Route::Verb | Route::Stream => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into()
         }
         Route::Other => error(StatusCode::NOT_FOUND, "not found").into(),
@@ -215,7 +310,9 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         Route::Pair if code == StatusCode::BAD_REQUEST || code == StatusCode::UNAUTHORIZED => {
             Some(Failure::Code)
         }
-        Route::Status | Route::Verb if code == StatusCode::UNAUTHORIZED => Some(Failure::Token),
+        Route::Status | Route::Verb | Route::Stream if code == StatusCode::UNAUTHORIZED => {
+            Some(Failure::Token)
+        }
         _ => None,
     };
     let blocked_until = failure.and_then(|kind| app.guard.fail(peer, kind));
@@ -230,7 +327,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         blocked_until,
     };
     audit(&app.host, record).await;
-    answer.response
+    name_server(answer.response, &app.server)
 }
 
 /// The token of a request, as the SHA-256 the store keeps. `None` for a missing header, another
@@ -348,6 +445,167 @@ async fn verb_call(host: Arc<dyn ApiHost>, peer: IpAddr, verb: String, request: 
         )),
         Err(_) => named(failed_inside()),
     }
+}
+
+/// The query of a stream: `session=<S-n>` and `after=<seq>`, each at most once. `None` for no
+/// session, and 0 for no `after`. Any other key, a session that is no `S-<n>` and an `after` that is
+/// no whole number are a 400 with the reason.
+fn parse_stream_query(query: Option<&str>) -> Result<(Option<String>, u64), String> {
+    let (mut session, mut after) = (None, None);
+    for pair in query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "session" if session.is_none() => {
+                let digits = value.strip_prefix("S-").unwrap_or_default();
+                if digits.is_empty()
+                    || digits.len() > 18
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err("session is a chat session ID such as S-1".to_string());
+                }
+                session = Some(value.to_string());
+            }
+            "after" if after.is_none() => {
+                if value.is_empty()
+                    || value.len() > 18
+                    || !value.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return Err("after is a whole number: the last seq the client has".to_string());
+                }
+                after = value.parse::<u64>().ok();
+            }
+            _ => {
+                return Err(format!(
+                    "the query has no parameter {:?}, or has it twice",
+                    key.chars().take(32).collect::<String>()
+                ));
+            }
+        }
+    }
+    Ok((session, after.unwrap_or(0)))
+}
+
+/// `GET /v1/stream`: the token, the upgrade headers, the query, the device's place, the host's open,
+/// then `101`. The order is the contract's, so a caller with no token learns nothing else.
+async fn stream(
+    host: Arc<dyn ApiHost>,
+    streams: Arc<Streams>,
+    peer: IpAddr,
+    request: Request,
+) -> Answer {
+    let device = match authenticate(&host, bearer_sha256(&request), peer).await {
+        Ok(d) => d,
+        Err(refusal) => return (*refusal).into(),
+    };
+    let id = device.id.clone();
+    let named = |response: Response| Answer {
+        response,
+        device: Some(id.clone()),
+        replayed: false,
+    };
+    let query = request.uri().query().map(str::to_string);
+    let upgrade = match WebSocketUpgrade::from_request(request, &()).await {
+        Ok(upgrade) => upgrade,
+        Err(_) => {
+            return named(error(
+                StatusCode::BAD_REQUEST,
+                "this route needs a WebSocket upgrade",
+            ));
+        }
+    };
+    let (session, after) = match parse_stream_query(query.as_deref()) {
+        Ok(parsed) => parsed,
+        Err(why) => return named(error(StatusCode::BAD_REQUEST, why)),
+    };
+    let Some(slot) = streams.take(&device.id) else {
+        return named(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many open streams",
+        ));
+    };
+    let opened =
+        tokio::task::spawn_blocking(move || host.open_stream(&device, session.as_deref(), after))
+            .await;
+    let feed = match opened {
+        Ok(Ok(feed)) => feed,
+        Ok(Err(StreamRefusal::NotFound(why))) => return named(error(StatusCode::NOT_FOUND, why)),
+        Ok(Err(StreamRefusal::BadRequest(why))) => {
+            return named(error(StatusCode::BAD_REQUEST, why));
+        }
+        Ok(Err(StreamRefusal::NotAuthorized)) => return named(not_authorized()),
+        Err(_) => return named(failed_inside()),
+    };
+    // The client sends nothing: its frames are refused, so a small message bound is enough.
+    let response = upgrade
+        .max_message_size(4096)
+        .max_frame_size(4096)
+        .on_upgrade(move |socket| carry(socket, feed, slot));
+    named(response)
+}
+
+/// A close frame with a code and a reason.
+fn close_frame(code: u16, reason: &str) -> Message {
+    Message::Close(Some(CloseFrame {
+        code,
+        reason: reason.into(),
+    }))
+}
+
+/// Carry the host's frames to the socket until the host ends the feed, the client leaves, or the
+/// client sends data. The server pings every 30 seconds. The place of the stream is given back when
+/// this ends.
+async fn carry(mut socket: WebSocket, mut feed: StreamFeed, _slot: Slot) {
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let closing = loop {
+        tokio::select! {
+            event = feed.recv() => match event {
+                Some(StreamEvent::Frame(text)) => {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        return;
+                    }
+                }
+                Some(StreamEvent::End(StreamEnd::Revoked)) => break close_frame(CLOSE_REVOKED, "revoked"),
+                Some(StreamEvent::End(StreamEnd::Lagged { after_seq })) => {
+                    break close_frame(
+                        CLOSE_LAGGED,
+                        &format!("lagged: reconnect after seq {after_seq}"),
+                    );
+                }
+                Some(StreamEvent::End(StreamEnd::Shutdown)) | None => {
+                    break close_frame(CLOSE_GOING_AWAY, "the controller stops");
+                }
+            },
+            received = socket.recv() => match received {
+                None | Some(Err(_) | Ok(Message::Close(_))) => return,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                Some(Ok(Message::Text(_) | Message::Binary(_))) => {
+                    break close_frame(CLOSE_READ_ONLY, "the stream is read-only");
+                }
+            },
+            _ = ping.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    };
+    if socket.send(closing).await.is_err() {
+        return;
+    }
+    // Let the client read the close frame and answer it, so no reset cuts the frame short.
+    let _ = tokio::time::timeout(CLOSE_GRACE, async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 async fn pair(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Answer {

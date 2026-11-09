@@ -93,6 +93,7 @@ impl ApiHost for Fake {
             version: "0.1.0".to_string(),
             key_spki_sha256: hex(&SPKI),
             device: None,
+            server: None,
         }
     }
 
@@ -300,6 +301,29 @@ async fn every_answer_calls_audit_once_with_its_outcome_and_status() {
     let (_, r) = rig.once(request("POST", "/v1/pair", None, body)).await;
     // The code "x" is bad, so the answer is 401 before the name is looked at.
     assert_eq!((r.status, r.outcome), (401, Outcome::Unauthorized));
+}
+
+#[tokio::test]
+async fn the_stream_route_leaves_one_record_with_the_route_stream() {
+    let rig = rig();
+    // A good token and no upgrade headers: the 400 is a record of the route `stream`, and it names
+    // the device and no verb.
+    let (status, r) = rig
+        .once(request("GET", "/v1/stream", Some(TOKEN), Vec::new()))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        (r.route, r.verb, r.device.as_deref(), r.status, r.outcome),
+        (Route::Stream, None, Some("D-7"), 400, Outcome::BadRequest)
+    );
+    // A bad token is a record of the same route, with no device.
+    let (_, r) = rig
+        .once(request("GET", "/v1/stream", Some(BAD_TOKEN), Vec::new()))
+        .await;
+    assert_eq!(
+        (r.route, r.device, r.status, r.outcome),
+        (Route::Stream, None, 401, Outcome::Unauthorized)
+    );
 }
 
 #[tokio::test]

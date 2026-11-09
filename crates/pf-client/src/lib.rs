@@ -8,4 +8,5 @@ pub mod keychain;
 pub mod pin;
 pub mod request;
 pub mod store;
+pub mod stream;
 pub mod transport;

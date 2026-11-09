@@ -130,6 +130,15 @@ impl Controller {
     /// `device_pair`: make one code, which holds the API address, a single-use secret and the SPKI
     /// hash of the server key. It replaces the live code.
     pub(super) fn verb_device_pair(&self) -> Response {
+        // A code for an API that cannot listen is useless: refuse, and make no code. `waiting` still
+        // makes one, because the address may come up within the code's 10 minutes.
+        let state = self.api.state();
+        if state.state == pf_api::types::ListenState::Failed {
+            return Response::err(format!(
+                "the API cannot listen: {}; fix it and restart the controller",
+                state.error.unwrap_or_default()
+            ));
+        }
         let (Some(key), Some(listen)) = (self.api.key.as_ref(), self.api.advertised()) else {
             return Response::err(match self.api.state().error {
                 Some(why) => format!("the API cannot start: {why}"),
@@ -218,6 +227,8 @@ impl Controller {
                 let Some(id) = &admission.unit_id else {
                     return Response::err("the admission names no device");
                 };
+                // A revoke closes the device's open streams at once (C13).
+                self.close_device_streams(id);
                 match self.store.devices() {
                     Ok(rows) => match rows.into_iter().find(|d| &d.id == id) {
                         Some(row) => Response::ok(

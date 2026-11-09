@@ -2,8 +2,13 @@
 //! the ledger (ADR-0003). It also owns the projects and devices and their own ledger,
 //! `controller.ledger`, and, when the operator sets an address, the network API (ADR-0012).
 
+pub mod agents;
 pub mod api;
 pub mod base_push;
+pub mod chat_install;
+pub mod chat_verbs;
+pub mod chat_view;
+pub mod chats;
 pub mod client;
 pub mod commands;
 pub mod devices;
@@ -13,15 +18,20 @@ pub mod ports;
 pub mod projects;
 pub mod requests;
 pub mod seat;
+pub mod sessions;
 pub mod status;
+pub mod worktrees;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use pf_adapter_claude::pinned::Pin;
 use pf_engine::ledger::FsLedger;
 use pf_engine::port::agent::{AgentPort, SessionRef};
+use pf_engine::port::chat::ChatPort;
 use pf_engine::port::store::{RunState, Store};
 use pf_engine::{Engine, EngineConfig, system_clock};
 use pf_ipc::{Handler, Peer, Request, Response};
@@ -57,6 +67,31 @@ pub struct Config {
     /// How long a device may make no call before the API refuses it and it must pair again: 30
     /// days (ADR-0012). A test sets a short time.
     pub device_idle: Duration,
+    /// Variables added to every git call, after the controller's own `GIT_*` variables are removed.
+    /// Empty. A test sets one, such as `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`.
+    pub git_env: Vec<(String, String)>,
+    /// The chat runtimes of this server, by runtime ID (`r1.s3.w3`). `controller::run` puts one
+    /// `ClaudeChat` under `claude-code`. A test puts a `FakeChat`, or a `ClaudeChat` over the
+    /// replay, under the same ID. An agent whose runtime has no entry is refused at its start.
+    pub chat_runtimes: BTreeMap<String, Arc<dyn ChatPort>>,
+    /// How long a chat process may be idle before the controller releases it: 30 minutes.
+    pub chat_idle: Duration,
+    /// The cap on live chat processes (`PF_CHAT_MAX_LIVE`): 4.
+    pub chat_max_live: usize,
+    /// The registry the managed Claude Code copy is fetched from. `None` in `Config::new`, so a test
+    /// never fetches. `run` sets it.
+    pub chat_registry: Option<String>,
+    /// The pin the start-time check of the managed copy uses.
+    pub chat_pin: Pin,
+    /// The share directory that holds the managed copy.
+    pub chat_share_dir: PathBuf,
+    /// `PF_AGENT_ENV_<AGENT>`: the agent's server-side environment, by the upper-cased agent key.
+    pub chat_agent_env: BTreeMap<String, BTreeMap<String, String>>,
+    /// The server's name, as every API answer names it (`PF_SERVER_NAME`).
+    pub server_name: String,
+    /// True when the chat runs the managed copy, so a runtime list can say whether the copy is
+    /// there.
+    pub chat_managed: bool,
 }
 
 impl Config {
@@ -72,7 +107,26 @@ impl Config {
             pair_ttl: Duration::from_secs(600),
             api_retry: api::DEFAULT_RETRY,
             device_idle: DEFAULT_DEVICE_IDLE,
+            git_env: Vec::new(),
+            chat_runtimes: BTreeMap::new(),
+            chat_idle: chats::DEFAULT_IDLE,
+            chat_max_live: chats::DEFAULT_MAX_LIVE,
+            chat_registry: None,
+            chat_pin: Pin::release(),
+            chat_share_dir: crate::arm::share_dir(),
+            chat_agent_env: BTreeMap::new(),
+            server_name: "server".to_string(),
+            chat_managed: false,
         }
+    }
+
+    /// Take the chat settings that the controller's environment gave.
+    pub fn apply_chat_env(&mut self, env: &chats::ChatEnv) {
+        self.chat_share_dir = env.share_dir.clone();
+        self.chat_max_live = env.max_live;
+        self.chat_agent_env = env.agent_env.clone();
+        self.server_name = env.server_name.clone();
+        self.chat_registry = Some(env.registry.clone());
     }
 }
 
@@ -104,6 +158,10 @@ pub struct Controller {
     controller_ledger: Mutex<commands::ControllerLedger>,
     /// The network API: its key, its state and the one live pairing code.
     api: api::ApiRuntime,
+    /// The chat processes, their pumps, `chat.ledger` and the stream's frames (`r1.s3.w3`).
+    chats: chats::Chats,
+    /// This controller, for the threads that outlive a call.
+    me: Weak<Controller>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -129,7 +187,8 @@ impl Controller {
         // With an address set, the key is made now, so `api status` and `device pair` have it
         // before the listener binds.
         let api = api::ApiRuntime::start(&cfg.state_dir, cfg.api_listen.as_deref());
-        let controller = Arc::new(Controller {
+        let chats = chats::Chats::new(&cfg.state_dir);
+        let controller = Arc::new_cyclic(|me| Controller {
             cfg,
             store,
             ports,
@@ -138,7 +197,14 @@ impl Controller {
             claim_lock: Mutex::new(()),
             controller_ledger: Mutex::new(controller_ledger),
             api,
+            chats,
+            me: me.clone(),
         });
+        // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
+        // session is set to wait for `--resume`, as the restart ended its process.
+        controller.backfill_project_kinds();
+        controller.settle_live_chat_sessions();
+        controller.check_managed_copy();
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
             for entry in entries.flatten() {
@@ -354,6 +420,8 @@ impl Controller {
 
     /// Run one tick of every driven run. A panic in one run's tick stops that tick only.
     pub fn tick_all(&self) {
+        // A chat process idle for the window is released. Nothing here opens one.
+        self.sweep_chats();
         for handle in self.handles() {
             if !handle.driven.load(Ordering::SeqCst) {
                 continue;
@@ -609,6 +677,15 @@ impl Handler for Controller {
             "project_add" => self.verb_project_add(&request.args),
             "project_list" => self.verb_project_list(),
             "project_remove" => self.verb_project_remove(&request.args),
+            "session_start" => self.verb_session_start(&request.args),
+            "session_send" => self.verb_session_send(&request.args),
+            "session_answer" => self.verb_session_answer(&request.args),
+            "session_interrupt" => self.verb_session_interrupt(&request.args),
+            "session_set" => self.verb_session_set(&request.args),
+            "session_end" => self.verb_session_end(&request.args),
+            "session_redact" => self.verb_session_redact(&request.args),
+            "session_list" => self.verb_session_list(&request.args),
+            "session_items" => self.verb_session_items(&request.args),
             "device_list" => self.verb_device_list(),
             "api_status" => self.verb_api_status(),
             // These change who acts and what runs. They need to know who calls.
@@ -637,6 +714,14 @@ impl Handler for Controller {
                 Ok(()) => self.verb_device_revoke(&request.args),
                 Err(why) => Response::err(why),
             },
+            // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).
+            verb @ ("session_start" | "session_send" | "session_answer" | "session_interrupt"
+            | "session_set" | "session_end" | "session_redact") => {
+                match self.check_chat_caller(verb, peer) {
+                    Ok(()) => self.handle(request),
+                    Err(why) => Response::err(why),
+                }
+            }
             _ => self.handle(request),
         }
     }
@@ -657,13 +742,21 @@ impl Controller {
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // The kill switch stops every live chat process first (Q2 rule 3).
+        let chats_stopped = self.halt_chat_json();
         let handle = match self.find(run) {
             Ok(h) => h,
+            // With no run at all, `halt` still stopped the chats.
+            Err(_) if run.is_none() && lock(&self.runs).is_empty() => {
+                return Response::ok(
+                    json!({ "schema_version": 1, "run": null, "halted": false, "already_halted": false, "chats_stopped": chats_stopped }),
+                );
+            }
             Err(why) => return Response::err(why),
         };
         match handle.engine.halt(reason) {
             Ok(_) => Response::ok(
-                json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": false }),
+                json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": false, "chats_stopped": chats_stopped }),
             ),
             // The first reason stays.
             Err(pf_engine::EngineError::Conflict { .. }) => {
@@ -675,7 +768,7 @@ impl Controller {
                     .and_then(|r| r.halted_reason)
                     .unwrap_or_default();
                 Response::ok(
-                    json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": true, "reason": first }),
+                    json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": true, "reason": first, "chats_stopped": chats_stopped }),
                 )
             }
             Err(e) => Response::err(e.to_string()),
@@ -713,6 +806,26 @@ pub fn run(args: &ControllerArgs) -> i32 {
         .clone()
         .or_else(|| std::env::var("PF_API_LISTEN").ok())
         .filter(|a| !a.trim().is_empty());
+    // The chat settings: the unit's `controller.env` (`PF_SHARE_DIR`, `PF_CHAT_CLAUDE_BIN`, ...).
+    let vars: BTreeMap<String, String> = std::env::vars().collect();
+    let (chat_env, warnings) = chats::parse_chat_env(&vars, chats::read_hostname().as_deref());
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+    cfg.apply_chat_env(&chat_env);
+    if let Some(bin) = &chat_env.claude_bin {
+        eprintln!(
+            "pulse-factory: the chat runs an unqualified Claude Code binary: {}",
+            bin.display()
+        );
+    }
+    let mut claude = pf_adapter_claude::ClaudeConfig::new(chat_env.share_dir.clone());
+    claude.claude_bin_override = chat_env.claude_bin.clone();
+    cfg.chat_managed = chat_env.claude_bin.is_none();
+    cfg.chat_runtimes.insert(
+        pf_adapter_claude::CLAUDE_CODE_RUNTIME.to_string(),
+        Arc::new(pf_adapter_claude::ClaudeChat::new(claude)),
+    );
     let controller = match Controller::open(cfg, Arc::new(LivePorts)) {
         Ok(c) => c,
         Err(why) => {
@@ -765,6 +878,9 @@ pub fn serve_forever(controller: Arc<Controller>, bound: pf_ipc::Bound) -> i32 {
             }
         };
         pf_ipc::serve(bound, controller.clone(), shutdown).await;
+        // A controller stop ends every chat process and every stream (Q2 rule 3).
+        let stopping = controller.clone();
+        let _ = tokio::task::spawn_blocking(move || stopping.shutdown_chats()).await;
         tick_task.abort();
         if let Some(task) = api_task {
             task.abort();

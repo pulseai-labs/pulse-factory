@@ -1,5 +1,5 @@
 //! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
-//! AC-9 (`r1.s2.w4`): the demo scripts run against the built binary, and each fails when its journey is
+//! AC-9 (`r1.s2.w4`) and AC-14 (`r1.s3.w3`): the demo scripts run against the built binary, and each fails when its journey is
 //! broken. The scripts run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`,
 //! and no build. d14 (`community-edition.sh`) is the exception that the five tests at the end cover: it
 //! asks GitHub for a CI run, and here a stub `gh` answers.
@@ -364,6 +364,58 @@ fn pair_api_passes() {
     }
 }
 
+/// The limit of `chat-api.sh`: one controller start, a replayed turn, three short readers and about
+/// twenty `curl` calls.
+const CHAT_API_LIMIT: Duration = Duration::from_secs(60);
+
+#[test]
+fn chat_api_passes() {
+    // d18: the chat verbs and the chat stream over the API, against the real adapter on a replay of
+    // a recorded session. The replay binary is built beside the controller's; a missing one fails
+    // the test, never skips it (`cargo build -p pf-adapter-claude --bin pf-claude-replay`).
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let (out, took) = run(
+        "chat-api.sh",
+        &[
+            ("PF_REPLAY_BIN", replay.to_str().unwrap()),
+            ("PF_STREAM_BIN", env!("CARGO_BIN_EXE_pf-stream-reader")),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < CHAT_API_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+        "step 6:",
+        "step 7:",
+        "step 8:",
+        "step 9:",
+        "step 10:",
+        "chat-api: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
 #[test]
 fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
     for name in [
@@ -373,6 +425,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "spine-base.sh",
         "seat-tamper.sh",
         "pair-api.sh",
+        "chat-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [

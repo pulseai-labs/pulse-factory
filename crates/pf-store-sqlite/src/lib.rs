@@ -27,6 +27,9 @@ pub struct Migration {
 /// The migrations of this binary. Migration `0001` holds what skeleton A needs. Migration `0002`
 /// adds requests and claims. Migration `0003` adds projects, and a trigger that keeps `@` out of a
 /// run id, so the admission scope `@controller` can never be a run. Migration `0004` adds devices.
+/// Migration `0005` adds the project hierarchy: the project kind and remote key, worktrees, agents,
+/// chat sessions and chat items. Migration `0006` adds the session's own runtime options.
+/// `RunActive` covers every migration, `0006` too: the store never migrates under an active run.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -47,6 +50,16 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "devices",
         sql: include_str!("../migrations/0004_devices.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "hierarchy",
+        sql: include_str!("../migrations/0005_hierarchy.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "session_options",
+        sql: include_str!("../migrations/0006_session_options.sql"),
     },
 ];
 

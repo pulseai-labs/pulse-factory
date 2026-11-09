@@ -1,16 +1,25 @@
 //! The Pulse Factory Mac app: a Tauri 2 shell over the UI bundle (`apps/ui`).
 //!
-//! The six Tauri commands are the six operations of the UI's transport interface
-//! (`docs/contracts/ui-transport.md`), with the same names. Each calls `pf-client`'s
-//! `Transport<KeychainStore>`: the pinned TLS call, and the device token in the macOS Keychain. A
-//! command returns the wire type, or rejects with `{"kind": …, "message": …}`, the same shape as the
-//! test bridge's error. No command takes or returns the device token, and the webview opens no
-//! network connection (its CSP allows the bundle's own assets and Tauri's IPC only).
+//! The Tauri commands are the operations of the UI's transport interface
+//! (`docs/contracts/ui-transport.md`), with the same names: the six of the pairing and the projects,
+//! the seven chat verbs, and `open_stream` and `close_stream` for the chat stream. Each calls
+//! `pf-client`'s `Transport<KeychainStore>`: the pinned TLS call, and the device token in the macOS
+//! Keychain. A command returns the wire type, or rejects with `{"kind": …, "message": …}`, the same
+//! shape as the test bridge's error. No command takes or returns the device token, and the webview
+//! opens no network connection (its CSP allows the bundle's own assets and Tauri's IPC only).
+//!
+//! The stream's events go to the webview on a `tauri::ipc::Channel`, not on Tauri's event system:
+//! `listen` needs a capability that grants `core:event`, and the app declares no capability file.
 
-use pf_api::types::{ApiStatus, ProjectAddArgs, ProjectChanged, ProjectList};
+use pf_api::types::{
+    ApiStatus, ProjectAddArgs, ProjectChanged, ProjectList, SessionAnswerArgs, SessionChanged,
+    SessionEndArgs, SessionInterruptArgs, SessionList, SessionListArgs, SessionSendArgs,
+    SessionSetArgs, SessionStartArgs,
+};
 use pf_client::error::ClientError;
 use pf_client::keychain::KeychainStore;
-use pf_client::transport::{PairedServer, Transport};
+use pf_client::stream::{StreamEvent, StreamOptions, Streams};
+use pf_client::transport::{PairedServer, SessionEnded, SessionStarted, Transport};
 use tauri::{Manager, State};
 
 type Device = Transport<KeychainStore>;
@@ -48,6 +57,80 @@ async fn project_add(
 }
 
 #[tauri::command]
+async fn session_list(
+    device: State<'_, Device>,
+    args: SessionListArgs,
+) -> Result<SessionList, ClientError> {
+    device.session_list(args).await
+}
+
+#[tauri::command]
+async fn session_start(
+    device: State<'_, Device>,
+    args: SessionStartArgs,
+) -> Result<SessionStarted, ClientError> {
+    device.session_start(args).await
+}
+
+#[tauri::command]
+async fn session_send(
+    device: State<'_, Device>,
+    args: SessionSendArgs,
+) -> Result<SessionChanged, ClientError> {
+    device.session_send(args).await
+}
+
+#[tauri::command]
+async fn session_answer(
+    device: State<'_, Device>,
+    args: SessionAnswerArgs,
+) -> Result<SessionChanged, ClientError> {
+    device.session_answer(args).await
+}
+
+#[tauri::command]
+async fn session_interrupt(
+    device: State<'_, Device>,
+    args: SessionInterruptArgs,
+) -> Result<SessionChanged, ClientError> {
+    device.session_interrupt(args).await
+}
+
+#[tauri::command]
+async fn session_set(
+    device: State<'_, Device>,
+    args: SessionSetArgs,
+) -> Result<SessionChanged, ClientError> {
+    device.session_set(args).await
+}
+
+#[tauri::command]
+async fn session_end(
+    device: State<'_, Device>,
+    args: SessionEndArgs,
+) -> Result<SessionEnded, ClientError> {
+    device.session_end(args).await
+}
+
+/// Open the chat stream. The events go to the webview on `on_event`, in order; a `closed` event is
+/// the last. Returns the stream's ID for `close_stream`.
+#[tauri::command]
+async fn open_stream(
+    device: State<'_, Device>,
+    streams: State<'_, Streams>,
+    options: StreamOptions,
+    on_event: tauri::ipc::Channel<StreamEvent>,
+) -> Result<u64, ClientError> {
+    Ok(streams.open(&device, options, move |event| on_event.send(event).is_ok()))
+}
+
+/// End one stream. `false` when the ID is not open.
+#[tauri::command]
+async fn close_stream(streams: State<'_, Streams>, id: u64) -> Result<bool, ClientError> {
+    Ok(streams.close(id))
+}
+
+#[tauri::command]
 async fn forget(device: State<'_, Device>) -> Result<(), ClientError> {
     device.forget().await
 }
@@ -60,7 +143,15 @@ fn main() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             app.manage(Transport::new(std::sync::Arc::new(KeychainStore::new(dir))));
+            app.manage(Streams::new());
             Ok(())
+        })
+        // A page that starts to load is a reload: the old page's channels are gone, so no stream
+        // stays open behind a channel that nobody reads.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                webview.state::<Streams>().close_all();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             paired,
@@ -68,6 +159,15 @@ fn main() {
             status,
             project_list,
             project_add,
+            session_list,
+            session_start,
+            session_send,
+            session_answer,
+            session_interrupt,
+            session_set,
+            session_end,
+            open_stream,
+            close_stream,
             forget
         ])
         .run(tauri::generate_context!())

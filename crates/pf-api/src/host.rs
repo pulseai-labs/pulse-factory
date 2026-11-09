@@ -5,11 +5,26 @@
 
 use std::net::IpAddr;
 
-use crate::types::{ApiStatus, DeviceRecord, PairResult};
+use tokio::sync::mpsc;
+
+use crate::types::{ApiStatus, DeviceRecord, PairResult, ServerRef};
 
 /// The verbs a device may call: exactly these. A later spine that adds a verb amends ADR-0012.
-/// `halt` and every verb that acks, answers or claims stay off this list.
-pub const ALLOWLIST: &[&str] = &["project_add", "project_list", "project_remove"];
+/// `halt` and every verb that acks, answers or claims stay off this list. So do `session_redact`
+/// (the CLI only: a redaction is the operator's, C12) and `session_items` (a device reads the items
+/// on the stream, from `after=0`).
+pub const ALLOWLIST: &[&str] = &[
+    "project_add",
+    "project_list",
+    "project_remove",
+    "session_list",
+    "session_start",
+    "session_send",
+    "session_answer",
+    "session_interrupt",
+    "session_set",
+    "session_end",
+];
 
 /// Whether a device may call this verb.
 pub fn is_allowed(verb: &str) -> bool {
@@ -34,6 +49,8 @@ pub enum Route {
     Pair,
     Status,
     Verb,
+    /// `GET /v1/stream`, the WebSocket stream (`r1.s3.w3`).
+    Stream,
     /// Any other path, and a path that is no route.
     Other,
 }
@@ -44,6 +61,7 @@ impl Route {
             Route::Pair => "pair",
             Route::Status => "status",
             Route::Verb => "verb",
+            Route::Stream => "stream",
             Route::Other => "other",
         }
     }
@@ -56,6 +74,8 @@ pub enum Outcome {
     Ok,
     /// 200, and the answer says `"replayed": true`.
     Replayed,
+    /// 101: a stream connection was upgraded. The close writes no record of its own.
+    Upgraded,
     /// 401.
     Unauthorized,
     /// 403.
@@ -81,6 +101,7 @@ impl Outcome {
         match self {
             Outcome::Ok => "ok",
             Outcome::Replayed => "replayed",
+            Outcome::Upgraded => "upgraded",
             Outcome::Unauthorized => "unauthorized",
             Outcome::Forbidden => "forbidden",
             Outcome::Refused => "refused",
@@ -113,6 +134,42 @@ pub struct RequestRecord {
     pub blocked_until: Option<String>,
 }
 
+/// Why the host ends a stream. The router turns each into a WebSocket close frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// The device was revoked: close 4001 `revoked`.
+    Revoked,
+    /// The connection fell behind the live frames: close 4002 `lagged: reconnect after seq <n>`.
+    Lagged { after_seq: u64 },
+    /// The controller stops: close 1001.
+    Shutdown,
+}
+
+/// One thing a stream feed carries to the router.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamEvent {
+    /// One frame, as the JSON text that goes out as a WebSocket text message.
+    Frame(String),
+    /// The stream ends. The router closes the socket with the matching code, and the feed ends.
+    End(StreamEnd),
+}
+
+/// The feed the host gives a stream: frames and the end. A feed whose sender is dropped without an
+/// [`StreamEvent::End`] closes the socket with 1001, as a controller stop does.
+pub type StreamFeed = mpsc::Receiver<StreamEvent>;
+
+/// Why the host will not open a stream. The router never reaches the store itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamRefusal {
+    /// The session is unknown: 404 with this one-line text.
+    NotFound(String),
+    /// The call is no good: 400 with this one-line text.
+    BadRequest(String),
+    /// The device was revoked after the router authenticated the request: 401, as for any call
+    /// with a revoked token.
+    NotAuthorized,
+}
+
 pub trait ApiHost: Send + Sync + 'static {
     /// Use up a live pairing code and record a device. `code_secret` is the 20 hex digits of the
     /// code's secret. Err names the refusal.
@@ -131,6 +188,32 @@ pub trait ApiHost: Send + Sync + 'static {
 
     /// The server's version and key. The `device` field is empty: the router fills it.
     fn status(&self) -> ApiStatus;
+
+    /// The server's id and name, which every answer names in `pf-server-id` and `pf-server-name`.
+    /// The default takes the id from [`ApiHost::status`] and the name `server`.
+    fn server(&self) -> ServerRef {
+        let id = self.status().key_spki_sha256;
+        ServerRef {
+            id: (!id.is_empty()).then_some(id),
+            name: "server".to_string(),
+        }
+    }
+
+    /// Open the stream of a device: the router calls this after the token, the upgrade headers and
+    /// the query are checked and before it answers `101`. `session` is the followed session, and
+    /// `after` is the last `seq` the device has. The host subscribes to its live frames first, then
+    /// sends `hello`, the stored items after `after`, `caught`, and the live frames (`api.md`, "The
+    /// stream"). The default refuses with 404, so a host that has no chat compiles unchanged.
+    fn open_stream(
+        &self,
+        _device: &DeviceRecord,
+        _session: Option<&str>,
+        _after: u64,
+    ) -> Result<StreamFeed, StreamRefusal> {
+        Err(StreamRefusal::NotFound(
+            "there is no stream here".to_string(),
+        ))
+    }
 
     /// Record one answered request. The router calls it once for every request it answers, after
     /// the answer is decided, except that a blocked peer's 429s are coalesced into one record a

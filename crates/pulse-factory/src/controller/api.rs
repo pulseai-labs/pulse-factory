@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pf_api::guard::listen_allowed;
-use pf_api::types::{ApiState, ApiStatus, DeviceRecord, ListenState, PairResult, SCHEMA_VERSION};
+use pf_api::host::{StreamFeed, StreamRefusal};
+use pf_api::types::{
+    ApiState, ApiStatus, DeviceRecord, ListenState, PairResult, SCHEMA_VERSION, ServerRef,
+};
 use pf_api::{ApiHost, Outcome, Refusal, RequestRecord, tls};
 use pf_ipc::{Handler, Request, Response};
 use serde_json::Value;
@@ -46,6 +49,15 @@ pub const VERBS: &[&str] = &[
     "project_add",
     "project_list",
     "project_remove",
+    "session_start",
+    "session_send",
+    "session_answer",
+    "session_interrupt",
+    "session_set",
+    "session_end",
+    "session_redact",
+    "session_list",
+    "session_items",
     "device_list",
     "api_status",
     "claim",
@@ -336,6 +348,20 @@ impl ApiHost for ApiBridge {
                 .map(tls::ServerKey::spki_sha256_hex)
                 .unwrap_or_default(),
             device: None,
+            server: Some(self.controller.server_ref()),
         }
+    }
+
+    fn server(&self) -> ServerRef {
+        self.controller.server_ref()
+    }
+
+    fn open_stream(
+        &self,
+        device: &DeviceRecord,
+        session: Option<&str>,
+        after: u64,
+    ) -> Result<StreamFeed, StreamRefusal> {
+        self.controller.open_stream(device, session, after)
     }
 }

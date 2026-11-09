@@ -7,15 +7,16 @@ version 1 of the interface and of the bridge protocol.
 
 Two things implement the interface:
 
-- **The Mac app** (`r1.s2.w4`): the Tauri shell's Rust side holds the token in the Keychain, makes
-  the pinned TLS call and exposes the six methods as Tauri commands with the names and shapes
-  below.
+- **The Mac app** (`r1.s2.w4`, and the chat in `r1.s3.w4`): the Tauri shell's Rust side holds the
+  token in the Keychain, makes the pinned TLS call and exposes the methods as Tauri commands with the
+  names and shapes below. The chat stream reaches the webview on a Tauri `Channel`.
 - **The test bridge**, `pf-client-bridge` (`crates/pf-client`; `scripts/demo/ui-bridge/README.md`): the
   `desktop-bridge` fake (`SPINE.md`, Fakes), now with the real pinned client behind it. It stands in
   for the Tauri shell's Rust side where the Mac app cannot run, such as headless Chromium on
   draco-desk. It is for `scripts/demo/ui-pair.sh` (d12) and tests only. The Mac app does not use it.
   It was a Node script until `r1.s2.w4`. After that item the fake covers only the Tauri `invoke` glue
-  and the Keychain.
+  and the Keychain. Since `r1.s3.w4` it also carries the chat stream to the browser as Server-Sent
+  Events, so d19 runs the UI through it and not through the Tauri app.
 
 ## The interface
 
@@ -34,13 +35,30 @@ export type TransportErrorKind =
   | 'bad_request'   // 400 or 413
   | 'server';       // 5xx, or an answer that is not the documented JSON
 export class TransportError extends Error { readonly kind: TransportErrorKind }
-export interface PairedServer { address: string; device: DeviceRecord }
+export interface PairedServer { address: string; device: DeviceRecord; server?: ServerRef }
+export interface SessionStarted { replayed: boolean; session_id: string; worktree_id: string;
+                                  worktree_dir: string; note: string | null }
+export interface SessionEnded { replayed: boolean; session_id: string; note: string | null }
+export interface StreamOptions { session?: string | null; after?: number }
+export type StreamEvent =
+  | { event: 'frame'; frame: ChatFrame }
+  | { event: 'reconnecting'; after: number; retry_in_ms: number; reason: string }
+  | { event: 'closed'; error: { kind: TransportErrorKind; message: string } };
+export interface StreamHandle { close(): Promise<void> }
 export interface Transport {
   paired(): Promise<PairedServer | null>;           // no network call
   pair(code: string, deviceName: string): Promise<PairedServer>;
   status(): Promise<ApiStatus>;
   projectList(): Promise<ProjectList>;
   projectAdd(args: ProjectAddArgs): Promise<ProjectChanged>;
+  sessionList(args?: SessionListArgs): Promise<SessionList>;
+  sessionStart(args: SessionStartArgs): Promise<SessionStarted>;
+  sessionSend(args: SessionSendArgs): Promise<SessionChanged>;
+  sessionAnswer(args: SessionAnswerArgs): Promise<SessionChanged>;
+  sessionInterrupt(args: SessionInterruptArgs): Promise<SessionChanged>;
+  sessionSet(args: SessionSetArgs): Promise<SessionChanged>;
+  sessionEnd(args: SessionEndArgs): Promise<SessionEnded>;
+  openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle>;
   forget(): Promise<void>;                          // drops the token on this device only
 }
 ```
@@ -50,7 +68,24 @@ export interface Transport {
   operator runs `pulse-factory device revoke <id>`, so the UI tells the operator that command, with
   the device's ID.
 - The message of a `key_changed` error is exactly `server key changed: re-pair`.
-- `projectAdd` carries a `command_id`. A retry of the same submit reuses it (`api.md`, A7).
+- `projectAdd` and every state-changing chat verb carry a `command_id`. A retry of the same submit
+  reuses it (`api.md`, A7).
+- `sessionStart` and `sessionEnd` answer `SessionStarted` and `SessionEnded`, which are transport types
+  and not wire types: the controller's own answers have no generated type, so the native side reads
+  `session.id`, `worktree.id`, `worktree.path` (as `worktree_dir`) and `note` from them. The full
+  `ChatSessionRecord` reaches the UI in `sessionList`, in `hello` and in `session` frames. `ChatSessionRecord`
+  names the worktree `worktree_dir`, not `worktree_path`.
+- `sessionStart` and `sessionSend` may open a chat process, so the native side waits up to 90 seconds
+  for them (the other verbs wait 30). A timeout is `unreachable`, and a retry with the same `command_id`
+  replays.
+- **The server.** `PairedServer.server` is the server that the last answer named (`pf-server-id` and
+  `pf-server-name` on every answer, a `101` and each `hello` frame's `server` too). The native side keeps
+  it in memory, only when its ID is the pin: a header that names another ID is ignored, because the TLS pin is
+  the check and the header is a label. It is absent before the first answer of a run, and `forget()`
+  clears it.
+- **`openStream` never rejects for a stream failure.** Every failure arrives as one `closed` event, from
+  either implementation, so a screen handles one path. No event follows `closed` or `close()`. A value
+  that is not one of the three event shapes is dropped.
 
 ## Error kinds
 
@@ -88,6 +123,28 @@ On start, on opening a page, after an action, and on "Retry now". **While connec
 interval or focus handler makes a call** (planning audit C15: the controller's ledger is local and
 unbounded). After an HTTP refusal the UI never retries by itself.
 
+**The chat stream (`r1.s3.w5`).** The UI holds **one stream open at a time**: a browser keeps six
+HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A10).
+
+- The shell opens the **overview** stream, `openStream({})`, when it mounts. Its `hello` and `session`
+  frames feed the session rows of the sidebar.
+- When a chat is on screen, the stream **follows that chat**: the UI closes the current stream and opens
+  `openStream({session, after})`, where `after` is the highest `seq` it holds for that session (0 the first
+  time). When no chat is on screen, it goes back to the overview. Each switch is an operator action.
+- `reconnecting` shows "Reconnecting…" with its reason on the open chat and does nothing else: `pf-client`
+  retries. `closed` by kind:
+  - `unreachable` (the local leg dropped, or the bridge or the app's Rust side is gone) and `rate_limited`:
+    the same 3c banner and `status()` retry as a failed call. When the link comes back, the UI opens the
+    stream again with the last `seq` it holds. No new timer: the only retry timer is the connection's.
+  - `unauthorized` and `key_changed`: the 3c banner, and no stream is opened again until a new pairing.
+  - `server`, `bad_request`, `forbidden` and `refused`: one error line on the open chat with the text and
+    "Reconnect", an operator action that opens the stream again with the last `seq`.
+- While a stream is open the UI makes no call by itself and sets no timer for it. It reads `session_list`
+  when the Agents page or the first chat opens, after `session_start`, and once when the link comes back,
+  and the cache-warm display ticks once a minute on the chat that is on screen and calls nothing.
+- A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
+  chat's items replay from `after=0`. The UI keeps no chat state in storage (`pf.sidebar` is its only key).
+
 ## The bridge protocol
 
 HTTP on `127.0.0.1`, on the same origin as the bundle. The bridge serves the bundle's files at `/`
@@ -98,20 +155,99 @@ and these routes:
 | `GET /bridge/paired` | none | `PairedServer`, or `null` when no server is paired. No network call. |
 | `POST /bridge/pair` | `{"code": "<pf1-…>", "device_name": "<name>"}` | `PairedServer`. The bridge checks the pin, then calls `POST /v1/pair`, and keeps the token. |
 | `POST /bridge/status` | `{}` | `ApiStatus` (`GET /v1/status`). |
-| `POST /bridge/verbs/<verb>` | the verb's JSON arguments | the verb's JSON answer (`POST /v1/verbs/<verb>`). `<verb>` is `[a-z][a-z_]*`; anything else is `bad_request`. |
+| `POST /bridge/verbs/<verb>` | the verb's JSON arguments | the verb's JSON answer (`POST /v1/verbs/<verb>`). `<verb>` is `[a-z][a-z_]*`; anything else is `bad_request`. `project_add` and the seven chat verbs go through the typed methods, so a bad argument fails at the bridge and `session_start` and `session_end` answer `SessionStarted` and `SessionEnded`. A verb off the allowlist (`session_redact`, `session_items`) is `bad_request` with no connection. |
+| `GET /bridge/stream[?session=<S-n>&after=<n>]` | none | **Not an envelope.** `200` with `Content-Type: text/event-stream` and `Cache-Control: no-store`: each `StreamEvent` is one `data: <JSON>` line and a blank line, in order. The response ends after a `closed` event. Any other method is 405. |
 | `POST /bridge/forget` | `{}` | `null`. Removes the device file. |
 
 **Every bridge answer is HTTP 200** with `{"ok": true, "result": …}` or `{"ok": false, "error":
-{"kind": "<TransportErrorKind>", "message": "<text>"}}`. No answer holds the device token or the
-code.
+{"kind": "<TransportErrorKind>", "message": "<text>"}}`, except the stream, which is `200` with Server-Sent
+Events (next section). No answer holds the device token or the code.
 
 `pf-client-bridge` serves this protocol, and the Mac app's Tauri commands carry the same names and
 shapes (next section).
 
+## The chat stream
+
+`openStream` follows the chat: one session and its items after `after`, or no session (then only
+the `hello` and `session` frames of every session). The native side, `pf-client`
+(`crates/pf-client/src/stream.rs`), opens `GET /v1/stream` (`api.md`) over the same pinned TLS 1.3
+connection as the verbs, with the device token in the upgrade's `Authorization` header and nowhere
+else. The UI sees only the events below. The stream is read-only.
+
+- **`after`** is the last `seq` the UI holds. An omitted `after` is 0, on every path. A session ID that
+  is not `S-<n>` (n at least 1) ends the stream as `bad_request` before any connection.
+- **Decoding.** Each text message is one JSON object. A `type` the client does not know is skipped
+  (a later server may add frames: ADR-0004). A known `type` that does not decode into `ChatFrame` ends
+  the stream as `server` ("the server sent a frame this client cannot read"), so an item is never
+  skipped silently.
+- **No gap, no double.** The client keeps the last `seq` it holds and drops an `item` of the followed
+  session with a `seq` it holds, except a redaction's re-send (`redacted_at` set), which always
+  passes. A reconnect sends `after=<that seq>`, not the `<n>` of a 4002 reason, and the server's fresh
+  `hello` and `caught` reach the UI again.
+
+### The events
+
+Each event is one JSON object, tagged by `event`. `closed` is the last. A close by the caller ends the
+stream with no event.
+
+```json
+{"event":"frame","frame":{"type":"caught","session_id":"S-1","last_seq":6}}
+{"event":"reconnecting","after":6,"retry_in_ms":4000,"reason":"the server is stopping"}
+{"event":"closed","error":{"kind":"unauthorized","message":"this device was revoked; pair it again"}}
+```
+
+### The outcomes
+
+| What happens | Event | Retry |
+|---|---|---|
+| close `4001 revoked` | `closed`, `unauthorized`, `this device was revoked; pair it again` | never |
+| close `4002 lagged…` | `reconnecting`, reason `lagged`, `retry_in_ms` 0 | at once |
+| close `1001` | `reconnecting`, `the server is stopping` | the schedule |
+| close `1008` | `closed`, `server`, `the server closed the stream: policy violation` | never |
+| any other end after the `101`: another code, a reset, a TCP drop, the silence limit | `reconnecting`, `the connection dropped` | the schedule |
+| no TCP connection, a timeout, a TLS failure before the pin check | `reconnecting`, `cannot reach <address>` | the schedule |
+| the key is not the pinned one | `closed`, `key_changed`, `server key changed: re-pair` | never |
+| an HTTP answer instead of `101` (400, 401, 404, 429, 5xx) | `closed`, the kind of the status, the server's text | never |
+| no pairing, or `forget()` while open | `closed`, `unauthorized`, `this device is not paired` | never |
+| a known frame that does not decode; a session ID that is not `S-<n>` | `closed`, `server`; `bad_request` | never |
+
+A 401 at the upgrade is the same outcome as a `4001`: `unauthorized`, no retry. The next verb call is
+refused by the server on its own token (planning audit C13).
+
+### The schedule, and why it is not polling
+
+The retry schedule is 4, 8, 16 and 32 seconds, then every 60 seconds, the `unreachable` row's schedule
+above. After a `4002` the first retry is at once; every other retry waits the next step. A connection
+that stays open 60 seconds or more resets the schedule. A connection that receives nothing, not even
+a ping, for 75 seconds (two and a half server ping intervals) counts as dropped.
+
+Polling is a timer that asks for state while connected. Here, while a connection is open no timer makes
+any request: the server pushes, and the silence limit is a local deadline that sends nothing. The
+schedule runs only while there is no connection, and each attempt is an upgrade that, once live,
+receives pushes again. An attempt that gets no HTTP answer writes no server line, and an HTTP
+refusal is never retried. So a server that keeps accepting and dropping sees at most one connection a
+minute after the first five attempts, and a connected client costs one `api.ledger` line per
+connection (planning audit C15). **Neither implementation of the interface sets a timer**: the
+reconnect lives in `pf-client`, once, for both. When the local leg itself drops (the bridge or the
+app's Rust side is gone), the UI gets `closed` and opens a new stream with the last `seq` it holds.
+
+### The bridge's stream
+
+`GET /bridge/stream[?session=<S-n>&after=<n>]` is Server-Sent Events: `200`, `Content-Type:
+text/event-stream`, `Cache-Control: no-store`, and each event as `data: <JSON>` and a blank line. The
+Host and Origin rules and the content security policy are unchanged: a same-origin `EventSource` is
+allowed by `default-src 'self'`. When the page drops the response, the bridge drops the stream and the
+upstream socket closes. `bridge.ts` opens an `EventSource` (a factory it takes, as it takes `fetch`)
+and closes it at once on a `closed` event and on `onerror`, so the browser never reconnects by itself;
+an error before any `closed` becomes `closed` `unreachable` ("the bridge closed the stream"). Known
+limit: each open `EventSource` holds one of the browser's six HTTP/1.1 connections to the bridge, so
+the UI follows one session per stream.
+
 ## The Tauri commands
 
-`apps/desktop/src-tauri` registers six commands. Each is one method of the interface, in snake case,
-and each calls `pf-client`'s `Transport<KeychainStore>`. `apps/ui/src/transport/tauri.ts` calls them
+`apps/desktop/src-tauri` registers fifteen commands. Each is one method of the interface, in snake case
+(the stream is two: `open_stream` and `close_stream`), and each calls `pf-client`'s
+`Transport<KeychainStore>`. `apps/ui/src/transport/tauri.ts` calls them
 with `invoke` from `@tauri-apps/api/core`, which turns a JavaScript argument name in camel case into
 the Rust one in snake case.
 
@@ -122,7 +258,26 @@ the Rust one in snake case.
 | `status` | none | `ApiStatus`. |
 | `project_list` | none | `ProjectList`. |
 | `project_add` | `{args}`: a `ProjectAddArgs` | `ProjectChanged`. |
-| `forget` | none | nothing. Deletes the Keychain item and the pairing file. |
+| `session_list` | `{args}`: a `SessionListArgs` | `SessionList`. |
+| `session_start` | `{args}`: a `SessionStartArgs` | `SessionStarted`. |
+| `session_send` | `{args}`: a `SessionSendArgs` | `SessionChanged`. |
+| `session_answer` | `{args}`: a `SessionAnswerArgs` | `SessionChanged`. |
+| `session_interrupt` | `{args}`: a `SessionInterruptArgs` | `SessionChanged`. |
+| `session_set` | `{args}`: a `SessionSetArgs` | `SessionChanged`. |
+| `session_end` | `{args}`: a `SessionEndArgs` | `SessionEnded`. |
+| `open_stream` | `{options, onEvent}`: a `StreamOptions` and a Tauri `Channel` | the stream's ID (a number). Each `StreamEvent` goes to the channel, in order. |
+| `close_stream` | `{id}`: the ID `open_stream` returned | `true` when that stream was open. |
+| `forget` | none | nothing. Deletes the Keychain item and the pairing file, and ends this app's open streams. |
+
+**A channel, not Tauri's event system.** Tauri's `listen` needs a capability that grants
+`core:event`, and the app declares no capability file (ADR-0013). A `Channel` is the IPC that Tauri
+provides for ordered streaming to one webview call, and it needs no capability. The webview still
+opens no network connection, and `tauri.conf.json` (its content security policy) does not change.
+`open_stream` never rejects for a stream failure that happens after it returned an ID: such a failure is a
+`closed` event on the channel. A rejection of `open_stream` itself becomes one `closed` event in
+`tauri.ts`. **A reload:** the shell closes every open stream when a page starts loading
+(`on_page_load`, `Streams::close_all`), so a reloaded webview leaves no stream open behind a channel that
+nobody reads.
 
 A command returns the wire type itself, with no `{"ok": …}` envelope. A command that fails rejects
 with `{"kind": "<TransportErrorKind>", "message": "<text>"}`, the shape of the `error` member of a
@@ -163,4 +318,21 @@ Tauri's IPC only, so the webview opens no network connection.
   client_pinned.rs` and `client_bridge.rs`: the client and the bridge against a real controller.
 - `apps/ui/src/test/tauri-transport.test.ts` (Vitest, `invoke` mocked): each command name and its
   arguments, every error kind, and the choice of transport in `main.tsx`.
+- `apps/ui/src/test/transport-contract.test.ts` (Vitest): one table of cases against both
+  implementations (`fetch` and an `EventSource` mocked, `invoke` and a `Channel` mocked): each chat
+  method, each error kind, `openStream`'s events in order, nothing after `closed`, no timer.
+  `apps/ui/src/test/tauri-commands.test.ts` reads `main.rs` and this file: the handler list, the
+  command functions, `TAURI_COMMANDS` and the table above are one set, and each command's Rust
+  argument names are the `invoke` keys of `tauri.ts`.
+- `crates/pf-client/tests/{stream,chat_verbs,bridge_stream}.rs` (`cargo test -p pf-client`): the
+  stream against a fake host, the seven typed verbs and the server memory, and `GET /bridge/stream`.
+  `crates/pulse-factory/tests/client_chat.rs`: the client, a drop and a reconnect, a revoke and the
+  bridge against a real controller with `FakeChat`.
 - `scripts/demo/ui-pair.sh` (d12): the whole journey in headless Chromium against the built binary.
+- `apps/ui/src/test/{agents,chat,composer,cards,chat-stream}.test.tsx` (Vitest, the fake transport,
+  `r1.s3.w5`): the Agents page, the chat screen and its items, the composer's controls, the gauge, the
+  cache timer and the cost in wu, the approval and question cards, and the stream rule above, including the
+  no-call-for-an-hour checks.
+- `scripts/demo/ui-chat.sh` (d19, `r1.s3.w5`): the Orchestrator chat of two projects in headless Chromium,
+  through `pf-client-bridge`, against the real controller, the real Claude Code adapter and
+  `pf-claude-replay`. Its journey is `apps/ui/e2e/chat.spec.ts`.

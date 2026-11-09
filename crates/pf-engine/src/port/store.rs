@@ -3,8 +3,11 @@
 //! The port carries one atomic commit: the state transition, its command and receipt, and its
 //! ledger outbox line, together or not at all. It shows no SQL.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::port::agent::Usage;
 use crate::status::Status;
 
 /// Whether a run still takes work.
@@ -307,11 +310,60 @@ pub const CONTROLLER_SCOPE: &str = "@controller";
 /// A stand-in for the ID that a commit's own effect assigns. The caller cannot know that ID
 /// before the commit. The store replaces the first copy of this text in the commit's ledger line
 /// with the ID, and the whole `unit_id` of its admission when that is this text, inside the
-/// commit's transaction. A commit has one effect that assigns an ID.
+/// commit's transaction. A commit has one effect that assigns an ID. A chat session start assigns
+/// `S-<n>` through `NEW_ID`, and it may also record a worktree: [`WORKTREE_ID`] stands for that
+/// second ID (ADR-0003, ADR-0015).
 pub const NEW_ID: &str = "{new-id}";
 
-/// One project: a controller entity. The engine core never reads it. Only the root is decided; the
-/// project's other fields wait for the project hierarchy.
+/// The stand-in for the ID of the worktree row that a chat session start used. The store replaces
+/// the first copy of this text in the commit's ledger line with that ID: the new `W-<n>` of a
+/// recorded worktree, or the ID of the existing worktree. A commit without a session start leaves
+/// the text as it is.
+pub const WORKTREE_ID: &str = "{worktree-id}";
+
+/// The ID of the built-in Orchestrator agent.
+pub const ORCHESTRATOR_AGENT: &str = "orchestrator";
+
+/// The cap on a tool call's stored input and its stored output, in bytes (the display log only). A
+/// text the store cuts is cut by [`crate::port::chat::cap`], so the store, the adapter and the stream
+/// share one cut and one mark (`…[truncated: <bytes> bytes in all]`).
+pub const TOOL_TEXT_MAX_BYTES: usize = 16384;
+
+/// The payload of a redacted chat item (C12). The store's trigger holds the same text.
+pub const REDACTED_PAYLOAD: &str = "{\"redacted\":true}";
+
+/// The text of a redacted tool input or output (C12). The store's trigger holds the same text.
+pub const REDACTED_TEXT: &str = "[redacted]";
+
+/// The `outcome` an answer item's payload names: the operator answered, the process that asked is
+/// gone (a controller restart), or the runtime itself cancelled the request.
+pub const ANSWER_OUTCOMES: [&str; 3] = ["answered", "lost", "withdrawn"];
+
+/// What a project is: a git repository's main worktree, or a plain folder (ADR-0015).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectKind {
+    Git,
+    Folder,
+}
+
+impl ProjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProjectKind::Git => "git",
+            ProjectKind::Folder => "folder",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<ProjectKind> {
+        match text {
+            "git" => Some(ProjectKind::Git),
+            "folder" => Some(ProjectKind::Folder),
+            _ => None,
+        }
+    }
+}
+
+/// One project: a controller entity. The engine core never reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectRow {
     /// `P-<n>`, from one sequence for the whole store. A removed row keeps its ID.
@@ -322,6 +374,11 @@ pub struct ProjectRow {
     pub created_at: String,
     /// Set when the project is removed. The row stays.
     pub removed_at: Option<String>,
+    /// `None` only for a project that was added before the kind existed and that the controller
+    /// could not detect yet. A kind, once set, never changes.
+    pub kind: Option<ProjectKind>,
+    /// `host/path` of the git remote, for a `git` project with one. Never a URL.
+    pub remote_key: Option<String>,
 }
 
 /// A project before the store gives it an ID.
@@ -329,6 +386,296 @@ pub struct ProjectRow {
 pub struct NewProject {
     pub name: String,
     pub root: String,
+    pub created_at: String,
+    pub kind: ProjectKind,
+    pub remote_key: Option<String>,
+}
+
+/// Who made a worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorktreeCreatedBy {
+    /// The project's root: its main worktree.
+    #[serde(rename = "root")]
+    Root,
+    #[serde(rename = "pulse-factory")]
+    PulseFactory,
+    #[serde(rename = "external")]
+    External,
+}
+
+impl WorktreeCreatedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorktreeCreatedBy::Root => "root",
+            WorktreeCreatedBy::PulseFactory => "pulse-factory",
+            WorktreeCreatedBy::External => "external",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<WorktreeCreatedBy> {
+        match text {
+            "root" => Some(WorktreeCreatedBy::Root),
+            "pulse-factory" => Some(WorktreeCreatedBy::PulseFactory),
+            "external" => Some(WorktreeCreatedBy::External),
+            _ => None,
+        }
+    }
+}
+
+/// A worktree the store records: one where a chat session started.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeRow {
+    /// `W-<n>`, never reused.
+    pub id: String,
+    pub project_id: String,
+    /// An absolute, canonical path.
+    pub path: String,
+    pub created_by: WorktreeCreatedBy,
+    pub created_at: String,
+    /// Set by the first read that saw the worktree gone, for display. The row stays.
+    pub gone_at: Option<String>,
+    /// Set with the project's remove.
+    pub removed_at: Option<String>,
+}
+
+/// One agent: a persona with its runtime settings. A built-in agent is a seeded row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRow {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub built_in: bool,
+    pub colour: String,
+    pub head: String,
+    /// `None` for a built-in agent: the binary holds its text.
+    pub instructions: Option<String>,
+    /// A chat runtime's ID. The store treats it as opaque text.
+    pub runtime: String,
+    pub model: String,
+    pub effort: String,
+    pub permission_mode: String,
+    pub skills: Vec<String>,
+    /// The runtime's options, as opaque text pairs.
+    pub runtime_options: BTreeMap<String, String>,
+    /// Names and values that are not secrets. They reach the store and the paired devices.
+    pub launch_env: BTreeMap<String, String>,
+    pub created_at: String,
+}
+
+/// What a live chat session is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSessionState {
+    Working,
+    NeedsYou,
+    Idle,
+}
+
+impl ChatSessionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatSessionState::Working => "working",
+            ChatSessionState::NeedsYou => "needs_you",
+            ChatSessionState::Idle => "idle",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<ChatSessionState> {
+        match text {
+            "working" => Some(ChatSessionState::Working),
+            "needs_you" => Some(ChatSessionState::NeedsYou),
+            "idle" => Some(ChatSessionState::Idle),
+            _ => None,
+        }
+    }
+}
+
+/// One chat session: an agent in a worktree. Live means `ended_at` is empty, with or without a
+/// process.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatSessionRow {
+    /// `S-<n>`, never reused.
+    pub id: String,
+    pub project_id: String,
+    pub worktree_id: String,
+    pub agent_id: String,
+    pub runtime: String,
+    /// The runtime's own session ID. `None` until it reports one.
+    pub runtime_session_ref: Option<String>,
+    pub state: ChatSessionState,
+    pub model: String,
+    pub effort: String,
+    pub permission_mode: String,
+    /// The session's own runtime options, as opaque text pairs. They start as the agent's, change
+    /// per chat and never change the agent. `{}` for a session that was live before migration 0006:
+    /// the controller then launches it with its agent's options.
+    pub runtime_options: BTreeMap<String, String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_micros: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// The kind of one chat item: the closed list of the display log. The store keeps it as text with
+/// no `CHECK`, so a later kind needs a change here and no table rebuild.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatItemKind {
+    OperatorMessage,
+    AssistantText,
+    ToolCall,
+    ApprovalRequest,
+    ApprovalAnswer,
+    QuestionRequest,
+    QuestionAnswer,
+    BackgroundTask,
+    Notice,
+    TurnResult,
+}
+
+impl ChatItemKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatItemKind::OperatorMessage => "operator_message",
+            ChatItemKind::AssistantText => "assistant_text",
+            ChatItemKind::ToolCall => "tool_call",
+            ChatItemKind::ApprovalRequest => "approval_request",
+            ChatItemKind::ApprovalAnswer => "approval_answer",
+            ChatItemKind::QuestionRequest => "question_request",
+            ChatItemKind::QuestionAnswer => "question_answer",
+            ChatItemKind::BackgroundTask => "background_task",
+            ChatItemKind::Notice => "notice",
+            ChatItemKind::TurnResult => "turn_result",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<ChatItemKind> {
+        match text {
+            "operator_message" => Some(ChatItemKind::OperatorMessage),
+            "assistant_text" => Some(ChatItemKind::AssistantText),
+            "tool_call" => Some(ChatItemKind::ToolCall),
+            "approval_request" => Some(ChatItemKind::ApprovalRequest),
+            "approval_answer" => Some(ChatItemKind::ApprovalAnswer),
+            "question_request" => Some(ChatItemKind::QuestionRequest),
+            "question_answer" => Some(ChatItemKind::QuestionAnswer),
+            "background_task" => Some(ChatItemKind::BackgroundTask),
+            "notice" => Some(ChatItemKind::Notice),
+            "turn_result" => Some(ChatItemKind::TurnResult),
+            _ => None,
+        }
+    }
+
+    /// For an answer kind, the request kind it answers. `None` for every other kind.
+    pub fn answers(self) -> Option<ChatItemKind> {
+        match self {
+            ChatItemKind::ApprovalAnswer => Some(ChatItemKind::ApprovalRequest),
+            ChatItemKind::QuestionAnswer => Some(ChatItemKind::QuestionRequest),
+            _ => None,
+        }
+    }
+
+    /// For a request kind, the answer kind that closes it. `None` for every other kind.
+    pub fn answered_by(self) -> Option<ChatItemKind> {
+        match self {
+            ChatItemKind::ApprovalRequest => Some(ChatItemKind::ApprovalAnswer),
+            ChatItemKind::QuestionRequest => Some(ChatItemKind::QuestionAnswer),
+            _ => None,
+        }
+    }
+
+    /// True for a request that an answer item closes.
+    pub fn is_request(self) -> bool {
+        matches!(
+            self,
+            ChatItemKind::ApprovalRequest | ChatItemKind::QuestionRequest
+        )
+    }
+}
+
+/// One completed item of a chat's display log. The log is append-only, except for one admitted
+/// redaction of an item.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatItemRow {
+    pub session_id: String,
+    /// From 1 within the session, with no gap.
+    pub seq: u64,
+    /// The text of the kind. A kind this binary does not know stays readable.
+    pub kind: String,
+    /// JSON.
+    pub payload: String,
+    pub tool_input: Option<String>,
+    pub tool_input_bytes: Option<u64>,
+    pub tool_input_truncated: bool,
+    pub tool_output: Option<String>,
+    pub tool_output_bytes: Option<u64>,
+    pub tool_output_truncated: bool,
+    /// An answer item: the `seq` of the request it answers.
+    pub answers_seq: Option<u64>,
+    pub redacted_at: Option<String>,
+    pub created_at: String,
+}
+
+/// A tool call's input or output, as the adapter capped it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolText {
+    pub text: String,
+    /// The size before any cut, in bytes.
+    pub bytes: u64,
+    pub truncated: bool,
+}
+
+impl ToolText {
+    /// Raw text that nothing has capped. The store cuts it when it is over
+    /// [`TOOL_TEXT_MAX_BYTES`].
+    pub fn uncapped(text: impl Into<String>) -> ToolText {
+        let text = text.into();
+        ToolText {
+            bytes: text.len() as u64,
+            text,
+            truncated: false,
+        }
+    }
+}
+
+/// A chat item before the store gives it its `seq`. A tool call's input and output travel in their
+/// own fields, never inside `payload`, so the store can cap them and a redaction can replace them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewChatItem {
+    pub session_id: String,
+    pub kind: ChatItemKind,
+    /// JSON.
+    pub payload: String,
+    pub tool_input: Option<ToolText>,
+    pub tool_output: Option<ToolText>,
+    /// An answer item: the `seq` of the request it answers.
+    pub answers_seq: Option<u64>,
+    /// A `turn_result`'s usage: the store adds it to the session's totals.
+    pub usage: Option<Usage>,
+    pub created_at: String,
+}
+
+/// Where a chat session starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionWorktree {
+    /// A live worktree row of the project.
+    Existing { id: String },
+    /// A new row, made inside the commit. The path must hold no live row.
+    Record {
+        path: String,
+        created_by: WorktreeCreatedBy,
+    },
+}
+
+/// A chat session before the store gives it an ID. It starts `idle`, with no runtime ref, and takes
+/// its runtime, model, effort and permission mode from the agent row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewChatSession {
+    pub project_id: String,
+    pub agent_id: String,
+    pub worktree: SessionWorktree,
     pub created_at: String,
 }
 
@@ -385,6 +732,50 @@ pub enum Effect {
     RevokeDevice {
         id: String,
         revoked_at: String,
+    },
+    /// Set the kind of a live project that has none (the backfill at controller start). An
+    /// unknown or removed project, or one whose kind is set, makes the commit
+    /// [`Committed::Rejected`].
+    SetProjectKind {
+        id: String,
+        kind: ProjectKind,
+        remote_key: Option<String>,
+    },
+    /// Replace the remote key of a live `git` project (inside a chat session start). An unknown or
+    /// removed project, or a project that is not `git`, makes the commit [`Committed::Rejected`].
+    SetProjectRemoteKey {
+        id: String,
+        remote_key: Option<String>,
+    },
+    /// Start a chat session. The store gives it the next `S-<n>` (as [`NEW_ID`]) and, for
+    /// [`SessionWorktree::Record`], the next `W-<n>` (as [`WORKTREE_ID`]).
+    StartChatSession(NewChatSession),
+    /// End a live chat session. An unknown or ended session makes the commit
+    /// [`Committed::Rejected`].
+    EndChatSession {
+        id: String,
+        ended_at: String,
+    },
+    /// Change the model, effort, permission mode or runtime options of a live chat session. A `None`
+    /// field stays as it was. `option_changes` merge key by key into the session's map inside the
+    /// commit, so two sets that overlap each keep their own keys (when the session's map is empty,
+    /// the agent's options are the base). An unknown or ended session makes the commit
+    /// [`Committed::Rejected`].
+    SetChatSessionRuntime {
+        id: String,
+        model: Option<String>,
+        effort: Option<String>,
+        permission_mode: Option<String>,
+        option_changes: Option<BTreeMap<String, String>>,
+        updated_at: String,
+    },
+    /// Redact one chat item (C12): the payload becomes [`REDACTED_PAYLOAD`], each tool text that
+    /// the item holds becomes [`REDACTED_TEXT`], and every other column stays. An unknown item, or
+    /// one that is redacted already, makes the commit [`Committed::Rejected`].
+    RedactChatItem {
+        session_id: String,
+        seq: u64,
+        redacted_at: String,
     },
 }
 
@@ -486,4 +877,62 @@ pub trait Store: Send + Sync {
     fn unwritten_ledger_lines(&self, ledger_file: &str) -> Result<Vec<LedgerLine>, StoreError>;
     /// Mark one outbox line written.
     fn mark_ledger_written(&self, ledger_file: &str, seq: u64) -> Result<(), StoreError>;
+
+    /// Read one worktree row by ID, whatever its state.
+    fn worktree(&self, id: &str) -> Result<Option<WorktreeRow>, StoreError>;
+    /// Read every worktree row of a project, in creation order.
+    fn worktrees(&self, project_id: &str) -> Result<Vec<WorktreeRow>, StoreError>;
+    /// Read the live worktree row (no `gone_at`, no `removed_at`) at a path.
+    fn live_worktree_at(&self, path: &str) -> Result<Option<WorktreeRow>, StoreError>;
+    /// Read every agent, in creation order.
+    fn agents(&self) -> Result<Vec<AgentRow>, StoreError>;
+    /// Read one agent by ID.
+    fn agent(&self, id: &str) -> Result<Option<AgentRow>, StoreError>;
+    /// Read one chat session by ID, live or ended.
+    fn chat_session(&self, id: &str) -> Result<Option<ChatSessionRow>, StoreError>;
+    /// Read every chat session of a project, in creation order.
+    fn chat_sessions(&self, project_id: &str) -> Result<Vec<ChatSessionRow>, StoreError>;
+    /// Read every live chat session (`ended_at` empty), in creation order.
+    fn live_chat_sessions(&self) -> Result<Vec<ChatSessionRow>, StoreError>;
+    /// Read up to `limit` items of a session with a `seq` above `after_seq`, in ascending `seq`.
+    fn chat_items_after(
+        &self,
+        session_id: &str,
+        after_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<ChatItemRow>, StoreError>;
+    /// Read one chat item.
+    fn chat_item(&self, session_id: &str, seq: u64) -> Result<Option<ChatItemRow>, StoreError>;
+    /// Read the approval and question requests of a session that have no answer item yet, in
+    /// `seq` order.
+    fn pending_requests(&self, session_id: &str) -> Result<Vec<ChatItemRow>, StoreError>;
+
+    /// Mark a worktree gone, for display: what the file system or git showed. It writes only a
+    /// row that is not gone and not removed, and answers whether it wrote. It makes no admission
+    /// and no ledger line (ADR-0003): the admission checks the worktree live and never decides on
+    /// the mark.
+    fn mark_worktree_gone(&self, id: &str, at: &str) -> Result<bool, StoreError>;
+    /// Write a live chat session's state, which is the runtime's turn state and changes on every
+    /// turn. It writes `updated_at` too, answers whether it wrote, and makes no admission and no
+    /// ledger line (ADR-0003). An ended or unknown session is never written.
+    fn set_chat_session_state(
+        &self,
+        id: &str,
+        state: ChatSessionState,
+        at: &str,
+    ) -> Result<bool, StoreError>;
+    /// Write the ID that the runtime reports for its own session. A later ref replaces an earlier
+    /// one. It is a fact of the runtime, not a command: no admission and no ledger line. An ended
+    /// or unknown session is never written.
+    fn set_chat_runtime_ref(
+        &self,
+        id: &str,
+        runtime_session_ref: &str,
+        at: &str,
+    ) -> Result<bool, StoreError>;
+    /// Append one item to a session's display log, live or ended. It gives the item the session's
+    /// next `seq`, caps a tool text over [`TOOL_TEXT_MAX_BYTES`], and adds a `turn_result`'s usage
+    /// to the session's totals, in one transaction. It makes no admission and no ledger line
+    /// (ADR-0003). An error writes nothing.
+    fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError>;
 }

@@ -19,16 +19,17 @@ const SERVER_META = new RegExp(`Connected · \\d+ ms · ${ADDRESS.replaceAll("."
 const LATER = ["Add a server", "Pair a phone", "Paired devices", "Server settings"];
 
 describe("the shell (2a to 2c)", () => {
-  it("has a rail with exactly Projects and Settings, and nothing the later spines add", async () => {
+  it("has a rail with exactly Projects, Agents and Settings, and nothing the later spines add", async () => {
     await open(new FakeTransport());
     expect(rail().getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
       "Projects",
+      "Agents",
       "Settings",
     ]);
-    for (const text of [/needs you/i, /need you/i, /agents/i, /more/i, /usage/i]) {
+    for (const text of [/needs you/i, /need you/i, /more/i, /usage/i]) {
       expect(screen.queryByText(text)).toBeNull();
     }
-    // No right panel, no tab strip.
+    // No right panel, and no tab strip until a chat opens.
     expect(screen.queryByRole("complementary")).toBeNull();
     expect(screen.queryAllByRole("tab")).toHaveLength(0);
     expect(screen.queryByRole("tablist")).toBeNull();

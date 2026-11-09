@@ -7,7 +7,12 @@
 - **Amended:** 2026-11-07, at `r1.s2.w1`: projects, the `@controller` admission scope and the
   controller ledger. The revisit trigger changes. Nothing else above changes.
 - **Amended:** 2026-11-07, at `r1.s2.w2`: devices (migration 0004), the device commands under the
-  `@controller` scope, and the one store write outside admission. Nothing else above changes.
+  `@controller` scope, and the writes outside admission. Nothing else above changes.
+- **Amended:** 2026-11-08, at `r1.s3.w2`: the project hierarchy (migration 0005), the chat sessions'
+  display log, the new `@controller` commands, a second ID placeholder and four more writes outside
+  admission. The revisit trigger changes. Nothing else above changes.
+- **Amended:** 2026-11-09, at `r1.s3.w3`: migration 0006 (the session's runtime options), the four chat
+  commands of the controller, one truncation mark.
 
 ## Context
 The controller is one control authority over a local SQLite store. ossify's state is the source of
@@ -90,7 +95,7 @@ The store gains devices, and the `@controller` scope holds device commands too (
   record, and changed content is a conflict. The command ID of a redeem is the SHA-256 of the code's
   secret, so the store sees one secret at most once. A line names the device, its name and the peer,
   and never the code or the token.
-- **`touch_device` is the one store write outside admission.** `Store::touch_device(id, at, peer)`
+- **`touch_device` is a store write outside admission.** `Store::touch_device(id, at, peer)`
   writes `last_seen_at` and `last_peer` with no admission row and no ledger line, at most once a
   minute for a device, and only for a live device. The reason: the API authenticates every call by a
   read of the store, and a read must not cost an admission row or a ledger line per request. Last
@@ -98,3 +103,74 @@ The store gains devices, and the `@controller` scope holds device commands too (
   `r1.s2.w5` reads it.
 - **Migration 0004** follows the posture above: forward-only, and it refuses under an active run.
   Install with no active run.
+
+## Amendment, 2026-11-08 (`r1.s3.w2`)
+
+The store gains the project hierarchy and the display log of the chat sessions (ADR-0015).
+
+- **The hierarchy.** Migration 0005 gives `projects` a `kind` (`git` or `folder`) and a `remote_key`
+  (the host and path of the git remote, never a URL), and adds `worktrees`, `agents` (with the
+  built-in Orchestrator row), `chat_sessions` and `chat_items`. The hierarchy is server → project →
+  worktree → chat session. The kind never changes, a `worktrees` row exists only when a session
+  starts there, and a project has at most one live Orchestrator session. Triggers and partial unique
+  indexes hold each rule, and the store port checks them first. ADR-0015 records the rules.
+- **New `@controller` commands.** `chat_session_start`, `chat_session_end`, `chat_item_redact` and
+  `project_kind` are admissions under `@controller`, each with a command ID and one controller ledger
+  line, as the project and device commands are. `project_kind` is the kind backfill that runs at
+  controller start for a project added before migration 0005. A refusal of any of them is an
+  admission of its own. They launch nothing and change no run, so `halt` does not apply to them.
+- **A second ID placeholder.** A commit's ledger line and the admission's `unit_id` take the ID that
+  the store assigns in place of `NEW_ID`. A `chat_session_start` commit may also record a worktree,
+  so its line carries `{worktree-id}` as well. The store replaces it with the `W-<n>` that the start
+  used. One commit may therefore assign two IDs: `S-<n>` through `NEW_ID`, and `W-<n>`.
+- **The writes outside admission.** There are five, with `touch_device` (above). Each records what
+  the file system, git or the runtime reported, and none is an operator command:
+  - `touch_device`: telemetry from an authenticated API call;
+  - `mark_worktree_gone`: a mark, for display, of what the file system or git showed. The admission
+    checks the worktree live and never decides on the mark;
+  - `set_chat_session_state`: the runtime's turn state, which changes on every turn. Nothing decides
+    on it;
+  - `set_chat_runtime_ref`: the id that the runtime reports for its own session;
+  - `append_chat_item`: the display log of what the runtime did. A row for each text block must not
+    cost an admission and a ledger line.
+- **A read never costs an admission.** `project list` reads the remote key live and writes nothing.
+  The stored key is set only inside an admitted command: `project_add`, `project_kind` and
+  `chat_session_start`.
+- **The display log against the CLI transcript.** The store keeps the display log: one row for each
+  completed item, for the app. The CLI's own transcript is the model's context, and only `--resume`
+  reads it. It is never copied into the store (Q4). Text deltas are never stored.
+- **The cap.** A tool call's stored input and output are each capped at 16 KB, with a truncation mark
+  and the original size. The store enforces the cap in `append_chat_item`, and a `CHECK` is the
+  backstop. The transcript keeps everything whole.
+- **Append-only, except one admitted redaction per item.** `chat_item_redact` (C12) is the one
+  change to an appended item. It has a command ID and one ledger line that holds no item text, the
+  text columns become fixed marks, and a trigger allows that update shape and no other. An item is
+  never deleted.
+- **Live chat sessions at start.** A restart ends every chat process (ADR-0007). At controller start,
+  each live chat session goes to `idle` and keeps `ended_at` empty, and its pending requests are
+  closed as lost (Q2 rule 4, C3). These are writes outside admission.
+- **The revisit trigger.** The claim under Unverified claims is revisited when the project hierarchy
+  is planned, or Pulse Base offers a store API, or custom agents, worktree creation or the
+  multi-server app is planned.
+
+Known limit: migration 0005, like every migration, refuses under an active run. Install with no
+active run.
+
+## Amendment, 2026-11-09 (`r1.s3.w3`)
+
+- **Migration 0006** (`0006_session_options.sql`) adds `chat_sessions.runtime_options TEXT NOT NULL
+  DEFAULT '{}'`, a JSON object of text values, with a check that it is an object. It is forward only
+  (ADR-0007). The migrations are now 0001 init, 0002 requests, 0003 projects, 0004 devices, 0005
+  hierarchy and 0006 session options. A session that was live before 0006 reads `{}`.
+- **The chat commands.** `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set` are
+  admissions under `@controller`, beside the three of `r1.s3.w2`, each with a command ID and one
+  controller-ledger line. The store's start copies the agent's runtime options onto the new row in the
+  same admission, and `SetChatSessionRuntime` replaces the row's map when it carries one. The agent row
+  never changes.
+- **One truncation mark.** The store's own cut of a tool text calls the chat port's `cap`, so a text
+  the store cuts gets the adapter's mark (`…[truncated: <bytes> bytes in all]`). The controller passes
+  the adapter's capped text, so in practice the store never cuts.
+- **The writes outside admission** stay `touch_device` and the four of `r1.s3.w2` (`mark_worktree_gone`,
+  `set_chat_session_state`, `set_chat_runtime_ref`, `append_chat_item`). This item adds none: the pump
+  writes through them, and a `SessionMoved` is a `set_chat_runtime_ref`.
+

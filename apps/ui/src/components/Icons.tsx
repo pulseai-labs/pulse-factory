@@ -47,3 +47,9 @@ export const ChevronsIcon = () => (
     <path d="m7 15 5 5 5-5M7 9l5-5 5 5" />
   </Svg>
 );
+export const BotIcon = () => (
+  <Svg>
+    <rect x="4" y="8" width="16" height="11" rx="2" />
+    <path d="M12 8V4M9 13v1M15 13v1M2 13v2M22 13v2" />
+  </Svg>
+);

@@ -2,6 +2,10 @@
 
 - **Status:** Accepted, 2026-11-07, at `r1.s2.w2`
 - **Date:** 2026-11-07
+- **Amended:** 2026-11-09, at `r1.s3.w3`: the chat verbs on the allowlist, the stream route, the server
+  headers and `upgraded` in the request ledger.
+- **Amended:** 2026-11-09, at `r1.s3.w4`: the client half of the stream in `pf-client`, the server
+  memory, and the reconnect rule. No route, verb or wire type is added.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -61,7 +65,8 @@
 - A8: the client's Rust side makes the pinned TLS call. A webview opens no TLS connection itself.
 
 **The allowlist rule.**
-- A device may call exactly `project_add`, `project_list` and `project_remove` in this spine.
+- A device may call exactly `project_add`, `project_list` and `project_remove` in this spine. The chat
+  verbs of `r1.s3.w3` extend the list (see "The chat stream and the chat verbs (r1.s3.w3)" below).
 - There is no `ack`, `answer`, `claim`, `clear`, `arm` or `halt` on the list, and no device verb
   (`device_pair`, `device_list`, `device_revoke`, `api_status`). A device cannot let another device
   in, and it cannot stop the run state.
@@ -91,8 +96,8 @@ Rejected alternatives:
 - A device can be revoked from the CLI, and the next call is refused. A paired device is as
   powerful as the operator within the allowlist, so a stolen unlocked device is the operator's
   problem until the operator revokes it.
-- `last_seen` is the one store write outside admission (ADR-0003, amended): a read must not cost an
-  admission row, and the idle expiry of `r1.s2.w5` reads it.
+- `last_seen` is one of the store's writes outside admission (ADR-0003, amended; ADR-0015 lists the
+  others): a read must not cost an admission row, and the idle expiry of `r1.s2.w5` reads it.
 - The server key is a single point of identity. Losing it costs a re-pair of every device.
 - The API's types are the clients' types: `ts-rs` renders them, and a test fails when the committed
   files drift (`apps/api-client/src/gen/`).
@@ -243,5 +248,114 @@ verb, no route and no wire type to the API, and it changes no decision above.
 - `pf-client-bridge` serves the bridge protocol with the same checks, and d12 passes with it
   (`crates/pulse-factory/tests/client_bridge.rs`, `scripts/demo/ui-pair.sh`, 2026-11-08).
 
+
+## The chat stream and the chat verbs (r1.s3.w3)
+
+Amendment, 2026-11-09. `r1.s3.w3` adds the chat verbs to the allowlist, a WebSocket stream on the same
+listener and the server's name on every answer. Per the allowlist rule above, this amendment records
+the change.
+
+- **The allowlist** (`pf_api::host::ALLOWLIST`) is now ten verbs: `project_add`, `project_list`,
+  `project_remove`, `session_list`, `session_start`, `session_send`, `session_answer`,
+  `session_interrupt`, `session_set` and `session_end`. Off it, and named by the router test:
+  `session_redact` (CLI-only, so a redaction stays the operator's act on the host), `session_items`
+  (the stream's `after=0` gives the history), `halt`, `ack`, `answer`, `claim`, `clear`, `arm`, the
+  `device_*` verbs and `api_status`. Each chat verb goes through the CLI's handler path, with its
+  command ID, so it is one admission and one `controller.ledger` line. A device acts as the operator
+  (ADR-0009), and `ApiBridge::call` reaches the verbs through `handle`.
+- **The stream route** is `GET /v1/stream[?session=<S-n>&after=<seq>]`, a WebSocket upgrade on the same
+  TLS 1.3 listener with the same pinned key. The token is read from `Authorization: Bearer` **at the
+  upgrade**: a bad token is a 401 with no upgrade and counts as a token failure for the peer guard.
+  After the token come the method (405), the upgrade headers (400), the query (400), the open (404 for
+  an unknown session) and the `101`. A device holds at most 8 streams: the ninth upgrade is 429 `too
+  many open streams`, which is not a guard failure. A stream holds one of the listener's 256
+  connection permits, so the listener serves with `with_upgrades()`. The `ApiHost` trait gains an
+  `open_stream(device, session, after)` call with a default that answers 404, so the router never
+  reaches the store and the test hosts compile unchanged.
+- **The reconnect order** belongs to the host: it subscribes the connection to the live frames, sends
+  `hello`, then the stored items after `after` in pages of 500, then `caught`, then the live frames,
+  dropping an `item` whose `seq` it already sent. No item is lost or doubled between the stored read
+  and the live stream. Text deltas are never stored and are not replayed.
+- **The close codes** are `4001 revoked`, `4002 lagged: reconnect after seq <n>`, `1001` for a
+  controller stop and `1008` for a data frame from the client. The stream is read-only, and the server
+  pings every 30 seconds.
+- **A revoke closes the device's streams.** An admitted `device_revoke` ends every open stream of that
+  device with 4001 within one second. Each verb call authenticates its own request, so a revoked token
+  is refused at once on the verbs too (C13).
+- **The server on every answer.** Every answer, a `101` and each error included, carries
+  `pf-server-id` (the SPKI SHA-256 hex of the pinned key) and `pf-server-name`. `ApiStatus` gains an
+  optional `server`, so an existing client still parses it. The id is no secret: any TLS peer sees the
+  key. This is the groundwork of an app that talks to more than one server.
+- **The request ledger** gains the route `stream` and the outcome `upgraded` (the `101`): one line for
+  each connection, written when the upgrade is answered, and none at the close. The router maps every
+  429 to `blocked`, so a ninth stream's refusal reads `outcome=blocked`.
+- **A new crate.** `tokio-tungstenite` (pinned with `=`) and axum's `ws` feature (ADR-0008, amended).
+- **The device model** keeps `last_seen` as one of the store's writes outside admission. This
+  amendment adds none: the store's writes outside admission stay the five of `r1.s3.w2` and
+  `touch_device`.
+
+Known limits: a stream that lags is closed and must reconnect; a reconnect does not replay the text
+deltas of a turn in progress (its finished items arrive when it ends); `session_redact` cannot recall
+an item that a device already read.
+
 Revisit this ADR when a second operator, a device outside the operator's tailnet, or a browser
 client served by the server is planned.
+
+## The pinned client's stream (r1.s3.w4)
+
+Amendment, 2026-11-09. `r1.s3.w4` gives `pf-client` the client half of the chat stream (`GET /v1/stream`)
+and the seven chat verbs as typed methods. It adds no route, no verb and no wire type, and it changes
+no decision above.
+
+- **One pinned connection for the verbs and the stream.** `pf-client` factors the connect half of its
+  call into one function, `connect_pinned`: TCP, then the TLS 1.3 handshake with `PinVerifier`, `key_changed`
+  on a pin mismatch and `unreachable` on any other failure. The verbs and the stream both use it, so
+  the pin check, "TLS 1.3 only" and "nothing written before the check" are one code path. The upgrade is
+  a WebSocket handshake on that TLS stream (`tokio-tungstenite`'s async client).
+- **The token travels only in the upgrade.** It is the `Authorization: Bearer` header of the upgrade,
+  marked sensitive, and never in the URL. No stream event, error message, `Debug` print, bridge answer or
+  webview value holds it.
+- **The decode rule.** Each text message is one JSON object. A `type` the client does not know is skipped
+  (ADR-0004's additive rule). A known `type` that does not decode into `ChatFrame` ends the stream as
+  `server`, so an item is never skipped silently.
+- **The reconnect sends the client's own `after`.** The client keeps the last `seq` it holds and sends
+  `after=<that seq>` at each reconnect, as `docs/contracts/api.md` says, not the `<n>` of a 4002
+  reason. It drops an `item` of the followed session whose `seq` it holds, and a redaction's re-send
+  (`redacted_at` set) always passes. Each reconnect delivers the server's fresh `hello` and `caught`.
+- **The outcomes.** `4001` is `unauthorized` ("this device was revoked; pair it again") and `1008` is `server`,
+  neither retried. `4002` retries at once, `1001`, a drop and a silence of 75 seconds retry on the schedule. A key that is
+  not the pinned one is `key_changed` and never retries. Every HTTP answer instead of `101` (400, 401, 404,
+  429, 5xx) is one `closed` event with the status's kind and the server's text, and is never retried, a
+  429 included. `forget()` ends the client's open streams.
+- **The schedule, and why it is not polling.** The retry schedule is 4, 8, 16 and 32 seconds, then every 60
+  seconds, and a connection open for 60 seconds or more resets it. While a connection is open no timer makes
+  a request: the server pushes, and the silence limit is a local deadline that sends nothing. The schedule
+  runs only while there is no connection. An attempt that gets no HTTP answer writes no server line, and an
+  HTTP refusal is never retried, so a server that keeps accepting and dropping sees at most one connection
+  a minute after the first five attempts, and a connected client costs one `api.ledger` line per connection
+  (A8, A10).
+- **The server memory.** `Transport` keeps the last `ServerRef` that an answer named (`pf-server-id` and
+  `pf-server-name`, on every answer including a `101`, and each `hello`'s `server`), shared by its clones, and
+  only when the id is the stored pin. A header that names another id is ignored and the answer is still used:
+  the TLS pin is the check, and the header is a label. `forget()` clears it, and `PairedServer.server` carries
+  it to the UI. It is the groundwork of an app that talks to more than one server.
+- **Limits.** `session_start` and `session_send` may open a chat process, so they wait 90 seconds (the other
+  verbs 30). A stream that lags is closed by the server and reconnects; a reconnect does not replay the
+  deltas of a turn in progress.
+
+### Verified claims (r1.s3.w4)
+- The stream decodes the host's frames in order and skips an unknown `type`; a known type with a bad body ends
+  it; `4001` ends it once with no retry; a `4002` after item 5 reconnects at once with `after=5` and drops the
+  re-sent items 4 and 5 while a redaction's re-send passes; `1001` and a dropped feed retry on the schedule, and
+  a long connection resets it; silence past the limit counts as a drop; a listener that starts later gets the
+  next attempt; another key is `key_changed` with no request and no retry; each HTTP refusal is one `closed`
+  event and one host record; a held stream makes one upgrade and no request on a timer; the token is in the
+  upgrade only; the caller's close and `forget()` end a stream
+  (`crates/pf-client/tests/stream.rs`, 2026-11-09).
+- The seven chat verbs post their arguments and parse their answers, `session_start` and `session_end` read
+  the controller's own answers, the chat-open timeout is longer than the request timeout, and the server memory
+  behaves as above (`crates/pf-client/tests/chat_verbs.rs`, 2026-11-09).
+- Against a real controller with `FakeChat`: the whole chat flow, a cut TCP relay (every item once, in order,
+  no gap), a revoke (`closed` within a second, no later upgrade in `api.ledger`, the next call `unauthorized`),
+  one `route=stream` line per connection and none while a stream is idle, and the bridge carrying the same
+  frames (`crates/pulse-factory/tests/client_chat.rs`, 2026-11-09).

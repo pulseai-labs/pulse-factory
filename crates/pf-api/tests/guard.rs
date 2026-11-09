@@ -100,6 +100,15 @@ impl ApiHost for Fake {
             version: "0.1.0".to_string(),
             key_spki_sha256: hex(&SPKI),
             device: None,
+            server: None,
+        }
+    }
+
+    fn server(&self) -> pf_api::types::ServerRef {
+        // Read when the router is made, and no host method of a request: no hit counted.
+        pf_api::types::ServerRef {
+            id: Some(hex(&SPKI)),
+            name: "server".to_string(),
         }
     }
 
@@ -129,6 +138,19 @@ async fn send(app: &Router, from: IpAddr, mut request: Request<Body>) -> Reply {
         .headers()
         .get(header::RETRY_AFTER)
         .map(|v| v.to_str().unwrap().to_string());
+    // The 429 of a blocked peer names the server too, as every answer does.
+    assert_eq!(
+        response
+            .headers()
+            .get("pf-server-id")
+            .map(|v| v.to_str().unwrap()),
+        Some(hex(&SPKI).as_str()),
+        "pf-server-id on a {status} answer"
+    );
+    assert!(
+        response.headers().contains_key("pf-server-name"),
+        "{status}"
+    );
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     Reply {
         status,
