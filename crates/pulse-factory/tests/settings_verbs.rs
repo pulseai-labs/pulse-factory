@@ -466,6 +466,57 @@ fn a_replay_answers_replayed_and_a_changed_value_is_a_conflict() {
     assert_eq!(setting_lines(&live).len(), lines);
 }
 
+/// A command ID is for one verb: the verb is part of the content, so a set under the ID of an
+/// unset is a conflict, never a replay (review B1).
+#[test]
+fn a_set_under_the_id_of_an_unset_is_a_conflict_and_not_a_replay() {
+    let (live, _) = live();
+    let first = cli_json(
+        &live,
+        &["settings", "set", CAP, "4", "--command-id", "seed"],
+    );
+    assert_eq!(first["replayed"], false, "{first}");
+    let gone = cli_json(&live, &["settings", "unset", CAP, "--command-id", "reused"]);
+    assert_eq!(gone["replayed"], false, "{gone}");
+    assert!(rows(&live).is_empty(), "the unset deleted the row");
+    let adm = admissions(&live);
+    let lines = setting_lines(&live).len();
+
+    // `null` reads as no value, so this set's fields equal the unset's. It must not replay it.
+    let why = cli_refused(
+        &live,
+        &[
+            "settings",
+            "set",
+            CAP,
+            "null",
+            "--command-id",
+            "reused",
+            "--json",
+        ],
+    );
+    assert!(why.contains("reused"), "{why}");
+    assert!(rows(&live).is_empty());
+    assert_eq!(admissions(&live), adm, "a conflict admits nothing");
+    assert_eq!(setting_lines(&live).len(), lines, "and writes no line");
+
+    // And a valid set under that ID is a conflict too: the unset's ID is spent.
+    let why = cli_refused(
+        &live,
+        &[
+            "settings",
+            "set",
+            CAP,
+            "9",
+            "--command-id",
+            "reused",
+            "--json",
+        ],
+    );
+    assert!(why.contains("reused"), "{why}");
+    assert!(rows(&live).is_empty());
+}
+
 #[test]
 fn a_caller_that_descends_from_a_live_chat_can_read_but_not_write() {
     use pf_ipc::Handler;

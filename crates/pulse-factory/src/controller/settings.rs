@@ -204,22 +204,30 @@ struct RawWrite {
 }
 
 /// The content of a settings admission, in canonical order. Who called is not content, so the same
-/// command ID from the CLI and from a device with the same content replays.
+/// command ID from the CLI and from a device with the same content replays. The kind of the verb
+/// is content: a command ID is for one verb, so a set under the ID of an unset is a conflict. An
+/// unset has no value, so a `value` in its arguments is not content.
 #[derive(serde::Serialize)]
 struct Content<'a> {
     agent_id: Option<&'a str>,
     key: &'a str,
+    kind: &'a str,
     project_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<&'a Value>,
 }
 
-fn content_of(raw: &RawWrite) -> String {
+fn content_of(kind: &str, raw: &RawWrite) -> String {
     serde_json::to_string(&Content {
         agent_id: raw.agent_id.as_deref(),
         key: &raw.key,
+        kind,
         project_id: raw.project_id.as_deref(),
-        value: raw.value.as_ref(),
+        value: if kind == "setting_set" {
+            raw.value.as_ref()
+        } else {
+            None
+        },
     })
     .unwrap_or_default()
 }
@@ -455,8 +463,8 @@ impl Controller {
             return Response::err(why);
         }
         let scope = SettingScope::new(raw.project_id.as_deref(), raw.agent_id.as_deref());
-        let content = content_of(&raw);
         let kind = kind_of(verb);
+        let content = content_of(kind, &raw);
         let plan = match self.plan_write(set, &raw, &scope, &by) {
             Ok(plan) => plan,
             Err(why) => Plan::Refuse(why),
@@ -643,7 +651,7 @@ impl Controller {
             .to_string();
         let kind = kind_of(verb);
         let content = serde_json::from_value::<RawWrite>(args.clone())
-            .map(|raw| content_of(&raw))
+            .map(|raw| content_of(kind, &raw))
             .unwrap_or_else(|_| "{}".to_string());
         let end = self.cfg.refusal_window;
         let mut windows = lock(&self.settings_refusals.windows);

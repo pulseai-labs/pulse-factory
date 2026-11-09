@@ -20,9 +20,13 @@ const CAP: &str = "chat.self_turn_cap";
 const DENY: &str = "chat.deny_commands";
 const TOKEN: &str = "tok-SECRET-0123456789";
 
-/// The window of the burst tests. It is longer than the 300 ms the spec names, because the burst
-/// starts a hundred real processes and must fit inside one window to be counted as one.
-const BURST_WINDOW: Duration = Duration::from_secs(4);
+/// The window of the burst tests. It is far longer than the 300 ms the spec names, because the burst
+/// starts a hundred real processes and must fit inside one window to be counted as one. The tests
+/// never time the burst: the window only has to be much longer than a burst on a loaded host.
+const BURST_WINDOW: Duration = Duration::from_secs(12);
+
+/// The most the tests wait, past the window, for the controller's tick to write the close lines.
+const CLOSE_BOUND: Duration = Duration::from_secs(30);
 
 /// A live controller with a chat runtime, a refusal window of `window`, and one live chat `S-1`.
 fn live(window: Duration) -> (Live, Arc<Rec>) {
@@ -314,14 +318,24 @@ fn burst_body(n: usize, tag: &str) -> String {
     body
 }
 
-/// Wait until `window` has passed since `start`, then run the controller's tick.
-fn close_the_windows(live: &Live, start: Instant, window: Duration) {
-    let end = start + window + Duration::from_millis(200);
+/// Run the controller's tick, again and again, until `want` refusal lines are in the ledger or
+/// `CLOSE_BOUND` has passed. A window opens at its first refusal, which is later than `start` by an
+/// amount the host decides, so no fixed wait after `start` is right: the tick closes a window only
+/// when the window is old enough, and this loop asks the ledger instead of the clock.
+fn close_the_windows(live: &Live, start: Instant, window: Duration, want: usize) {
+    let give_up = start + window + CLOSE_BOUND;
+    let first = start + window;
     let now = Instant::now();
-    if end > now {
-        std::thread::sleep(end - now);
+    if first > now {
+        std::thread::sleep(first - now);
     }
-    live.controller.tick_all();
+    loop {
+        live.controller.tick_all();
+        if refused_lines(live).len() >= want || Instant::now() >= give_up {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn bucket_lines(lines: &[String], bucket: &str) -> usize {
@@ -337,11 +351,6 @@ fn a_burst_from_a_chat_adds_at_most_six_lines_and_the_counts_add_up() {
     let rows = setting_rows(&live);
     let start = Instant::now();
     below(&live, &rec, As::Chat, &[], &burst_body(100, "burst"));
-    assert!(
-        start.elapsed() < BURST_WINDOW,
-        "the burst took {:?}, longer than its window: run again on a quiet host",
-        start.elapsed()
-    );
 
     // Inside the window: one open line per bucket, and no more.
     let lines = refused_lines(&live);
@@ -360,7 +369,7 @@ fn a_burst_from_a_chat_adds_at_most_six_lines_and_the_counts_add_up() {
     assert_eq!(refused_admissions(&live).len(), 3);
 
     // After the window and one tick: one close line per bucket, and the counts add up to 100.
-    close_the_windows(&live, start, BURST_WINDOW);
+    close_the_windows(&live, start, BURST_WINDOW, 6);
     let lines = refused_lines(&live);
     assert_eq!(lines.len(), 6, "{lines:#?}");
     for bucket in [CAP, DENY, "other"] {
@@ -375,7 +384,7 @@ fn a_burst_from_a_chat_adds_at_most_six_lines_and_the_counts_add_up() {
     // A second burst after the window starts new windows: still at most two lines per bucket each.
     let start = Instant::now();
     below(&live, &rec, As::Chat, &[], &burst_body(30, "again"));
-    close_the_windows(&live, start, BURST_WINDOW);
+    close_the_windows(&live, start, BURST_WINDOW, 12);
     let lines = refused_lines(&live);
     assert_eq!(lines.len(), 12, "{lines:#?}");
     for bucket in [CAP, DENY, "other"] {
@@ -396,12 +405,7 @@ fn a_burst_from_a_seat_token_caller_is_bounded_the_same_way() {
         &[("PF_SEAT_TOKEN", TOKEN)],
         &burst_body(100, "seat"),
     );
-    assert!(
-        start.elapsed() < BURST_WINDOW,
-        "the burst took {:?}, longer than its window",
-        start.elapsed()
-    );
-    close_the_windows(&live, start, BURST_WINDOW);
+    close_the_windows(&live, start, BURST_WINDOW, 6);
     let lines = refused_lines(&live);
     assert_eq!(lines.len(), 6, "{lines:#?}");
     assert!(

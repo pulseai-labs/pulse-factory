@@ -283,6 +283,55 @@ fn a_device_write_names_the_device_and_a_replay_adds_nothing() {
     assert!(ledger[1].contains("outcome=replayed"), "{}", ledger[1]);
 }
 
+/// An unset that carries a `value` in its arguments is no set: a later set with that value and the
+/// same command ID must write its row, not replay the unset (review B1).
+#[test]
+fn a_set_after_an_unset_that_carried_a_value_is_not_a_replay() {
+    let api = api();
+    let token = api.pair("macbook");
+    add_project(&api.live, &repo(&api.live, "alpha"));
+    api.verb(
+        &token,
+        "settings_set",
+        json!({"key": CAP, "value": 3, "project_id": "P-1", "command_id": "seed"}),
+    );
+    let unset = api.verb(
+        &token,
+        "settings_unset",
+        json!({"key": CAP, "value": 7, "project_id": "P-1", "command_id": "same"}),
+    );
+    assert_eq!(unset.status, 200, "{}", unset.body);
+    assert!(
+        api.live
+            .controller
+            .store()
+            .setting_rows()
+            .unwrap()
+            .is_empty()
+    );
+
+    let set = api.verb(
+        &token,
+        "settings_set",
+        json!({"key": CAP, "value": 7, "project_id": "P-1", "command_id": "same"}),
+    );
+    assert_ne!(
+        set.status, 200,
+        "the ID is spent by the unset: {}",
+        set.body
+    );
+    assert_ne!(set.body["replayed"], true, "{}", set.body);
+    assert!(
+        api.live
+            .controller
+            .store()
+            .setting_rows()
+            .unwrap()
+            .is_empty(),
+        "a conflict writes no row"
+    );
+}
+
 #[test]
 fn each_call_writes_one_request_line_with_the_device_and_the_outcome() {
     let api = api();
