@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::cli::{
-    AckArgs, AnswerArgs, ApiStatusArgs, ClaimArgs, ClearArgs, DeviceListArgs, DevicePairArgs,
-    DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs, ProjectRemoveArgs, RequestsArgs,
-    ShowArgs, StatusArgs,
+    AckArgs, AnswerArgs, ApiStatusArgs, ChatRuntimeInstallArgs, ClaimArgs, ClearArgs,
+    DeviceListArgs, DevicePairArgs, DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
+    ProjectRemoveArgs, RequestsArgs, SessionAnswerArgs, SessionEndArgs, SessionInterruptArgs,
+    SessionItemsArgs, SessionListArgs, SessionRedactArgs, SessionSendArgs, SessionSetArgs,
+    SessionStartArgs, ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -126,6 +128,8 @@ pub fn halt(a: &HaltArgs) -> i32 {
         Ok(v) => {
             if a.json {
                 print_json(&v);
+            } else if v["run"].is_null() {
+                println!("there is no run to halt");
             } else if v["already_halted"].as_bool() == Some(true) {
                 println!(
                     "run {} was halted already; the first reason stays: {}",
@@ -134,6 +138,17 @@ pub fn halt(a: &HaltArgs) -> i32 {
                 );
             } else {
                 println!("run {} halted", v["run"].as_str().unwrap_or(""));
+            }
+            if !a.json {
+                let stopped: Vec<String> = v["chats_stopped"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(s_of)
+                    .collect();
+                if !stopped.is_empty() {
+                    println!("stopped the chat processes of {}", stopped.join(", "));
+                }
             }
             0
         }
@@ -804,4 +819,444 @@ pub fn api_status_text(v: &Value) -> String {
 
 fn s_of(v: &Value) -> String {
     v.as_str().unwrap_or("").to_string()
+}
+
+// ------------------------------------------------------------------ chat sessions
+
+fn session_failed(verb: &str, why: &str) -> i32 {
+    eprintln!("pulse-factory: session {verb}: {}", tame(why));
+    1
+}
+
+/// The command ID of one call: the one given, or a random one.
+fn command_id_of(given: &Option<String>) -> Result<String, String> {
+    given.clone().map_or_else(random_command_id, Ok)
+}
+
+/// Print the answer of a verb that answers a `SessionChanged`: JSON, or `line`, and the note.
+fn finish(
+    verb: &str,
+    json: bool,
+    reply: Result<Value, String>,
+    line: impl FnOnce(&Value) -> String,
+) -> i32 {
+    match reply {
+        Ok(v) => {
+            if json {
+                print_json(&v);
+            } else {
+                println!("{}", line(&v));
+                if let Some(note) = v["note"].as_str() {
+                    eprintln!("note: {}", tame(note));
+                }
+            }
+            0
+        }
+        Err(why) => session_failed(verb, &why),
+    }
+}
+
+pub fn session_start(a: &SessionStartArgs) -> i32 {
+    if let Some(code) = refuse_seat("session start") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("start", &why),
+    };
+    let reply = call(
+        "session_start",
+        json!({ "project_id": a.project, "agent_id": a.agent, "command_id": command_id }),
+    );
+    finish("start", a.json, reply, |v| {
+        format!(
+            "session {} started in {} (worktree {})",
+            tame(&s_of(&v["session"]["id"])),
+            tame(&s_of(&v["worktree"]["path"])),
+            tame(&s_of(&v["worktree"]["id"]))
+        )
+    })
+}
+
+pub fn session_send(a: &SessionSendArgs) -> i32 {
+    if let Some(code) = refuse_seat("session send") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("send", &why),
+    };
+    let reply = call(
+        "session_send",
+        json!({ "session_id": a.id, "text": a.text, "command_id": command_id }),
+    );
+    finish("send", a.json, reply, |v| {
+        format!("sent to {}", tame(&s_of(&v["session"]["id"])))
+    })
+}
+
+pub fn session_answer(a: &SessionAnswerArgs) -> i32 {
+    if let Some(code) = refuse_seat("session answer") {
+        return code;
+    }
+    let answer = if a.allow {
+        json!({ "type": "allow" })
+    } else if let Some(message) = &a.deny {
+        json!({ "type": "deny", "value": { "message": message } })
+    } else if !a.answer.is_empty() {
+        let mut map = serde_json::Map::new();
+        for pair in &a.answer {
+            match pair.rsplit_once('=') {
+                Some((question, label)) if !question.is_empty() => {
+                    map.insert(question.to_string(), Value::String(label.to_string()));
+                }
+                _ => {
+                    return session_failed(
+                        "answer",
+                        &format!("--answer {pair:?} is not <question>=<label>"),
+                    );
+                }
+            }
+        }
+        json!({ "type": "answers", "value": map })
+    } else {
+        return session_failed(
+            "answer",
+            "give --allow, --deny <message> or --answer <question>=<label>",
+        );
+    };
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("answer", &why),
+    };
+    let reply = call(
+        "session_answer",
+        json!({ "session_id": a.id, "seq": a.seq, "answer": answer, "command_id": command_id }),
+    );
+    finish("answer", a.json, reply, |v| {
+        format!(
+            "answered request {} of {}",
+            a.seq,
+            tame(&s_of(&v["session"]["id"]))
+        )
+    })
+}
+
+pub fn session_interrupt(a: &SessionInterruptArgs) -> i32 {
+    if let Some(code) = refuse_seat("session interrupt") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("interrupt", &why),
+    };
+    let reply = call(
+        "session_interrupt",
+        json!({ "session_id": a.id, "command_id": command_id }),
+    );
+    finish("interrupt", a.json, reply, |v| {
+        format!("interrupted {}", tame(&s_of(&v["session"]["id"])))
+    })
+}
+
+pub fn session_set(a: &SessionSetArgs) -> i32 {
+    if let Some(code) = refuse_seat("session set") {
+        return code;
+    }
+    let mut options = serde_json::Map::new();
+    for pair in &a.option {
+        match pair.split_once('=') {
+            Some((id, value)) if !id.is_empty() => {
+                options.insert(id.to_string(), Value::String(value.to_string()));
+            }
+            _ => {
+                return session_failed("set", &format!("--option {pair:?} is not <id>=<value>"));
+            }
+        }
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("set", &why),
+    };
+    let reply = call(
+        "session_set",
+        json!({
+            "session_id": a.id,
+            "model": a.model,
+            "effort": a.effort,
+            "permission_mode": a.mode,
+            "options": if options.is_empty() { Value::Null } else { Value::Object(options) },
+            "command_id": command_id,
+        }),
+    );
+    finish("set", a.json, reply, |v| {
+        let s = &v["session"];
+        let pending = s["pending_options"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+            .map(|m| {
+                let pairs: Vec<String> = m
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", tame(k), tame(&s_of(v))))
+                    .collect();
+                format!("; applies at the next process: {}", pairs.join(", "))
+            })
+            .unwrap_or_default();
+        format!(
+            "{} is set to {}/{}/{}{pending}",
+            tame(&s_of(&s["id"])),
+            tame(&s_of(&s["model"])),
+            tame(&s_of(&s["effort"])),
+            tame(&s_of(&s["permission_mode"]))
+        )
+    })
+}
+
+pub fn session_end(a: &SessionEndArgs) -> i32 {
+    if let Some(code) = refuse_seat("session end") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("end", &why),
+    };
+    let reply = call(
+        "session_end",
+        json!({ "session_id": a.id, "command_id": command_id }),
+    );
+    finish("end", a.json, reply, |v| {
+        format!("session {} ended", tame(&s_of(&v["session"]["id"])))
+    })
+}
+
+pub fn session_redact(a: &SessionRedactArgs) -> i32 {
+    if let Some(code) = refuse_seat("session redact") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return session_failed("redact", &why),
+    };
+    let reply = call(
+        "session_redact",
+        json!({ "session_id": a.id, "seq": a.seq, "command_id": command_id }),
+    );
+    finish("redact", a.json, reply, |v| {
+        format!(
+            "redacted item {} of {}",
+            v["item"]["seq"],
+            tame(&s_of(&v["item"]["session_id"]))
+        )
+    })
+}
+
+/// A cost in millionths of a dollar as `$0.003465`.
+pub fn cost_text(micros: u64) -> String {
+    format!("${}.{:06}", micros / 1_000_000, micros % 1_000_000)
+}
+
+/// One line of `session list`.
+pub fn session_line(s: &Value) -> String {
+    let worktree = match (s["branch"].as_str(), s["detached"].as_bool()) {
+        (Some(b), _) => format!("{} {}", tame(&s_of(&s["worktree_id"])), tame(b)),
+        (None, Some(true)) => format!("{} detached", tame(&s_of(&s["worktree_id"]))),
+        _ => tame(&s_of(&s["worktree_id"])),
+    };
+    let process = if s["process"].is_null() {
+        "no process".to_string()
+    } else {
+        let p = &s["process"];
+        let mut text = format!("process since {}", tame(&s_of(&p["since"])));
+        match p["releases_at"].as_str() {
+            Some(t) => text.push_str(&format!(", releases at {}", tame(t))),
+            None => {
+                if let Some(t) = p["waiting_since"].as_str() {
+                    text.push_str(&format!(", waiting for an answer since {}", tame(t)));
+                }
+                for task in p["tasks"].as_array().into_iter().flatten() {
+                    text.push_str(&format!(
+                        ", background task {} since {}",
+                        tame(&s_of(&task["id"])),
+                        tame(&s_of(&task["since"]))
+                    ));
+                }
+                if let Some(t) = p["turn_since"].as_str() {
+                    text.push_str(&format!(", turn since {}", tame(t)));
+                }
+            }
+        }
+        if p["qualified"].as_bool() == Some(false) {
+            text.push_str(&format!(
+                ", unqualified {}",
+                tame(&s_of(&p["runtime_version"]))
+            ));
+        }
+        text
+    };
+    let mut line = format!(
+        "{}  {} {}  {}  {}  {}/{}/{}  {}  {process}",
+        tame(&s_of(&s["id"])),
+        tame(&s_of(&s["project_id"])),
+        tame(&s_of(&s["project_name"])),
+        worktree,
+        tame(&s_of(&s["state"])),
+        tame(&s_of(&s["model"])),
+        tame(&s_of(&s["effort"])),
+        tame(&s_of(&s["permission_mode"])),
+        cost_text(s["usage"]["cost_micros"].as_u64().unwrap_or(0)),
+    );
+    if let Some(why) = s["context_lost"].as_str() {
+        line.push_str(&format!(", context lost: {}", tame(why)));
+    }
+    if let Some(t) = s["ended_at"].as_str() {
+        line.push_str(&format!(", ended {}", tame(t)));
+    }
+    line
+}
+
+pub fn session_list(a: &SessionListArgs) -> i32 {
+    let reply = call(
+        "session_list",
+        json!({ "project_id": a.project, "all": a.all }),
+    );
+    match reply {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let list = v["sessions"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("no chat sessions");
+                }
+                for s in &list {
+                    println!("{}", session_line(s));
+                }
+            }
+            0
+        }
+        Err(why) => session_failed("list", &why),
+    }
+}
+
+/// One line of `session items`: the `seq`, the kind and a one-line summary.
+pub fn item_line(item: &Value) -> String {
+    let body = &item["body"];
+    let kind = s_of(&body["kind"]);
+    let cut = |t: &str| -> String {
+        let t = tame(t);
+        if t.chars().count() > 100 {
+            let head: String = t.chars().take(100).collect();
+            format!("{head}...")
+        } else {
+            t
+        }
+    };
+    let summary = match kind.as_str() {
+        "operator_message" | "assistant_text" => cut(&s_of(&body["text"])),
+        "tool_call" => format!(
+            "{}{}",
+            tame(&s_of(&body["tool"])),
+            if body["is_error"].as_bool() == Some(true) {
+                " (error)"
+            } else {
+                ""
+            }
+        ),
+        "approval_request" => format!(
+            "{} {}",
+            tame(&s_of(&body["tool"])),
+            cut(&s_of(&body["reason"]))
+        ),
+        "question_request" => body["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|q| cut(&s_of(&q["text"])))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        "approval_answer" | "question_answer" => format!(
+            "{} {}answers {}",
+            tame(&s_of(&body["outcome"])),
+            body["decision"]
+                .as_str()
+                .map(|d| format!("{d} "))
+                .unwrap_or_default(),
+            item["answers_seq"]
+        ),
+        "background_task" => format!(
+            "{} {}",
+            tame(&s_of(&body["event"])),
+            tame(&s_of(&body["task_id"]))
+        ),
+        "notice" => cut(&s_of(&body["text"])),
+        "turn_result" => format!(
+            "{} cost {}",
+            tame(&s_of(&body["stop"])),
+            cost_text(body["usage"]["cost_micros"].as_u64().unwrap_or(0))
+        ),
+        "redacted" => "(redacted)".to_string(),
+        _ => "(unknown kind)".to_string(),
+    };
+    let kind = if kind == "redacted" {
+        tame(&s_of(&body["item_kind"]))
+    } else {
+        kind
+    };
+    format!("{}  {}  {}", item["seq"], tame(&kind), summary)
+}
+
+pub fn session_items(a: &SessionItemsArgs) -> i32 {
+    let reply = call(
+        "session_items",
+        json!({ "session_id": a.id, "after": a.after }),
+    );
+    match reply {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                let list = v["items"].as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("no items");
+                }
+                for item in &list {
+                    println!("{}", item_line(item));
+                }
+            }
+            0
+        }
+        Err(why) => session_failed("items", &why),
+    }
+}
+
+/// `chat-runtime install`: fetch the managed Claude Code copy, check it against the pin and place
+/// it. It runs in this process, with no controller.
+pub fn chat_runtime_install(a: &ChatRuntimeInstallArgs) -> i32 {
+    match super::chat_install::install_from_env() {
+        Ok(path) => {
+            let version = pf_adapter_claude::pinned::CLI_VERSION;
+            if a.json {
+                print_json(&json!({
+                    "schema_version": 1,
+                    "installed": true,
+                    "version": version,
+                    "path": path.display().to_string(),
+                }));
+            } else {
+                println!(
+                    "the chat runtime Claude Code {version} is installed at {}",
+                    path.display()
+                );
+            }
+            0
+        }
+        Err(why) => {
+            if a.json {
+                print_json(&json!({ "schema_version": 1, "installed": false, "error": why }));
+            } else {
+                eprintln!("pulse-factory: chat-runtime install: {}", tame(&why));
+            }
+            1
+        }
+    }
 }

@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::*;
 use pf_engine::port::store::{
     AdmissionOutcome, AgentRow, CONTROLLER_SCOPE, ChatSessionRow, ChatSessionState, Committed,
@@ -384,6 +386,7 @@ fn set_chat_session_runtime_changes_only_the_named_fields_of_a_live_session() {
                         model: model.map(String::from),
                         effort: effort.map(String::from),
                         permission_mode: mode.map(String::from),
+                        runtime_options: None,
                         updated_at: "t9".to_string(),
                     },
                 ))
@@ -429,6 +432,156 @@ fn set_chat_session_runtime_changes_only_the_named_fields_of_a_live_session() {
     assert!(rejected(set("m4", "S-9", Some("x"), None, None)).contains("S-9"));
     assert_unchanged(&store, &before);
     assert_eq!(store.chat_session("S-1").unwrap().unwrap(), ended);
+}
+
+/// `r1.s3.w3` (P3, Approach 14): a session starts with a copy of its agent's runtime options, a
+/// set that carries a map replaces the session's map, a set that carries none leaves it, and the
+/// agent row never changes.
+#[test]
+fn a_start_copies_the_agents_options_and_a_set_replaces_them_and_leaves_the_agent_alone() {
+    let (_d, store) = open();
+    add_project(&store, "c1", "one", "/r/one", ProjectKind::Git, None);
+    applied(start(&store, "s1", "P-1", record("/r/one")));
+    let agent_before = store.agent("orchestrator").unwrap().unwrap();
+    let on: BTreeMap<String, String> = [("artifacts".to_string(), "on".to_string())].into();
+    assert_eq!(agent_before.runtime_options, on);
+    assert_eq!(
+        store.chat_session("S-1").unwrap().unwrap().runtime_options,
+        on,
+        "the start copies the agent's options onto the row"
+    );
+    let set = |cmd: &str, options: Option<BTreeMap<String, String>>, model: Option<&str>| {
+        store
+            .commit(effect_commit(
+                cmd,
+                "chat_session_runtime",
+                Effect::SetChatSessionRuntime {
+                    id: "S-1".to_string(),
+                    model: model.map(String::from),
+                    effort: None,
+                    permission_mode: None,
+                    runtime_options: options,
+                    updated_at: "t9".to_string(),
+                },
+            ))
+            .unwrap()
+    };
+    // A map replaces the row's map as a whole, not key by key.
+    let off: BTreeMap<String, String> = [
+        ("artifacts".to_string(), "off".to_string()),
+        ("zeta".to_string(), "1".to_string()),
+    ]
+    .into();
+    applied(set("o1", Some(off.clone()), None));
+    assert_eq!(
+        store.chat_session("S-1").unwrap().unwrap().runtime_options,
+        off
+    );
+    let replaced: BTreeMap<String, String> = [("artifacts".to_string(), "on".to_string())].into();
+    applied(set("o2", Some(replaced.clone()), None));
+    assert_eq!(
+        store.chat_session("S-1").unwrap().unwrap().runtime_options,
+        replaced,
+        "the map replaces the old one: `zeta` is gone"
+    );
+    // A set that carries no map leaves it.
+    applied(set("o3", None, Some("claude-sonnet-5-5")));
+    let now = store.chat_session("S-1").unwrap().unwrap();
+    assert_eq!(now.runtime_options, replaced);
+    assert_eq!(now.model, "claude-sonnet-5-5");
+    // The agent row is the same as before every set.
+    assert_eq!(store.agent("orchestrator").unwrap().unwrap(), agent_before);
+    // A new session after an end copies the agent's options again, not the old session's.
+    applied(set("o4", Some(off), None));
+    applied(end(&store, "e1", "S-1"));
+    applied(start(&store, "s2", "P-1", existing("W-1")));
+    assert_eq!(
+        store.chat_session("S-2").unwrap().unwrap().runtime_options,
+        on
+    );
+}
+
+const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_requests.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_projects.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_devices.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_hierarchy.sql");
+
+/// `r1.s3.w3` (migration 0006, ADR-0007: forward only): a store file at version 5, as `r1.s3.w2`
+/// left it, upgrades with `{}` on every session row, live or ended, and the rows keep their other
+/// columns. The agent row keeps its options.
+#[test]
+fn a_version_five_file_upgrades_with_an_empty_option_map_on_every_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (version, name, sql) in [
+            (1, "init", MIGRATION_0001),
+            (2, "requests", MIGRATION_0002),
+            (3, "projects", MIGRATION_0003),
+            (4, "devices", MIGRATION_0004),
+            (5, "hierarchy", MIGRATION_0005),
+        ] {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, 't0')",
+                rusqlite::params![version, name],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, root, created_at, kind) VALUES ('P-1', 'a', '/a', 't', 'git'); \
+             INSERT INTO worktrees (id, project_id, path, created_by, created_at) \
+                 VALUES ('W-1', 'P-1', '/a', 'root', 't'); \
+             INSERT INTO chat_sessions (id, project_id, worktree_id, agent_id, runtime, state, model, \
+                 effort, permission_mode, created_at, updated_at, ended_at) \
+                 VALUES ('S-1', 'P-1', 'W-1', 'orchestrator', 'claude-code', 'idle', 'm', 'high', \
+                 'bypassPermissions', 't', 't', 't2'); \
+             INSERT INTO chat_sessions (id, project_id, worktree_id, agent_id, runtime, state, model, \
+                 effort, permission_mode, created_at, updated_at) \
+                 VALUES ('S-2', 'P-1', 'W-1', 'orchestrator', 'claude-code', 'idle', 'claude-opus-5-5', \
+                 'low', 'plan', 't3', 't3');",
+        )
+        .unwrap();
+    }
+    let store = pf_store_sqlite::SqliteStore::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 6);
+    let sessions = store.chat_sessions("P-1").unwrap();
+    assert_eq!(sessions.len(), 2);
+    for s in &sessions {
+        assert!(
+            s.runtime_options.is_empty(),
+            "{}: {:?}",
+            s.id,
+            s.runtime_options
+        );
+    }
+    assert_eq!(sessions[1].model, "claude-opus-5-5");
+    assert_eq!(sessions[1].permission_mode, "plan");
+    assert_eq!(sessions[0].ended_at.as_deref(), Some("t2"));
+    let on: BTreeMap<String, String> = [("artifacts".to_string(), "on".to_string())].into();
+    assert_eq!(
+        store
+            .agent("orchestrator")
+            .unwrap()
+            .unwrap()
+            .runtime_options,
+        on
+    );
+    // The column refuses what is no JSON object.
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let bad = conn.execute(
+        "UPDATE chat_sessions SET runtime_options = '[1]' WHERE id = 'S-2'",
+        [],
+    );
+    assert!(bad.is_err(), "an array is no option map");
+    let bad = conn.execute(
+        "UPDATE chat_sessions SET runtime_options = 'x' WHERE id = 'S-2'",
+        [],
+    );
+    assert!(bad.is_err(), "text is no option map");
 }
 
 #[test]

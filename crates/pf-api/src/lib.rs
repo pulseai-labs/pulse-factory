@@ -18,5 +18,8 @@ pub mod router;
 pub mod tls;
 pub mod types;
 
-pub use host::{ALLOWLIST, ApiHost, Outcome, Refusal, RequestRecord, Route};
+pub use host::{
+    ALLOWLIST, ApiHost, Outcome, Refusal, RequestRecord, Route, StreamEnd, StreamEvent, StreamFeed,
+    StreamRefusal,
+};
 pub use router::{MAX_BODY_BYTES, PeerAddr, router, router_with};

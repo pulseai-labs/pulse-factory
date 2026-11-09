@@ -2,6 +2,7 @@
 //! forge is a stub `gh` and a local git repo, the seats are fakes or paper scripts.
 #![allow(dead_code)]
 
+pub mod chat;
 pub mod ctl;
 pub mod rig;
 

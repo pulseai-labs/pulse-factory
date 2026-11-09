@@ -324,12 +324,10 @@ pub const WORKTREE_ID: &str = "{worktree-id}";
 /// The ID of the built-in Orchestrator agent.
 pub const ORCHESTRATOR_AGENT: &str = "orchestrator";
 
-/// The cap on a tool call's stored input and its stored output, in bytes (the display log only).
+/// The cap on a tool call's stored input and its stored output, in bytes (the display log only). A
+/// text the store cuts is cut by [`crate::port::chat::cap`], so the store, the adapter and the stream
+/// share one cut and one mark (`…[truncated: <bytes> bytes in all]`).
 pub const TOOL_TEXT_MAX_BYTES: usize = 16384;
-
-/// The text that ends a tool text the store cut. Content plus this mark fit
-/// [`TOOL_TEXT_MAX_BYTES`].
-pub const TOOL_TEXT_TRUNCATION_MARK: &str = "\n[truncated]";
 
 /// The payload of a redacted chat item (C12). The store's trigger holds the same text.
 pub const REDACTED_PAYLOAD: &str = "{\"redacted\":true}";
@@ -508,6 +506,10 @@ pub struct ChatSessionRow {
     pub model: String,
     pub effort: String,
     pub permission_mode: String,
+    /// The session's own runtime options, as opaque text pairs. They start as the agent's, change
+    /// per chat and never change the agent. `{}` for a session that was live before migration 0006:
+    /// the controller then launches it with its agent's options.
+    pub runtime_options: BTreeMap<String, String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
@@ -754,13 +756,15 @@ pub enum Effect {
         id: String,
         ended_at: String,
     },
-    /// Change the model, effort or permission mode of a live chat session. A `None` field stays as
-    /// it was. An unknown or ended session makes the commit [`Committed::Rejected`].
+    /// Change the model, effort, permission mode or runtime options of a live chat session. A `None`
+    /// field stays as it was. A map replaces the session's map as a whole. An unknown or ended
+    /// session makes the commit [`Committed::Rejected`].
     SetChatSessionRuntime {
         id: String,
         model: Option<String>,
         effort: Option<String>,
         permission_mode: Option<String>,
+        runtime_options: Option<BTreeMap<String, String>>,
         updated_at: String,
     },
     /// Redact one chat item (C12): the payload becomes [`REDACTED_PAYLOAD`], each tool text that

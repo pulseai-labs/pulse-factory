@@ -1,5 +1,5 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `project`, `device`, `api`, `hook` and `controller`.
+//! `clear`, `ack`, `project`, `session`, `chat-runtime`, `device`, `api`, `hook` and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -42,6 +42,10 @@ pub enum Verb {
     Ack(AckArgs),
     /// Add, list and remove the projects on this host. A project is an ID, a name and one root.
     Project(ProjectArgs),
+    /// Chat with a project's Orchestrator: start, send, answer, set, interrupt, end, list, read.
+    Session(SessionArgs),
+    /// Install the managed Claude Code copy that the chat runs.
+    ChatRuntime(ChatRuntimeArgs),
     /// Pair, list and revoke the devices that call the network API. A device acts as you.
     Device(DeviceArgs),
     /// Show whether the network API is off, waiting for its address or listening.
@@ -245,6 +249,185 @@ pub struct ProjectRemoveArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub verb: SessionVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SessionVerb {
+    /// Start the Orchestrator of a project in its main worktree.
+    Start(SessionStartArgs),
+    /// Send a message to a chat. It does not wait for the reply: read it with `session items`.
+    Send(SessionSendArgs),
+    /// Answer an approval or a question of a chat.
+    Answer(SessionAnswerArgs),
+    /// End the running turn of a chat. The process stays.
+    Interrupt(SessionInterruptArgs),
+    /// Change the model, effort, permission mode or a runtime option of this chat only.
+    Set(SessionSetArgs),
+    /// End a chat and stop its process.
+    End(SessionEndArgs),
+    /// Redact one item of a chat's display log (CLI only).
+    Redact(SessionRedactArgs),
+    /// List the chats, with their state, cost and process.
+    List(SessionListArgs),
+    /// Read the stored items of a chat.
+    Items(SessionItemsArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionStartArgs {
+    /// The project, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: String,
+    /// The agent. The default is the built-in Orchestrator.
+    #[arg(long, default_value = "orchestrator")]
+    pub agent: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionSendArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    /// The message: 1 byte to 256 KiB.
+    pub text: String,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionAnswerArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    /// The `seq` of the request item (read it with `session items`).
+    pub seq: u64,
+    /// Allow the tool call.
+    #[arg(long, conflicts_with_all = ["deny", "answer"])]
+    pub allow: bool,
+    /// Deny the tool call, with a message of at most 1000 characters and no line break.
+    #[arg(long, value_name = "MESSAGE", conflicts_with = "answer")]
+    pub deny: Option<String>,
+    /// Answer a question: `<question>=<label>`. Repeat for each question.
+    #[arg(long, value_name = "QUESTION=LABEL")]
+    pub answer: Vec<String>,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionInterruptArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionSetArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    #[arg(long)]
+    pub model: Option<String>,
+    #[arg(long)]
+    pub effort: Option<String>,
+    /// The permission mode.
+    #[arg(long, value_name = "MODE")]
+    pub mode: Option<String>,
+    /// A runtime option: `<id>=<value>`. Repeat for each.
+    #[arg(long, value_name = "ID=VALUE")]
+    pub option: Vec<String>,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionEndArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionRedactArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    /// The `seq` of the item.
+    pub seq: u64,
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionListArgs {
+    /// Only this project's chats.
+    #[arg(long, value_name = "P-n")]
+    pub project: Option<String>,
+    /// Also the ended chats.
+    #[arg(long)]
+    pub all: bool,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SessionItemsArgs {
+    /// The chat, such as `S-1`.
+    pub id: String,
+    /// Only the items after this `seq`.
+    #[arg(long, default_value_t = 0)]
+    pub after: u64,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ChatRuntimeArgs {
+    #[command(subcommand)]
+    pub verb: ChatRuntimeVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ChatRuntimeVerb {
+    /// Fetch the managed Claude Code copy, check it against the pin, and place it.
+    Install(ChatRuntimeInstallArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ChatRuntimeInstallArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct DeviceArgs {
     #[command(subcommand)]
     pub verb: DeviceVerb,
@@ -340,6 +523,20 @@ pub fn run(args: Vec<OsString>) -> i32 {
             ProjectVerb::Add(a) => crate::controller::client::project_add(&a),
             ProjectVerb::List(a) => crate::controller::client::project_list(&a),
             ProjectVerb::Remove(a) => crate::controller::client::project_remove(&a),
+        },
+        Verb::Session(a) => match a.verb {
+            SessionVerb::Start(a) => crate::controller::client::session_start(&a),
+            SessionVerb::Send(a) => crate::controller::client::session_send(&a),
+            SessionVerb::Answer(a) => crate::controller::client::session_answer(&a),
+            SessionVerb::Interrupt(a) => crate::controller::client::session_interrupt(&a),
+            SessionVerb::Set(a) => crate::controller::client::session_set(&a),
+            SessionVerb::End(a) => crate::controller::client::session_end(&a),
+            SessionVerb::Redact(a) => crate::controller::client::session_redact(&a),
+            SessionVerb::List(a) => crate::controller::client::session_list(&a),
+            SessionVerb::Items(a) => crate::controller::client::session_items(&a),
+        },
+        Verb::ChatRuntime(a) => match a.verb {
+            ChatRuntimeVerb::Install(a) => crate::controller::client::chat_runtime_install(&a),
         },
         Verb::Device(a) => match a.verb {
             DeviceVerb::Pair(a) => crate::controller::client::device_pair(&a),

@@ -1,15 +1,30 @@
 // Every generated type of the network API. `src/gen/` is written by `ts-rs`; do not edit it. A new
 // file there needs one more line here. Import types only (`import type`): this package has no
 // runtime code and no build step.
+export type * from "./gen/AgentRecord";
+export type * from "./gen/AnswerOutcome";
 export type * from "./gen/ApiError";
 export type * from "./gen/ApiState";
 export type * from "./gen/ApiStatus";
+export type * from "./gen/ChatAnswerArg";
+export type * from "./gen/ChatContext";
+export type * from "./gen/ChatFrame";
+export type * from "./gen/ChatItemBody";
+export type * from "./gen/ChatItemRecord";
+export type * from "./gen/ChatOptionRecord";
+export type * from "./gen/ChatProcessRecord";
+export type * from "./gen/ChatRuntimeRecord";
+export type * from "./gen/ChatSessionRecord";
+export type * from "./gen/ChatState";
+export type * from "./gen/ChatTaskRecord";
+export type * from "./gen/ChatUsage";
 export type * from "./gen/DeviceList";
 export type * from "./gen/DevicePairing";
 export type * from "./gen/DeviceRecord";
 export type * from "./gen/DeviceRevokeArgs";
 export type * from "./gen/DeviceRevoked";
 export type * from "./gen/ListenState";
+export type * from "./gen/MidTurnMode";
 export type * from "./gen/PairRequest";
 export type * from "./gen/PairResult";
 export type * from "./gen/ProjectAddArgs";
@@ -18,3 +33,17 @@ export type * from "./gen/ProjectKind";
 export type * from "./gen/ProjectList";
 export type * from "./gen/ProjectRecord";
 export type * from "./gen/ProjectRemoveArgs";
+export type * from "./gen/QuestionChoiceRecord";
+export type * from "./gen/QuestionRecord";
+export type * from "./gen/ServerRef";
+export type * from "./gen/SessionAnswerArgs";
+export type * from "./gen/SessionChanged";
+export type * from "./gen/SessionEndArgs";
+export type * from "./gen/SessionInterruptArgs";
+export type * from "./gen/SessionItems";
+export type * from "./gen/SessionList";
+export type * from "./gen/SessionListArgs";
+export type * from "./gen/SessionSendArgs";
+export type * from "./gen/SessionSetArgs";
+export type * from "./gen/SessionStartArgs";
+export type * from "./gen/ToolTextRecord";

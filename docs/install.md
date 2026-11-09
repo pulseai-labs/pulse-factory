@@ -35,10 +35,25 @@ The script does these steps and no others:
    ~/.local`. This is the test bridge, `pf-client-bridge`, beside the main binary. It is for the UI demo
    (`scripts/demo/ui-pair.sh`, d12) and for tests. The Mac app does not use it, and the controller does
    not need it. It uses the workspace's target, so this second install is incremental.
-3. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
-4. Builds the UI bundle (`scripts/install-ui.sh`, Node 22 and `npm`) into `~/.local/share/pulse-factory/ui/`.
-5. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`.
-6. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
+3. `nice -n 10 ionice -c3 cargo install --path crates/pf-adapter-claude --bin pf-claude-replay --locked
+   --root ~/.local`. This is the replay of recorded Claude Code sessions, beside the main binary. It is
+   for the chat demo (`scripts/demo/chat-api.sh`, d18) and for tests. The controller does not need it.
+   The `pulse-factory` install also puts `pf-stream-reader`, a small client of the chat stream for the
+   same demo, in `~/.local/bin`.
+4. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
+5. Builds the UI bundle (`scripts/install-ui.sh`, Node 22 and `npm`) into `~/.local/share/pulse-factory/ui/`.
+6. Runs `pulse-factory chat-runtime install`. It fetches the managed Claude Code copy that the chat
+   runs, at the pinned version, from the npm registry (`$PF_CHAT_REGISTRY`, default
+   `https://registry.npmjs.org`), checks its SHA-256 against the pin and places it at
+   `~/.local/share/pulse-factory/claude/<version>/claude`. The binary is Anthropic's official
+   per-platform package: Pulse Factory never ships it. When the fetch fails, the script prints the
+   cause and goes on: the controller checks the copy at each start and fetches it again. Until a good
+   copy is in place, `session start` is refused with a message that names this verb. The chat never
+   runs a `claude` that it finds on `PATH`.
+7. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`. The unit states
+   `KillMode=control-group`, so a stop of the controller also ends any process left in its cgroup,
+   such as a background command that a chat started.
+8. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
    bus. Then it runs `systemctl --user daemon-reload`, `enable --now pulse-factory` and
    `try-restart pulse-factory`.
 
@@ -53,7 +68,7 @@ The unit sets `PATH` to `~/.local/bin`, `~/.cargo/bin` and the system directorie
 so `gh`, `git` and `omp` must be on one of those paths.
 
 **Install with no active run.** Each release of the binary can migrate the store (migration 0004
-adds the `devices` table). The controller refuses to migrate while a run is active, so it does not
+adds the `devices` table, and migration 0006 adds the session's runtime options). The controller refuses to migrate while a run is active, so it does not
 start until no run is active (ADR-0003, ADR-0007). End or halt every run, then install.
 
 ## Turn on the network API
@@ -87,6 +102,32 @@ and no key exists until then.
 To turn the API off, remove the line and restart the unit. The key and the paired devices stay. If
 the key files are deleted, the next start makes a new key: every paired device then fails closed.
 Revoke them all and pair again.
+
+## Set up the chat
+
+A paired device and the CLI can chat with a project's Orchestrator: `pulse-factory session start
+--project P-1` (`docs/contracts/cli.md`, `session`). The chat runs the managed Claude Code copy that
+`pulse-factory chat-runtime install` places. The controller reads these settings from the same
+`~/.config/pulse-factory/controller.env` as `PF_API_LISTEN`, one `NAME=value` per line:
+
+- `PF_CHAT_CLAUDE_BIN=<path>` runs another Claude Code binary instead of the managed copy. The
+  controller prints `the chat runs an unqualified Claude Code binary: <path>` at start, and every
+  session list and every `chat open` line marks the process `unqualified`. Leave it unset for the
+  managed copy.
+- `PF_CHAT_MAX_LIVE=<n>` caps the live chat processes, 1 to 64, default 4. A chat process takes 205 to
+  537 MB. A bad value prints one line and keeps 4.
+- `PF_AGENT_ENV_<AGENT>=NAME=value NAME2=value2` sets environment variables for the chat processes of
+  one agent, as server-side settings. The agent ID is upper-cased and each other character becomes
+  `_`, so the built-in Orchestrator is `PF_AGENT_ENV_ORCHESTRATOR`. A name that the adapter reserves
+  (`ANTHROPIC_*`, `PF_*` and the like) is refused at the open, and the refusal names it.
+- `PF_SERVER_NAME=<name>` names this server in every API answer (`pf-server-name`). The default is the
+  host name. It is 1 to 64 characters of `A-Z a-z 0-9 . _ -`.
+- `PF_CHAT_REGISTRY=<url>` is the registry that `chat-runtime install` and the start-time check
+  fetch from. The default is `https://registry.npmjs.org`.
+
+A chat process opens only on `session start` or on a `session send` to a session with no process. The
+controller releases it after 30 idle minutes and stops every live chat on `pulse-factory halt` and
+when the controller stops.
 
 ## Install the Mac app
 

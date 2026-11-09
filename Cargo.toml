@@ -35,13 +35,16 @@ portable-pty = "=0.9.0"
 clap = { version = "=4.6.7", default-features = false, features = ["std", "help", "usage", "error-context", "derive"] }
 # the network API (ADR-0012): HTTP, TLS with the `ring` provider only (no aws-lc-rs, so no cmake
 # build), a self-signed certificate, and the TypeScript types for the clients
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "service"] }
 http-body-util = "=0.1.5"
 bytes = "=1.12.1"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring"] }
+# the chat stream (r1.s3.w3): axum's `ws` feature needs it, and the stream reader and the tests use its
+# synchronous client (`tungstenite`, re-exported). Pinned with `=`; ADR-0008 records the first-use check.
+tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat"] }
 # the Keychain of the Mac app (r1.s2.w4); `pf-client` takes it on macOS only

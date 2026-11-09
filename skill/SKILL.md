@@ -10,8 +10,10 @@ A controller (a systemd user service) then drives the seats until each item PR h
 spine branch. A spine-close seat then opens the spine PR, and the PR merges into the base branch
 only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
 `status`, `halt`, `hook` and `controller`, the verbs of requests and the claim: `requests`,
-`show`, `claim`, `answer`, `clear` and `ack`, `project`, which lists the operator's projects, and
-`device` and `api`, which pair and revoke the devices that reach the controller over the network.
+`show`, `claim`, `answer`, `clear` and `ack`, `project`, which lists the operator's projects,
+`session`, which chats with a project's Orchestrator, `chat-runtime`, which installs the runtime that
+chat needs, and `device` and `api`, which pair and revoke the devices that reach the controller over
+the network.
 
 ## Arm a run
 
@@ -134,7 +136,10 @@ pulse-factory project remove P-2                              # the row stays; t
 
 1. `project add <root>` records the root, made canonical, under a name. The name is the root's last
    component unless `--name` gives one. A missing path, a file, `/`, a root that a live project holds
-   already, and a name that a live project holds already are refused, each with its reason.
+   already, and a name that a live project holds already are refused, each with its reason. A root
+   that is a linked worktree (add its main worktree instead), a bare repository, the inside of a
+   `.git` directory and a repository that git refuses for dubious ownership are refused too, with
+   the cause.
 2. `project list` shows the live projects in creation order. `--json` gives
    `{"schema_version": 1, "projects": [...]}`.
 3. A retry of `add` or `remove` sends the same `--command-id`. The controller admits the command
@@ -144,11 +149,54 @@ pulse-factory project remove P-2                              # the row stays; t
 Every `add` and `remove`, admitted or refused, is one line of `<state dir>/controller.ledger`. A seat
 cannot `add` or `remove`; it can `list`.
 
+## Chat with a project's Orchestrator
+
+Each project has a built-in Orchestrator: a Claude Code chat that runs in the project's main worktree
+on this server. You start it, send it messages, answer its approvals and questions, and end it. No
+verb waits for a reply: a verb sends one request, prints one answer and exits. You read the chat with
+`session items`, and the app reads it on the API stream.
+
+```bash
+pulse-factory session start --project P-1            # session S-1 started in /home/… (worktree W-1)
+pulse-factory session send S-1 "what is open?"       # sent to S-1
+pulse-factory session items S-1                      # one line for each item, after --after <seq>
+pulse-factory session answer S-1 4 --deny "not now"  # or --allow, or --answer "<question>=<label>"
+pulse-factory session set S-1 --effort medium        # this chat only; the agent's defaults stay
+pulse-factory session interrupt S-1                  # ends the running turn
+pulse-factory session list                           # the live sessions, with their holders and cost
+pulse-factory session end S-1                        # stops the process and ends the session
+pulse-factory session redact S-1 4                   # redacts one stored item; CLI only
+```
+
+1. `chat-runtime install` fetches the managed Claude Code copy at the pinned version. The install
+   script runs it. A start before it is refused with a message that names it.
+2. `session start` opens the process at once. The chat uses no token until you send a message. A
+   second live Orchestrator for one project is refused, and the refusal names the live `S-<n>`.
+3. `session send` opens the process again when it was released or stopped, and resumes the same
+   conversation. A turn begins only on your message or when a background task the chat started
+   finishes. The chat cannot wake itself: no timer, tick or notice starts a turn.
+4. A process with no running turn, no background task and no pending request is released after 30
+   idle minutes. The next `send` resumes it. The cap is `PF_CHAT_MAX_LIVE` (default 4). A refused
+   open names every live chat and why it holds its process.
+5. `session answer <S-n> <seq>` answers the pending approval or question whose item has that `seq`,
+   which `session items` shows.
+6. A session marked `context lost` cannot resume: end it and start a new one. `halt` stops every
+   live chat process, and each session stays live; the next `send` reopens it.
+7. A seat, and a chat process or anything that descends from one, cannot run the state-changing
+   `session` verbs. `session list` and `session items` are reads. A paired device calls `session
+   list`, `start`, `send`, `answer`, `interrupt`, `set` and `end`; `redact`, `items` and `halt` are
+   not open to it.
+
+Every state-changing verb is one line of `<state dir>/controller.ledger`, and each process open,
+turn and stop is one line of `<state dir>/chat.ledger`. A `send` line holds the byte count and never
+the text.
+
 ## Pair a device
 
 The controller can serve a network API over TLS (ADR-0012). It is off until the operator sets
-`PF_API_LISTEN` (`docs/install.md`). A paired device calls the project verbs and nothing else: no
-`answer`, `claim`, `clear`, `ack`, `arm` or `halt`.
+`PF_API_LISTEN` (`docs/install.md`). A paired device calls the project verbs and the chat verbs and
+nothing else: no `answer`, `claim`, `clear`, `ack`, `arm` or `halt`. It reads a chat on the stream
+(`docs/contracts/api.md`).
 
 ```bash
 pulse-factory api status          # off | waiting for <addr> | listening on <addr> | failed: <why>
@@ -176,7 +224,8 @@ The line names the device and never the code or the token. A seat cannot run `de
 ## Halt a run
 
 `pulse-factory halt [<run>] --reason "<why>"` stops new launches and new merges. Seats that run
-finish their stage. A repeat is safe, and the first reason stays.
+finish their stage. A repeat is safe, and the first reason stays. `halt` also stops every live chat
+process and answers with the sessions it stopped (see "Chat with a project's Orchestrator").
 
 ## Other verbs
 
@@ -185,5 +234,5 @@ finish their stage. A repeat is safe, and the first reason stays.
 - `pulse-factory hook` judges one tool call of a seat. The seat's extension runs it. You do not run
   it yourself.
 
-A seat cannot arm or halt a run, it cannot add or remove a project, and it cannot pair or revoke a
-device: those verbs refuse when `PF_SEAT_TOKEN` is set. `halt` applies to runs only.
+A seat cannot arm or halt a run, it cannot add or remove a project, it cannot start or drive a chat,
+and it cannot pair or revoke a device: those verbs refuse when `PF_SEAT_TOKEN` is set.

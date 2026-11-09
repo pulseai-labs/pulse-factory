@@ -2,9 +2,11 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has sixteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
-`add`, `list` and `remove`, and `device` and `api` (`r1.s2`), which manage the network API.
+`add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
+`session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
+runtime it needs.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -14,8 +16,10 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
   ledgers (ADR-0003). A client never writes there.
 - **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
   ledger of the controller's own commands (`project`, the device commands, which are the redeem of a
-  pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end` and
-  `chat_item_redact`, with the kind backfill `project_kind` that runs at controller start). It is
+  pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end`,
+  `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, with the kind
+  backfill `project_kind` that runs at controller start). A `chat_send` line holds the byte count of
+  the text and never the text. It is
   not a run's ledger. Each command is admitted once under the admission scope `@controller`, where
   a run's commands are admitted under the run's ID, and each admitted or refused new command is one
   line, `- #<n> <command> …`, written by the controller as the only writer. A replay writes no line.
@@ -28,12 +32,34 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
   pairing code, are refused with the reason (the redeem leaves the live code unused). `device
   revoke` is the one exception: it still commits to the store, so the device is refused at once,
   and its line waits in the outbox for the next start to append. The reads still work.
-- **`halt` and the projects.** `halt` applies to runs only. A `project` command launches nothing and
-  changes no run, so a halt neither stops it nor needs it. The same holds for `device` commands, and
-  for the four commands `project_kind`, `chat_session_start`, `chat_session_end` and
-  `chat_item_redact`: they launch nothing and change no run, so `halt` does not apply to them. The
-  verbs that reach the three chat commands, and `halt` over the live chat processes, come with the
-  chat verbs of `r1.s3.w3`. `halt` is not open to a device over the API either (`api.md`).
+- **`halt` and the projects.** `halt` applies to runs and to live chat processes. A `project` command
+  launches nothing and changes no run, so a halt neither stops it nor needs it. The same holds for
+  `device` commands and for the commands `project_kind`, `chat_session_start`, `chat_session_end`
+  and `chat_item_redact`. `halt` stops every live chat process (see `halt` and `session`). `halt` is
+  not open to a device over the API either (`api.md`).
+- **`chat.ledger`.** `<state dir>/chat.ledger` is the audit trail of the chat processes, beside
+  `api.ledger`. It is append-only, has one writer, writes no `fsync` per line, is not in the store
+  and has no rotation. A crash can lose the last lines: the store's `turn_result` items keep the
+  usage. One line for each process open, each turn and each process stop; every value passes
+  `field()`, and no line holds a message, a tool text, a token or a key:
+
+  ```
+  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|->
+  <UTC> chat turn session=S-1 cause=operator input_tokens=9 output_tokens=12 cache_read_tokens=0 cache_write_tokens=13006 cost_micros=3465 duration_ms=1042 stop=end_turn is_error=false
+  <UTC> chat stop session=S-1 reason=end|idle|halt|exited|shutdown|option [code=<n>]
+  ```
+
+  `qualified=false` marks an override binary. A turn that the CLI starts on its own (a `task` turn)
+  has its line too, with `cause=task`.
+- **The chat settings.** The controller reads these from its environment, which is the unit's
+  `controller.env` (`docs/install.md`): `PF_SHARE_DIR`, `PF_CHAT_CLAUDE_BIN` (an override binary,
+  run as `unqualified`; the controller prints `pulse-factory: the chat runs an unqualified Claude
+  Code binary: <path>` at start), `PF_CHAT_MAX_LIVE` (the cap on live chat processes, 1 to 64,
+  default 4; a bad value prints one line on stderr and keeps the default), `PF_AGENT_ENV_<AGENT>`
+  (the agent's server-side environment, `NAME=value` pairs separated by spaces; the agent ID is
+  upper-cased and each other character is `_`), `PF_SERVER_NAME` (the name every API answer carries)
+  and `PF_CHAT_REGISTRY` (default `https://registry.npmjs.org`). No `PF_*` name reaches a chat
+  process.
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -43,11 +69,13 @@ has fourteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), 
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
   `--yes`, and a command line that clap refuses.
 - **A seat cannot spend.** `arm`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
-  `project remove`, `device pair` and `device revoke` refuse when `PF_SEAT_TOKEN` is in the
+  `project remove`, `device pair`, `device revoke` and the state-changing `session` verbs (`start`,
+  `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
-  the list of projects or to let a device in).
-  `project list`, `device list` and `api status` are reads and stay open. The controller checks the
-  caller of `claim`, `answer`, `clear`, `ack`, `device pair` and `device revoke` again (see `claim`).
+  the list of projects, to let a device in or to start a chat).
+  `project list`, `device list`, `api status`, `session list` and `session items` are reads and stay
+  open. The controller checks the caller of `claim`, `answer`, `clear`, `ack`, `device pair`,
+  `device revoke` and the state-changing `session` verbs again (see `claim` and `session`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
   both.
@@ -120,6 +148,13 @@ pulse-factory halt [<run>] --reason <text> [--json]
 
 Running seats finish their stage. Nothing new launches or merges. A repeat is safe, and the first
 reason stays. A caller with `PF_SEAT_TOKEN` is refused.
+
+`halt` also stops every live chat process and its process group, closes each pending request of
+those chats as `lost` (`halted`), adds a `notice` item to each chat, and writes `chat stop
+reason=halt` for each. The chat sessions stay live and `idle`: the operator's next `session send`
+reopens one, with a new confirm. With no run at all `halt` still stops the chats and answers ok with
+`"run": null`. The JSON gains `"chats_stopped": ["S-1", …]`, and the text form names the stopped
+chats.
 
 ## `requests`
 
@@ -343,11 +378,138 @@ command ID and one line of the controller ledger (see Common rules).
   - `chat_session_end S-1 admitted command=<id>`;
   - `chat_item_redact S-1 seq=4 admitted command=<id>`. The line never holds the item's text.
 
-  The chat commands have no verb yet. They are controller functions that `r1.s3.w3`'s verbs call. A
-  chat session start checks the root live (a git failure or a gone root is a refusal), records the
-  main worktree at the project's first Orchestrator start, allows one live Orchestrator for each
-  project, and starts a new chat after an end with a fresh CLI context. A `chat_session_start` that
-  is replayed answers the first record and writes no line.
+  The verbs that reach the chat commands are the `session` verbs. A chat session start checks the
+  root live (a git failure or a gone root is a refusal), records the main worktree at the project's
+  first Orchestrator start, allows one live Orchestrator for each project, and starts a new chat
+  after an end with a fresh CLI context. A `chat_session_start` that is replayed answers the first
+  record and writes no line.
+
+## `session`
+
+```
+pulse-factory session start --project <P-n> [--agent orchestrator] [--command-id <id>] [--json]
+pulse-factory session send <S-n> <text> [--command-id <id>] [--json]
+pulse-factory session answer <S-n> <seq> (--allow | --deny <message> | --answer <question>=<label>...)
+                             [--command-id <id>] [--json]
+pulse-factory session interrupt <S-n> [--command-id <id>] [--json]
+pulse-factory session set <S-n> [--model <m>] [--effort <e>] [--mode <p>] [--option <id>=<value>...]
+                           [--command-id <id>] [--json]
+pulse-factory session end <S-n> [--command-id <id>] [--json]
+pulse-factory session redact <S-n> <seq> [--command-id <id>] [--json]
+pulse-factory session list [--project <P-n>] [--all] [--json]
+pulse-factory session items <S-n> [--after <seq>] [--json]
+```
+
+A chat session is one conversation with a project's Orchestrator, in the project's main worktree
+(ADR-0015). The controller runs the chat through the chat port: the Claude Code adapter on the
+managed, pinned CLI copy, with the agent's defaults and the chat's own runtime overrides. No verb
+waits for a reply: the operator reads it with `session items`, and the app reads it on the API
+stream (`api.md`).
+
+- **Commands.** Each state-changing verb is one controller command under `@controller`, with a
+  command ID (`--command-id`, else random, as `project add`) and one `controller.ledger` line,
+  admitted or refused. The same ID with the same content returns the first record with `replayed`
+  true and **makes no port call**: no second send, open or stop. The same ID with other content is a
+  conflict that names the ID and changes nothing. The lines, after the kind:
+  - `chat_session_start` and `chat_session_end`: as in `project`;
+  - `chat_send S-1 admitted bytes=<n> command=<id>`: the text's SHA-256 is the content, and no line
+    holds the text;
+  - `chat_answer S-1 seq=<n> admitted answer=allow|deny|answers command=<id>`;
+  - `chat_interrupt S-1 admitted command=<id>`;
+  - `chat_session_set S-1 admitted model=… effort=… mode=… options=<id>=<value>,… command=<id>`;
+  - `chat_item_redact S-1 seq=<n> admitted command=<id>`.
+- **`start`.** Starts the built-in Orchestrator in the project's main worktree and opens its process,
+  so the runtime session ID is stored from the first moment and the live controls work before the
+  first message. The launch check refuses an agent whose runtime is not on this server (`no chat
+  runtime <id> on this server`), a model, effort or permission mode the runtime does not declare, an
+  unknown runtime option, a gone worktree and a cap that is full. A second live Orchestrator for the
+  project is the store's refusal, which names the live `S-<n>`: follow that one. A failed open after
+  the admission leaves the session live with no process, adds a `notice` item and answers an error
+  with the adapter's text, which names the fix; the next `session send` tries again.
+- **`send`.** The text is 1 byte to 256 KiB. Refused, each as a refused admission: an unknown or ended
+  session, a session marked "context lost", no room under the cap when the session has no process,
+  and a gone worktree at the reopen. Admitted: the controller opens the process when there is none
+  (`--resume` of the stored runtime session ID), stores an `operator_message` item and sends the
+  text. During a turn the send steers it (`mid_turn` `steer`, shown in the runtime record). A failure
+  after the admission is the answer's `note` and a `notice` item; the command stays admitted, so a
+  retry needs a new command ID.
+- **`answer`.** `<seq>` names a pending `approval_request` or `question_request` of a live session
+  with a process. `--allow` and `--deny <message>` answer an approval (the message has no line break
+  and at most 1000 characters). `--answer <question>=<label>` answers a question; repeat it for each
+  question. Refused: an unknown, answered or closed request, the wrong kind of answer, and a session
+  with no process.
+- **`interrupt`.** Ends the running turn. With no turn it is admitted and does nothing.
+- **`set`.** At least one field. Each value is checked against the runtime's declared options, and a
+  bad value or an undeclared option ID is refused with the declared values. The values are stored on
+  the session row, so they survive a release and a resume, and the agent's defaults never change.
+  With a live process, a changed option that the runtime declares `live` (model, effort and permission
+  mode for Claude Code 2.1.319) applies at once. An option that is not live (`artifacts`) shows in
+  `pending_options`, and the next `send` to an idle process (no turn, no task, no pending request)
+  stops it (`chat stop reason=option`) and reopens it with the new value first. A live change that
+  fails stops the process and adds a notice; the next send reopens it.
+- **`end`.** Stops the process and its group, closes each pending request as `lost` (`the session
+  ended`) and ends the session. A replay stops nothing. A later `send` is refused.
+- **`redact`.** Redacts one stored item. It is CLI-only: it is not on the API allowlist. An `item`
+  frame with the redaction marks goes to open streams. A device that read the item before keeps its
+  copy.
+- **`list`.** The live sessions of every project, or of one, in creation order. `--all` adds the
+  ended ones. One line each:
+  `S-1  P-1 alpha  W-1 main  idle  claude-opus-5-5/high/bypassPermissions  $0.003465  process since <t>, releases at <t>`,
+  with `unqualified` for an override binary, `context lost: <why>`, and the holders when they apply:
+  `waiting for an answer since <t>`, `background task <id> since <t>` and `turn since <t>`. The
+  branch is read live from the worktree. The JSON is `SessionList`: `{"schema_version": 1, "server":
+  {"id", "name"}, "runtimes": […], "agents": […], "sessions": […]}`, where a runtime record holds the
+  declared options, `mid_turn`, `ready` and `error`, an agent holds no env value, and a session record
+  is the `ChatSessionRecord` of `api.md` (usage, `last_turn_at`, `cache_ttl_seconds`, the context
+  gauge, `pending_options`, `process` with its holders).
+- **`items`.** The stored items after `--after` (default 0), at most 500. The text form prints one
+  line each: the `seq`, the kind and a one-line summary.
+- **The JSON of the others.** `send`, `answer`, `interrupt` and `set` answer `{"schema_version": 1,
+  "replayed": …, "session": <ChatSessionRecord>, "note": …}`, where `note` appears only when an
+  admitted command could not act. `start` and `end` answer the session shape of `project`'s chat
+  commands, with the same optional `note`. The text forms are one line each (`session S-1 started in
+  /path (worktree W-1)`, `sent to S-1`, …).
+- **The lifetime.** One live process for each chat. A process is *not idle* while a turn runs, a
+  background task runs or a request is pending. A process that is none of these for 30 minutes is
+  released: it is stopped, a `notice` item says so, and `chat stop reason=idle` is written. Nothing
+  reopens a released process except the operator's next `send`: no timer, tick or notice does. The
+  cap is `PF_CHAT_MAX_LIVE` (default 4). An open that would pass it is refused, no process is
+  released early to make room, and the refusal names every live chat and why it holds its process:
+  `the chat process cap (4) is reached: S-3 waits for an answer since <t>; S-5 holds background task
+  <id> since <t>; S-7 runs a turn since <t>; S-8 is idle until <t>; end one with pulse-factory
+  session end`. A pending card keeps its process live, so it counts against the cap. `halt`, `end` and
+  a controller stop (`chat stop reason=shutdown`) stop the processes, and the unit states
+  `KillMode=control-group` so that systemd ends any child left. A controller start sets each live
+  session `idle` and closes its pending requests as `lost`; the next `send` resumes it.
+- **Context lost.** When the runtime cannot resume a session (its transcript is missing), the
+  session is marked `context lost: <why>`, a `notice` item says so, and `send` is refused at once.
+  Nothing opens a fresh context for a session that has a runtime session ID. End the session and
+  start a new one. The mark is in memory: after a controller restart the next `send` tries the
+  resume again and marks it again.
+- **Who may call.** A caller with `PF_SEAT_TOKEN` is refused every state-changing `session` verb. The
+  controller checks the caller again: it refuses a caller that is, or descends from, a seat **or a
+  live chat process**, so an Orchestrator cannot drive its own chat or another one. A paired device
+  acts as the operator over the API (`api.md`), on the allowlist.
+
+## `chat-runtime`
+
+```
+pulse-factory chat-runtime install [--json]
+```
+
+Fetches the managed Claude Code copy, checks it against the pin and places it, with no controller
+running. The binary is Anthropic's official per-platform package at the pinned version: the
+controller never ships it, and it never runs a `claude` found on `PATH`. The fetch uses `curl` from
+the registry at `$PF_CHAT_REGISTRY` (default `https://registry.npmjs.org`), unpacks `package/claude`,
+checks its size and SHA-256 against the pin and places it, mode 0755, at
+`$PF_SHARE_DIR/claude/<version>/claude`. A copy that matches the pin is not fetched again. A failed
+download, a tarball with no `package/claude`, and a size or SHA-256 that differs from the pin each
+place nothing, leave an existing file as it was and print the cause and the URL; the exit is 1.
+Success prints `the chat runtime Claude Code <version> is installed at <path>`. The JSON is
+`{"schema_version": 1, "installed": true, "version": "<version>", "path": "<path>"}`, or, with exit 1,
+`{"schema_version": 1, "installed": false, "error": "<cause and URL>"}` on stdout. A controller with a registry set checks the copy at its start on a background thread
+and runs the same fetch when it is missing or altered; until a good copy is in place, a chat open is
+refused with the adapter's text, which names this verb.
 
 ## `device`
 

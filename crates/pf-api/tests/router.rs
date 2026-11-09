@@ -93,6 +93,7 @@ impl ApiHost for Fake {
             version: "0.1.0".to_string(),
             key_spki_sha256: hex(&SPKI),
             device: None,
+            server: None,
         }
     }
 }
@@ -140,6 +141,23 @@ async fn send(app: &Router, mut request: Request<Body>) -> Reply {
     assert_eq!(
         response.headers().get(header::CONTENT_TYPE).unwrap(),
         "application/json"
+    );
+    // Every answer of every route names the server: the 200s, the 401s, the 403s and the rest.
+    assert_eq!(
+        response
+            .headers()
+            .get("pf-server-id")
+            .map(|v| v.to_str().unwrap()),
+        Some(hex(&SPKI).as_str()),
+        "pf-server-id on a {status} answer"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("pf-server-name")
+            .map(|v| v.to_str().unwrap()),
+        Some("server"),
+        "pf-server-name on a {status} answer"
     );
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     Reply {
@@ -420,6 +438,8 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         "device_list",
         "device_revoke",
         "api_status",
+        "session_redact",
+        "session_items",
         "no_such_verb",
         "Project_List",
         "project_list ",
@@ -440,8 +460,69 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{verb}");
     }
     assert_eq!(calls(&fake), 0);
-    // The allowlist is exactly the three project verbs. `halt` and every ack are off it.
-    assert_eq!(ALLOWLIST, ["project_add", "project_list", "project_remove"]);
+    // The allowlist is exactly these ten verbs: the project verbs and the chat verbs. `halt`, every
+    // ack, `session_redact` (the CLI only) and `session_items` (the stream reads the items) are off.
+    assert_eq!(
+        ALLOWLIST,
+        [
+            "project_add",
+            "project_list",
+            "project_remove",
+            "session_list",
+            "session_start",
+            "session_send",
+            "session_answer",
+            "session_interrupt",
+            "session_set",
+            "session_end",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn every_chat_verb_on_the_allowlist_reaches_call_with_its_name_and_body() {
+    let (app, fake) = rig();
+    let chat = [
+        "session_list",
+        "session_start",
+        "session_send",
+        "session_answer",
+        "session_interrupt",
+        "session_set",
+        "session_end",
+    ];
+    for verb in chat {
+        let body = json!({ "verb": verb });
+        let reply = send(
+            &app,
+            request(
+                "POST",
+                &format!("/v1/verbs/{verb}"),
+                Some(TOKEN),
+                serde_json::to_vec(&body).unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{verb}");
+    }
+    let seen = fake.seen.lock().unwrap();
+    let names: Vec<&str> = seen.calls.iter().map(|(v, _)| v.as_str()).collect();
+    assert_eq!(names, chat);
+}
+
+#[tokio::test]
+async fn the_stream_route_needs_a_token_and_an_upgrade_and_is_not_a_missing_path() {
+    let (app, fake) = rig();
+    // No token: 401, as on the other token routes.
+    let reply = send(&app, request("GET", "/v1/stream", None, Vec::new())).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    // A good token and no upgrade headers: 400, not 404.
+    let reply = send(&app, request("GET", "/v1/stream", Some(TOKEN), Vec::new())).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.error());
+    // Another method: 405.
+    let reply = send(&app, request("POST", "/v1/stream", Some(TOKEN), Vec::new())).await;
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(calls(&fake), 0);
 }
 
 #[tokio::test]
