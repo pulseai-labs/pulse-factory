@@ -185,7 +185,7 @@ function byCreation(a: ChatSessionRecord, b: ChatSessionRecord): number {
 
 export function ChatProvider(props: { transport: Transport; children: ReactNode }) {
   const { transport, children } = props;
-  const { call, report, epoch } = useConnection();
+  const { call, report, epoch, link } = useConnection();
   const [state, dispatch] = useReducer(reduce, INITIAL);
   const [following, setFollowing] = useState<string | null>(null);
   const [halt, setHalt] = useState<Halt | null>(null);
@@ -288,13 +288,18 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
   }, [refreshList]);
 
   // When the link comes back: the session list once, and a new stream if a link failure ended it.
+  // The link comes back either by a `status()` retry (`epoch` rises) or by any call that reaches
+  // the server (the link goes from down to up without a new `epoch`).
   const lastEpoch = useRef(epoch);
+  const lastLinkState = useRef(link.state);
   useEffect(() => {
-    if (epoch === lastEpoch.current) return;
+    const cameBack = lastLinkState.current !== "up" && link.state === "up";
+    lastLinkState.current = link.state;
+    if (epoch === lastEpoch.current && !cameBack) return;
     lastEpoch.current = epoch;
     void refreshList();
     setHalt((h) => (h && h.kind === "link" ? null : h));
-  }, [epoch, refreshList]);
+  }, [epoch, link.state, refreshList]);
 
   const follow = useCallback((session: string | null) => setFollowing(session), []);
   const reconnect = useCallback(() => {

@@ -146,6 +146,24 @@ describe("what the stream's events do", () => {
   });
 
   it.each([
+    ["unreachable", "the bridge closed the stream"],
+    ["rate_limited", "too many failed calls; wait a minute"],
+  ] as const)("`%s`: a call that succeeds before any retry brings the link back and reopens the stream", async (kind, message) => {
+    const fake = seeded();
+    const user = await bootChat(fake, "S-1", [notice(1), notice(2)]);
+    const opens = fake.count("openStream");
+    await emit(fake, closed(kind, message));
+    expect(fake.count("openStream")).toBe(opens);
+    // An ordinary verb succeeds; no `status()` retry runs.
+    await user.type(screen.getByRole("textbox", { name: "Message Orchestrator" }), "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(fake.count("openStream")).toBe(opens + 1));
+    expect(fake.current()?.options).toEqual({ session: "S-1", after: 2 });
+    expect(fake.count("status")).toBe(0);
+    expect(screen.queryByText(/Not connected/)).toBeNull();
+  });
+
+  it.each([
     ["unauthorized", "this device was revoked; pair it again", `This device is no longer paired with ${ADDRESS}.`],
     ["key_changed", "server key changed: re-pair", "server key changed: re-pair"],
   ] as const)("`%s`: shows the banner and never reopens", async (kind, message, banner) => {
