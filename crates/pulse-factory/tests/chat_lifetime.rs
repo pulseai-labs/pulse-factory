@@ -474,3 +474,103 @@ fn a_withdrawn_request_restarts_the_idle_clock() {
     assert_eq!(rec.stop_count(), 1);
     assert_eq!(notices(&live, &s, "idle_release"), 1);
 }
+
+/// A halt that waits in `port.stop` for one chat, with that chat holding a pending approval. The
+/// test releases it after the checks it makes while the stop holds.
+fn halt_while_stop_holds(rec: &std::sync::Arc<Rec>, live: &Live, during: impl FnOnce(&Live)) {
+    let hold = rec.hold_next_stop();
+    std::thread::scope(|scope| {
+        let halt = scope.spawn(|| cli_json(live, &["halt", "--reason", "test"]));
+        hold.entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the halt reached port.stop");
+        during(live);
+        hold.release.send(()).unwrap();
+        halt.join().unwrap();
+    });
+}
+
+#[test]
+fn a_send_while_a_stop_runs_opens_no_second_process_and_the_stop_closes_only_its_own_requests() {
+    let rec = Rec::new(strict_fake());
+    let live = start_with(rec.clone(), |_| {});
+    let (_, s) = started(&live, "alpha");
+    cli_json(&live, &["session", "send", &s, "fake:approval"]);
+    wait_state(&live, &s, ChatSessionState::NeedsYou);
+    let opens = rec.open_count();
+
+    halt_while_stop_holds(&rec, &live, |live| {
+        // The process is stopping and still in the table. A send must not open a second one.
+        let why = cli_refused(live, &["session", "send", &s, "again"]);
+        assert!(why.contains("is stopping"), "{why}");
+        assert_eq!(rec.open_count(), opens, "no second process opened");
+    });
+
+    assert_eq!(rec.open_count(), opens);
+    assert!(live.controller.live_chat_sessions().is_empty());
+    // The old request closed as lost, once, and nothing is left pending.
+    assert!(
+        live.controller
+            .store()
+            .pending_requests(&s)
+            .unwrap()
+            .is_empty()
+    );
+    let lost = items(&live, &s)
+        .into_iter()
+        .filter(|i| i.kind == "approval_answer")
+        .count();
+    assert_eq!(lost, 1);
+    // The next send opens one process, which is not closed under it.
+    cli_json(&live, &["session", "send", &s, "back"]);
+    wait_turns(&live, &s, 1);
+    assert_eq!(rec.open_count(), opens + 1);
+    assert_eq!(live.controller.live_chat_sessions(), [s.as_str()]);
+}
+
+#[test]
+fn an_event_the_pump_dequeued_before_a_stop_leaves_no_request_and_no_state_behind() {
+    use pf_engine::port::chat::{ChatEvent, cap};
+
+    let rec = Rec::new(strict_fake());
+    let live = start_with(rec.clone(), |_| {});
+    let (_, s) = started(&live, "alpha");
+    let hold = rec.hold_next_stop();
+
+    std::thread::scope(|scope| {
+        let halt = scope.spawn(|| cli_json(&live, &["halt", "--reason", "test"]));
+        hold.entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the halt reached port.stop");
+        // The pump holds this event and waits for `io`, which the halt holds until the stop ends.
+        let late = scope.spawn(|| {
+            live.controller.apply_chat_event(
+                &s,
+                ChatEvent::ApprovalRequest {
+                    request_id: "late".into(),
+                    tool: "Bash".into(),
+                    input: cap("{}"),
+                    reason: None,
+                },
+            )
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        hold.release.send(()).unwrap();
+        halt.join().unwrap();
+        late.join()
+            .unwrap()
+            .expect("the event found the stopping process");
+    });
+
+    assert!(
+        live.controller
+            .store()
+            .pending_requests(&s)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(count_kind(&live, &s, "approval_request"), 0);
+    let row = live.controller.store().chat_session(&s).unwrap().unwrap();
+    assert_eq!(row.state, ChatSessionState::Idle);
+    assert!(live.controller.live_chat_sessions().is_empty());
+}

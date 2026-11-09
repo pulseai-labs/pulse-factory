@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use pf_adapter_fake::FakeChat;
@@ -32,6 +32,17 @@ pub struct Rec {
     pub chats: Mutex<Vec<ChatId>>,
     /// The process id each chat reports, for the caller check.
     pub pids: Mutex<BTreeMap<ChatId, u32>>,
+    /// A stop that waits: the next `stop` sends on `.0` when it starts, then blocks until `.1`
+    /// receives (or its sender drops). `hold_next_stop` arms it.
+    stop_hook: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+/// The two ends of a held stop, for the test.
+pub struct StopHold {
+    /// Receives once the stop has started and holds.
+    pub entered: mpsc::Receiver<()>,
+    /// Send (or drop) to let the stop finish.
+    pub release: mpsc::Sender<()>,
 }
 
 impl Rec {
@@ -42,7 +53,16 @@ impl Rec {
             sets: Mutex::new(Vec::new()),
             chats: Mutex::new(Vec::new()),
             pids: Mutex::new(BTreeMap::new()),
+            stop_hook: Mutex::new(None),
         })
+    }
+
+    /// Make the next `stop` of any chat wait until the test releases it.
+    pub fn hold_next_stop(&self) -> StopHold {
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        *self.stop_hook.lock().unwrap() = Some((entered_tx, release_rx));
+        StopHold { entered, release }
     }
 
     pub fn open_count(&self) -> usize {
@@ -103,6 +123,11 @@ impl ChatPort for Rec {
         self.fake.is_alive(chat)
     }
     fn stop(&self, chat: &ChatId) -> Result<(), ChatError> {
+        let hook = self.stop_hook.lock().unwrap().take();
+        if let Some((entered, release)) = hook {
+            let _ = entered.send(());
+            let _ = release.recv();
+        }
         self.fake.stop(chat)
     }
     fn process_id(&self, chat: &ChatId) -> Option<u32> {

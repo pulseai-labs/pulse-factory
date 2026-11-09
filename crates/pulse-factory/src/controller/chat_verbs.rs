@@ -817,7 +817,7 @@ impl Controller {
                 Err(e) => {
                     let why = e.to_string();
                     self.stop_chat(&live, "option");
-                    self.close_pending(&args.session_id, "the chat process stopped");
+                    self.close_pending(&live, "the chat process stopped");
                     self.notice(
                         &args.session_id,
                         "option_restart",
@@ -855,7 +855,7 @@ impl Controller {
         if !known && let Some(live) = self.live_chat(&args.session_id) {
             let _io = lock(&live.io);
             self.stop_chat(&live, "end");
-            self.close_pending(&args.session_id, "the session ended");
+            self.close_pending(&live, "the session ended");
         }
         let ended = match self.end_chat_session(&ChatSessionEndArgs {
             session_id: args.session_id.clone(),

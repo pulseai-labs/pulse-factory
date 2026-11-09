@@ -12,7 +12,7 @@
 //! The verbs that use these live in `chat_verbs.rs`. The records and the item conversions are in
 //! `chat_view.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -538,8 +538,18 @@ impl Controller {
         }
     }
 
-    /// Close every pending request of a session with a `lost` answer. Returns how many it closed.
-    pub(super) fn close_pending(&self, session_id: &str, reason: &str) -> usize {
+    /// Close the pending requests of a stopped process with a `lost` answer. Returns how many it
+    /// closed. It is scoped to the process it is given: when another process of the same session
+    /// is live, it closes only the requests this one held and leaves the other's untouched. It
+    /// holds the open lock, so no process of the session opens while it reads the table and the
+    /// store.
+    pub(super) fn close_pending(&self, live: &Arc<LiveChat>, reason: &str) -> usize {
+        let session_id = live.session.as_str();
+        let _no_open = lock(&self.chats.open_lock);
+        let replaced = lock(&self.chats.live)
+            .get(session_id)
+            .is_some_and(|other| !Arc::ptr_eq(other, live));
+        let own: BTreeSet<u64> = lock(&live.inner).requests.keys().copied().collect();
         let pending = match self.store.pending_requests(session_id) {
             Ok(p) => p,
             Err(e) => {
@@ -551,6 +561,9 @@ impl Controller {
         };
         let mut closed = 0;
         for request in pending {
+            if replaced && !own.contains(&request.seq) {
+                continue;
+            }
             let Some(answer) =
                 ChatItemKind::parse(&request.kind).and_then(ChatItemKind::answered_by)
             else {
@@ -563,9 +576,7 @@ impl Controller {
                 closed += 1;
             }
         }
-        if let Some(live) = lock(&self.chats.live).get(session_id) {
-            lock(&live.inner).requests.clear();
-        }
+        lock(&live.inner).requests.clear();
         closed
     }
 
@@ -603,6 +614,17 @@ impl Controller {
         let _one = lock(&self.chats.open_lock);
         if let Some(live) = self.live_chat(&row.id) {
             return Ok(live);
+        }
+        // A process that is being stopped still holds the session. A second process opens only
+        // after the stop has taken the first out of the table.
+        if lock(&self.chats.live)
+            .get(&row.id)
+            .is_some_and(|l| l.is_stopping())
+        {
+            return Err(OpenFailure::Refused(format!(
+                "the chat process of session {} is stopping; send again in a moment",
+                row.id
+            )));
         }
         let failed = |why: String| OpenFailure::Failed(why);
         let port = self.chat_port(&row.runtime).map_err(OpenFailure::Refused)?;
@@ -769,11 +791,10 @@ impl Controller {
             "stop session={} reason={reason}",
             field(&live.session)
         ));
-        let mut inner = lock(&live.inner);
-        inner.context = None;
-        // The process is gone, so its requests cannot be answered. The process left the table
-        // above, which `close_pending` reads, so the set is cleared here.
-        inner.requests.clear();
+        // The requests stay in the set: `close_pending` reads them to close this process's own
+        // requests as lost, and it clears the set. The process left the table, so no answer
+        // reaches them.
+        lock(&live.inner).context = None;
     }
 
     // -------------------------------------------------------------- the cap
@@ -832,6 +853,19 @@ impl Controller {
     pub(super) fn handle_event(&self, live: &Arc<LiveChat>, event: ChatEvent) {
         let result = {
             let _io = lock(&live.io);
+            // A stopper sets `stopping` while it holds `io`, so an event that waited for the lock
+            // sees the flag here. A stopped process owns no state any more: only the result of a
+            // finished turn and a moved runtime session still apply.
+            if live.is_stopping()
+                && !matches!(
+                    event,
+                    ChatEvent::TurnResult { .. }
+                        | ChatEvent::SessionMoved { .. }
+                        | ChatEvent::Exited { .. }
+                )
+            {
+                return;
+            }
             self.apply_event(live, event)
         };
         if result.turn_ended {
@@ -1111,7 +1145,7 @@ impl Controller {
                     "exited",
                     &format!("the chat process exited (code {code_text}): {reason}"),
                 );
-                self.close_pending(session, "the chat process exited");
+                self.close_pending(live, "the chat process exited");
                 // A tool still open at the exit is stored with no output and `finished: false`.
                 let open_tools = std::mem::take(&mut lock(&live.inner).tools);
                 for (call_id, (tool, input)) in open_tools {
@@ -1133,7 +1167,6 @@ impl Controller {
                     let mut inner = lock(&live.inner);
                     inner.turn_since = None;
                     inner.tasks.clear();
-                    // The process left the table above, so `close_pending` cannot reach this set.
                     inner.requests.clear();
                     inner.context = None;
                 }
@@ -1194,7 +1227,7 @@ impl Controller {
         for live in self.live_chats() {
             let _io = lock(&live.io);
             self.stop_chat(&live, "halt");
-            self.close_pending(&live.session, "halted");
+            self.close_pending(&live, "halted");
             self.notice(
                 &live.session,
                 "halted",
@@ -1215,6 +1248,7 @@ impl Controller {
     /// Stop every live process and end every stream, for a controller stop.
     pub fn shutdown_chats(&self) {
         for live in self.live_chats() {
+            let _io = lock(&live.io);
             self.stop_chat(&live, "shutdown");
         }
         let mut streams = lock(&self.chats.streams);
