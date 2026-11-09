@@ -189,3 +189,16 @@ The chat stream and the chat controller add one crate, one feature and three dep
   JSON, reads the token from a file, and is no product surface; `pf-client`'s own stream may replace
   it. `scripts/install.sh` also installs `pf-claude-replay` for the same demo.
 
+## Amendment, 2026-11-09 (`r1.s3.w4`)
+
+The pinned client takes the stream's async client and one new direct dependency.
+
+- **`futures-util`**, pinned with `=0.3.34`, with `default-features = false` and the features `sink` and `std`,
+  is a workspace dependency of `pf-client`, for `StreamExt` and `SinkExt` on the WebSocket. First-use check:
+  it is already in both lock files (through axum and `tokio-tungstenite`), it is not yanked, and draco-desk's
+  offline cache holds it. `Cargo.lock` gains edges (`pf-client` to `futures-util`, `tokio-tungstenite` and,
+  as a dev-dependency, `pf-ipc`) and no new package. `apps/desktop/src-tauri/Cargo.lock` gains the first two.
+- **`tokio-tungstenite`** is now also a dependency of `pf-client`: its async client
+  (`client_async_with_config`) runs the WebSocket upgrade on the pinned TLS stream. The version and the
+  features (`handshake`) do not change.
+- **`rt-multi-thread`** is a dev-dependency feature of `tokio` in `pf-client`, for its stream tests.

@@ -886,11 +886,13 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
  "pf-api",
  "pf-engine",
+ "pf-ipc",
  "rcgen",
  "rustls",
  "security-framework",
@@ -899,6 +901,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
 ]
 
 [[package]]

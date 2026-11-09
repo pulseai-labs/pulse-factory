@@ -28,14 +28,17 @@ bytes.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 
 # The Keychain is on the Mac only. The Linux build and its tests never compile this crate.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true
 
 [dev-dependencies]
+pf-ipc = { path = "../pf-ipc" }
 rcgen.workspace = true
 # TLS 1.2 is compiled in for the tests only, so a test server can offer it and show the client refuse it
 rustls = { workspace = true, features = ["tls12"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "time", "sync", "io-util", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }

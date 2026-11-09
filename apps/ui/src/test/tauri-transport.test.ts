@@ -12,6 +12,9 @@ const isTauri = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
   isTauri: () => isTauri(),
+  Channel: class {
+    onmessage: (message: unknown) => void = () => {};
+  },
 }));
 
 const DEVICE = {
@@ -84,6 +87,13 @@ describe("a rejection becomes a TransportError of its kind", () => {
     ["projectList", (t) => t.projectList()],
     ["projectAdd", (t) => t.projectAdd({ root: "/r", name: null, command_id: "c" } as ProjectAddArgs)],
     ["forget", (t) => t.forget()],
+    ["sessionList", (t) => t.sessionList()],
+    ["sessionStart", (t) => t.sessionStart({ project_id: "P-1", agent_id: "orchestrator", command_id: "c" })],
+    ["sessionSend", (t) => t.sessionSend({ session_id: "S-1", text: "x", command_id: "c" })],
+    ["sessionAnswer", (t) => t.sessionAnswer({ session_id: "S-1", seq: 1, answer: { type: "allow" }, command_id: "c" })],
+    ["sessionInterrupt", (t) => t.sessionInterrupt({ session_id: "S-1", command_id: "c" })],
+    ["sessionSet", (t) => t.sessionSet({ session_id: "S-1", effort: "low", command_id: "c" })],
+    ["sessionEnd", (t) => t.sessionEnd({ session_id: "S-1", command_id: "c" })],
   ];
 
   it.each(TRANSPORT_ERROR_KINDS)("kind %s", async (kind) => {
