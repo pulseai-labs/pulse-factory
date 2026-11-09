@@ -437,17 +437,20 @@ stream (`api.md`).
 - **`answer`.** `<seq>` names a pending `approval_request` or `question_request` of a live session
   with a process. `--allow` and `--deny <message>` answer an approval (the message has no line break
   and at most 1000 characters). `--answer <question>=<label>` answers a question; repeat it for each
-  question. Refused: an unknown, answered or closed request, the wrong kind of answer, and a session
+  question. The last `=` with no backslash before it separates the two. Write `\=` for an `=` inside
+  the question or the label, and `\\` for a backslash before one (a backslash before any other
+  character stays as it is). A `send` text, a `--deny` message and an `--option` value may start with
+  `-`. Refused: an unknown, answered or closed request, the wrong kind of answer, and a session
   with no process.
 - **`interrupt`.** Ends the running turn. With no turn it is admitted and does nothing.
 - **`set`.** At least one field. Each value is checked against the runtime's declared options, and a
   bad value or an undeclared option ID is refused with the declared values. The values are stored on
   the session row, so they survive a release and a resume, and the agent's defaults never change.
+  Two overlapping `set` calls each keep their own options: the store merges the `--option` values
+  into the session's map key by key at the commit.
   With a live process, a changed option that the runtime declares `live` (model, effort and permission
   mode for Claude Code 2.1.319) applies at once. An option that is not live (`artifacts`) shows in
   `pending_options`, and the next `send` to an idle process (no turn, no task, no pending request)
-  Two overlapping `set` calls each keep their own options: the store merges the `--option` values
-  into the session's map key by key at the commit.
   stops it (`chat stop reason=option`) and reopens it with the new value first. A live change that
   fails stops the process and adds a notice; the next send reopens it.
 - **`end`.** Stops the process and its group, closes each pending request as `lost` (`the session

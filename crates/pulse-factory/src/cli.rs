@@ -296,7 +296,8 @@ pub struct SessionStartArgs {
 pub struct SessionSendArgs {
     /// The chat, such as `S-1`.
     pub id: String,
-    /// The message: 1 byte to 256 KiB.
+    /// The message: 1 byte to 256 KiB. It may start with `-`.
+    #[arg(allow_hyphen_values = true)]
     pub text: String,
     #[arg(long, value_name = "ID")]
     pub command_id: Option<String>,
@@ -315,10 +316,17 @@ pub struct SessionAnswerArgs {
     #[arg(long, conflicts_with_all = ["deny", "answer"])]
     pub allow: bool,
     /// Deny the tool call, with a message of at most 1000 characters and no line break.
-    #[arg(long, value_name = "MESSAGE", conflicts_with = "answer")]
+    #[arg(
+        long,
+        value_name = "MESSAGE",
+        conflicts_with = "answer",
+        allow_hyphen_values = true
+    )]
     pub deny: Option<String>,
-    /// Answer a question: `<question>=<label>`. Repeat for each question.
-    #[arg(long, value_name = "QUESTION=LABEL")]
+    /// Answer a question: `<question>=<label>`. Repeat for each question. The last `=` that has no
+    /// backslash before it separates the two; write `\=` for an `=` inside either, and `\\` for a
+    /// backslash before one.
+    #[arg(long, value_name = "QUESTION=LABEL", allow_hyphen_values = true)]
     pub answer: Vec<String>,
     #[arg(long, value_name = "ID")]
     pub command_id: Option<String>,
@@ -350,7 +358,7 @@ pub struct SessionSetArgs {
     #[arg(long, value_name = "MODE")]
     pub mode: Option<String>,
     /// A runtime option: `<id>=<value>`. Repeat for each.
-    #[arg(long, value_name = "ID=VALUE")]
+    #[arg(long, value_name = "ID=VALUE", allow_hyphen_values = true)]
     pub option: Vec<String>,
     #[arg(long, value_name = "ID")]
     pub command_id: Option<String>,

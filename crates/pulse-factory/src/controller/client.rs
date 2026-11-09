@@ -895,6 +895,34 @@ pub fn session_send(a: &SessionSendArgs) -> i32 {
     })
 }
 
+/// Split an `--answer` pair at its last `=` that has no backslash before it. `\=` is a literal `=`
+/// and `\\` a literal backslash in either part; a backslash before any other character stays as
+/// it is. A pair with no separator is `None`. Text with no backslash splits at its last `=`.
+fn split_answer(pair: &str) -> Option<(String, String)> {
+    let mut parts = vec![String::new()];
+    let mut chars = pair.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if matches!(chars.peek(), Some('=' | '\\')) => {
+                if let (Some(next), Some(part)) = (chars.next(), parts.last_mut()) {
+                    part.push(next);
+                }
+            }
+            '=' => parts.push(String::new()),
+            other => {
+                if let Some(part) = parts.last_mut() {
+                    part.push(other);
+                }
+            }
+        }
+    }
+    let label = parts.pop()?;
+    if parts.is_empty() {
+        return None;
+    }
+    Some((parts.join("="), label))
+}
+
 pub fn session_answer(a: &SessionAnswerArgs) -> i32 {
     if let Some(code) = refuse_seat("session answer") {
         return code;
@@ -906,9 +934,9 @@ pub fn session_answer(a: &SessionAnswerArgs) -> i32 {
     } else if !a.answer.is_empty() {
         let mut map = serde_json::Map::new();
         for pair in &a.answer {
-            match pair.rsplit_once('=') {
+            match split_answer(pair) {
                 Some((question, label)) if !question.is_empty() => {
-                    map.insert(question.to_string(), Value::String(label.to_string()));
+                    map.insert(question, Value::String(label));
                 }
                 _ => {
                     return session_failed(
@@ -1258,5 +1286,31 @@ pub fn chat_runtime_install(a: &ChatRuntimeInstallArgs) -> i32 {
             }
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::split_answer;
+
+    fn pair(a: &str, b: &str) -> Option<(String, String)> {
+        Some((a.to_string(), b.to_string()))
+    }
+
+    #[test]
+    fn a_pair_splits_at_the_last_bare_equals_sign() {
+        assert_eq!(split_answer("Which one?=B"), pair("Which one?", "B"));
+        // No backslash: the last `=` separates, as before.
+        assert_eq!(split_answer("a=b=c"), pair("a=b", "c"));
+        // An escaped `=` is literal, in the label or in the question (PR #41, class C4).
+        assert_eq!(split_answer(r"Which?=x\=1"), pair("Which?", "x=1"));
+        assert_eq!(split_answer(r"a\=b=c"), pair("a=b", "c"));
+        // `\\` is a backslash, so the `=` after it separates. Another backslash stays as it is.
+        assert_eq!(split_answer(r"path\\=C"), pair(r"path\", "C"));
+        assert_eq!(split_answer(r"a\nb=c"), pair(r"a\nb", "c"));
+        // No separator, or an empty label, as before.
+        assert_eq!(split_answer("nothing"), None);
+        assert_eq!(split_answer(r"only\=escaped"), None);
+        assert_eq!(split_answer("q="), pair("q", ""));
     }
 }

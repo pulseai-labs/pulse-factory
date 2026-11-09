@@ -631,3 +631,49 @@ fn an_agent_whose_runtime_is_not_on_this_server_is_refused_at_its_start() {
             .is_empty()
     );
 }
+
+/// PR #41, class C4: a text that starts with `-` is a value, not a flag.
+#[test]
+fn a_message_a_deny_text_and_an_option_value_may_start_with_a_hyphen() {
+    let rec = Rec::new(strict_fake());
+    let live = start(rec);
+    let (_, s) = started(&live, "alpha");
+
+    cli_json(&live, &["session", "send", &s, "- check the log"]);
+    cli_json(&live, &["session", "send", &s, "-1 is the answer"]);
+    wait_turns(&live, &s, 2);
+    let sent: Vec<String> = items(&live, &s)
+        .into_iter()
+        .filter(|i| i.kind == "operator_message")
+        .map(|i| text_of(&i)["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(sent, ["- check the log", "-1 is the answer"]);
+
+    cli_json(&live, &["session", "send", &s, "fake:approval"]);
+    wait_for(&live, &s, "the approval request", |i| {
+        i.iter().any(|x| x.kind == "approval_request")
+    });
+    let seq = seq_of(&live, &s, "approval_request");
+    cli_json(
+        &live,
+        &[
+            "session",
+            "answer",
+            &s,
+            &seq.to_string(),
+            "--deny",
+            "-x not now",
+        ],
+    );
+    wait_for(&live, &s, "the deny text in the reply", |i| {
+        i.iter()
+            .any(|x| x.kind == "assistant_text" && text_of(x)["text"] == "denied: -x not now")
+    });
+
+    // The value reaches the controller, which refuses it as an option value and not as a flag.
+    let why = cli_refused(&live, &["session", "set", &s, "--option", "artifacts=-x"]);
+    assert!(
+        !why.contains("unexpected argument") && why.contains("artifacts"),
+        "{why}"
+    );
+}
