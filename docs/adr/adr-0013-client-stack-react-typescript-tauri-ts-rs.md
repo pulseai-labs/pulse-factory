@@ -3,6 +3,8 @@
 - **Status:** Proposed, 2026-11-07, at `r1.s2.w3`. It becomes Accepted at that item's close. `r1.s2.w4`
   adds the Tauri lines.
 - **Date:** 2026-11-07
+- **Amended:** 2026-11-09, at `r1.s3.w4`: the chat verbs and the chat stream in the `Transport`
+  interface, one bridge route and nine Tauri commands.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk,
@@ -197,3 +199,50 @@ older Node 22.
   3b's server row, 3c's retry rule, Q5's rail). The operator compares the screenshots with the canvas.
 
 Revisit this ADR when the Android app is planned, or the macOS webview fails the terminal or the editor.
+
+## Amendment, 2026-11-09 (`r1.s3.w4`)
+
+`r1.s3.w4` adds the chat to the client stack. It keeps the CSP of the Tauri config and the rule that the
+app declares no capability file, and it adds no npm dependency.
+
+- **The interface grows.** The Consequences rule "each verb added to the allowlist adds its `Transport` method"
+  applies to the seven chat verbs: `sessionList`, `sessionStart`, `sessionSend`, `sessionAnswer`,
+  `sessionInterrupt`, `sessionSet` and `sessionEnd`. It also gains `openStream(options, onEvent)`, which
+  returns a handle with `close()`. `openStream` never rejects for a stream failure: every failure is one
+  `closed` event from either implementation, so a screen handles one path (`docs/contracts/ui-transport.md`).
+- **Hand-written transport types.** `SessionStarted`, `SessionEnded`, `StreamEvent`, `StreamOptions` and
+  `PairedServer.server` are written by hand in `apps/ui/src/transport/types.ts`, as `PairedServer` is. There
+  is no wire type for the answers of `session_start` and `session_end`: the controller's own answers have none,
+  and a wire type for them is a later change to `pf-api`. The event envelope is the transport's, and its
+  `frame` member is the generated `ChatFrame`.
+- **The bridge route.** `GET /bridge/stream` carries the stream to the browser as Server-Sent Events: a
+  same-origin `GET` that `default-src 'self'` allows, so the bridge's CSP does not change. A WebSocket would
+  need a `connect-src` for `ws://`. Known limit: each open `EventSource` holds one of the browser's six
+  HTTP/1.1 connections to the bridge, so the UI follows one session per stream.
+- **Nine Tauri commands.** The shell adds `session_list`, `session_start`, `session_send`, `session_answer`,
+  `session_interrupt`, `session_set`, `session_end`, `open_stream` and `close_stream`. `open_stream` takes the
+  stream options and a `tauri::ipc::Channel<StreamEvent>`, and returns the stream's ID.
+- **A Channel, not Tauri's event system.** Tauri's `listen` needs a capability that grants `core:event`, and this
+  ADR says the app declares no capability file. A `Channel` is the IPC that Tauri provides for ordered
+  streaming to one webview call, and it needs no capability. The webview still opens no network connection.
+- **A reload closes the streams.** The shell's `on_page_load` hook calls `Streams::close_all()` when a page
+  starts loading, so a reloaded webview leaves no stream open behind a channel that nobody reads.
+- **The desktop lock.** `pf-client`'s dependencies grew (`tokio-tungstenite` and `futures-util`), so
+  `apps/desktop/src-tauri/Cargo.lock` is refreshed in this item with `cargo metadata`, which compiles nothing.
+  Without it the `macos-app` job fails on `--locked`.
+- **No timer in the UI.** Neither implementation of the interface sets a timer: the reconnect lives in
+  `pf-client` once, for both, so the UI never polls (C15).
+
+### Verified claims (r1.s3.w4)
+- Both implementations run one table of cases (`fetch` and `EventSource` mocked, `invoke` and `Channel` mocked):
+  each chat method sends its verb or command with its arguments, each of the nine error kinds becomes a
+  `TransportError`, `openStream` delivers the same scripted events in order, nothing follows `closed`, a value of
+  another shape is dropped, no call holds the word `token`, and no timer is set
+  (`apps/ui/src/test/transport-contract.test.ts`, 2026-11-09).
+- The names in `generate_handler![…]`, the `#[tauri::command]` functions, `TAURI_COMMANDS` and the contract's
+  table are one set, each command's Rust argument names are the `invoke` keys in snake case, and `open_stream`'s
+  `on_event` is a `Channel` (`apps/ui/src/test/tauri-commands.test.ts`, 2026-11-09).
+
+### Unverified claims (r1.s3.w4)
+- The `Channel` delivers the stream's events, in order, in the Mac app's webview, and the nine commands' Rust glue
+  runs. No test on draco-desk compiles `main.rs`. The `macos-app` job compiles it, and the d17 walk runs it.

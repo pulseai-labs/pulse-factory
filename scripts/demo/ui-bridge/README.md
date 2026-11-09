@@ -15,3 +15,20 @@ pf-client-bridge --ui <dir> --state <dir>   # prints: listening http://127.0.0.1
 
 `scripts/install.sh` installs it beside `pulse-factory`. `scripts/demo/ui-pair.sh` finds it through
 `PF_BRIDGE_BIN`, then next to `PF_BIN`, then on `PATH`.
+
+## The chat
+
+Since `r1.s3.w4` the bridge carries the chat too (`docs/contracts/ui-transport.md`, "The chat stream"):
+
+- `POST /bridge/verbs/<verb>` reaches the seven chat verbs (`session_list`, `session_start`,
+  `session_send`, `session_answer`, `session_interrupt`, `session_set`, `session_end`) through the typed
+  methods of `pf-client`, so a bad argument fails at the bridge. `session_start` and `session_end`
+  answer the transport's `SessionStarted` and `SessionEnded`. `session_redact` and `session_items`
+  are off the allowlist and answer `bad_request` with no connection.
+- `GET /bridge/stream[?session=<S-n>&after=<n>]` is the chat stream as Server-Sent Events: `200`,
+  `Content-Type: text/event-stream`, each event one `data: <JSON>` line, and the response ends after a
+  `closed` event. The reconnect is `pf-client`'s: the bridge sends a `reconnecting` event while it waits.
+  When the page drops the response, the bridge closes the upstream socket. A browser's `EventSource`
+  reaches it with no change to the content security policy.
+
+The bridge still writes nothing to stdout or stderr but its one `listening` line.

@@ -384,9 +384,8 @@ There is no key rotation without a re-pair in this version.
 
 ## Out of this version
 
-These come in later items and spines: the stream in `pf-client` and the macOS shell (`r1.s3.w4`) and
-the chat screens (`r1.s3.w5`); per-device scopes and the merge-ack confirm (`r1.s4`); rotation or a
-size cap of `api.ledger`, `chat.ledger` and `controller.ledger` (the feature map's "controller ledger
+These come in later items and spines: the chat screens (`r1.s3.w5`); per-device scopes and the
+merge-ack confirm (`r1.s4`); rotation or a size cap of `api.ledger`, `chat.ledger` and `controller.ledger` (the feature map's "controller ledger
 rotation"); a per-device rate limit, a ban list that survives a restart and a limit on successful
 calls; a `session_items` verb for devices (the stream's `after=0` gives the history); several
 servers in one app (the server headers are its groundwork).

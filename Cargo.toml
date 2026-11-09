@@ -45,6 +45,9 @@ tokio-rustls = { version = "=0.26.6", default-features = false, features = ["rin
 # the chat stream (r1.s3.w3): axum's `ws` feature needs it, and the stream reader and the tests use its
 # synchronous client (`tungstenite`, re-exported). Pinned with `=`; ADR-0008 records the first-use check.
 tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"] }
+# the chat stream of the pinned client (r1.s3.w4): `StreamExt` and `SinkExt` on the WebSocket. Already in the
+# lock through axum and `tokio-tungstenite`; ADR-0008 records the first-use check.
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 ts-rs = { version = "=12.0.1", default-features = false, features = ["serde-compat"] }
 # the Keychain of the Mac app (r1.s2.w4); `pf-client` takes it on macOS only

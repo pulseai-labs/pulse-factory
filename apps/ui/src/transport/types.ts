@@ -1,12 +1,23 @@
 // The transport interface (docs/contracts/ui-transport.md). The UI reaches the server only through it.
 // The types come from the generated API package. No method takes or returns the device token: the
-// token lives on the native side (the test bridge here, the Tauri shell's Rust side in w4).
+// token lives on the native side (the test bridge, or the Tauri shell's Rust side).
 import type {
   ApiStatus,
+  ChatFrame,
   DeviceRecord,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
+  ServerRef,
+  SessionAnswerArgs,
+  SessionChanged,
+  SessionEndArgs,
+  SessionInterruptArgs,
+  SessionList,
+  SessionListArgs,
+  SessionSendArgs,
+  SessionSetArgs,
+  SessionStartArgs,
 } from "@pulse-factory/api-client";
 
 export type TransportErrorKind =
@@ -47,6 +58,77 @@ export class TransportError extends Error {
 export interface PairedServer {
   address: string;
   device: DeviceRecord;
+  /** The server the last answer named. Known only after an answer, so it can be absent. */
+  server?: ServerRef;
+}
+
+/** What `sessionStart` returns: the transport's own shape (no wire type), from the controller's answer. */
+export interface SessionStarted {
+  replayed: boolean;
+  session_id: string;
+  worktree_id: string;
+  worktree_dir: string;
+  note: string | null;
+}
+
+/** What `sessionEnd` returns. */
+export interface SessionEnded {
+  replayed: boolean;
+  session_id: string;
+  note: string | null;
+}
+
+/** What to follow: one session and its items after `after` (the last `seq` the UI holds; 0 if omitted). */
+export interface StreamOptions {
+  session?: string | null;
+  after?: number;
+}
+
+/**
+ * One thing a chat stream tells the UI. `closed` is the last event: no event follows it or a
+ * `close()`. The reconnect is native: while `reconnecting` the native side waits and tries again.
+ */
+export type StreamEvent =
+  | { event: "frame"; frame: ChatFrame }
+  | { event: "reconnecting"; after: number; retry_in_ms: number; reason: string }
+  | { event: "closed"; error: { kind: TransportErrorKind; message: string } };
+
+export interface StreamHandle {
+  /** Ends the stream. No event follows. */
+  close(): Promise<void>;
+}
+
+const FRAME_TYPES = ["hello", "session", "item", "caught", "delta", "tool_running"] as const;
+
+function isKind(value: unknown): value is TransportErrorKind {
+  return typeof value === "string" && (TRANSPORT_ERROR_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * A native value as a `StreamEvent`, or `null` when it is none of the three shapes. Both
+ * implementations use this, so a value of another shape is dropped the same way in each. A frame
+ * is checked by its `type` only: the generated `ChatFrame` is the native side's to decode.
+ */
+export function parseStreamEvent(value: unknown): StreamEvent | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (v.event === "frame") {
+    const frame = v.frame as { type?: unknown } | null | undefined;
+    if (typeof frame !== "object" || frame === null) return null;
+    if (!(FRAME_TYPES as readonly unknown[]).includes(frame.type)) return null;
+    return { event: "frame", frame: frame as ChatFrame };
+  }
+  if (v.event === "reconnecting") {
+    if (typeof v.after !== "number" || typeof v.retry_in_ms !== "number" || typeof v.reason !== "string") return null;
+    return { event: "reconnecting", after: v.after, retry_in_ms: v.retry_in_ms, reason: v.reason };
+  }
+  if (v.event === "closed") {
+    const error = v.error as { kind?: unknown; message?: unknown } | null | undefined;
+    if (typeof error !== "object" || error === null) return null;
+    if (!isKind(error.kind) || typeof error.message !== "string") return null;
+    return { event: "closed", error: { kind: error.kind, message: error.message } };
+  }
+  return null;
 }
 
 export interface Transport {
@@ -56,6 +138,20 @@ export interface Transport {
   status(): Promise<ApiStatus>;
   projectList(): Promise<ProjectList>;
   projectAdd(args: ProjectAddArgs): Promise<ProjectChanged>;
+  sessionList(args?: SessionListArgs): Promise<SessionList>;
+  /** A state-changing call carries a `command_id`. A retry of the same submit reuses it (A7). */
+  sessionStart(args: SessionStartArgs): Promise<SessionStarted>;
+  sessionSend(args: SessionSendArgs): Promise<SessionChanged>;
+  sessionAnswer(args: SessionAnswerArgs): Promise<SessionChanged>;
+  sessionInterrupt(args: SessionInterruptArgs): Promise<SessionChanged>;
+  sessionSet(args: SessionSetArgs): Promise<SessionChanged>;
+  sessionEnd(args: SessionEndArgs): Promise<SessionEnded>;
+  /**
+   * Opens the chat stream. It never rejects for a stream failure: every failure arrives as one
+   * `closed` event. The native side pushes and reconnects (with the last `seq` it holds), so the
+   * UI sets no timer and makes no call to keep a stream alive.
+   */
+  openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle>;
   /** Drops the token on this device only. The server's record of the device stays until a revoke. */
   forget(): Promise<void>;
 }
