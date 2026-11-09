@@ -4,7 +4,8 @@
 // When the UI calls (docs/contracts/ui-transport.md): on start, on opening a page, after an action
 // and on "Retry now". The one timer that makes a call is the retry while the server is
 // *unreachable* (no HTTP answer, so no request reaches the server). An HTTP refusal never starts a
-// timer. While connected there is no timer, interval or focus handler that calls.
+// timer. While connected there is no timer, interval or focus handler that calls. A chat stream's
+// `closed` reaches the same banner through `report`.
 import type { ProjectRecord } from "@pulse-factory/api-client";
 import {
   createContext,
@@ -51,6 +52,11 @@ export interface Connection {
   /** Ticks each second while the server is unreachable, so "Retrying in n s" counts down. */
   now: number;
   call<T>(fn: (t: Transport) => Promise<T>): Promise<T>;
+  /**
+   * Feeds a failure the UI saw outside `call`, such as a stream's `closed`, into the same 3c banner
+   * and retry as a failed call. A kind that is no disconnect changes nothing.
+   */
+  report(err: TransportError): void;
   retryNow(): void;
   forget(): Promise<void>;
   /** Opens the pair screen (3a) again. It drops nothing: only a new pairing replaces the old one. */
@@ -221,6 +227,7 @@ export function ConnectionProvider(props: {
       epoch,
       now,
       call,
+      report: noteDown,
       retryNow,
       forget,
       pairAgain: onPairAgain,
@@ -228,7 +235,7 @@ export function ConnectionProvider(props: {
       projectsAt,
       setProjects,
     }),
-    [server, link, lastCallMs, lastReachedAt, epoch, now, call, retryNow, forget, onPairAgain, projects, projectsAt, setProjects],
+    [server, link, lastCallMs, lastReachedAt, epoch, now, call, noteDown, retryNow, forget, onPairAgain, projects, projectsAt, setProjects],
   );
 
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>;

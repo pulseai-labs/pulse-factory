@@ -4,7 +4,8 @@
   adds the Tauri lines.
 - **Date:** 2026-11-07
 - **Amended:** 2026-11-09, at `r1.s3.w4`: the chat verbs and the chat stream in the `Transport`
-  interface, one bridge route and nine Tauri commands.
+  interface, one bridge route and nine Tauri commands. 2026-11-09, at `r1.s3.w5`: the Agents rail item and
+  the chat screens, behind the unchanged `Transport`.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk,
@@ -246,3 +247,52 @@ app declares no capability file, and it adds no npm dependency.
 ### Unverified claims (r1.s3.w4)
 - The `Channel` delivers the stream's events, in order, in the Mac app's webview, and the nine commands' Rust glue
   runs. No test on draco-desk compiles `main.rs`. The `macos-app` job compiles it, and the d17 walk runs it.
+
+## Amendment, 2026-11-09 (`r1.s3.w5`)
+
+`r1.s3.w5` builds the Orchestrator chat in the UI. It adds screens behind the `Transport` interface of
+`r1.s3.w4` and nothing else to the stack: no npm dependency, no transport method, no Tauri command, no
+capability file and no storage key.
+
+- **The Agents rail item and the chat screens.** The rail is Projects and Agents at the top and Settings at
+  the bottom (A9). The Agents page is read only: the agents the server lists, the selected agent's defaults,
+  and its sessions by project with Open or Start session. A chat is a tab in the title bar. It shows a header
+  (project, worktree, branch read live by the server, state, an `unqualified` mark for an override binary,
+  the cost and End session), the message stream, approval and question cards that are answered in place, and a
+  composer with the runtime's own controls, the context gauge and the cache-warm timer. The sidebar lists each
+  project's live sessions.
+- **One stream and its reopen rule.** The UI keeps one stream open: the overview while no chat is on screen,
+  and the chat on screen otherwise, with `after` the highest `seq` it holds. It opens a new stream only on an
+  operator action, when the chat on screen changes, or when the link comes back. `reconnecting` shows a line and
+  does nothing; `pf-client` retries (`docs/contracts/ui-transport.md`, "When the UI calls"). A card is pending
+  while no held item answers it, so a reload and a reconnect show the same pending cards.
+- **No new dependency, storage key or capability.** The reply is plain text, not Markdown. `localStorage` keeps
+  `pf.sidebar` only. Every call goes through the `Transport`: no screen calls `fetch`, `EventSource` or
+  `WebSocket`, and `scripts/demo/ui-chat.sh` (d19) checks that every request goes to the bridge's origin and
+  that no token or code is in storage, the console, the DOM or a bridge answer.
+- **The look is not claimed.** The chat screens are built for function from the structure of the approved
+  screens 2a to 2c and 6a, and no test judges their look. The pixel claim of the earlier section covers
+  `r1.s2`'s screens only. The look of the chat is `r1.s5`'s work, compared against canvas version
+  `1794071391-77bb`.
+- **Known limits.** The cost in weighted units (wu) is computed at the last turn's cache TTL, because
+  `ChatUsage` sums cache writes without the 5-minute and 1-hour split; a split in the wire type is a later
+  `pf-api` change. The wire has no persona text for an agent and no session title, so the Agents page shows the
+  agent's ids and the chat has no title. A reload forgets which chats were open.
+
+### Verified claims (r1.s3.w5)
+- The Agents page, the chat header, each kind of item, the cards (answered in place, `answered`, `withdrawn`
+  and `lost`, and still pending after a reconnect and a remount), the composer's controls from the runtime's
+  declaration, the gauge, the cache timer, `weightedUnits` and its format, and the stream rule (one stream, the
+  reopen only on an operator action or the link's return, nothing after `unauthorized` or `key_changed`) pass
+  in `apps/ui/src/test/{agents,chat,composer,cards,chat-stream}.test.tsx`, and no test makes a call for an hour
+  (2026-11-09).
+- The whole journey runs in headless Chromium through `pf-client-bridge`, against the real controller, the real
+  Claude Code adapter and `pf-claude-replay`: Start session on two projects, a `Bash` approval that is still
+  pending after a reload and then denied, the cost in wu equal to the CLI's record, an effort change that
+  reaches only that chat, and a branch read live. No token or code is in storage, the console, the DOM or a
+  bridge answer (`scripts/demo/ui-chat.sh`, d19, 2026-11-09).
+
+### Unverified claims (r1.s3.w5)
+- The chat runs in the Mac app's webview: the `Channel` delivers the stream, the approval card is answered and
+  the controls work there. The d17 walk on the MacBook checks it, with the real qualified Claude Code copy.
+- The look of the chat screens. `r1.s5` compares them with canvas `1794071391-77bb`.

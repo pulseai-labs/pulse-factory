@@ -1,14 +1,8 @@
 // The Projects page (2c): the live projects from `projectList()` and the "Add project" form.
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { newCommandId } from "../components/command-id";
 import { clock } from "../components/format";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
-
-function newCommandId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 export function Projects() {
   const { call, setProjects, epoch, projects, projectsAt, link, server } = useConnection();

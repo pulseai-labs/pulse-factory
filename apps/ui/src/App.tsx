@@ -1,8 +1,9 @@
 // The start: `paired()` decides. No server shows the pair screen (3a). A server shows the shell on
-// the Projects page.
+// the Projects page, with the connection and the chat state around it.
 import { useCallback, useEffect, useState } from "react";
 import { Pair, type Notice } from "./screens/Pair";
 import { Shell } from "./screens/Shell";
+import { ChatProvider } from "./state/chat";
 import { ConnectionProvider } from "./state/connection";
 import type { PairedServer, Transport } from "./transport/types";
 
@@ -82,7 +83,9 @@ export function App(props: { transport: Transport }) {
           onForgotten={onForgotten}
           onPairAgain={onPairAgain}
         >
-          <Shell />
+          <ChatProvider transport={transport}>
+            <Shell />
+          </ChatProvider>
         </ConnectionProvider>
       );
   }

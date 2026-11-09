@@ -123,6 +123,28 @@ On start, on opening a page, after an action, and on "Retry now". **While connec
 interval or focus handler makes a call** (planning audit C15: the controller's ledger is local and
 unbounded). After an HTTP refusal the UI never retries by itself.
 
+**The chat stream (`r1.s3.w5`).** The UI holds **one stream open at a time**: a browser keeps six
+HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A10).
+
+- The shell opens the **overview** stream, `openStream({})`, when it mounts. Its `hello` and `session`
+  frames feed the session rows of the sidebar.
+- When a chat is on screen, the stream **follows that chat**: the UI closes the current stream and opens
+  `openStream({session, after})`, where `after` is the highest `seq` it holds for that session (0 the first
+  time). When no chat is on screen, it goes back to the overview. Each switch is an operator action.
+- `reconnecting` shows "Reconnecting…" with its reason on the open chat and does nothing else: `pf-client`
+  retries. `closed` by kind:
+  - `unreachable` (the local leg dropped, or the bridge or the app's Rust side is gone) and `rate_limited`:
+    the same 3c banner and `status()` retry as a failed call. When the link comes back, the UI opens the
+    stream again with the last `seq` it holds. No new timer: the only retry timer is the connection's.
+  - `unauthorized` and `key_changed`: the 3c banner, and no stream is opened again until a new pairing.
+  - `server`, `bad_request`, `forbidden` and `refused`: one error line on the open chat with the text and
+    "Reconnect", an operator action that opens the stream again with the last `seq`.
+- While a stream is open the UI makes no call by itself and sets no timer for it. It reads `session_list`
+  when the Agents page or the first chat opens, after `session_start`, and once when the link comes back,
+  and the cache-warm display ticks once a minute on the chat that is on screen and calls nothing.
+- A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
+  chat's items replay from `after=0`. The UI keeps no chat state in storage (`pf.sidebar` is its only key).
+
 ## The bridge protocol
 
 HTTP on `127.0.0.1`, on the same origin as the bundle. The bridge serves the bundle's files at `/`
@@ -307,3 +329,10 @@ Tauri's IPC only, so the webview opens no network connection.
   `crates/pulse-factory/tests/client_chat.rs`: the client, a drop and a reconnect, a revoke and the
   bridge against a real controller with `FakeChat`.
 - `scripts/demo/ui-pair.sh` (d12): the whole journey in headless Chromium against the built binary.
+- `apps/ui/src/test/{agents,chat,composer,cards,chat-stream}.test.tsx` (Vitest, the fake transport,
+  `r1.s3.w5`): the Agents page, the chat screen and its items, the composer's controls, the gauge, the
+  cache timer and the cost in wu, the approval and question cards, and the stream rule above, including the
+  no-call-for-an-hour checks.
+- `scripts/demo/ui-chat.sh` (d19, `r1.s3.w5`): the Orchestrator chat of two projects in headless Chromium,
+  through `pf-client-bridge`, against the real controller, the real Claude Code adapter and
+  `pf-claude-replay`. Its journey is `apps/ui/e2e/chat.spec.ts`.

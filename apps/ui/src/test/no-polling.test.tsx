@@ -36,11 +36,11 @@ describe("the UI never polls", () => {
     const fake = new FakeTransport({ projects: [project(1, "alpha")] });
     render(<App transport={fake} />);
     await advance(0);
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
     expect(screen.getByRole("region", { name: "Sidebar" })).toBeTruthy();
 
     await wiggle();
-    expect(fake.calls).toEqual(["paired", "projectList"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
   });
 
   it("makes no call on the Settings page for an hour, blurred or focused", async () => {
@@ -49,10 +49,10 @@ describe("the UI never polls", () => {
     await advance(0);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     await advance(0);
-    expect(fake.calls).toEqual(["paired", "projectList", "status"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "status"]);
 
     await wiggle();
-    expect(fake.calls).toEqual(["paired", "projectList", "status"]);
+    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "status"]);
   });
 
   it("makes no call on the pair screen for an hour", async () => {
