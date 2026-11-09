@@ -243,11 +243,20 @@ pub(super) struct LiveInner {
     /// The runtime options the process runs with now.
     pub applied: BTreeMap<String, String>,
     pub state: ChatSessionState,
+    /// The turns this process started on its own (a background task finished) since the operator's
+    /// last message. 0 at each open (ADR-0016, ADR-0015's cap).
+    pub self_turns: u64,
+    /// Why the process was stopped at the self-started turn cap. A held process is `needs_you`
+    /// until the operator's next message reopens the session.
+    pub held: Option<String>,
 }
 
 /// One live chat process.
 pub(super) struct LiveChat {
     pub session: String,
+    /// The session's project and agent, which scope its settings.
+    pub project: String,
+    pub agent: String,
     pub chat: ChatId,
     pub port: Arc<dyn ChatPort>,
     pub opened_at: SystemTime,
@@ -585,7 +594,9 @@ impl Controller {
     pub(super) fn sync_state(&self, live: &LiveChat) {
         let state = {
             let inner = lock(&live.inner);
-            if !inner.requests.is_empty() {
+            // A process held at the self-started turn cap waits for the operator, whatever its
+            // interrupted turn reports late.
+            if inner.held.is_some() || !inner.requests.is_empty() {
                 ChatSessionState::NeedsYou
             } else if inner.turn_since.is_some() {
                 ChatSessionState::Working
@@ -690,6 +701,9 @@ impl Controller {
             }
             _ => None,
         };
+        // The deny list in force at this open: a change applies at the next launch (ADR-0016).
+        let (deny_commands, deny_from) = self.deny_commands(&row.project_id, &row.agent_id);
+        let deny_count = deny_commands.len();
         let spec = ChatOpen {
             cwd: worktree.path.clone(),
             resume,
@@ -706,6 +720,7 @@ impl Controller {
             permission_mode: row.permission_mode.clone(),
             env,
             options: options.clone(),
+            deny_commands,
         };
         let resuming = spec.resume.is_some();
         let opened = port.open(&spec).map_err(|e| match e {
@@ -717,6 +732,8 @@ impl Controller {
         let now_t = SystemTime::now();
         let live = Arc::new(LiveChat {
             session: row.id.clone(),
+            project: row.project_id.clone(),
+            agent: row.agent_id.clone(),
             chat: opened.chat.clone(),
             port: port.clone(),
             opened_at: now_t,
@@ -733,6 +750,8 @@ impl Controller {
                 context: None,
                 applied: options,
                 state: ChatSessionState::Idle,
+                self_turns: 0,
+                held: None,
             }),
         });
         if row.runtime_session_ref.as_deref() != Some(opened.session.0.as_str()) {
@@ -743,13 +762,14 @@ impl Controller {
         lock(&self.chats.lost).remove(&row.id);
         lock(&self.chats.live).insert(row.id.clone(), live.clone());
         self.chats.ledger.append(&format!(
-            "open session={} runtime={} version={} qualified={} resume={} pid={}",
+            "open session={} runtime={} version={} qualified={} resume={} pid={} deny={deny_count} deny_from={}",
             field(&row.id),
             field(&row.runtime),
             field(&opened.runtime_version),
             opened.qualified,
             if resuming { "yes" } else { "no" },
             pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+            field(&deny_from),
         ));
         self.spawn_pump(live.clone(), opened.events);
         self.sync_state(&live);
@@ -802,6 +822,12 @@ impl Controller {
     /// Stop a process and its group, take it out of the table and write its `stop` line. The
     /// caller writes the items and the frame that belong to the reason.
     pub(super) fn stop_chat(&self, live: &Arc<LiveChat>, reason: &str) {
+        self.stop_chat_with(live, reason, "");
+    }
+
+    /// [`Controller::stop_chat`], and `detail` (a text that starts with a space) after the reason
+    /// in the `stop` line.
+    fn stop_chat_with(&self, live: &Arc<LiveChat>, reason: &str, detail: &str) {
         live.stopping.store(true, Ordering::SeqCst);
         if let Err(e) = live.port.stop(&live.chat) {
             eprintln!(
@@ -819,7 +845,7 @@ impl Controller {
             }
         }
         self.chats.ledger.append(&format!(
-            "stop session={} reason={reason}",
+            "stop session={} reason={reason}{detail}",
             field(&live.session)
         ));
         // The requests stay in the set: `close_pending` reads them to close this process's own
@@ -923,8 +949,21 @@ impl Controller {
         let session = live.session.as_str();
         let mut result = EventResult::default();
         match event {
-            ChatEvent::TurnStarted { .. } => {
-                lock(&live.inner).turn_since = Some(SystemTime::now());
+            ChatEvent::TurnStarted { cause } => {
+                let self_started = cause != TurnCause::Operator;
+                {
+                    let mut inner = lock(&live.inner);
+                    inner.turn_since = Some(SystemTime::now());
+                    // An operator's turn resets the count. A turn nobody asked for counts.
+                    inner.self_turns = if self_started {
+                        inner.self_turns + 1
+                    } else {
+                        0
+                    };
+                }
+                if self_started {
+                    self.cut_at_self_turn_cap(live);
+                }
             }
             ChatEvent::TextDelta { text } => {
                 self.emit(wire::ChatFrame::Delta {
@@ -1210,6 +1249,47 @@ impl Controller {
         self.sync_state(live);
         self.emit_session(session);
         result
+    }
+
+    /// The self-started turn cap (ADR-0015, ADR-0016). A turn the chat started on its own counts.
+    /// When the cap is not 0 and the count passes it, that turn is cut as it starts: the controller
+    /// interrupts it and stops the process and its background tasks, and holds the session at
+    /// `needs_you` with the reason. The next operator message reopens it with resume. The cap is
+    /// resolved here, at each self-started turn, so a change applies with no relaunch. The caller
+    /// holds the session's `io` lock, as `halt_chats` does.
+    fn cut_at_self_turn_cap(&self, live: &Arc<LiveChat>) {
+        let (cap, from) = self.self_turn_cap(&live.project, &live.agent);
+        let turns = lock(&live.inner).self_turns;
+        if cap == 0 || turns <= cap {
+            return;
+        }
+        if let Err(e) = live.port.interrupt(&live.chat) {
+            eprintln!(
+                "pulse-factory: chat session {} did not interrupt cleanly at the cap: {e}",
+                live.session
+            );
+        }
+        // The stop ends the process group, so its background tasks end with it (ADR-0014, case 16).
+        self.stop_chat_with(
+            live,
+            "self_turn_cap",
+            &format!(" self_turns={turns} cap={cap} from={}", field(&from)),
+        );
+        self.close_pending(live, "stopped at the self-started turn cap");
+        {
+            let mut inner = lock(&live.inner);
+            inner.turn_since = None;
+            inner.tasks.clear();
+            inner.held = Some("stopped at the self-started turn cap".to_string());
+        }
+        self.notice(
+            &live.session,
+            "self_turn_cap",
+            &format!(
+                "this chat ran {cap} turns on its own since your last message, and the cap is {cap} ({from}); \
+                 Pulse Factory stopped it as it started one more, with its background tasks; your next message resumes it"
+            ),
+        );
     }
 
     /// When a finished task leaves the process with no holder, the idle clock starts.

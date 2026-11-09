@@ -350,3 +350,70 @@ fn an_unknown_message_kind_gives_no_event_and_no_failure() {
         assert!(feed(&mut d, msg).is_empty());
     }
 }
+
+/// `r1.s4.w4`, case 19: every `Bash` call of the recording that ran one of the four commands got an
+/// error result, and the recording starts with the two self-started turns that d21 replays.
+///
+/// What the recording does not show (ADR-0014's amendment, case 19): the results of
+/// `git branch -D pf-probe` and `git push -f origin main` carry the text of the recording host's own
+/// `PreToolUse` hook, not the text of a deny rule, so they do not show the rule; the model made no
+/// `Bash` call for `git push origin main --force` or for the compound command. The one result that
+/// carries the rule's own text is `gh -R … pr merge 1`. A second run needs a new grant.
+#[test]
+fn the_deny_rules_recording_gives_every_bash_call_of_the_four_commands_an_error_and_starts_with_two_task_turns()
+ {
+    let f = load_fixture("deny_rules");
+    assert_eq!(f.header["pf_fixture"]["case"], "deny_rules");
+    assert_eq!(f.header["pf_fixture"]["cli_version"], "2.1.319");
+    let (events, _) = decode_recording("2.1.319", "", &f.body);
+    check_order(&events).unwrap();
+    let causes: Vec<TurnCause> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::TurnStarted { cause } => Some(*cause),
+            _ => None,
+        })
+        .collect();
+    assert!(causes.len() >= 3, "{causes:?}");
+    assert_eq!(
+        causes[..3],
+        [TurnCause::Operator, TurnCause::Task, TurnCause::Task],
+        "the first three turns"
+    );
+    let host: Vec<&Value> = f
+        .body
+        .iter()
+        .filter(|(to, _)| to == "host")
+        .map(|(_, m)| m)
+        .collect();
+    let blocks: Vec<&Value> = host
+        .iter()
+        .flat_map(|m| m["message"]["content"].as_array().into_iter().flatten())
+        .collect();
+    let mut ran = 0;
+    for command in [
+        "git branch -D pf-probe",
+        "git push -f origin main",
+        "git push origin main --force",
+        "gh -R pulseai-labs/pf-probe pr merge 1",
+    ] {
+        for b in &blocks {
+            if !(b["type"] == "tool_use"
+                && b["name"] == "Bash"
+                && b["input"]["command"].as_str() == Some(command))
+            {
+                continue;
+            }
+            ran += 1;
+            let result = blocks
+                .iter()
+                .find(|r| r["type"] == "tool_result" && r["tool_use_id"] == b["id"])
+                .unwrap_or_else(|| panic!("no tool_result for `{command}`"));
+            assert_eq!(
+                result["is_error"], true,
+                "`{command}` was not refused: {result}"
+            );
+        }
+    }
+    assert!(ran >= 3, "the recording holds {ran} of the four Bash calls");
+}

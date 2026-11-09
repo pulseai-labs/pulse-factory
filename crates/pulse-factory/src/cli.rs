@@ -1,5 +1,6 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `project`, `session`, `chat-runtime`, `device`, `api`, `hook` and `controller`.
+//! `clear`, `ack`, `project`, `session`, `settings`, `chat-runtime`, `device`, `api`, `hook` and
+//! `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -44,6 +45,8 @@ pub enum Verb {
     Project(ProjectArgs),
     /// Chat with a project's Orchestrator: start, send, answer, set, interrupt, end, list, read.
     Session(SessionArgs),
+    /// Read, set and unset the scoped settings: how a chat behaves, per server, project or agent.
+    Settings(SettingsArgs),
     /// Install the managed Claude Code copy that the chat runs.
     ChatRuntime(ChatRuntimeArgs),
     /// Pair, list and revoke the devices that call the network API. A device acts as you.
@@ -239,6 +242,79 @@ pub struct ProjectListArgs {
 pub struct ProjectRemoveArgs {
     /// The project, such as `P-1`.
     pub id: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SettingsArgs {
+    #[command(subcommand)]
+    pub verb: SettingsVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SettingsVerb {
+    /// Show each setting as a project and an agent read it: the value, its scope, what it masks.
+    Get(SettingsGetArgs),
+    /// Set a setting at the server, a project, an agent, or an agent in a project.
+    Set(SettingsSetArgs),
+    /// Remove the setting at one scope, so the next scope or the built-in applies.
+    Unset(SettingsUnsetArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SettingsGetArgs {
+    /// One setting, such as `chat.self_turn_cap`. The default is every setting.
+    pub key: Option<String>,
+    /// Read as this project does, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: Option<String>,
+    /// Read as this agent does, such as `orchestrator`.
+    #[arg(long, value_name = "ID")]
+    pub agent: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SettingsSetArgs {
+    /// The setting: `chat.self_turn_cap` or `chat.deny_commands`.
+    pub key: String,
+    /// The value as JSON text: `5`, or `'["gh pr merge"]'`. A value that starts with `-` is taken as
+    /// it is, so the controller refuses it with its rule.
+    #[arg(allow_hyphen_values = true)]
+    pub value: String,
+    /// Set it for this project only, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: Option<String>,
+    /// Set it for this agent only, such as `orchestrator`.
+    #[arg(long, value_name = "ID")]
+    pub agent: Option<String>,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SettingsUnsetArgs {
+    /// The setting to remove.
+    pub key: String,
+    /// The project scope, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: Option<String>,
+    /// The agent scope, such as `orchestrator`.
+    #[arg(long, value_name = "ID")]
+    pub agent: Option<String>,
     /// The command ID. A retry sends the same one, and the command is admitted once. The default
     /// is a random one for each call.
     #[arg(long, value_name = "ID")]
@@ -542,6 +618,11 @@ pub fn run(args: Vec<OsString>) -> i32 {
             SessionVerb::Redact(a) => crate::controller::client::session_redact(&a),
             SessionVerb::List(a) => crate::controller::client::session_list(&a),
             SessionVerb::Items(a) => crate::controller::client::session_items(&a),
+        },
+        Verb::Settings(a) => match a.verb {
+            SettingsVerb::Get(a) => crate::controller::client::settings_get(&a),
+            SettingsVerb::Set(a) => crate::controller::client::settings_set(&a),
+            SettingsVerb::Unset(a) => crate::controller::client::settings_unset(&a),
         },
         Verb::ChatRuntime(a) => match a.verb {
             ChatRuntimeVerb::Install(a) => crate::controller::client::chat_runtime_install(&a),

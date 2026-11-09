@@ -460,23 +460,45 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{verb}");
     }
     assert_eq!(calls(&fake), 0);
-    // The allowlist is exactly these ten verbs: the project verbs and the chat verbs. `halt`, every
+    // The three settings verbs are on the list (`r1.s4.w4`), and so are the project and chat verbs.
+    // The test pins no exact count, so it holds whatever the other round-1 item adds. `halt`, every
     // ack, `session_redact` (the CLI only) and `session_items` (the stream reads the items) are off.
-    assert_eq!(
-        ALLOWLIST,
-        [
-            "project_add",
-            "project_list",
-            "project_remove",
-            "session_list",
-            "session_start",
-            "session_send",
-            "session_answer",
-            "session_interrupt",
-            "session_set",
-            "session_end",
-        ]
-    );
+    for verb in [
+        "project_add",
+        "project_list",
+        "project_remove",
+        "session_list",
+        "session_start",
+        "session_send",
+        "session_answer",
+        "session_interrupt",
+        "session_set",
+        "session_end",
+        "settings_get",
+        "settings_set",
+        "settings_unset",
+    ] {
+        assert!(ALLOWLIST.contains(&verb), "{verb} is not on the allowlist");
+    }
+    for verb in [
+        "arm",
+        "claim",
+        "halt",
+        "hook",
+        "runs",
+        "status",
+        "device_pair",
+        "device_list",
+        "device_revoke",
+        "api_status",
+        "session_redact",
+        "session_items",
+    ] {
+        assert!(
+            !ALLOWLIST.contains(&verb),
+            "{verb} must stay off the allowlist"
+        );
+    }
 }
 
 #[tokio::test]
@@ -508,6 +530,29 @@ async fn every_chat_verb_on_the_allowlist_reaches_call_with_its_name_and_body() 
     let seen = fake.seen.lock().unwrap();
     let names: Vec<&str> = seen.calls.iter().map(|(v, _)| v.as_str()).collect();
     assert_eq!(names, chat);
+}
+
+#[tokio::test]
+async fn every_settings_verb_on_the_allowlist_reaches_call_with_its_name_and_body() {
+    let (app, fake) = rig();
+    let verbs = ["settings_get", "settings_set", "settings_unset"];
+    for verb in verbs {
+        let body = json!({ "verb": verb, "key": "chat.self_turn_cap" });
+        let reply = send(
+            &app,
+            request(
+                "POST",
+                &format!("/v1/verbs/{verb}"),
+                Some(TOKEN),
+                serde_json::to_vec(&body).unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{verb}");
+    }
+    let seen = fake.seen.lock().unwrap();
+    let names: Vec<&str> = seen.calls.iter().map(|(v, _)| v.as_str()).collect();
+    assert_eq!(names, verbs);
 }
 
 #[tokio::test]

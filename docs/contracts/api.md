@@ -189,6 +189,9 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `session_interrupt` | `session interrupt` |
 | `session_set` | `session set` |
 | `session_end` | `session end` |
+| `settings_get` | `settings get` |
+| `settings_set` | `settings set` |
+| `settings_unset` | `settings unset` |
 
 Every other verb is 403: `runs`, `status`, `requests`, `show`, `answer`, `claim`, `clear`, `ack`,
 `arm`, `halt`, `hook`, `device_pair`, `device_list`, `device_revoke`, `api_status`, `session_items`
@@ -201,6 +204,17 @@ merge-ack verb stay off the list: the human confirm of an ack comes with `r1.s4`
 The chat verbs take the arguments and give the answers that `cli.md` lists under `session`. Each
 state-changing one takes a `command_id`, and the same ID with the same content returns the first
 record with `replayed` true and acts on nothing.
+
+The settings verbs (`r1.s4.w4`, ADR-0016) take the arguments and give the answers that `cli.md`
+lists under `settings`: `SettingsGetArgs` and `SettingsView`, `SettingsSetArgs`, `SettingsUnsetArgs`
+and `SettingChanged`, each a `ts-rs` type in `apps/api-client/src/gen/`. `settings_set` and
+`settings_unset` take a `command_id` and commit through the same admission as the CLI's, under
+`@controller`, with kind `setting_set` or `setting_unset`. A device is no local process, so the
+controller's caller check does not apply to it: the router has authenticated the token and refuses a
+revoked one (401), and the write is admitted as the operator's (ADR-0009). The `controller.ledger`
+line of a device's write names it, `setting_set <key> admitted scope=<scope> value=<json> by=D-<n>
+command=<id>`, and the request ledger has one `api.ledger` line for the call, with `verb=settings_<…>`,
+`device=D-<n>` and the outcome (`ok`, `replayed`, or `refused` for an unknown key or a bad value).
 
 **Each later spine that adds a verb amends ADR-0012** (planning audit C2). The list lives in
 `pf_api::host::ALLOWLIST`, and the router test names every verb that must stay off it.

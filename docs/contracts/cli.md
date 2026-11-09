@@ -2,11 +2,12 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has sixteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has seventeen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
 `add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
 `session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
-runtime it needs.
+runtime it needs, and `settings` (`r1.s4`), which reads and sets how a chat behaves, per server,
+project or agent.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -17,7 +18,8 @@ runtime it needs.
 - **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
   ledger of the controller's own commands (`project`, the device commands, which are the redeem of a
   pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end`,
-  `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, with the kind
+  `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, the settings
+  commands `setting_set` and `setting_unset` (`r1.s4`), with the kind
   backfill `project_kind` that runs at controller start). A `chat_send` line holds the byte count of
   the text and never the text. It is
   not a run's ledger. Each command is admitted once under the admission scope `@controller`, where
@@ -35,7 +37,9 @@ runtime it needs.
 - **`halt` and the projects.** `halt` applies to runs and to live chat processes. A `project` command
   launches nothing and changes no run, so a halt neither stops it nor needs it. The same holds for
   `device` commands and for the commands `project_kind`, `chat_session_start`, `chat_session_end`
-  and `chat_item_redact`. `halt` stops every live chat process (see `halt` and `session`). `halt` is
+  and `chat_item_redact`. The commands `setting_set` and `setting_unset` launch nothing and change
+  no run either, so `halt` neither stops them nor needs them, and they still commit after a halt.
+  `halt` stops every live chat process (see `halt` and `session`). `halt` is
   not open to a device over the API either (`api.md`).
 - **`chat.ledger`.** `<state dir>/chat.ledger` is the audit trail of the chat processes, beside
   `api.ledger`. It is append-only, has one writer, writes no `fsync` per line, is not in the store
@@ -44,10 +48,17 @@ runtime it needs.
   `field()`, and no line holds a message, a tool text, a token or a key:
 
   ```
-  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|->
+  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in>
   <UTC> chat turn session=S-1 cause=operator input_tokens=9 output_tokens=12 cache_read_tokens=0 cache_write_tokens=13006 cost_micros=3465 duration_ms=1042 stop=end_turn is_error=false
   <UTC> chat stop session=S-1 reason=end|idle|halt|exited|shutdown|option [code=<n>]
+  <UTC> chat stop session=S-1 reason=self_turn_cap self_turns=<n> cap=<n> from=<scope|built_in>
   ```
+
+  `deny=` is the number of shell command patterns the launch passed to the runtime, and `deny_from=`
+  is the scope of the list in force (`built_in`, `server`, `project:P-1`, `agent:orchestrator` or
+  `project:P-1/agent:orchestrator`; see `settings`). A stop with `reason=self_turn_cap` is the cap on
+  the turns a chat starts on its own: `self_turns` counts the turn that was cut, so it is the cap plus
+  one, and `from` is the scope the cap came from.
 
   `qualified=false` marks an override binary. A turn that the CLI starts on its own (a `task` turn)
   has its line too, with `cause=task`.
@@ -59,7 +70,9 @@ runtime it needs.
   (the agent's server-side environment, `NAME=value` pairs separated by spaces; the agent ID is
   upper-cased and each other character is `_`), `PF_SERVER_NAME` (the name every API answer carries)
   and `PF_CHAT_REGISTRY` (default `https://registry.npmjs.org`). No `PF_*` name reaches a chat
-  process.
+  process. These are "the chat settings": the controller's environment, and a restart changes them.
+  The values that `settings` reads and sets are "settings": scoped values in the store, and no restart
+  changes them. The two share no name and no storage.
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -73,9 +86,12 @@ runtime it needs.
   `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
-  `project list`, `device list`, `api status`, `session list` and `session items` are reads and stay
-  open. The controller checks the caller of `claim`, `answer`, `clear`, `ack`, `device pair`,
-  `device revoke` and the state-changing `session` verbs again (see `claim` and `session`).
+  `project list`, `device list`, `api status`, `session list`, `session items` and `settings get` are
+  reads and stay open. `settings set` and `settings unset` are the named exception: the CLI does not
+  refuse them under `PF_SEAT_TOKEN`. They always reach the controller, whose caller check refuses the
+  seat and audits the refusal (see `settings`). The controller checks the caller of `claim`,
+  `answer`, `clear`, `ack`, `device pair`, `device revoke`, the state-changing `session` verbs and
+  `settings set` and `settings unset` again (see `claim`, `session` and `settings`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
   both.
@@ -494,10 +510,132 @@ stream (`api.md`).
   because the runtime has no transcript to resume (operator ruling on PR #41, class C1). End the
   session and start a new one. The mark is in memory: after a controller restart the next `send` tries the
   resume again and marks it again.
+- **The cap on self-started turns.** A turn the chat starts on its own (a background task finished,
+  cause `task`, or a controller notice, cause `notice`) counts. The operator's next message, and any
+  operator turn, sets the count to 0. With the cap `chat.self_turn_cap` of N (see `settings`; default
+  3, `0` is off), N such turns run whole after each operator message, and the controller cuts the
+  next one as it starts: it interrupts the turn, stops the process and its background tasks, closes
+  each pending request as `lost`, writes one `chat.ledger` line `stop session=S-1
+  reason=self_turn_cap self_turns=<cap+1> cap=<cap> from=<scope>`, adds a `notice` item with the code
+  `self_turn_cap` and sets the session `needs_you`. The interrupted turn's late `turn_result` is still
+  stored and keeps the state. The operator's next `send` finds no process, opens one with `--resume`
+  and starts the count at 0; the state becomes `working`. `halt` still stops a live process
+  mid-turn (`reason=halt`, the session `idle`) and leaves a session that the cap holds `needs_you`.
+  A controller restart settles every live session to `idle`, so the `needs_you` of a cap stop does
+  not survive a restart (its notice item does).
 - **Who may call.** A caller with `PF_SEAT_TOKEN` is refused every state-changing `session` verb. The
   controller checks the caller again: it refuses a caller that is, or descends from, a seat **or a
   live chat process**, so an Orchestrator cannot drive its own chat or another one. A paired device
   acts as the operator over the API (`api.md`), on the allowlist.
+
+## `settings`
+
+```
+pulse-factory settings get [<key>] [--project <P-n>] [--agent <id>] [--json]
+pulse-factory settings set <key> <value> [--project <P-n>] [--agent <id>] [--command-id <id>] [--json]
+pulse-factory settings unset <key> [--project <P-n>] [--agent <id>] [--command-id <id>] [--json]
+```
+
+A setting is one value of one key at one scope, in the store's `settings` table (ADR-0003,
+ADR-0016). The operator sets how a chat behaves with no restart. A key is read for a context: a
+project, an agent, both or neither. The settings are not the controller's environment (see "The chat
+settings" in the common rules).
+
+- **The scopes.** The server default, one project, one agent, or one agent in one project. A context
+  reads them most specific first, in the words
+  "project and agent, project, agent, server, then the built-in": the pair `(project, agent)`, then the project for every agent, then the agent for every
+  project, then the server default, then the binary's own value. A project value is the operator's
+  choice for that project and every agent in it, so it sits above an agent value. A context with no
+  project skips the two project scopes, and one with no agent skips the two agent scopes.
+- **The keys.** Exactly two in this release. Any other key is refused: `unknown setting <key>; the
+  settings are chat.deny_commands, chat.self_turn_cap`. The confirm code, the caller checks and the
+  claim are authority floors, not settings, and never become keys.
+
+  | Key | Value | Built-in | Merge | A change applies |
+  |---|---|---|---|---|
+  | `chat.self_turn_cap` | a JSON integer, 0 to 100; `0` is off | `3` | `override` | at the next turn the chat starts on its own, with no relaunch |
+  | `chat.deny_commands` | a JSON array of 0 to 32 command patterns, no duplicates | the fifteen patterns below | `override` | at the chat's next launch (`chat.ledger` `open`, `deny=`, `deny_from=`) |
+
+  A pattern is words, and `*` stands for any text. It is 1 to 100 characters of letters, digits,
+  space, `.`, `_`, `/`, `:`, `=`, `@`, `+`, `-` and `*`, starts with a letter or a digit, has no
+  trailing space and no two spaces in a row, and holds `*` only as a whole word or as the last
+  character of a word. It holds no `:*` anywhere: Claude Code reads a rule that ends `:*` as its
+  prefix form, which would deny every call. The built-in list, in order: `git push -f*`,
+  `git push * -f*`, `git push --force*`, `git push * --force*`, `git push * +*`,
+  `git push --delete`, `git push * --delete`, `git push -d`, `git push * -d`, `git branch -D`,
+  `git branch * -D`, `gh pr merge`, `gh -R * pr merge`, `gh --repo * pr merge` and
+  `gh --repo=* pr merge`. The list is a speed bump, not a boundary (`chat-adapter.md`).
+- **The merge mode.** Each key declares how the rows of its scope chain combine. Both keys are
+  `override` now: the first row on the chain wins whole, and every other stored row on the chain is
+  masked. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
+  migration, because the store keeps every scope's row as it is. A stored value that this binary
+  cannot read (a hand edit) is skipped with one stderr line, and the next scope decides. A stored key
+  that this binary does not know is ignored. There is no cache: a change applies at the next read.
+- **`get`.** With no key, one record for each key; with a key, that one. `--project` and `--agent`
+  name the context, and must be a live project and a known agent. The text form is one line for each
+  key, `chat.self_turn_cap 3 (built-in)` or `chat.deny_commands ["cargo publish"] (project P-1)`,
+  then one indented line for each value the winner masked, such as `  masks agent:orchestrator
+  ["npm publish"]`. The JSON is `SettingsView`: `{"schema_version": 1, "project_id", "agent_id",
+  "settings": [SettingRecord…]}`. A `SettingRecord` is `{key, value, from, built_in, merge, applies,
+  layers, masked}`: `from` is `{kind, project_id, agent_id}` with `kind` one of `server`, `project`,
+  `agent`, `project_agent` or `built_in`; `merge` is `override`; `applies` is `next_turn` or
+  `next_launch`; `layers` is every stored row on the chain, most specific first (`scope`, `value`,
+  `set_by`, `set_at`); `masked` is the layers the resolved value hides. `get` is a read and is open to
+  every caller, a chat included.
+- **`set` and `unset`.** `<value>` is JSON text (`5`, `'["gh pr merge"]'`); text that is not JSON is
+  refused by the CLI before any call. A value that starts with `-` is taken as it is, so the
+  controller refuses `-1` with the rule. With neither `--project` nor `--agent` the scope is the
+  server. `set` replaces the row at that scope and key. `unset` deletes it, so the next scope or
+  the built-in applies. The text answer names the scope and when it applies:
+  `chat.deny_commands set at project P-1; it applies at the chat's next launch`. The JSON is
+  `SettingChanged`: `{"schema_version": 1, "replayed", "key", "scope", "value", "resolved":
+  SettingRecord}`, with `value` null after an unset.
+- **Commands.** Each `set` and `unset` is one controller command under `@controller`, kind
+  `setting_set` or `setting_unset`, with a command ID (`--command-id`, else random) and one
+  `controller.ledger` line, admitted or refused. The content is the canonical JSON of the key, the
+  scope and the value: who called is not content, so the same ID and content from the CLI and from a
+  device replays. A replay returns the first record with `replayed` true and writes no line; the same
+  ID with other content is a conflict that names the ID. The lines:
+  - `setting_set <key> admitted scope=<scope> value=<json> by=<cli|D-n> command=<id>`;
+  - `setting_unset <key> admitted scope=<scope> by=<cli|D-n> command=<id>`;
+  - the usual `setting_set refused reason=… command=<id>` for a refusal.
+
+  `<scope>` is `server`, `project:P-1`, `agent:orchestrator` or `project:P-1/agent:orchestrator`. The
+  stored row's `set_by` is `cli` or the device ID. A refusal is one refused admission and one line,
+  and changes no row: an unknown key; a value that fails the rule of its key (`-1`, `101`, `"3"` and
+  `3.5` for the cap; a pattern with `:*`, more than 32 entries or a duplicate for the list); an
+  unknown or removed project; an unknown agent; an `unset` of a value that is not set (`no value of
+  <key> is set at <scope>`). A stopped controller ledger refuses both writes, and the reads still
+  work.
+- **Who may call.** `get` is open. `set` and `unset` are the operator's: the CLI, and a paired device
+  over the API (`api.md`, `by=D-<n>`). The CLI does not refuse them under `PF_SEAT_TOKEN`: they always
+  reach the controller, whose caller check refuses a caller that is, or descends from, a seat or a
+  live chat process. A refused caller is audited, with a bound, so it gets no unbounded durable
+  writes. The controller names the caller `chat:<S-n>`, `seat:<pid>`, `seat-token` (any caller with
+  `PF_SEAT_TOKEN` in its environment) or `unknown`, and the bucket by the key the arguments name
+  (`chat.self_turn_cap`, `chat.deny_commands`, or `other` for an unknown key or arguments that do
+  not parse). A refused write is answered at once. For each caller and bucket, one window of a
+  minute holds the audit:
+  - the window's first refusal commits one refused admission under a command ID that the controller
+    makes, `caller-refused-<32 hex>`, so the caller's own ID is never used up, and writes its line at
+    once: `setting_set refused caller=chat:S-1 bucket=chat.self_turn_cap refused=1 reason="…"
+    command=caller-refused-<hex>`;
+  - later refusals in the window write nothing, and the controller counts them;
+  - at the tick after the window, or at the caller's next refusal after it, a window that counted any
+    commits one more refused admission and line: `… refused=<n> window=<start UTC>..<end UTC>
+    reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
+    refusals after the first.
+
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, six
+  across the three buckets, whatever it sends. A crash or a restart loses the count of an open
+  window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
+  prints one stderr line for each window, in place of the ledger line.
+- **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
+  it runs. The chat runs as the operator's user, so a process it starts can evade the check:
+  `env -u PF_SEAT_TOKEN`, a double fork that leaves the ancestor chain, a rewrite of its own `/proc`
+  environment, or a direct write to the store file. "A chat cannot raise its own cap" holds only for a
+  chat that does not evade the check. This is a known limit; its owner is the Release 2
+  authority-rules spine.
 
 ## `chat-runtime`
 

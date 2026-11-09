@@ -10,8 +10,9 @@ use pf_engine::port::store::{
     ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect, LedgerLine,
     NEW_ID, NewChatItem, NewChatSession, NewDevice, NewProject, NewRequest, NodeKind, NodeRow,
     ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
-    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, Store, StoreError,
-    TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
+    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow,
+    SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy,
+    WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -798,6 +799,77 @@ struct Assigned {
     worktree_id: Option<String>,
 }
 
+// ------------------------------------------------------------------ settings (ADR-0016)
+
+const SETTING_COLUMNS: &str = "project_id, agent_id, key, value, set_by, set_at";
+
+fn setting_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<SettingRow> {
+    let project: String = r.get(0)?;
+    let agent: String = r.get(1)?;
+    Ok(SettingRow {
+        scope: SettingScope {
+            project_id: (!project.is_empty()).then_some(project),
+            agent_id: (!agent.is_empty()).then_some(agent),
+        },
+        key: r.get(2)?,
+        value: r.get(3)?,
+        set_by: r.get(4)?,
+        set_at: r.get(5)?,
+    })
+}
+
+/// Insert a setting row, or replace the row at the same scope and key.
+fn set_setting(tx: &Transaction<'_>, row: &SettingRow) -> Result<(), EffectError> {
+    if let Some(project) = &row.scope.project_id {
+        live_project(tx, project)?;
+    }
+    if let Some(agent) = &row.scope.agent_id {
+        let known: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM agents WHERE id = ?1)",
+            [agent],
+            |r| r.get(0),
+        )?;
+        if !known {
+            return Err(EffectError::Rejected(format!("no agent {agent}")));
+        }
+    }
+    tx.execute(
+        "INSERT INTO settings (project_id, agent_id, key, value, set_by, set_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT (project_id, agent_id, key) DO UPDATE \
+         SET value = excluded.value, set_by = excluded.set_by, set_at = excluded.set_at",
+        params![
+            row.scope.project_id.as_deref().unwrap_or(""),
+            row.scope.agent_id.as_deref().unwrap_or(""),
+            row.key,
+            row.value,
+            row.set_by,
+            row.set_at
+        ],
+    )
+    .map_err(backstop)?;
+    Ok(())
+}
+
+/// Delete the setting row at a scope and key. No row there is a rejection.
+fn unset_setting(tx: &Transaction<'_>, scope: &SettingScope, key: &str) -> Result<(), EffectError> {
+    let changed = tx.execute(
+        "DELETE FROM settings WHERE project_id = ?1 AND agent_id = ?2 AND key = ?3",
+        params![
+            scope.project_id.as_deref().unwrap_or(""),
+            scope.agent_id.as_deref().unwrap_or(""),
+            key
+        ],
+    )?;
+    if changed == 0 {
+        return Err(EffectError::Rejected(format!(
+            "no value of {key} is set at {}",
+            scope.text()
+        )));
+    }
+    Ok(())
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
 fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
@@ -858,6 +930,8 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
             seq,
             redacted_at,
         } => redact_chat_item(tx, session_id, *seq, redacted_at)?,
+        Effect::SetSetting(row) => set_setting(tx, row)?,
+        Effect::UnsetSetting { scope, key } => unset_setting(tx, scope, key)?,
     }
     Ok(Assigned::default())
 }
@@ -1681,6 +1755,52 @@ impl Store for SqliteStore {
                 chat_item_from,
             )
             .map_err(sql_error)
+        })?
+    }
+
+    fn setting_rows(&self) -> Result<Vec<SettingRow>, StoreError> {
+        self.call(move |conn| {
+            let mut rows = collect(
+                conn,
+                &format!("SELECT {SETTING_COLUMNS} FROM settings"),
+                [],
+                setting_from,
+            )
+            .map_err(sql_error)?;
+            rows.sort_by(|a, b| (&a.key, a.scope.text()).cmp(&(&b.key, b.scope.text())));
+            Ok(rows)
+        })?
+    }
+
+    fn setting_chain(
+        &self,
+        key: &str,
+        project_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<SettingRow>, StoreError> {
+        let key = key.to_string();
+        let chain = SettingScope::chain(project_id, agent_id);
+        self.call(move |conn| {
+            let mut out = Vec::new();
+            for scope in chain {
+                let found = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {SETTING_COLUMNS} FROM settings \
+                             WHERE project_id = ?1 AND agent_id = ?2 AND key = ?3"
+                        ),
+                        params![
+                            scope.project_id.as_deref().unwrap_or(""),
+                            scope.agent_id.as_deref().unwrap_or(""),
+                            key
+                        ],
+                        setting_from,
+                    )
+                    .optional()
+                    .map_err(sql_error)?;
+                out.extend(found);
+            }
+            Ok(out)
         })?
     }
 

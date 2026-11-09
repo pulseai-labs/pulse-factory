@@ -19,6 +19,7 @@ pub mod projects;
 pub mod requests;
 pub mod seat;
 pub mod sessions;
+pub mod settings;
 pub mod status;
 pub mod worktrees;
 
@@ -92,6 +93,9 @@ pub struct Config {
     /// True when the chat runs the managed copy, so a runtime list can say whether the copy is
     /// there.
     pub chat_managed: bool,
+    /// The window in which the refusals of one caller and one settings key coalesce into one
+    /// more ledger line: 60 seconds (ADR-0016). A test sets a short time.
+    pub refusal_window: Duration,
 }
 
 impl Config {
@@ -117,6 +121,7 @@ impl Config {
             chat_agent_env: BTreeMap::new(),
             server_name: "server".to_string(),
             chat_managed: false,
+            refusal_window: settings::DEFAULT_REFUSAL_WINDOW,
         }
     }
 
@@ -160,6 +165,8 @@ pub struct Controller {
     api: api::ApiRuntime,
     /// The chat processes, their pumps, `chat.ledger` and the stream's frames (`r1.s3.w3`).
     chats: chats::Chats,
+    /// The open windows of refused settings callers (ADR-0016).
+    settings_refusals: settings::Refusals,
     /// This controller, for the threads that outlive a call.
     me: Weak<Controller>,
 }
@@ -198,6 +205,7 @@ impl Controller {
             controller_ledger: Mutex::new(controller_ledger),
             api,
             chats,
+            settings_refusals: settings::Refusals::default(),
             me: me.clone(),
         });
         // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
@@ -422,6 +430,8 @@ impl Controller {
     pub fn tick_all(&self) {
         // A chat process idle for the window is released. Nothing here opens one.
         self.sweep_chats();
+        // A window of refused settings writes that has ended gets its closing line.
+        self.close_refusal_windows();
         for handle in self.handles() {
             if !handle.driven.load(Ordering::SeqCst) {
                 continue;
@@ -686,15 +696,15 @@ impl Handler for Controller {
             "session_redact" => self.verb_session_redact(&request.args),
             "session_list" => self.verb_session_list(&request.args),
             "session_items" => self.verb_session_items(&request.args),
+            "settings_get" => self.verb_settings_get(&request.args),
             "device_list" => self.verb_device_list(),
             "api_status" => self.verb_api_status(),
             // These change who acts and what runs. They need to know who calls.
-            "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke" => {
-                Response::err(format!(
-                    "{} refused: the controller cannot tell which process called",
-                    request.verb
-                ))
-            }
+            "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke"
+            | "settings_set" | "settings_unset" => Response::err(format!(
+                "{} refused: the controller cannot tell which process called",
+                request.verb
+            )),
             other => Response::err(format!("unknown verb {other:?}")),
         }
     }
@@ -714,6 +724,11 @@ impl Handler for Controller {
                 Ok(()) => self.verb_device_revoke(&request.args),
                 Err(why) => Response::err(why),
             },
+            // A seat cannot change a setting, and neither can a chat. The refusal is audited, with a
+            // bound (ADR-0016).
+            verb @ ("settings_set" | "settings_unset") => {
+                self.settings_write_from(verb, &request.args, peer)
+            }
             // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).
             verb @ ("session_start" | "session_send" | "session_answer" | "session_interrupt"
             | "session_set" | "session_end" | "session_redact") => {

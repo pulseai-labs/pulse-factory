@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use pf_adapter_claude::launch::{argv, validate};
+use pf_adapter_claude::launch::{argv, disallowed_tools, validate};
 use pf_adapter_claude::pinned;
 use pf_engine::port::agent::SessionRef;
 use pf_engine::port::chat::{ChatError, ChatPort};
@@ -374,4 +374,116 @@ fn set_option_of_artifacts_is_refused_because_it_is_not_live() {
         .expect_err("unknown");
     assert!(matches!(err, ChatError::Refused(_)), "{err}");
     c.stop(&o.chat).unwrap();
+}
+
+// ------------------------------------------------------------------ the deny rules (ADR-0016)
+
+/// The fifteen built-in deny patterns and the rules each becomes (`r1.s4.w4`, Approach 5).
+const BUILT_IN: [(&str, &[&str]); 15] = [
+    ("git push -f*", &["Bash(git push -f*)"]),
+    ("git push * -f*", &["Bash(git push * -f*)"]),
+    ("git push --force*", &["Bash(git push --force*)"]),
+    ("git push * --force*", &["Bash(git push * --force*)"]),
+    ("git push * +*", &["Bash(git push * +*)"]),
+    (
+        "git push --delete",
+        &["Bash(git push --delete)", "Bash(git push --delete *)"],
+    ),
+    (
+        "git push * --delete",
+        &["Bash(git push * --delete)", "Bash(git push * --delete *)"],
+    ),
+    ("git push -d", &["Bash(git push -d)", "Bash(git push -d *)"]),
+    (
+        "git push * -d",
+        &["Bash(git push * -d)", "Bash(git push * -d *)"],
+    ),
+    (
+        "git branch -D",
+        &["Bash(git branch -D)", "Bash(git branch -D *)"],
+    ),
+    (
+        "git branch * -D",
+        &["Bash(git branch * -D)", "Bash(git branch * -D *)"],
+    ),
+    ("gh pr merge", &["Bash(gh pr merge)", "Bash(gh pr merge *)"]),
+    (
+        "gh -R * pr merge",
+        &["Bash(gh -R * pr merge)", "Bash(gh -R * pr merge *)"],
+    ),
+    (
+        "gh --repo * pr merge",
+        &["Bash(gh --repo * pr merge)", "Bash(gh --repo * pr merge *)"],
+    ),
+    (
+        "gh --repo=* pr merge",
+        &["Bash(gh --repo=* pr merge)", "Bash(gh --repo=* pr merge *)"],
+    ),
+];
+
+fn built_in() -> Vec<String> {
+    BUILT_IN.iter().map(|(p, _)| p.to_string()).collect()
+}
+
+#[test]
+fn disallowed_tools_of_an_empty_list_is_the_timer_tools_alone() {
+    assert_eq!(disallowed_tools(&[]), TIMERS);
+}
+
+#[test]
+fn disallowed_tools_of_the_fifteen_built_ins_is_the_timers_then_the_rules_row_by_row() {
+    let mut want: Vec<String> = TIMERS.split(',').map(String::from).collect();
+    for (_, rules) in BUILT_IN {
+        want.extend(rules.iter().map(ToString::to_string));
+    }
+    assert_eq!(
+        want.len(),
+        5 + 25,
+        "25 rules: one for each pattern that ends in *, else two"
+    );
+    assert_eq!(disallowed_tools(&built_in()), want.join(","));
+}
+
+#[test]
+fn a_pattern_that_ends_in_a_star_gets_one_rule_and_another_gets_two() {
+    let list = vec!["npm publish".to_string(), "rm -rf*".to_string()];
+    assert_eq!(
+        disallowed_tools(&list),
+        format!("{TIMERS},Bash(npm publish),Bash(npm publish *),Bash(rm -rf*)")
+    );
+}
+
+#[test]
+fn argv_with_no_deny_list_is_the_old_command_line_and_with_a_list_it_holds_the_string() {
+    let work = tempfile::tempdir().unwrap();
+    let mut spec = spec(work.path());
+    let plain = argv(&spec, "sid");
+    let at = plain.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(plain[at + 1], TIMERS, "the argv of 5c551cf");
+    spec.deny_commands = built_in();
+    let with = argv(&spec, "sid");
+    let at = with.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(with[at + 1], disallowed_tools(&built_in()));
+    // Only that one argument differs.
+    let mut a = plain.clone();
+    let mut b = with.clone();
+    a.remove(at + 1);
+    b.remove(at + 1);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn validate_refuses_a_deny_list_that_fails_the_check_and_names_the_entry() {
+    let work = tempfile::tempdir().unwrap();
+    for bad in ["git push * :*", "git (push", "a  b"] {
+        let mut spec = spec(work.path());
+        spec.deny_commands = vec!["npm publish".into(), bad.into()];
+        match validate(&spec) {
+            Err(ChatError::Refused(why)) => assert!(why.contains(bad), "{why}"),
+            other => panic!("{bad:?} must be refused, got {other:?}"),
+        }
+    }
+    let mut ok = spec(work.path());
+    ok.deny_commands = built_in();
+    assert!(validate(&ok).is_ok());
 }

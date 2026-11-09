@@ -191,7 +191,9 @@ impl Store for FakeStore {
                 | Effect::StartChatSession(_)
                 | Effect::EndChatSession { .. }
                 | Effect::SetChatSessionRuntime { .. }
-                | Effect::RedactChatItem { .. } => {}
+                | Effect::RedactChatItem { .. }
+                | Effect::SetSetting(_)
+                | Effect::UnsetSetting { .. } => {}
             }
         }
         let ledger = commit.ledger.map(|entry| {
@@ -392,6 +394,19 @@ impl Store for FakeStore {
     }
 
     fn pending_requests(&self, _session_id: &str) -> Result<Vec<ChatItemRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn setting_rows(&self) -> Result<Vec<SettingRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn setting_chain(
+        &self,
+        _key: &str,
+        _project_id: Option<&str>,
+        _agent_id: Option<&str>,
+    ) -> Result<Vec<SettingRow>, StoreError> {
         Ok(Vec::new())
     }
 

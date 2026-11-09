@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use pf_engine::port::chat::{ChatError, ChatOpen, ChatOption};
+use pf_engine::port::chat::{ChatError, ChatOpen, ChatOption, check_deny_commands};
 
 use crate::decode::TIMER_TOOLS;
 use crate::version::{ARTIFACTS_LIVE, ARTIFACTS_SUPPORTED};
@@ -168,6 +168,7 @@ pub fn validate(spec: &ChatOpen) -> Result<Validated, ChatError> {
             MODES.join(", ")
         ));
     }
+    check_deny_commands(&spec.deny_commands).map_err(ChatError::Refused)?;
     let mut stored = true;
     for (key, value) in &spec.options {
         match key.as_str() {
@@ -191,6 +192,24 @@ pub fn validate(spec: &ChatOpen) -> Result<Validated, ChatError> {
         artifacts,
         degraded: stored && !ARTIFACTS_SUPPORTED,
     })
+}
+
+/// The value of `--disallowedTools`: the five timer tools, then, for each deny pattern `c` in order,
+/// `Bash(c)` and `Bash(c *)`, or `Bash(c)` alone when `c` ends in `*`, all joined by `,`. `Bash(c)`
+/// matches the bare command, and `Bash(c *)` matches it with arguments (the pinned help's
+/// `Bash(git *)` form). With an empty list it is the timer tools alone.
+///
+/// A pattern passed [`check_deny_commands`], so no `(`, `)`, `,` or `:*` reaches a rule. A deny rule
+/// matches the command text the model writes: it is a speed bump, not a boundary (ADR-0014).
+pub fn disallowed_tools(deny: &[String]) -> String {
+    let mut rules: Vec<String> = TIMER_TOOLS.iter().map(ToString::to_string).collect();
+    for c in deny {
+        rules.push(format!("Bash({c})"));
+        if !c.ends_with('*') {
+            rules.push(format!("Bash({c} *)"));
+        }
+    }
+    rules.join(",")
 }
 
 /// The command line, the same for every process of one session (a new session and a resume differ
@@ -219,7 +238,7 @@ pub fn argv(spec: &ChatOpen, session_id: &str) -> Vec<String> {
     a.push("--effort".into());
     a.push(spec.effort.clone());
     a.push("--disallowedTools".into());
-    a.push(TIMER_TOOLS.join(","));
+    a.push(disallowed_tools(&spec.deny_commands));
     if !spec.instructions.is_empty() {
         a.push("--append-system-prompt".into());
         a.push(spec.instructions.clone());

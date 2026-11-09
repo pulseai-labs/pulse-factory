@@ -246,3 +246,36 @@ Known limits: a turn run in a terminal stays out of the app's history; a secret 
 reaches the store, the stream and the paired devices; `chat.ledger` can lose its last lines in a crash.
 
 Revisit this ADR when custom agents, worktree creation or the multi-server app is planned.
+
+## Amendment, 2026-11-09 (`r1.s4.w4`): the cap on self-started turns
+
+The chat-lifetime side only. The cap's value comes from ADR-0016's settings layer.
+
+- **What counts.** A turn whose `TurnStarted` cause is not `Operator`: `Task` (a background task the
+  chat started finished) or `Notice` (a controller notice; none is sent today). No operator asked for
+  it. The count, `self_turns`, lives in memory in the live chat and starts at 0 at each open. An
+  admitted `session send` (a mid-turn steer included) and an `Operator` turn start set it to 0.
+- **The rule.** With the key `chat.self_turn_cap` at N (0 to 100; default 3; `0` is off), N
+  self-started turns run whole after each operator message, and the controller cuts the turn that
+  would be the (N+1)th as it starts. The cap is resolved at each self-started `TurnStarted`, so a
+  change applies at the next one with no relaunch.
+- **Why stop the process.** The CLI starts a self-started turn itself, inside the process, when a
+  background task finishes (ADR-0014, case 11). The controller sends no input for it, so it has no
+  input to withhold. Stopping the process is the one control that ends the turn and the background
+  tasks that would start the next. A chat that keeps waking itself to watch something is the misuse the
+  cap targets: a session waits, polls or watches nothing (MASTER-SPEC §1).
+- **The stop.** The controller interrupts the turn, stops the process and its group (the background
+  tasks end with it, ADR-0014 case 16), closes each pending request as `lost`, writes one `chat.ledger`
+  line, `stop session=S-1 reason=self_turn_cap self_turns=<cap+1> cap=<cap> from=<scope|built_in>`, and
+  adds a `notice` item with the code `self_turn_cap`. The session is held at `needs_you` with the
+  reason. The interrupted turn's late `TurnResult` still stores its usage and its `turn` line, and the
+  state stays `needs_you`.
+- **The resume.** The operator's next `session send` finds no process and opens one. The session has
+  an `operator_message` item, so it resumes (C15). The new process has no hold and a count of 0.
+- **`halt`.** `halt` still stops every live process, one in a self-started turn included, with
+  `reason=halt` and the session `idle`. A process the cap stopped is already out of the table, so
+  `halt` leaves its session `needs_you`.
+- **Known limits.** A controller restart settles every live session to `idle` (C3), so the
+  `needs_you` of a cap stop does not survive a restart; its notice item does. The count does not
+  survive a restart either, and needs not: the restart ends the process. The cap does not bound the
+  turns the operator starts, or their cost.

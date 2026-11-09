@@ -24,6 +24,10 @@ pub const ALLOWLIST: &[&str] = &[
     "session_interrupt",
     "session_set",
     "session_end",
+    // `r1.s4.w4`: the scoped settings (ADR-0016). A device acts as the operator.
+    "settings_get",
+    "settings_set",
+    "settings_unset",
 ];
 
 /// Whether a device may call this verb.

@@ -1,5 +1,5 @@
 //! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
-//! AC-9 (`r1.s2.w4`) and AC-14 (`r1.s3.w3`): the demo scripts run against the built binary, and each fails when its journey is
+//! AC-9 (`r1.s2.w4`), AC-14 (`r1.s3.w3`) and AC-27 (`r1.s4.w4`): the demo scripts run against the built binary, and each fails when its journey is
 //! broken. The scripts run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`,
 //! and no build. d14 (`community-edition.sh`) is the exception that the five tests at the end cover: it
 //! asks GitHub for a CI run, and here a stub `gh` answers.
@@ -414,6 +414,56 @@ fn chat_api_passes() {
     ] {
         assert!(text.contains(want), "missing {want:?} in:\n{text}");
     }
+}
+
+/// The limit of `chat-policy.sh`: one controller, two launches of the replay, and two waits for the
+/// adapter's 30 s control timeout (the replay does not answer the context-usage request).
+const CHAT_POLICY_LIMIT: Duration = Duration::from_secs(240);
+
+#[test]
+fn chat_policy_passes() {
+    // d21 (`r1.s4.w4`): the scoped settings, the deny rules at launch and the self-started turn cap,
+    // against the real adapter on a replay of the recording of qualification case 19. The replay
+    // binary is built beside the controller's; a missing one fails the test, never skips it.
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let (out, took) = run(
+        "chat-policy.sh",
+        &[("PF_REPLAY_BIN", replay.to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < CHAT_POLICY_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "chat-policy: ok step 1:",
+        "chat-policy: ok step 2:",
+        "chat-policy: ok step 3:",
+        "chat-policy: ok step 4:",
+        "chat-policy: ok step 5:",
+        "chat-policy: ok\n",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    // It builds nothing and leaves nothing outside its temporary directory.
+    let body = std::fs::read_to_string(script("chat-policy.sh")).unwrap();
+    for bad in ["cargo build", "cargo run", "cargo install", "gh api"] {
+        assert!(!body.contains(bad), "chat-policy.sh holds {bad:?}");
+    }
+    assert!(body.contains("mktemp -d"));
 }
 
 #[test]

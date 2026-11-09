@@ -15,7 +15,7 @@ use crate::cli::{
     DeviceListArgs, DevicePairArgs, DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
     ProjectRemoveArgs, RequestsArgs, SessionAnswerArgs, SessionEndArgs, SessionInterruptArgs,
     SessionItemsArgs, SessionListArgs, SessionRedactArgs, SessionSendArgs, SessionSetArgs,
-    SessionStartArgs, ShowArgs, StatusArgs,
+    SessionStartArgs, SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -681,6 +681,142 @@ pub fn project_remove(a: &ProjectRemoveArgs) -> i32 {
             0
         }
         Err(why) => project_failed("remove", &why),
+    }
+}
+
+// ------------------------------------------------------------------ settings
+
+fn settings_failed(verb: &str, why: &str) -> i32 {
+    eprintln!("pulse-factory: settings {verb}: {}", tame(why));
+    1
+}
+
+/// A scope as the text forms show it: `server`, `project P-1`, `agent orchestrator`,
+/// `project P-1, agent orchestrator`, or `built-in`.
+fn scope_words(scope: &Value) -> String {
+    let project = scope["project_id"].as_str();
+    let agent = scope["agent_id"].as_str();
+    match (scope["kind"].as_str(), project, agent) {
+        (Some("built_in"), _, _) => "built-in".to_string(),
+        (_, Some(p), Some(a)) => format!("project {p}, agent {a}"),
+        (_, Some(p), None) => format!("project {p}"),
+        (_, None, Some(a)) => format!("agent {a}"),
+        _ => "server".to_string(),
+    }
+}
+
+/// A scope as a layer line names it: `server`, `project:P-1`, `agent:orchestrator`,
+/// `project:P-1/agent:orchestrator`.
+fn scope_tag(scope: &Value) -> String {
+    match (scope["project_id"].as_str(), scope["agent_id"].as_str()) {
+        (Some(p), Some(a)) => format!("project:{p}/agent:{a}"),
+        (Some(p), None) => format!("project:{p}"),
+        (None, Some(a)) => format!("agent:{a}"),
+        _ => "server".to_string(),
+    }
+}
+
+/// The text form of `settings get`: one line per key, then one indented line for each value it masks.
+pub fn settings_text(v: &Value) -> String {
+    let mut t = String::new();
+    for r in v["settings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "{} {} ({})\n",
+            tame(&s_of(&r["key"])),
+            tame(&r["value"].to_string()),
+            scope_words(&r["from"])
+        ));
+        for m in r["masked"].as_array().into_iter().flatten() {
+            t.push_str(&format!(
+                "  masks {} {}\n",
+                scope_tag(&m["scope"]),
+                tame(&m["value"].to_string())
+            ));
+        }
+    }
+    t
+}
+
+pub fn settings_get(a: &SettingsGetArgs) -> i32 {
+    let args = json!({ "key": a.key, "project_id": a.project, "agent_id": a.agent });
+    match call("settings_get", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                print!("{}", settings_text(&v));
+            }
+            0
+        }
+        Err(why) => settings_failed("get", &why),
+    }
+}
+
+fn applies_words(applies: &Value) -> &'static str {
+    match applies.as_str() {
+        Some("next_turn") => "the next turn the chat starts on its own",
+        _ => "the chat's next launch",
+    }
+}
+
+pub fn settings_set(a: &SettingsSetArgs) -> i32 {
+    // The value is JSON text. Text that is not JSON is refused here, before any call.
+    let value: Value = match serde_json::from_str(&a.value) {
+        Ok(v) => v,
+        Err(e) => {
+            return settings_failed("set", &format!("the value is not JSON ({e}): {}", a.value));
+        }
+    };
+    let command_id = match a.command_id.clone().map_or_else(random_command_id, Ok) {
+        Ok(id) => id,
+        Err(why) => return settings_failed("set", &why),
+    };
+    // No seat check here: the controller's caller check refuses a seat and audits the refusal.
+    let args = json!({
+        "key": a.key, "value": value, "project_id": a.project, "agent_id": a.agent,
+        "command_id": command_id,
+    });
+    match call("settings_set", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!(
+                    "{} set at {}; it applies at {}",
+                    tame(&s_of(&v["key"])),
+                    scope_words(&v["scope"]),
+                    applies_words(&v["resolved"]["applies"])
+                );
+            }
+            0
+        }
+        Err(why) => settings_failed("set", &why),
+    }
+}
+
+pub fn settings_unset(a: &SettingsUnsetArgs) -> i32 {
+    let command_id = match a.command_id.clone().map_or_else(random_command_id, Ok) {
+        Ok(id) => id,
+        Err(why) => return settings_failed("unset", &why),
+    };
+    let args = json!({
+        "key": a.key, "project_id": a.project, "agent_id": a.agent, "command_id": command_id,
+    });
+    match call("settings_unset", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!(
+                    "{} unset at {}; it applies at {}",
+                    tame(&s_of(&v["key"])),
+                    scope_words(&v["scope"]),
+                    applies_words(&v["resolved"]["applies"])
+                );
+            }
+            0
+        }
+        Err(why) => settings_failed("unset", &why),
     }
 }
 

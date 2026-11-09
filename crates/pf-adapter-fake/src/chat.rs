@@ -20,7 +20,7 @@ use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::{
     BackgroundTask, ChatAnswer, ChatError, ChatEvent, ChatId, ChatOpen, ChatOpened, ChatOption,
     ChatPort, ContextUsage, InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd, TurnCause,
-    cap,
+    cap, check_deny_commands,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -255,6 +255,8 @@ impl ChatPort for FakeChat {
     }
 
     fn open(&self, spec: &ChatOpen) -> Result<ChatOpened, ChatError> {
+        // The deny list is checked as the real adapter checks it, and otherwise ignored.
+        check_deny_commands(&spec.deny_commands).map_err(ChatError::Refused)?;
         for name in spec.env.keys() {
             check_env_name(name)?;
         }

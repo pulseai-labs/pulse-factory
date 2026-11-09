@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,8 @@ pub struct Rec {
     pub chats: Mutex<Vec<ChatId>>,
     /// The process id each chat reports, for the caller check.
     pub pids: Mutex<BTreeMap<ChatId, u32>>,
+    /// How many times the controller called `interrupt` (any chat).
+    interrupts: AtomicUsize,
     /// A stop that waits: the next `stop` sends on `.0` when it starts, then blocks until `.1`
     /// receives (or its sender drops). `hold_next_stop` arms it.
     stop_hook: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
@@ -53,6 +56,7 @@ impl Rec {
             sets: Mutex::new(Vec::new()),
             chats: Mutex::new(Vec::new()),
             pids: Mutex::new(BTreeMap::new()),
+            interrupts: AtomicUsize::new(0),
             stop_hook: Mutex::new(None),
         })
     }
@@ -71,6 +75,11 @@ impl Rec {
 
     pub fn stop_count(&self) -> usize {
         self.fake.stop_count()
+    }
+
+    /// How many `interrupt` calls the controller made.
+    pub fn interrupt_count(&self) -> usize {
+        self.interrupts.load(Ordering::SeqCst)
     }
 
     /// The texts the chat that opened `n`-th took, oldest first.
@@ -104,6 +113,7 @@ impl ChatPort for Rec {
         self.fake.answer(chat, request_id, a)
     }
     fn interrupt(&self, chat: &ChatId) -> Result<(), ChatError> {
+        self.interrupts.fetch_add(1, Ordering::SeqCst);
         self.fake.interrupt(chat)
     }
     fn set_option(&self, chat: &ChatId, id: &str, value: &str) -> Result<(), ChatError> {
