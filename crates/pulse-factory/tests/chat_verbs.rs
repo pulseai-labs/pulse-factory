@@ -315,7 +315,9 @@ fn a_set_changes_this_chat_only_and_the_next_start_takes_the_agents_defaults() {
     assert_ne!(row2.runtime_session_ref, ref1);
 
     // A non-live option is stored on the row, pending while the process lives, and the next send
-    // reopens the idle process with it.
+    // reopens the idle process with it. The session has had a message, so the reopen resumes.
+    cli_json(&live, &["session", "send", &s2, "first"]);
+    wait_turns(&live, &s2, 1);
     cli_json(&live, &["session", "set", &s2, "--option", "artifacts=off"]);
     let row2 = store.chat_session("S-2").unwrap().unwrap();
     assert_eq!(
@@ -338,7 +340,7 @@ fn a_set_changes_this_chat_only_and_the_next_start_takes_the_agents_defaults() {
     assert_eq!(rec2["pending_options"], json!({"artifacts": "off"}));
     let opens = rec.open_count();
     cli_json(&live, &["session", "send", &s2, "hello"]);
-    wait_turns(&live, &s2, 1);
+    wait_turns(&live, &s2, 2);
     assert_eq!(rec.open_count(), opens + 1);
     let spec = rec.last_open();
     assert_eq!(

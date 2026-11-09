@@ -680,9 +680,19 @@ impl Controller {
                 env.insert(name.clone(), value.clone());
             }
         }
+        // Only a session that has had a message has a conversation to resume. The runtime writes
+        // no transcript before the first message, so a resume of a session with none would fail
+        // as "context lost" (operator ruling on PR #41, class C1). A session with no message
+        // opens fresh and stores the new runtime ID.
+        let resume = match &row.runtime_session_ref {
+            Some(r) if self.has_operator_message(&row.id).map_err(failed)? => {
+                Some(SessionRef(r.clone()))
+            }
+            _ => None,
+        };
         let spec = ChatOpen {
             cwd: worktree.path.clone(),
-            resume: row.runtime_session_ref.clone().map(SessionRef),
+            resume,
             instructions: super::agents::instructions(
                 &agent,
                 &project.name,
@@ -745,6 +755,27 @@ impl Controller {
         self.sync_state(&live);
         self.emit_session(&row.id);
         Ok(live)
+    }
+
+    /// Whether the session's log holds an `operator_message` item.
+    fn has_operator_message(&self, session_id: &str) -> Result<bool, String> {
+        let mut after = 0;
+        loop {
+            let page = self
+                .store
+                .chat_items_after(session_id, after, ITEM_PAGE)
+                .map_err(|e| e.to_string())?;
+            if page
+                .iter()
+                .any(|i| i.kind == ChatItemKind::OperatorMessage.as_str())
+            {
+                return Ok(true);
+            }
+            match page.last() {
+                Some(last) if page.len() >= ITEM_PAGE as usize => after = last.seq,
+                _ => return Ok(false),
+            }
+        }
     }
 
     /// One thread per live process drains its events. It never blocks the controller's runtime.

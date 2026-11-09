@@ -66,7 +66,8 @@
   `runtime_session_ref`, model, effort and permission mode stay.
 - Each pending request of such a session gets an answer item with the outcome `lost`. The process
   that asked is gone, so the app must not show a card that can never be answered.
-- The next message reopens the session with `--resume <runtime_session_ref>` (`r1.s3.w3`).
+- The next message reopens the session with `--resume <runtime_session_ref>` (`r1.s3.w3`), when the
+  session has had a message. A session with none opens fresh (C15, operator ruling on PR #41).
 - So a live row after a restart is a session that waits to resume, not a zombie. The
   one-live-Orchestrator index holds by design.
 
@@ -231,8 +232,10 @@ project needs one.
   the unit states `KillMode=control-group`, so systemd also ends any child left in its cgroup, such as
   a background command in its own session. A controller start settles each live session to `idle`.
 - **Context lost (C15).** `ResumeFailed` marks the session "context lost" with the adapter's text, adds
-  a notice and refuses `send`. Nothing opens a fresh context for a session that has a runtime session
-  ID. The mark is in memory, and the next resume attempt after a restart sets it again.
+  a notice and refuses `send`. Nothing opens a fresh context for a session that has had a message.
+  A session with no message has no conversation to lose: the runtime writes no transcript before the
+  first message, so the controller opens it fresh and stores the new runtime ID (operator ruling on
+  PR #41, class C1). The mark is in memory, and the next resume attempt after a restart sets it again.
 - **The caller rule over chat processes.** The controller refuses a state-changing chat verb from a
   caller that is, or descends from, a seat or a live chat process (`ChatPort::process_id`), so an
   Orchestrator cannot drive its own chat or another one (Q2 rule 2).

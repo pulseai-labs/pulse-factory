@@ -208,7 +208,10 @@ ready".
 For a resume, `ClaudeChat` looks for `<config_dir>/projects/*/<id>.jsonl` before it spawns anything.
 None found is `ResumeFailed` and no process starts. A process that exits before `initialize` is
 answered, or that writes an error `result` first (case 15: "No conversation found with session ID"), is
-`ResumeFailed` too. The controller shows "context lost", and the operator chooses to end the session.
+`ResumeFailed` too. The controller shows "context lost" for a session that has had a message, and the
+operator chooses to end the session. The controller passes `resume` only for such a session: a session
+with no message has no transcript, so it opens with no `resume` and the adapter returns a new ID
+(operator ruling on PR #41, class C1).
 
 ### `RuntimeNotReady`
 

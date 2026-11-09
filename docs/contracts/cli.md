@@ -429,7 +429,8 @@ stream (`api.md`).
 - **`send`.** The text is 1 byte to 256 KiB. Refused, each as a refused admission: an unknown or ended
   session, a session marked "context lost", no room under the cap when the session has no process,
   and a gone worktree at the reopen. Admitted: the controller opens the process when there is none
-  (`--resume` of the stored runtime session ID), stores an `operator_message` item and sends the
+  (`--resume` of the stored runtime session ID when the session has had a message, else a fresh open
+  that stores the new ID), stores an `operator_message` item and sends the
   text. During a turn the send steers it (`mid_turn` `steer`, shown in the runtime record). A failure
   after the admission is the answer's `note` and a `notice` item; the command stays admitted, so a
   retry needs a new command ID.
@@ -483,8 +484,10 @@ stream (`api.md`).
   session `idle` and closes its pending requests as `lost`; the next `send` resumes it.
 - **Context lost.** When the runtime cannot resume a session (its transcript is missing), the
   session is marked `context lost: <why>`, a `notice` item says so, and `send` is refused at once.
-  Nothing opens a fresh context for a session that has a runtime session ID. End the session and
-  start a new one. The mark is in memory: after a controller restart the next `send` tries the
+  Nothing opens a fresh context for a session that has had a message (an `operator_message` item).
+  A session with no message opens fresh at its first `send` and stores the new runtime session ID,
+  because the runtime has no transcript to resume (operator ruling on PR #41, class C1). End the
+  session and start a new one. The mark is in memory: after a controller restart the next `send` tries the
   resume again and marks it again.
 - **Who may call.** A caller with `PF_SEAT_TOKEN` is refused every state-changing `session` verb. The
   controller checks the caller again: it refuses a caller that is, or descends from, a seat **or a

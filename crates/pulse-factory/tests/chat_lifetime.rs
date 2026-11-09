@@ -129,6 +129,9 @@ fn nothing_but_the_next_send_reopens_a_released_process() {
         .unwrap()
         .runtime_session_ref
         .unwrap();
+    // A session that has had a message has a conversation to resume.
+    cli_json(&live, &["session", "send", &s, "hello"]);
+    wait_turns(&live, &s, 1);
     live.controller.sweep_chats();
     assert_eq!(rec.open_count(), 1);
 
@@ -141,7 +144,7 @@ fn nothing_but_the_next_send_reopens_a_released_process() {
 
     let v = cli_json(&live, &["session", "send", &s, "hello again"]);
     assert_eq!(v["session"]["id"], s.as_str());
-    wait_turns(&live, &s, 1);
+    wait_turns(&live, &s, 2);
     assert_eq!(rec.open_count(), 2);
     let spec = rec.last_open();
     assert_eq!(spec.resume.map(|r| r.0), Some(stored));
@@ -149,8 +152,52 @@ fn nothing_but_the_next_send_reopens_a_released_process() {
         .into_iter()
         .filter(|i| i.kind == "assistant_text")
         .collect();
+    assert_eq!(texts.len(), 2);
+    assert!(texts[1].payload.contains("fake reply: hello again"));
+}
+
+/// Operator ruling on PR #41, class C1: a released session with no message has no transcript, so
+/// its first send opens fresh, stores the new ref and is answered. It is not "context lost".
+#[test]
+fn a_released_session_with_no_message_reopens_fresh_on_its_first_send() {
+    let rec = Rec::new(strict_fake());
+    let live = short_idle(&rec);
+    let (_, s) = started(&live, "alpha");
+    let before = live
+        .controller
+        .store()
+        .chat_session(&s)
+        .unwrap()
+        .unwrap()
+        .runtime_session_ref
+        .unwrap();
+    live.controller.sweep_chats();
+    assert!(live.controller.live_chat_sessions().is_empty());
+    assert_eq!(rec.open_count(), 1);
+
+    let v = cli_json(&live, &["session", "send", &s, "first words"]);
+    assert_eq!(v["session"]["id"], s.as_str());
+    wait_turns(&live, &s, 1);
+
+    assert_eq!(rec.open_count(), 2);
+    assert!(rec.last_open().resume.is_none(), "no message, so no resume");
+    let after = live
+        .controller
+        .store()
+        .chat_session(&s)
+        .unwrap()
+        .unwrap()
+        .runtime_session_ref
+        .unwrap();
+    assert_ne!(after, before, "the new ref the adapter returned is stored");
+    assert_eq!(notices(&live, &s, "context_lost"), 0);
+    assert!(session_of(&live, &s)["context_lost"].is_null());
+    let texts: Vec<_> = items(&live, &s)
+        .into_iter()
+        .filter(|i| i.kind == "assistant_text")
+        .collect();
     assert_eq!(texts.len(), 1);
-    assert!(texts[0].payload.contains("fake reply: hello again"));
+    assert!(texts[0].payload.contains("fake reply: first words"));
 }
 
 /// The cap is 1 and `S-1` holds its process by `prompt`. Answer the refusal of a start in another
@@ -328,6 +375,9 @@ fn a_ref_the_runtime_does_not_know_is_context_lost_and_never_a_fresh_open() {
     let rec = Rec::new(strict_fake());
     let live = short_idle(&rec);
     let (_, s) = started(&live, "alpha");
+    // The session has had a message, so its failed resume is "context lost".
+    cli_json(&live, &["session", "send", &s, "first"]);
+    wait_turns(&live, &s, 1);
     live.controller.sweep_chats();
     live.controller
         .store()

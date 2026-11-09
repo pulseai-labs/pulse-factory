@@ -402,7 +402,10 @@ fn the_persona_holds_the_facts_and_none_of_the_banned_words_and_two_processes_ge
         assert!(!lower.contains(banned), "the persona holds {banned}");
     }
 
-    // A release, a transcript for the resume check, and a second process of the same session.
+    // A message, so the session has a conversation to resume (PR #41, class C1). Then a release, a
+    // transcript for the resume check, and a second process of the same session.
+    cli_json(live, &["session", "send", &s, "first"]);
+    wait_turns(live, &s, 1);
     let stored = live
         .controller
         .store()
@@ -417,7 +420,7 @@ fn the_persona_holds_the_facts_and_none_of_the_banned_words_and_two_processes_ge
     live.controller.sweep_chats();
     assert!(live.controller.live_chat_sessions().is_empty());
     cli_json(live, &["session", "send", &s, "again"]);
-    wait_turns(live, &s, 1);
+    wait_turns(live, &s, 2);
     assert_eq!(real.launches(), 2);
     let second = value_after(&real.argv(1), "--append-system-prompt").expect("a persona");
     assert_eq!(first, second, "one session, one persona");
