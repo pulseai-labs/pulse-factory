@@ -650,7 +650,7 @@ export class FakeTransport implements Transport {
     if (index < 0) throw new TransportError("refused", `request ${args.request} is unknown`);
     const claim = this.takeClaim();
     const row = this.requestRows[index] as RequestSummary;
-    const request: RequestSummary = { ...row, status: "answered", answered_at: "2026-11-10T10:05:00.000Z", verbs: [] };
+    const request: RequestSummary = { ...row, status: "answered", answered_at: new Date().toISOString(), verbs: [] };
     this.requestRows[index] = request;
     return {
       schema_version: 1,
