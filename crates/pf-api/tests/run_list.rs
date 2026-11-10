@@ -138,7 +138,7 @@ async fn with_no_token_or_a_bad_one_run_list_is_401_and_never_reaches_call() {
 async fn every_verb_router_rs_keeps_off_is_still_off() {
     let (app, fake) = rig();
     for verb in [
-        "arm",
+        "propose",
         "claim",
         "halt",
         "hook",

@@ -465,6 +465,111 @@ fn needs_you_api_passes() {
     }
 }
 
+/// The limit of `start-api.sh`: one controller start, one replayed chat turn, a 4 s wait for a confirm
+/// code to expire and about forty `curl` calls. The script's own limit is 150 seconds.
+const START_API_LIMIT: Duration = Duration::from_secs(150);
+
+#[test]
+fn start_api_passes() {
+    // d22: the chat proposes a start, a paired device confirms the card with a one-use code and arms
+    // the run. The replay binary is built beside the controller's; a missing one fails the test, never
+    // skips it (`cargo build -p pf-adapter-claude --bin pf-claude-replay`).
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let (out, took) = run(
+        "start-api.sh",
+        &[
+            ("PF_REPLAY_BIN", replay.to_str().unwrap()),
+            ("PF_STREAM_BIN", env!("CARGO_BIN_EXE_pf-stream-reader")),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < START_API_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+        "step 6:",
+        "step 7:",
+        "start-api: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
+#[test]
+fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
+    // The script's header names the defaults `pulse-factory`, `pf-claude-replay` and `pf-stream-reader`
+    // on PATH. `start-env.sh` is a child process that needs `PF_BIN` and `PF_REPLAY_BIN` in its
+    // environment, so the defaults must reach it exported (r1.s4.w2 review, B1).
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let bin_dir = std::env::temp_dir().join(format!("pf-start-api-path-{}", std::process::id()));
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for (name, from) in [
+        ("pulse-factory", env!("CARGO_BIN_EXE_pulse-factory")),
+        ("pf-claude-replay", replay.to_str().unwrap()),
+        ("pf-stream-reader", env!("CARGO_BIN_EXE_pf-stream-reader")),
+    ] {
+        let link = bin_dir.join(name);
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(from, &link).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let start = Instant::now();
+    let out = Command::new("bash")
+        .arg(script("start-api.sh"))
+        .env("PATH", path)
+        .env_remove("PF_BIN")
+        .env_remove("PF_REPLAY_BIN")
+        .env_remove("PF_STREAM_BIN")
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .output()
+        .expect("bash starts");
+    let took = start.elapsed();
+    let _ = std::fs::remove_dir_all(&bin_dir);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < START_API_LIMIT, "{took:?}");
+    assert!(stdout(&out).contains("start-api: ok"), "{}", stdout(&out));
+}
+
 /// The limit of `chat-policy.sh`: one controller, two launches of the replay, and two waits for the
 /// adapter's 30 s control timeout (the replay does not answer the context-usage request).
 const CHAT_POLICY_LIMIT: Duration = Duration::from_secs(240);
@@ -526,6 +631,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "pair-api.sh",
         "chat-api.sh",
         "needs-you-api.sh",
+        "start-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [
@@ -540,6 +646,18 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         assert!(text.contains("mktemp -d"), "{name} makes a temp directory");
         assert!(text.contains("PF_BIN"), "{name} takes PF_BIN");
     }
+    // `start-env.sh` makes its paper env under the directory its caller names, so it has no `mktemp`.
+    let env = std::fs::read_to_string(script("start-env.sh")).unwrap();
+    for bad in [
+        "cargo build",
+        "cargo run",
+        "cargo install",
+        "gh pr",
+        "gh api",
+    ] {
+        assert!(!env.contains(bad), "start-env.sh holds {bad:?}");
+    }
+    assert!(env.contains("PF_BIN"), "start-env.sh takes PF_BIN");
 }
 
 #[test]

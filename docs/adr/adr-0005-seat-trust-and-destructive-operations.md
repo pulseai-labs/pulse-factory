@@ -255,3 +255,20 @@ ADR-0012 adds a second kind of caller beside the operator's OS user and the seat
   residue.
 - **Still a known limit:** a code proves the device, the freshness and the head, not that a person
   pressed the button.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): a device arms with a confirm code, and the second pass runs in a chat
+
+- **A device arms a run proposed from a chat, and an arm takes no claim.** `arm` answers no request,
+  and the operator's CLI `arm` needs no claim, so the device's arm takes no claim either: the confirm
+  code for an arm binds the proposal and the hash of its plan, never a claim generation, and the arm
+  moves no claim. `claim_moved` never applies to an arm. The claim still governs answers.
+- **A chat still cannot arm.** A chat process, and a process below one, is refused on `arm` and on
+  the claim verbs. It runs `pulse-factory propose`, which starts nothing: the controller builds the
+  plan, checks it with the dry run and posts a start card into the calling chat. Only a paired
+  device's confirm arms it. The caller of `propose` is found by its process ancestry alone. The
+  `PULSE_FACTORY_CHAT` marker only ever refuses. All of this is a speed bump, not a boundary, and the
+  Release 2 authority-rules spine owns the residue.
+- **The second pass of the spine close runs in the operator's own session or in the project's
+  Orchestrator chat.** The close needs no claim, so the waiting text no longer names a "claim
+  session". The Orchestrator is a chat Pulse Factory launched, not a seat: no `pf-rules` role applies
+  to it. Its deny list does, with the known limit of ADR-0014.

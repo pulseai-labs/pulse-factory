@@ -56,6 +56,7 @@ fn every_header_names_the_version_the_recorder_the_case_and_the_hash_of_its_body
         );
         assert_eq!(h["cli_version"], "2.1.319", "{}", f.name);
         assert_eq!(h["cli_version"], pinned::CLI_VERSION, "{}: the pin", f.name);
+        // Every fixture is a recording: none is hand-written.
         assert_eq!(h["recorder"], "real_probe_chat", "{}", f.name);
         assert_eq!(
             h["case"],

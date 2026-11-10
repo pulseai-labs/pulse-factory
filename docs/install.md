@@ -234,7 +234,7 @@ make a claim with `pulse-factory claim`, then resume the unit in the same run wi
 When every item has merged, a spine-close seat opens the spine PR and the controller opens a
 `merge_ack` request. `pulse-factory show <R-n>` names the PR, the base branch and the head SHA.
 `pulse-factory ack <R-n> --rev <k>` merges the PR with that SHA. Then run `/ossify:close <spine>`
-in the claim session for the second pass. The run ends when the method records the close.
+for the second pass, in your own session or in the project's Orchestrator chat. The run ends when the method records the close.
 
 ## Remove
 

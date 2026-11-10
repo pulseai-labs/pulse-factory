@@ -5,10 +5,12 @@
 // (`listen` needs a capability, and the app declares no capability file).
 import type {
   ApiStatus,
+  ArmActed,
   ConfirmCodeArgs,
   ConfirmIssued,
   DeviceAckArgs,
   DeviceAnswerArgs,
+  DeviceArmArgs,
   DeviceClearArgs,
   ProjectAddArgs,
   ProjectChanged,
@@ -169,6 +171,7 @@ export function createTauriTransport(invokeImpl?: InvokeLike, channelFactory?: C
     settingsSet: (args: SettingsSetArgs) => verb<SettingChanged>("settings_set", args),
     settingsUnset: (args: SettingsUnsetArgs) => verb<SettingChanged>("settings_unset", args),
     runList: () => verb<RunList>("run_list", {}),
+    arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
     openStream,
     forget: async () => {
       await command<null>("forget", undefined);

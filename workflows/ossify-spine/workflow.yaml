@@ -554,7 +554,8 @@ tracks:
         - [git, -C, "{param.repo}", fetch, origin, "{param.base_branch}"]
 
 # The run ends when the method records the spine as closed. That is the second pass of the close,
-# which the operator runs in the claim session after the spine PR is merged.
+# which the operator runs in their own session or in the project's Orchestrator chat after the
+# spine PR is merged.
 end_when:
   when:
     - exit0:
@@ -565,5 +566,5 @@ end_when:
         - "{param.spine}"
         - 'any(.spines[]; .id == $s and .status == "closed")'
         - "{param.state_file}"
-  waiting: "the spine PR is merged: run /ossify:close {param.spine} in the claim session for the second pass"
+  waiting: "the spine PR is merged: run /ossify:close {param.spine} for the second pass, in your own session or in the project's Orchestrator chat"
   reason: "spine {param.spine} closed"

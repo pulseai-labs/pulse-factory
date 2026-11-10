@@ -1486,7 +1486,7 @@ fn the_run_ends_when_the_method_records_the_close() {
     );
     assert_eq!(
         end.waiting,
-        "the spine PR is merged: run /ossify:close {param.spine} in the claim session for the second pass"
+        "the spine PR is merged: run /ossify:close {param.spine} for the second pass, in your own session or in the project's Orchestrator chat"
     );
     assert_eq!(end.reason, "spine {param.spine} closed");
 }

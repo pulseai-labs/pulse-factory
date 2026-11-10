@@ -303,6 +303,22 @@ const CASES: Array<{
     run: (t) => t.runList(),
     result: { schema_version: 1, runs: [] },
   },
+  {
+    method: "confirmCode",
+    verb: "confirm_code",
+    viaVerb: true,
+    args: { subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-7" },
+    run: (t) => t.confirmCode({ subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-7" }),
+    result: { schema_version: 1, replayed: false, code: "pfc1-x", expires_at: "2026-11-09T10:10:00Z", device: "D-1" },
+  },
+  {
+    method: "arm",
+    verb: "arm",
+    viaVerb: true,
+    args: { proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-8" },
+    run: (t) => t.arm({ proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-8" }),
+    result: { schema_version: 1, replayed: false, device: "D-1", proposal: "sp-1", run_id: "run-1", project_id: "P-1" },
+  },
 ];
 
 /** The scripted native events: one of each of the four shapes (the chat frame twice). */

@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 use crate::cli::{
     AckArgs, AnswerArgs, ApiStatusArgs, ChatRuntimeInstallArgs, ClaimArgs, ClearArgs,
     DeviceListArgs, DevicePairArgs, DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
-    ProjectRemoveArgs, RequestsArgs, SessionAnswerArgs, SessionEndArgs, SessionInterruptArgs,
-    SessionItemsArgs, SessionListArgs, SessionRedactArgs, SessionSendArgs, SessionSetArgs,
-    SessionStartArgs, SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, ShowArgs, StatusArgs,
+    ProjectRemoveArgs, ProposeArgs, RequestsArgs, SessionAnswerArgs, SessionEndArgs,
+    SessionInterruptArgs, SessionItemsArgs, SessionListArgs, SessionRedactArgs, SessionSendArgs,
+    SessionSetArgs, SessionStartArgs, SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs,
+    ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -406,6 +407,67 @@ fn default_holder() -> String {
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "host".to_string());
     format!("{user}@{host}:{}", std::process::id())
+}
+
+/// `propose`: ask the controller to post a start card into the calling chat. It starts nothing.
+pub fn propose(a: &ProposeArgs) -> i32 {
+    let refused = |why: &str| -> i32 {
+        eprintln!("pulse-factory: propose refused: {}", tame(why));
+        1
+    };
+    if std::env::var_os("PF_SEAT_TOKEN").is_some() {
+        return refused("PF_SEAT_TOKEN is set, so this is a seat");
+    }
+    if a.workflow.contains('/') {
+        return refused("--workflow takes the name of an installed workflow, not a path");
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return refused(&why),
+    };
+    let inputs = crate::arm::ArmInputs {
+        spine: a.spine.clone(),
+        workflow: a.workflow.clone(),
+        ledger: crate::arm::absolute(&a.ledger),
+        params: a.params.clone(),
+        plugin_roots: a
+            .plugin_roots
+            .iter()
+            .map(|p| crate::arm::absolute(p))
+            .collect(),
+        paper: a.paper.as_deref().map(crate::arm::absolute),
+        replace: None,
+    };
+    let args = json!({ "inputs": inputs, "command_id": command_id });
+    match call("propose", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                if let Ok(summary) =
+                    serde_json::from_value::<pf_api::types::ArmSummary>(v["summary"].clone())
+                {
+                    print!("{}", crate::arm::summary_text(&summary));
+                }
+                match v["proposal"].as_str() {
+                    Some(id) => println!(
+                        "proposal: {} posted to chat session {}; nothing is armed until the operator confirms it on a paired device",
+                        tame(id),
+                        tame(&s_of(&v["session"]))
+                    ),
+                    None => println!("note: {}", tame(&s_of(&v["note"]))),
+                }
+            }
+            0
+        }
+        Err(why) => {
+            let why = why
+                .strip_prefix("propose refused: ")
+                .unwrap_or(&why)
+                .to_string();
+            refused(&why)
+        }
+    }
 }
 
 pub fn claim(a: &ClaimArgs) -> i32 {
@@ -1303,6 +1365,12 @@ pub fn session_list(a: &SessionListArgs) -> i32 {
 }
 
 /// One line of `session items`: the `seq`, the kind and a one-line summary.
+/// A count a plan shows, or `unknown` when the workflow has no `plan_check`.
+fn count_text(v: &Value) -> String {
+    v.as_u64()
+        .map_or_else(|| "unknown".to_string(), |n| n.to_string())
+}
+
 pub fn item_line(item: &Value) -> String {
     let body = &item["body"];
     let kind = s_of(&body["kind"]);
@@ -1357,6 +1425,23 @@ pub fn item_line(item: &Value) -> String {
             "{} cost {}",
             tame(&s_of(&body["stop"])),
             cost_text(body["usage"]["cost_micros"].as_u64().unwrap_or(0))
+        ),
+        "start_card" => format!(
+            "start {} proposal={} items={} most_launches={}",
+            tame(&s_of(&body["summary"]["spine"])),
+            tame(&s_of(&body["proposal"])),
+            count_text(&body["summary"]["items"]),
+            count_text(&body["summary"]["most_launches"]),
+        ),
+        "start_result" => format!(
+            "{} answers {}{} result={}",
+            tame(&s_of(&body["outcome"])),
+            item["answers_seq"],
+            body["run"]
+                .as_str()
+                .map(|r| format!(" run={}", tame(r)))
+                .unwrap_or_default(),
+            tame(&s_of(&body["result"])),
         ),
         "redacted" => "(redacted)".to_string(),
         _ => "(unknown kind)".to_string(),

@@ -128,7 +128,7 @@ fn the_allowlist_holds_the_device_verbs_and_the_ten_of_the_chat_spine() {
     }
     for verb in [
         "claim",
-        "arm",
+        "hook",
         "halt",
         "device_pair",
         "device_revoke",
@@ -145,7 +145,7 @@ async fn a_verb_off_the_allowlist_answers_403_and_never_reaches_call() {
     let (app, fake) = rig();
     for verb in [
         "claim",
-        "arm",
+        "hook",
         "halt",
         "device_pair",
         "device_revoke",

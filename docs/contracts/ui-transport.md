@@ -73,6 +73,8 @@ export interface Transport {
   settingsSet(args: SettingsSetArgs): Promise<SettingChanged>;
   settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged>;
   runList(): Promise<RunList>;
+  // r1.s4.w2: the device `arm` of a start card (api.md, "The device `arm`")
+  arm(args: DeviceArmArgs): Promise<ArmActed>;
   openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle>;
   forget(): Promise<void>;                          // drops the token on this device only
 }
@@ -83,6 +85,12 @@ export interface Transport {
   operator runs `pulse-factory device revoke <id>`, so the UI tells the operator that command, with
   the device's ID.
 - The message of a `key_changed` error is exactly `server key changed: re-pair`.
+- **`arm`** (`r1.s4.w2`) arms the run of a start card. `DeviceArmArgs` holds the `proposal`, its
+  `plan_sha256`, the confirm `code` from `confirmCode` and a `command_id`. The bridge serves it on
+  `/bridge/verbs/arm`. `tauri.ts` sends it through w3's generic `verb` command,
+  `command("verb", { name: "arm", args })` (O2), and adds no name to `TAURI_COMMANDS`: the desktop
+  app reaches `arm` through w3's `verb` command. `confirmCode` is w3's line of this interface; its
+  `arm` subject is w2's.
 - `projectAdd` and every state-changing chat verb carry a `command_id`. A retry of the same submit
   reuses it (`api.md`, A7).
 - `sessionStart` and `sessionEnd` answer `SessionStarted` and `SessionEnded`, which are transport types

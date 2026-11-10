@@ -235,6 +235,7 @@ impl Live {
             forge_repo: self.bare.display().to_string(),
             default_branch: "main".into(),
             target_dir: String::new(),
+            ..ArmPlan::default()
         }
     }
 

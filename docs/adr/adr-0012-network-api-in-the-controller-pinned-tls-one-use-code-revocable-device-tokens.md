@@ -411,6 +411,22 @@ This amends the allowlist rule: a later spine that adds a verb amends this ADR, 
 - **The wire types** are generated with `ts-rs` into `apps/api-client/src/gen/` (ADR-0013).
 - Rules and limits: ADR-0016. The verbs' arguments and answers are `cli.md`'s.
 
+## The device `arm` and the `arm` subject (r1.s4.w2)
+
+Each spine that adds a verb amends this ADR (the allowlist rule). This one adds one.
+
+- **`arm` joins the allowlist.** It takes `DeviceArmArgs { proposal, plan_sha256, code, command_id }`
+  and answers `ArmActed`. It runs only with a confirm code from a start card. The operator's CLI
+  `arm` is unchanged, and a socket `arm` that carries a code and no plan is refused.
+- **The `arm` subject of the confirm code** is `{ kind: "arm", proposal, plan_sha256 }`. The code binds
+  the proposal and `plan_sha256`, the SHA-256 of the plan, its summary and the package snapshot's
+  pin. It binds no claim generation. A wrong hash, an unknown, withdrawn, failed, armed or
+  being-armed proposal is refused `subject_moved`. The nine refusal words do not change.
+- **The spend checks the plan again.** It checks the snapshot's hash before any of its code runs, then
+  builds the plan again from the snapshot. A different hash is `subject_moved`.
+- **Two chat item kinds** reach the stream: `start_card` and `start_result`. `ConfirmIssued` keeps its
+  required `subject`, and gains an optional `start`.
+
 ## The run list, the request frames in the client and the `verb` command (r1.s4.w3)
 
 Amendment, 2026-11-10. This item amends the allowlist rule again, as its own text asks: a later spine

@@ -218,13 +218,22 @@ refuses it.
 ## Confirm codes
 
 A paired device acts on a request with a **confirm code** (ADR-0005, ADR-0012). The code is
-generic over its subject, so a later item adds a variant (an arm) and nothing else changes shape.
+generic over its subject: `r1.s4.w2` adds the `arm` variant and nothing else changes shape.
 
 - **Subject.** A code binds one request, its revision, one verb and the verb's parameters, the
   claim generation current at issue (or none), the device, and for a `merge_ack` the PR's head SHA.
   The verbs are `answer`, `clear` and `ack`. An `answer` code binds the SHA-256 of the answer text
   (`text_sha256`: the device sends the hash at issue, and the text never enters the code table). A
   `clear` code binds the target stage `to`, or its absence.
+- **The `arm` subject** (`r1.s4.w2`). A code can bind a start card instead of a request: the
+  proposal (`sp-…`) and its `plan_sha256`. An arm code takes no claim: it binds no generation, the
+  spend reads no claim, and the arm leaves the claim with its holder (W6). It is refused
+  `subject_moved` at issue when the proposal is unknown, withdrawn, failed, being armed or already
+  armed, or when the plan hash differs from the card's. An arm code spent on `answer`, `clear` or
+  `ack`, and a request code spent on `arm`, are each `code_subject`. The spend builds the plan
+  again from the proposal's package snapshot and compares `plan_sha256` before anything runs
+  (`api.md`, `arm`): a plan that changed since the card is `subject_moved`, and the card is
+  `failed`.
 - **Code text.** 16 random bytes from the controller's random device, shown as `pfc1-` and 32
   lower-case hex digits. With no random bytes there is no code and no admission. The answer of
   `confirm_code` is the only place the text appears. The controller keeps only its SHA-256.

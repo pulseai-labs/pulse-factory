@@ -102,6 +102,9 @@ fn dump(conn: &Connection) -> Vec<(String, Vec<String>)> {
                     // Migration 0005 adds two columns to `projects`: a version-N dump reads the old ones.
                     if *t == "projects" {
                         "id, name, root, created_at, removed_at"
+                    } else if *t == "runs" {
+                        // Migration 0008 adds `project_id` to `runs`.
+                        "id, workflow, ledger_file, state, halted_reason, created_at, updated_at"
                     } else {
                         "*"
                     }
@@ -148,7 +151,7 @@ fn insert_device(conn: &Connection, id: &str, token_sha256: &str) -> rusqlite::R
 
 #[test]
 fn the_migration_list_has_devices_as_version_four() {
-    assert_eq!(MIGRATIONS.len(), 7);
+    assert_eq!(MIGRATIONS.len(), 8);
     assert_eq!(MIGRATIONS[3].version, 4);
     assert_eq!(MIGRATIONS[3].name, "devices");
 }
@@ -161,11 +164,11 @@ fn a_version_three_store_migrates_to_the_latest_and_keeps_every_row() {
     let before = dump(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(dump(&conn), before, "no row of version 3 changed");
     assert_eq!(count(&conn, "devices"), 0, "the devices table is empty");
     // The columns are exactly the ones the spec names, in its order, and the table is strict.
@@ -204,10 +207,10 @@ fn a_fresh_file_opens_at_the_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(count(&conn, "devices"), 0);
 }
 
@@ -225,7 +228,7 @@ fn a_version_three_store_with_an_active_run_refuses_and_stays_at_three() {
         err,
         OpenError::RunActive {
             current: 3,
-            pending: 7
+            pending: 8
         }
     );
 

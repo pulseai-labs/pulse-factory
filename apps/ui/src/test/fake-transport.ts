@@ -3,6 +3,7 @@
 import type {
   AgentRecord,
   ApiStatus,
+  ArmActed,
   ChatFrame,
   ChatItemBody,
   ChatItemRecord,
@@ -14,6 +15,7 @@ import type {
   ConfirmIssued,
   DeviceAckArgs,
   DeviceAnswerArgs,
+  DeviceArmArgs,
   DeviceClearArgs,
   DeviceRecord,
   ProjectAddArgs,
@@ -83,6 +85,7 @@ export type Method =
   | "settingsSet"
   | "settingsUnset"
   | "runList"
+  | "arm"
   | "openStream";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -376,6 +379,7 @@ export class FakeTransport implements Transport {
   readonly setArgs: SessionSetArgs[] = [];
   readonly interruptArgs: SessionInterruptArgs[] = [];
   readonly endArgs: SessionEndArgs[] = [];
+  readonly armArgs: DeviceArmArgs[] = [];
   readonly streams: OpenStream[] = [];
   server: PairedServer | null;
   projects: ProjectRecord[];
@@ -593,11 +597,33 @@ export class FakeTransport implements Transport {
     return { schema_version: 1, ...row, body: this.bodies[args.id] ?? {}, answer: null, answer_generation: null };
   }
 
+  /** The code the next arm `confirmCode` issues (a replay of a command ID answers `null`, as the server does). */
+  nextCode = "pfc1-" + "a".repeat(32);
+  private issued = new Map<string, ConfirmIssued>();
+
   async confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued> {
     this.confirmArgs.push(args);
     this.enter("confirmCode");
-    const row = this.requestRows.find((r) => r.id === args.subject.request);
-    if (!row) throw new TransportError("refused", `request ${args.subject.request} is unknown`);
+    const subject = args.subject;
+    if (subject.kind === "arm") {
+      const first = this.issued.get(args.command_id);
+      if (first) return { ...first, replayed: true, code: null };
+      const issued: ConfirmIssued = {
+        schema_version: 1,
+        replayed: false,
+        code: this.nextCode,
+        expires_at: "2026-11-09T10:10:00Z",
+        device: this.server?.device.id ?? "D-1",
+        generation: null,
+        holder: null,
+        subject: { request: "", revision: 0, kind: subject.kind, run: "", unit: null, reason: "" },
+        start: { proposal: subject.proposal, session: "S-1", project_id: "P-1", spine: "s1", plan_sha256: subject.plan_sha256 },
+      };
+      this.issued.set(args.command_id, issued);
+      return issued;
+    }
+    const row = this.requestRows.find((r) => r.id === subject.request);
+    if (!row) throw new TransportError("refused", `request ${subject.request} is unknown`);
     this.codeCounter += 1;
     const code = `pfc1-${this.codeCounter.toString(16).padStart(32, "0")}`;
     const merge = row.kind === "merge_ack";
@@ -783,6 +809,19 @@ export class FakeTransport implements Transport {
   /** Deliver a request frame to every open stream. */
   requestFrame(frame: RequestFrame): void {
     this.emit({ event: "request_frame", frame });
+  }
+
+  async arm(args: DeviceArmArgs): Promise<ArmActed> {
+    this.armArgs.push(args);
+    this.enter("arm");
+    return {
+      schema_version: 1,
+      replayed: false,
+      device: this.server?.device.id ?? "D-1",
+      proposal: args.proposal,
+      run_id: "run-1",
+      project_id: "P-1",
+    };
   }
 
   async openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle> {

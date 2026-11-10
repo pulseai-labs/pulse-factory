@@ -3,10 +3,12 @@
 // call. This file sees no token and opens no TLS connection.
 import type {
   ApiStatus,
+  ArmActed,
   ConfirmCodeArgs,
   ConfirmIssued,
   DeviceAckArgs,
   DeviceAnswerArgs,
+  DeviceArmArgs,
   DeviceClearArgs,
   ProjectAddArgs,
   ProjectChanged,
@@ -164,6 +166,7 @@ export function createBridgeTransport(fetchImpl?: FetchLike, eventSourceFactory?
     settingsSet: (args: SettingsSetArgs) => verb<SettingChanged>("settings_set", args),
     settingsUnset: (args: SettingsUnsetArgs) => verb<SettingChanged>("settings_unset", args),
     runList: () => verb<RunList>("run_list", {}),
+    arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
     openStream,
     forget: async () => {
       await request<null>("POST", "/bridge/forget", {});

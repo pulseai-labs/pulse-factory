@@ -63,6 +63,17 @@ describe("the Tauri transport invokes the command of each method's name", () => 
     expect(invoke).toHaveBeenCalledWith("project_add", { args });
   });
 
+  it("confirmCode and arm invoke the generic verb command with {name, args} (O2)", async () => {
+    invoke.mockResolvedValue({ ok: 1 });
+    const t = createTauriTransport();
+    const confirmArgs = { subject: { kind: "arm" as const, proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-1" };
+    const armArgs = { proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-2" };
+    await t.confirmCode(confirmArgs);
+    await t.arm(armArgs);
+    expect(invoke).toHaveBeenNthCalledWith(1, "verb", { name: "confirm_code", args: confirmArgs });
+    expect(invoke).toHaveBeenNthCalledWith(2, "verb", { name: "arm", args: armArgs });
+  });
+
   it("forget invokes forget and returns nothing", async () => {
     invoke.mockResolvedValueOnce(null);
     await expect(createTauriTransport().forget()).resolves.toBeUndefined();
@@ -120,6 +131,8 @@ describe("a rejection becomes a TransportError of its kind", () => {
     ["answer", (t) => t.answer({ request: "R-1", rev: 1, text: "x", code: "pfc1-0123", command_id: "c" })],
     ["ack", (t) => t.ack({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c" })],
     ["runList", (t) => t.runList()],
+    ["confirmCode", (t) => t.confirmCode({ subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c" })],
+    ["arm", (t) => t.arm({ proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c" })],
   ];
 
   it.each(TRANSPORT_ERROR_KINDS)("kind %s", async (kind) => {

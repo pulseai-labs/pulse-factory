@@ -665,7 +665,6 @@ fn verbs_off_the_allowlist_are_refused_with_403_on_the_real_controller() {
     for verb in [
         "halt",
         "claim",
-        "arm",
         "runs",
         "device_pair",
         "device_revoke",

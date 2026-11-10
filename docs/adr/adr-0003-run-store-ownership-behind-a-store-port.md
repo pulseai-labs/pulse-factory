@@ -196,3 +196,24 @@ The store side only. The layer's rules (scopes, order, merge modes, callers) are
 - **No write outside admission.** The store trait gains no settings write but the two effects. This
   item adds no write to the list of writes outside admission.
 - Rules and limits: ADR-0016.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): a run's project, and the start commands
+
+- **The store gains migration 0008** (`0008_run_project.sql`), which adds `runs.project_id`, nullable, and three triggers:
+  a project that a run names is live (`runs_project_is_live`), a run's project never changes once
+  set (`runs_project_never_changes`), and a non-null value names a row of `projects`
+  (`runs_project_names_a_project`). Every existing row and every run armed from the CLI keeps NULL.
+  It is forward only and is refused under an active run (ADR-0007). The migrations are now 0001 to
+  0008, the last being `run_project`.
+- **One effect.** `Effect::SetRunProject { run_id, project_id }` sets the column. It is allowed only
+  in an admission under `@controller`, and the same pair a second time is a no-op that admits.
+  `PutRun` never writes the column, so a later upsert of the run keeps the project. `RunRow` gains
+  `project_id`.
+- **Two item kinds.** `start_card` and `start_result` join the chat items. A `start_result` answers
+  its card through `answers_seq`, so the one-answer index lets a card be armed at most once. A
+  `start_card` is not a pending request.
+- **Three admissions under `@controller`**, each with a command ID and one controller-ledger line:
+  `propose` (the proposal posted into a chat), `device_arm` (the device's arm, committed inside the
+  arm's critical section) and `run_project` (the link of a new run to its project, committed before
+  `run.json` is written, so an arm whose link fails fails whole).
+- Rules and limits: ADR-0015 (the proposals), ADR-0005 (who may arm), ADR-0012 (the wire).

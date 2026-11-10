@@ -209,7 +209,7 @@ fn a_paired_device_reads_writes_and_unsets_a_setting() {
     let got = api.verb(&token, "settings_get", json!({}));
     assert_eq!(got.status, 200, "{}", got.body);
     assert_eq!(got.body["schema_version"], 1);
-    assert_eq!(got.body["settings"].as_array().unwrap().len(), 2);
+    assert_eq!(got.body["settings"].as_array().unwrap().len(), 3);
 
     let set = api.verb(
         &token,

@@ -3,11 +3,13 @@
 // token lives on the native side (the test bridge, or the Tauri shell's Rust side).
 import type {
   ApiStatus,
+  ArmActed,
   ChatFrame,
   ConfirmCodeArgs,
   ConfirmIssued,
   DeviceAckArgs,
   DeviceAnswerArgs,
+  DeviceArmArgs,
   DeviceClearArgs,
   DeviceRecord,
   ProjectAddArgs,
@@ -218,6 +220,8 @@ export interface Transport {
   settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged>;
   /** Every run the controller holds: its state, its waiting text, its open request count. */
   runList(): Promise<RunList>;
+  /** Arms the run of a start card with a code from `confirmCode` (subject kind `start`). */
+  arm(args: DeviceArmArgs): Promise<ArmActed>;
   /**
    * Opens the chat stream. It never rejects for a stream failure: every failure arrives as one
    * `closed` event. The native side pushes and reconnects (with the last `seq` it holds), so the

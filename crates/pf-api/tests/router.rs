@@ -426,7 +426,6 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         "runs",
         "status",
         "claim",
-        "arm",
         "halt",
         "hook",
         "device_pair",
@@ -455,9 +454,9 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{verb}");
     }
     assert_eq!(calls(&fake), 0);
-    // The allowlist holds the ten verbs of the chat spine (the project verbs and the chat verbs), the
+    // The allowlist holds the ten verbs of the chat spine (the project verbs and the chat verbs), `arm` (`r1.s4.w2`), the
     // three settings verbs (`r1.s4.w4`), and `r1.s4.w1` adds the device verbs (`tests/device_verbs.rs`).
-    // The test pins no exact count. `halt`, `claim`, `arm`, `session_redact` (the CLI only) and
+    // The test pins no exact count. `halt`, `claim`, `session_redact` (the CLI only) and
     // `session_items` (the stream reads the items) are off.
     for verb in [
         "project_add",
@@ -477,7 +476,6 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert!(ALLOWLIST.contains(&verb), "{verb} is not on the allowlist");
     }
     for verb in [
-        "arm",
         "claim",
         "halt",
         "hook",

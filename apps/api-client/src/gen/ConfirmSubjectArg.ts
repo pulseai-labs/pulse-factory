@@ -8,4 +8,4 @@ import type { ConfirmVerb } from "./ConfirmVerb";
  * reaches the controller's code table), for `clear` the target stage `to` or its absence, for `ack`
  * nothing (the code binds the PR's head SHA the controller reads when it issues the code).
  */
-export type ConfirmSubjectArg = { "kind": "request", request: string, revision: number, verb: ConfirmVerb, text_sha256?: string, to?: string, };
+export type ConfirmSubjectArg = { "kind": "request", request: string, revision: number, verb: ConfirmVerb, text_sha256?: string, to?: string, } | { "kind": "arm", proposal: string, plan_sha256: string, };
