@@ -827,6 +827,35 @@ fn the_socket_refuses_a_code_and_a_cli_label_cannot_pose_as_a_device() {
         stderr(&out)
     );
     assert!(rig.claims().is_empty());
+    // The engine drops control characters from a label before it stores it, so the refusal
+    // reads the stored form: a label that starts with one still reads as a device.
+    for label in [
+        "\u{1}device D-1 (MacBook)",
+        "\t device D-1 (MacBook)",
+        "device\u{7f} D-1 (MacBook)",
+    ] {
+        let out = rig.live.cli(&["claim", "--holder", label]);
+        assert_eq!(common::code(&out), 1, "{label:?}");
+        assert!(
+            stderr(&out).contains("kept for paired devices"),
+            "{label:?}: {}",
+            stderr(&out)
+        );
+        let on_socket = rig
+            .live
+            .controller
+            .handle_from(Request::new("claim", json!({ "holder": label })), me());
+        assert!(!on_socket.ok, "{label:?}: {on_socket:?}");
+        assert!(
+            on_socket
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("kept for paired devices"),
+            "{label:?}: {on_socket:?}"
+        );
+        assert!(rig.claims().is_empty(), "{label:?}");
+    }
 }
 
 #[test]

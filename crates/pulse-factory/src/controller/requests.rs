@@ -233,7 +233,9 @@ impl Controller {
             return err("claim refused: the claim needs a holder label");
         }
         // A label that reads as a paired device is the controller's to make (`r1.s4.w1`, R9).
-        if holder.trim().starts_with("device ") {
+        // Check the form the engine stores: `Engine::claim` flattens the label with
+        // `one_line_reason`, which drops control characters, so a raw check can be bypassed.
+        if pf_engine::status::one_line_reason(holder).starts_with("device ") {
             return err("claim refused: the holder label \"device …\" is kept for paired devices");
         }
         let handle = match self.claim_run(text(args, "run")) {
