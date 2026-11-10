@@ -4,7 +4,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::chat::*;
 use common::ctl::Live;
@@ -34,6 +34,22 @@ fn live_with_idle(idle: Duration) -> (Live, Arc<Rec>) {
     let rec = Rec::new(strict_fake());
     let live = start_with(rec.clone(), move |cfg| cfg.chat_idle = idle);
     (live, rec)
+}
+
+/// Sweep until the sweep has released the process. The reader thread stores a turn's `turn_result`
+/// item first and clears the turn hold after it, so a sweep that runs the moment `wait_turns` sees
+/// the item can find the process still held and release nothing. The controller sweeps on every
+/// tick, so a test that needs the release sweeps again, within a bound.
+fn sweep_until_released(live: &Live, rec: &Rec) {
+    let end = Instant::now() + Duration::from_secs(20);
+    while rec.stop_count() == 0 {
+        live.controller.sweep_chats();
+        assert!(
+            Instant::now() < end,
+            "no idle release within 20 s of sweeping"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn set(live: &Live, value: &str, scope: &[&str]) {
@@ -131,7 +147,7 @@ fn a_resume_after_an_idle_release_carries_the_list_in_force_then() {
     let (project, s) = started(&live, "alpha");
     cli_json(&live, &["session", "send", &s, "hello"]);
     wait_turns(&live, &s, 1);
-    live.controller.sweep_chats();
+    sweep_until_released(&live, &rec);
     assert_eq!(rec.stop_count(), 1, "the idle release stopped the process");
 
     set(&live, r#"["terraform apply"]"#, &["--project", &project]);

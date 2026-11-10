@@ -174,6 +174,10 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "DeviceAckArgs.ts",
         "RequestActed.ts",
         "RequestFrame.ts",
+        // r1.s4.w3: the run list.
+        "RunListArgs.ts",
+        "RunSummary.ts",
+        "RunList.ts",
     ] {
         assert!(now.contains_key(name), "{name} is not rendered");
     }

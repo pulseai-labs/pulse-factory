@@ -223,6 +223,7 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `settings_get` | `settings get` |
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
+| `run_list` | none (API only); on the host, `status` shows the same runs |
 
 Every other verb is 403: `runs`, `status`, `claim`, `arm`, `halt`, `hook`, `device_pair`,
 `device_list`, `device_revoke`, `api_status`, `session_items` and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
@@ -279,6 +280,18 @@ second merge.
 - **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
   `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
   CLI's `ack`.
+- **`run_list`** (`r1.s4.w3`): `{}` (`RunListArgs`; unknown fields are ignored). The answer is a
+  `RunList`: `schema_version` 1 and `runs`, oldest first, one `RunSummary` for every run the controller
+  holds (an ended run too, while the controller holds it). A `RunSummary` has exactly eight fields: `id`,
+  `spine`, `workflow`, `state` (`active` or `ended`), `halted_reason` (null unless the run is halted),
+  `end_reason` (null unless it ended), `open_requests` and `waiting`. **`waiting`** is the `end_when`
+  waiting text that the last tick noted, rendered from the run's workflow (`workflow-file.md`,
+  `end_when`), and null when the last tick noted none. It is what a device shows for a run that waits
+  for the operator. `status` is off the allowlist, so this is the one read of a run that a device has.
+  The verb is **device auth only** (the token check, and the peer guard counts a failure), **read-only**
+  (no admission, no `controller.ledger` line, no store write, no driver action: the one `api.ledger`
+  line, `verb=run_list`, is its only trace), and **one allowlist entry**. It carries no run units,
+  sessions, costs or tokens. `status`'s JSON does not change.
 
 `answer`, `clear` and `ack` move the claim to the device when they act (`requests.md`, "The claim"):
 the first device to act wins. An engine refusal after the controller admitted the act (checks red, a

@@ -10,6 +10,8 @@
   `confirm_code`, `answer`, `clear`, `ack`), the per-device confirm code, the request frames on the
   stream, `refusal` in the error body and `refusal=` in the request ledger, and the revoke window as a
   known limit.
+- **Amended:** 2026-11-10, at `r1.s4.w3`: `run_list` on the allowlist, the client's `request_frame`
+  event and its `refusal` word, and the `verb` command of the Mac app.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -408,3 +410,41 @@ This amends the allowlist rule: a later spine that adds a verb amends this ADR, 
   `refused`).
 - **The wire types** are generated with `ts-rs` into `apps/api-client/src/gen/` (ADR-0013).
 - Rules and limits: ADR-0016. The verbs' arguments and answers are `cli.md`'s.
+
+## The run list, the request frames in the client and the `verb` command (r1.s4.w3)
+
+Amendment, 2026-11-10. This item amends the allowlist rule again, as its own text asks: a later spine
+that adds a verb amends this ADR.
+
+- **One verb joins the allowlist: `run_list`.** It is a typed read of every run the controller holds:
+  `RunList { schema_version, runs }` with one `RunSummary` per run (`id`, `spine`, `workflow`, `state`,
+  `halted_reason`, `end_reason`, `open_requests` and `waiting`). `waiting` is the `end_when` waiting
+  text that the last tick noted, which the driver now records beside its notes; it is what lets a device
+  show a run that waits for the operator and see it end. A device had no read of a run: `runs` and
+  `status` stay off the allowlist (`status` is untyped and large, `runs` has no waiting text, and the
+  router test keeps both off).
+- **Its controls.** Device auth only (the router's token check; the peer guard counts a failure),
+  read-only (no admission, no `controller.ledger` line, no store write, no driver action; the one
+  `api.ledger` line is its only trace), one allowlist entry, and no run units, sessions, costs or tokens
+  in the answer. `run_list` is in the request ledger's list of verb names.
+- **The client carries the request frames.** `pf-client` decodes a `type` of `requests`, `request` or
+  `claim` into `RequestFrame` and emits it as its own event, `{"event":"request_frame","frame":…}`,
+  beside `frame`, so no consumer of `ChatFrame` changes (the client half of the `r1.s4.w1` rule that a
+  client skips a `type` it does not know). A request frame that does not decode is **dropped and
+  logged, and the stream goes on**: the requests state is a cache that the next `requests` snapshot
+  repairs, and ending the stream would cut the chat it carries. The log is one stderr line per
+  connection, with no frame text, because a request carries seat-written text. A request frame never
+  moves the client's last chat `seq`.
+- **The client carries the refusal word.** `ClientError` gains `refusal`, kept only for a 422 and only
+  when the word is in `pf_api::host::REFUSALS`; an error with no word keeps its JSON `{"kind",
+  "message"}` byte for byte, and the test bridge's error envelope carries the word beside them. The
+  client treats a call's `code` argument as a secret when it builds an error: a server text that holds
+  it becomes `the server answered <status>`.
+- **`ack` waits up to 90 seconds.** It merges through the forge. A timeout is `unreachable`, and a
+  retry with the same command ID replays and acts on nothing.
+- **The Mac app reaches every verb added since `r1.s4` through one `verb` command.** It calls
+  `pf-client`'s `Transport::verb`, which checks the name against `pf_api::ALLOWLIST` before it
+  connects, so the command passes only allowlisted verbs and a webview reaches no verb a device may not
+  call. A later item's verb needs no edit in `apps/desktop`. `pf-client` re-exports `serde_json::Value`
+  for it, so the desktop's manifest and lock do not change.
+- **No other change.** No route, no admission, no store change and no new frame.

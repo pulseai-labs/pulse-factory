@@ -3,9 +3,19 @@
 // call. This file sees no token and opens no TLS connection.
 import type {
   ApiStatus,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceAckArgs,
+  DeviceAnswerArgs,
+  DeviceClearArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
+  RequestActed,
+  RequestDetail,
+  RequestList,
+  RequestsArgs,
+  RunList,
   SessionAnswerArgs,
   SessionChanged,
   SessionEndArgs,
@@ -15,6 +25,12 @@ import type {
   SessionSendArgs,
   SessionSetArgs,
   SessionStartArgs,
+  SettingChanged,
+  SettingsGetArgs,
+  SettingsSetArgs,
+  SettingsUnsetArgs,
+  SettingsView,
+  ShowArgs,
 } from "@pulse-factory/api-client";
 import {
   TRANSPORT_ERROR_KINDS,
@@ -69,11 +85,11 @@ export function createBridgeTransport(fetchImpl?: FetchLike, eventSourceFactory?
     if (typeof answer !== "object" || answer === null || typeof (answer as { ok?: unknown }).ok !== "boolean") {
       throw new TransportError("server", "the bridge answered with something that is not its protocol");
     }
-    const a = answer as { ok: boolean; result?: unknown; error?: { kind?: unknown; message?: unknown } };
+    const a = answer as { ok: boolean; result?: unknown; error?: { kind?: unknown; message?: unknown; refusal?: unknown } };
     if (a.ok) return a.result as T;
     const kind = isKind(a.error?.kind) ? a.error.kind : "server";
     const message = typeof a.error?.message === "string" ? a.error.message : "the bridge refused the call";
-    throw new TransportError(kind, message);
+    throw new TransportError(kind, message, typeof a.error?.refusal === "string" ? a.error.refusal : undefined);
   }
 
   const verb = <T>(name: string, args: unknown) => request<T>("POST", `/bridge/verbs/${name}`, args);
@@ -138,6 +154,16 @@ export function createBridgeTransport(fetchImpl?: FetchLike, eventSourceFactory?
     sessionInterrupt: (args: SessionInterruptArgs) => verb<SessionChanged>("session_interrupt", args),
     sessionSet: (args: SessionSetArgs) => verb<SessionChanged>("session_set", args),
     sessionEnd: (args: SessionEndArgs) => verb<SessionEnded>("session_end", args),
+    requests: (args?: RequestsArgs) => verb<RequestList>("requests", args ?? {}),
+    show: (args: ShowArgs) => verb<RequestDetail>("show", args),
+    confirmCode: (args: ConfirmCodeArgs) => verb<ConfirmIssued>("confirm_code", args),
+    answer: (args: DeviceAnswerArgs) => verb<RequestActed>("answer", args),
+    clear: (args: DeviceClearArgs) => verb<RequestActed>("clear", args),
+    ack: (args: DeviceAckArgs) => verb<RequestActed>("ack", args),
+    settingsGet: (args?: SettingsGetArgs) => verb<SettingsView>("settings_get", args ?? {}),
+    settingsSet: (args: SettingsSetArgs) => verb<SettingChanged>("settings_set", args),
+    settingsUnset: (args: SettingsUnsetArgs) => verb<SettingChanged>("settings_unset", args),
+    runList: () => verb<RunList>("run_list", {}),
     openStream,
     forget: async () => {
       await request<null>("POST", "/bridge/forget", {});

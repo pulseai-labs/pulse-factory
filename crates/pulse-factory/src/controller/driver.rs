@@ -130,6 +130,9 @@ pub struct Driver {
     cfg: DriverConfig,
     state: Mutex<DState>,
     notes: Mutex<Vec<String>>,
+    /// The `end_when` waiting text the last tick noted, one line, as it stands in `notes`. `None`
+    /// when the last tick noted none, and once the run ends (`r1.s4.w3`, W4).
+    waiting: Mutex<Option<String>>,
     /// Notes from start-up. The first tick takes them into its own notes.
     startup_notes: Mutex<Vec<String>>,
 }
@@ -141,10 +144,19 @@ fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// What one tick collects.
 struct Tick {
     notes: Vec<String>,
+    /// The waiting text of `end_when`, when this tick noted it.
+    waiting: Option<String>,
     now: u64,
 }
 
 impl Tick {
+    /// Note the `end_when` waiting text, and keep it apart, so `run_list` can show it.
+    fn note_waiting(&mut self, text: impl Into<String>) {
+        let line = pf_engine::status::one_line_reason(&text.into());
+        self.notes.push(line.clone());
+        self.waiting = Some(line);
+    }
+
     fn note(&mut self, text: impl Into<String>) {
         self.notes
             .push(pf_engine::status::one_line_reason(&text.into()));
@@ -168,6 +180,7 @@ impl Driver {
             cfg,
             state: Mutex::new(DState::default()),
             notes: Mutex::new(Vec::new()),
+            waiting: Mutex::new(None),
             startup_notes: Mutex::new(Vec::new()),
         }
     }
@@ -182,6 +195,11 @@ impl Driver {
     /// The notes of the last tick.
     pub fn notes(&self) -> Vec<String> {
         locked(&self.notes).clone()
+    }
+
+    /// The `end_when` waiting text the last tick noted, or `None`.
+    pub fn waiting(&self) -> Option<String> {
+        locked(&self.waiting).clone()
     }
 
     fn run_dir_text(&self) -> String {
@@ -217,10 +235,13 @@ impl Driver {
         let mut state = locked(&self.state);
         let mut t = Tick {
             notes: std::mem::take(&mut *locked(&self.startup_notes)),
+            waiting: None,
             now: (self.cfg.clock)(),
         };
         self.tick_inner(&mut state, &mut t);
         *locked(&self.notes) = t.notes;
+        // A tick that does not note the text clears it, and so does the tick of an ended run.
+        *locked(&self.waiting) = t.waiting;
     }
 
     fn tick_inner(&self, st: &mut DState, t: &mut Tick) {
@@ -1045,7 +1066,7 @@ impl Driver {
             Some(end) => {
                 if !self.end_when_holds(t, end, run_dir) {
                     match render(&end.waiting, &self.ctx(run_dir, None)) {
-                        Ok(text) => t.note(text.text),
+                        Ok(text) => t.note_waiting(text.text),
                         Err(e) => t.note(format!("end_when waiting text cannot render: {e}")),
                     }
                     return;
@@ -1148,6 +1169,7 @@ impl Driver {
             MergeStep::Merged { unit, effect } => {
                 let mut t = Tick {
                     notes: Vec::new(),
+                    waiting: None,
                     now: (self.cfg.clock)(),
                 };
                 let run_dir = self.run_dir_text();
@@ -1299,6 +1321,7 @@ impl Driver {
         let mut state = locked(&self.state);
         let mut t = Tick {
             notes: locked(&self.startup_notes).clone(),
+            waiting: None,
             now: (self.cfg.clock)(),
         };
         self.step3_sessions(&mut state, &mut t);

@@ -49,8 +49,8 @@ interface Rig {
   transport: Transport;
   /** The native side answers the next call with this result. */
   answerNext(result: unknown): void;
-  /** The native side fails the next call. */
-  failNext(kind: string, message: string): void;
+  /** The native side fails the next call, with a refusal word when it has one (r1.s4.w3, W3). */
+  failNext(kind: string, message: string, refusal?: string): void;
   /** What the last call sent natively: where, and with what. */
   lastCall(): { target: string; payload: unknown };
   /** Every native call, as JSON text, for the no-token scan. */
@@ -80,8 +80,10 @@ function bridgeRig(): Rig {
     name: "bridge",
     transport,
     answerNext: (result) => fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, result })),
-    failNext: (kind, message) =>
-      fetchMock.mockResolvedValueOnce(jsonResponse({ ok: false, error: { kind, message } })),
+    failNext: (kind, message, refusal) =>
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ ok: false, error: refusal === undefined ? { kind, message } : { kind, message, refusal } }),
+      ),
     lastCall: () => {
       const [target, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit | undefined];
       const body = init?.body;
@@ -109,7 +111,8 @@ function tauriRig(): Rig {
     name: "tauri",
     transport,
     answerNext: (result) => invoke.mockResolvedValueOnce(result),
-    failNext: (kind, message) => invoke.mockRejectedValueOnce({ kind, message }),
+    failNext: (kind, message, refusal) =>
+      invoke.mockRejectedValueOnce(refusal === undefined ? { kind, message } : { kind, message, refusal }),
     lastCall: () => {
       const [target, payload] = invoke.mock.calls.at(-1) as [string, unknown];
       return { target, payload };
@@ -134,19 +137,27 @@ const RIGS: Array<[string, () => Rig]> = [
   ["tauri", tauriRig],
 ];
 
-/** Where a verb goes in each implementation. */
-function target(rig: Rig, verb: string): string {
-  return rig.name === "bridge" ? `/bridge/verbs/${verb}` : verb;
+/**
+ * Where a verb goes in each implementation. A verb added since `r1.s4` (`viaVerb`) goes through the
+ * one `verb` command of the Mac app, with its name and arguments; the bridge posts it to its path as
+ * every other verb (r1.s4.w3, W5).
+ */
+function target(rig: Rig, c: { verb: string; viaVerb?: boolean }): string {
+  if (rig.name === "bridge") return `/bridge/verbs/${c.verb}`;
+  return c.viaVerb ? "verb" : c.verb;
 }
 
-function payload(rig: Rig, args: unknown): unknown {
-  return rig.name === "bridge" ? args : { args };
+function payload(rig: Rig, c: { verb: string; args: unknown; viaVerb?: boolean }): unknown {
+  if (rig.name === "bridge") return c.args;
+  return c.viaVerb ? { name: c.verb, args: c.args } : { args: c.args };
 }
 
 const SESSION = { id: "S-1" };
 const CASES: Array<{
   method: string;
   verb: string;
+  /** True for a verb the Mac app reaches through its `verb` command. */
+  viaVerb?: boolean;
   args: unknown;
   run: (t: Transport) => Promise<unknown>;
   result: unknown;
@@ -195,15 +206,116 @@ const CASES: Array<{
     run: (t) => t.sessionEnd({ session_id: "S-1", command_id: "c-6" }),
     result: { replayed: false, session_id: "S-1", note: null },
   },
+  // r1.s4.w3: the device verbs, the settings verbs and `run_list`.
+  {
+    method: "requests",
+    verb: "requests",
+    viaVerb: true,
+    args: { all: true },
+    run: (t) => t.requests({ all: true }),
+    result: { schema_version: 1, open: 0, requests: [], claim: null },
+  },
+  {
+    method: "requests (no arguments)",
+    verb: "requests",
+    viaVerb: true,
+    args: {},
+    run: (t) => t.requests(),
+    result: { schema_version: 1, open: 0, requests: [], claim: null },
+  },
+  {
+    method: "show",
+    verb: "show",
+    viaVerb: true,
+    args: { id: "R-1" },
+    run: (t) => t.show({ id: "R-1" }),
+    result: { schema_version: 1, id: "R-1", body: { stop_text: "which?" }, answer: null },
+  },
+  {
+    method: "confirmCode",
+    verb: "confirm_code",
+    viaVerb: true,
+    args: { subject: { kind: "request", request: "R-1", revision: 1, verb: "ack" }, command_id: "c-7" },
+    run: (t) => t.confirmCode({ subject: { kind: "request", request: "R-1", revision: 1, verb: "ack" }, command_id: "c-7" }),
+    result: { schema_version: 1, replayed: false, code: "pfc1-0123", device: "D-1" },
+  },
+  {
+    method: "answer",
+    verb: "answer",
+    viaVerb: true,
+    args: { request: "R-1", rev: 1, text: "main", code: "pfc1-0123", command_id: "c-8" },
+    run: (t) => t.answer({ request: "R-1", rev: 1, text: "main", code: "pfc1-0123", command_id: "c-8" }),
+    result: { schema_version: 1, replayed: false, verb: "answer", device: "D-1" },
+  },
+  {
+    method: "clear",
+    verb: "clear",
+    viaVerb: true,
+    args: { request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c-9" },
+    run: (t) => t.clear({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c-9" }),
+    result: { schema_version: 1, replayed: false, verb: "clear", device: "D-1" },
+  },
+  {
+    method: "ack",
+    verb: "ack",
+    viaVerb: true,
+    args: { request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c-10" },
+    run: (t) => t.ack({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c-10" }),
+    result: { schema_version: 1, replayed: false, verb: "ack", device: "D-1", merged: true },
+  },
+  {
+    method: "settingsGet",
+    verb: "settings_get",
+    viaVerb: true,
+    args: { project_id: "P-1" },
+    run: (t) => t.settingsGet({ project_id: "P-1" }),
+    result: { schema_version: 1, project_id: "P-1", agent_id: null, settings: [] },
+  },
+  {
+    method: "settingsGet (no arguments)",
+    verb: "settings_get",
+    viaVerb: true,
+    args: {},
+    run: (t) => t.settingsGet(),
+    result: { schema_version: 1, project_id: null, agent_id: null, settings: [] },
+  },
+  {
+    method: "settingsSet",
+    verb: "settings_set",
+    viaVerb: true,
+    args: { key: "chat.self_turn_cap", value: 5, project_id: "P-1", command_id: "c-11" },
+    run: (t) => t.settingsSet({ key: "chat.self_turn_cap", value: 5, project_id: "P-1", command_id: "c-11" }),
+    result: { schema_version: 1, replayed: false, key: "chat.self_turn_cap" },
+  },
+  {
+    method: "settingsUnset",
+    verb: "settings_unset",
+    viaVerb: true,
+    args: { key: "chat.self_turn_cap", project_id: "P-1", command_id: "c-12" },
+    run: (t) => t.settingsUnset({ key: "chat.self_turn_cap", project_id: "P-1", command_id: "c-12" }),
+    result: { schema_version: 1, replayed: false, key: "chat.self_turn_cap" },
+  },
+  {
+    method: "runList",
+    verb: "run_list",
+    viaVerb: true,
+    args: {},
+    run: (t) => t.runList(),
+    result: { schema_version: 1, runs: [] },
+  },
 ];
 
-/** The scripted native events: one of each. */
+/** The scripted native events: one of each of the four shapes (the chat frame twice). */
 const NATIVE: unknown[] = [
   { event: "frame", frame: { type: "caught", session_id: "S-1", last_seq: 6 } },
   { event: "frame", frame: { type: "delta", session_id: "S-1", text: "hi" } },
+  { event: "request_frame", frame: { type: "requests", requests: [], claim: null } },
   { event: "reconnecting", after: 6, retry_in_ms: 4000, reason: "the server is stopping" },
   { event: "closed", error: { kind: "unauthorized", message: "this device was revoked; pair it again" } },
 ];
+/** Every event before the last one: `closed` ends a stream. */
+const BEFORE_CLOSED = NATIVE.slice(0, 4);
+const CLOSED = NATIVE[4];
 
 beforeEach(() => {
   FakeEventSource.all = [];
@@ -220,7 +332,22 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
       const rig = makeRig();
       rig.answerNext(c.result);
       await expect(c.run(rig.transport)).resolves.toEqual(c.result);
-      expect(rig.lastCall()).toEqual({ target: target(rig, c.verb), payload: payload(rig, c.args) });
+      expect(rig.lastCall()).toEqual({ target: target(rig, c), payload: payload(rig, c) });
+    });
+
+    it("a native failure with a refusal word reaches TransportError.refusal, and one without has none", async () => {
+      for (const c of CASES.filter((x) => x.viaVerb)) {
+        const rig = makeRig();
+        rig.failNext("refused", "that code was used", "code_used");
+        const err = (await c.run(rig.transport).catch((e: unknown) => e)) as TransportError;
+        expect(err, c.method).toBeInstanceOf(TransportError);
+        expect([err.kind, err.message, err.refusal], c.method).toEqual(["refused", "that code was used", "code_used"]);
+
+        const plain = makeRig();
+        plain.failNext("refused", "checks are red");
+        const none = (await c.run(plain.transport).catch((e: unknown) => e)) as TransportError;
+        expect(none.refusal, c.method).toBeUndefined();
+      }
     });
 
     it.each(TRANSPORT_ERROR_KINDS)("a native failure of kind %s is a TransportError of that kind", async (kind: TransportErrorKind) => {
@@ -247,8 +374,8 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
     it("delivers the same scripted native events in the same order", async () => {
       const rig = makeRig();
       const { seen } = await open(rig);
-      for (const native of NATIVE.slice(0, 3)) rig.nativeEvent(native);
-      expect(seen).toEqual(NATIVE.slice(0, 3));
+      for (const native of BEFORE_CLOSED) rig.nativeEvent(native);
+      expect(seen).toEqual(BEFORE_CLOSED);
     });
 
     it("sends nothing after closed, and closes the native stream on it", async () => {
@@ -261,7 +388,7 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
       if (rig.name === "bridge") expect(FakeEventSource.all.at(-1)?.closed).toBe(true);
     });
 
-    it("drops a value that is not one of the three event shapes", async () => {
+    it("drops a value that is not one of the four event shapes", async () => {
       const rig = makeRig();
       const { seen } = await open(rig);
       const odd: unknown[] = [
@@ -270,6 +397,14 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
         { event: "reconnecting", after: "6", retry_in_ms: 1, reason: "x" },
         { event: "closed", error: { kind: "not_a_kind", message: "x" } },
         { event: "closed", error: "oops" },
+        // A request frame of an unknown type, or whose fields have no shape the state reads, is dropped.
+        { event: "request_frame" },
+        { event: "request_frame", frame: { type: "future_thing" } },
+        { event: "request_frame", frame: { type: "request", request: "oops" } },
+        { event: "request_frame", frame: { type: "request", request: { id: "R-1", revision: "1", status: "open" } } },
+        { event: "request_frame", frame: { type: "requests", requests: 3, claim: null } },
+        { event: "request_frame", frame: { type: "claim", claim: "bad" } },
+        { event: "request_frame", frame: { type: "claim" } },
         42,
         null,
         "text",
@@ -288,7 +423,7 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
       expect(rig.nativeClosed()).toBe(true);
       if (rig.name === "tauri") expect(rig.lastCall()).toEqual({ target: "close_stream", payload: { id: 7 } });
       rig.nativeEvent(NATIVE[0]);
-      rig.nativeEvent(NATIVE[3]);
+      rig.nativeEvent(CLOSED);
       expect(seen).toEqual([]);
     });
 

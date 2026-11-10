@@ -42,12 +42,12 @@ const rowOf = (name: string) => {
 };
 
 describe("the Agents page (6a)", () => {
-  it("puts Agents between Projects and Settings on the rail, with nothing else", async () => {
+  it("puts Agents between Projects and Needs you on the rail, with nothing else", async () => {
     await open(seeded());
     const names = within(screen.getByRole("navigation"))
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
-    expect(names).toEqual(["Projects", "Agents", "Settings"]);
+    expect(names).toEqual(["Projects", "Agents", "Needs you", "Settings"]);
   });
 
   it("shows the Orchestrator's defaults from the server's agent list, read only", async () => {

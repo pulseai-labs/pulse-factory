@@ -5,6 +5,7 @@ import { Pair, type Notice } from "./screens/Pair";
 import { Shell } from "./screens/Shell";
 import { ChatProvider } from "./state/chat";
 import { ConnectionProvider } from "./state/connection";
+import { RequestsProvider } from "./state/requests";
 import type { PairedServer, Transport } from "./transport/types";
 
 type View =
@@ -84,7 +85,9 @@ export function App(props: { transport: Transport }) {
           onPairAgain={onPairAgain}
         >
           <ChatProvider transport={transport}>
-            <Shell />
+            <RequestsProvider>
+              <Shell />
+            </RequestsProvider>
           </ChatProvider>
         </ConnectionProvider>
       );

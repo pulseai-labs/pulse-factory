@@ -9,7 +9,7 @@
 // The UI never polls and sets no timer here: `pf-client` reconnects, and the UI opens a new stream
 // only on an operator action, when the chat on screen changes, or when the link comes back
 // (`epoch`). See docs/contracts/ui-transport.md, "When the UI calls".
-import type { ChatFrame, ChatItemRecord, ChatSessionRecord, SessionList } from "@pulse-factory/api-client";
+import type { ChatFrame, ChatItemRecord, ChatSessionRecord, RequestFrame, SessionList } from "@pulse-factory/api-client";
 import {
   createContext,
   useCallback,
@@ -157,6 +157,11 @@ export interface Chat {
   refreshList(): Promise<string | null>;
   /** `refreshList` once: the first time a page or a chat needs the list. */
   ensureList(): Promise<void>;
+  /**
+   * Listen for the request frames of the one stream (r1.s4.w3, W1). The requests state is the one
+   * listener; it opens no stream. Returns the function that stops the listening.
+   */
+  onRequestFrame(listener: (frame: RequestFrame) => void): () => void;
 }
 
 const Ctx = createContext<Chat | null>(null);
@@ -194,6 +199,7 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
   // The highest `seq` held for each session: what a stream opens `after`.
   const maxSeq = useRef<Record<string, number>>({});
   const listLoaded = useRef(false);
+  const requestListeners = useRef(new Set<(frame: RequestFrame) => void>());
 
   const onEvent = useCallback(
     (event: StreamEvent) => {
@@ -208,6 +214,12 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
           setStatus((s) => (s.state === "open" ? s : { state: "open" }));
           return;
         }
+        case "request_frame":
+          // A request frame is a sign that the stream is open, as a chat frame is. It rides this one
+          // stream, so Needs you opens none of its own.
+          for (const listener of requestListeners.current) listener(event.frame);
+          setStatus((s) => (s.state === "open" ? s : { state: "open" }));
+          return;
         case "reconnecting":
           // `pf-client` waits and tries again by itself: the UI shows it and does nothing else.
           setStatus({ state: "reconnecting", reason: event.reason });
@@ -307,6 +319,12 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
     setOpenToken((n) => n + 1);
   }, []);
   const applyRecord = useCallback((record: ChatSessionRecord) => dispatch({ type: "record", record }), []);
+  const onRequestFrame = useCallback((listener: (frame: RequestFrame) => void) => {
+    requestListeners.current.add(listener);
+    return () => {
+      requestListeners.current.delete(listener);
+    };
+  }, []);
 
   const live = useMemo(
     () => Object.values(state.sessions).filter((s) => s.ended_at === null).sort(byCreation),
@@ -328,8 +346,9 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
       applyRecord,
       refreshList,
       ensureList,
+      onRequestFrame,
     }),
-    [state, live, status, following, follow, reconnect, applyRecord, refreshList, ensureList],
+    [state, live, status, following, follow, reconnect, applyRecord, refreshList, ensureList, onRequestFrame],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

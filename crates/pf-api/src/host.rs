@@ -35,6 +35,9 @@ pub const ALLOWLIST: &[&str] = &[
     "settings_get",
     "settings_set",
     "settings_unset",
+    // `r1.s4.w3`: every run the controller holds, for the Needs you page. A read: no admission, no
+    // run units or costs.
+    "run_list",
 ];
 
 /// The words a device verb gives for a refusal, a closed list (`r1.s4.w1`, R7). The controller puts one

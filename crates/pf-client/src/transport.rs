@@ -1,7 +1,8 @@
 //! The transport: the operations of the UI's interface (`docs/contracts/ui-transport.md`).
 //!
-//! `paired`, `pair`, `status`, `project_list`, `project_add`, the seven chat verbs and `forget`, with
-//! the names of the interface in snake case, and the chat stream (`stream.rs`). The device token goes
+//! `paired`, `pair`, `status`, `project_list`, `project_add`, the seven chat verbs, the device verbs
+//! (`requests`, `show`, `confirm_code`, `answer`, `clear`, `ack`), the settings verbs, `run_list` and
+//! `forget`, with the names of the interface in snake case, and the chat stream (`stream.rs`). The device token goes
 //! from `POST /v1/pair` into the [`DeviceStore`] and no further: no method returns it, and no error
 //! holds it.
 
@@ -10,9 +11,12 @@ use std::time::Duration;
 
 use pf_api::code::PairingCode;
 use pf_api::types::{
-    ApiStatus, DeviceRecord, PairRequest, PairResult, ProjectAddArgs, ProjectChanged, ProjectList,
-    ServerRef, SessionAnswerArgs, SessionChanged, SessionEndArgs, SessionInterruptArgs,
-    SessionList, SessionListArgs, SessionSendArgs, SessionSetArgs, SessionStartArgs,
+    ApiStatus, ConfirmCodeArgs, ConfirmIssued, DeviceAckArgs, DeviceAnswerArgs, DeviceClearArgs,
+    DeviceRecord, PairRequest, PairResult, ProjectAddArgs, ProjectChanged, ProjectList,
+    RequestActed, RequestDetail, RequestList, RequestsArgs, RunList, RunListArgs, ServerRef,
+    SessionAnswerArgs, SessionChanged, SessionEndArgs, SessionInterruptArgs, SessionList,
+    SessionListArgs, SessionSendArgs, SessionSetArgs, SessionStartArgs, SettingChanged,
+    SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, SettingsView, ShowArgs,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -310,6 +314,16 @@ impl<S: DeviceStore> Transport<S> {
         request: ApiRequest,
         timeouts: Timeouts,
     ) -> Result<Value, ClientError> {
+        self.token_call_secret(request, timeouts, None).await
+    }
+
+    /// The call, with one more string an error must not hold: the confirm code of the call.
+    async fn token_call_secret(
+        &self,
+        request: ApiRequest,
+        timeouts: Timeouts,
+        code: Option<&str>,
+    ) -> Result<Value, ClientError> {
         let paired = self.on_store(|store| store.load()).await?.ok_or_else(|| {
             ClientError::new(ErrorKind::Unauthorized, "this device is not paired")
         })?;
@@ -327,11 +341,13 @@ impl<S: DeviceStore> Transport<S> {
         .await?;
         self.note_answer(&paired.pin, &response);
         if response.status != 200 {
+            let mut secrets = vec![paired.token.as_str()];
+            secrets.extend(code);
             return Err(error_from_status(
                 response.status,
                 Route::Token,
                 &response.body,
-                &[&paired.token],
+                &secrets,
             ));
         }
         match serde_json::from_slice::<Value>(&response.body) {
@@ -354,9 +370,21 @@ impl<S: DeviceStore> Transport<S> {
     }
 
     /// `POST /v1/verbs/<verb>`. A verb off the allowlist is a `bad_request` before any connection.
+    /// A `code` argument is a secret of the call: a server text that holds it is replaced
+    /// (`r1.s4.w3`). `ack` merges through the forge, so it has the long timeout, as `session_start`
+    /// and `session_send` have (W6).
     pub async fn verb(&self, verb: &str, args: Value) -> Result<Value, ClientError> {
         let request = verb_request(verb, &args)?;
-        self.token_call(request).await
+        let code = args.get("code").and_then(Value::as_str);
+        let timeouts = if verb == "ack" {
+            Timeouts {
+                request: self.chat_open_timeout,
+                ..self.timeouts
+            }
+        } else {
+            self.timeouts
+        };
+        self.token_call_secret(request, timeouts, code).await
     }
 
     pub async fn project_list(&self) -> Result<ProjectList, ClientError> {
@@ -445,6 +473,71 @@ impl<S: DeviceStore> Transport<S> {
             session_id: answer.session.id,
             note: answer.note,
         })
+    }
+
+    /// One verb with typed arguments, over [`Transport::verb`].
+    async fn typed_verb<A: Serialize, T: DeserializeOwned>(
+        &self,
+        verb: &str,
+        args: &A,
+    ) -> Result<T, ClientError> {
+        let value = serde_json::to_value(args).map_err(|_| {
+            ClientError::new(ErrorKind::BadRequest, "the arguments cannot be written")
+        })?;
+        parse_answer(self.verb(verb, value).await?)
+    }
+
+    /// `requests`: the open requests (or all with `all`) and the claim.
+    pub async fn requests(&self, args: RequestsArgs) -> Result<RequestList, ClientError> {
+        self.typed_verb("requests", &args).await
+    }
+
+    /// `show`: one request with its body and answer.
+    pub async fn show(&self, args: ShowArgs) -> Result<RequestDetail, ClientError> {
+        self.typed_verb("show", &args).await
+    }
+
+    /// `confirm_code`: asks for a one-use code that binds the subject. It has the short timeout:
+    /// a timeout is `unreachable`, and a retry takes a new command ID.
+    pub async fn confirm_code(&self, args: ConfirmCodeArgs) -> Result<ConfirmIssued, ClientError> {
+        self.typed_verb("confirm_code", &args).await
+    }
+
+    /// `answer` from this device, spending a confirm code.
+    pub async fn answer(&self, args: DeviceAnswerArgs) -> Result<RequestActed, ClientError> {
+        self.typed_verb("answer", &args).await
+    }
+
+    /// `clear` from this device, spending a confirm code. The Needs you page offers no Clear (W10),
+    /// but the allowlist has it.
+    pub async fn clear(&self, args: DeviceClearArgs) -> Result<RequestActed, ClientError> {
+        self.typed_verb("clear", &args).await
+    }
+
+    /// `ack` from this device, spending a confirm code. It merges through the forge, so it waits up
+    /// to the long timeout.
+    pub async fn ack(&self, args: DeviceAckArgs) -> Result<RequestActed, ClientError> {
+        self.typed_verb("ack", &args).await
+    }
+
+    pub async fn settings_get(&self, args: SettingsGetArgs) -> Result<SettingsView, ClientError> {
+        self.typed_verb("settings_get", &args).await
+    }
+
+    pub async fn settings_set(&self, args: SettingsSetArgs) -> Result<SettingChanged, ClientError> {
+        self.typed_verb("settings_set", &args).await
+    }
+
+    pub async fn settings_unset(
+        &self,
+        args: SettingsUnsetArgs,
+    ) -> Result<SettingChanged, ClientError> {
+        self.typed_verb("settings_unset", &args).await
+    }
+
+    /// `run_list`: every run the controller holds (`r1.s4.w3`, W4).
+    pub async fn run_list(&self, args: RunListArgs) -> Result<RunList, ClientError> {
+        self.typed_verb("run_list", &args).await
     }
 
     /// Drop the token and the pin of this device, and the server it named. The server still lists

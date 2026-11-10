@@ -20,6 +20,7 @@ pub mod ports;
 pub mod projects;
 pub mod request_frames;
 pub mod requests;
+pub mod run_list;
 pub mod seat;
 pub mod sessions;
 pub mod settings;
@@ -699,6 +700,8 @@ impl Handler for Controller {
     fn handle(&self, request: Request) -> Response {
         match request.verb.as_str() {
             "runs" => Response::ok(json!({ "runs": self.run_infos() })),
+            // The Needs you page's read of the runs (`r1.s4.w3`): device auth only, read-only.
+            "run_list" => self.verb_run_list(),
             "hook" => Response::ok(self.seats.answer(&request.args)),
             "status" => self.verb_status(&request.args),
             "halt" => self.verb_halt(&request.args),

@@ -9,11 +9,25 @@ import type {
   ChatOptionRecord,
   ChatRuntimeRecord,
   ChatSessionRecord,
+  ClaimRecord,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceAckArgs,
+  DeviceAnswerArgs,
+  DeviceClearArgs,
   DeviceRecord,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
   ProjectRecord,
+  RequestActed,
+  RequestDetail,
+  RequestFrame,
+  RequestList,
+  RequestSummary,
+  RequestsArgs,
+  RunList,
+  RunSummary,
   SessionAnswerArgs,
   SessionChanged,
   SessionEndArgs,
@@ -23,6 +37,15 @@ import type {
   SessionSendArgs,
   SessionSetArgs,
   SessionStartArgs,
+  SettingChanged,
+  SettingRecord,
+  SettingScope,
+  SettingValue,
+  SettingsGetArgs,
+  SettingsSetArgs,
+  SettingsUnsetArgs,
+  SettingsView,
+  ShowArgs,
 } from "@pulse-factory/api-client";
 import {
   TransportError,
@@ -50,6 +73,16 @@ export type Method =
   | "sessionInterrupt"
   | "sessionSet"
   | "sessionEnd"
+  | "requests"
+  | "show"
+  | "confirmCode"
+  | "answer"
+  | "clear"
+  | "ack"
+  | "settingsGet"
+  | "settingsSet"
+  | "settingsUnset"
+  | "runList"
   | "openStream";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -195,6 +228,95 @@ export function item(sessionId: string, seq: number, body: ChatItemBody, patch: 
 
 export const SERVER = { id: "0".repeat(64), name: "fake-server" };
 
+// ---- requests, the claim, runs and settings (r1.s4.w3) ----------------------------------------------
+
+/** A request as `requests` and the stream show it. A stop request takes `answer` and `clear`. */
+export function requestSummary(id: string, patch: Partial<RequestSummary> = {}): RequestSummary {
+  const n = Number(id.replace("R-", ""));
+  return {
+    id,
+    revision: 1,
+    kind: "stop",
+    status: "open",
+    run: "R-1",
+    unit: "u1",
+    stage: "implement",
+    blocks: [],
+    opened_at: `2026-11-10T10:${String(n % 60).padStart(2, "0")}:00.000Z`,
+    answered_at: null,
+    reason: "the implementer asks a question",
+    verbs: ["answer", "clear"],
+    ...patch,
+  };
+}
+
+/** A `merge_ack` request: its summary names the PR, the base and the head SHA. */
+export function mergeAck(id: string, patch: Partial<RequestSummary> = {}): RequestSummary {
+  return requestSummary(id, {
+    kind: "merge_ack",
+    unit: null,
+    stage: "spine",
+    reason: "spine merge waits on the claim's ack",
+    verbs: ["ack"],
+    pr: "pulseai-labs/example#9",
+    base: "main",
+    head_sha: "a".repeat(40),
+    ...patch,
+  });
+}
+
+export function claimRecord(patch: Partial<ClaimRecord> = {}): ClaimRecord {
+  return {
+    generation: 1,
+    holder: "ann@host",
+    device: null,
+    revoked: false,
+    claimed_at: "2026-11-10T10:00:00.000Z",
+    ...patch,
+  };
+}
+
+export function runSummary(id: string, patch: Partial<RunSummary> = {}): RunSummary {
+  return {
+    id,
+    spine: "s1",
+    workflow: "ossify-spine",
+    state: "active",
+    halted_reason: null,
+    end_reason: null,
+    open_requests: 0,
+    waiting: null,
+    ...patch,
+  };
+}
+
+/** The frames about requests on the stream (docs/contracts/api.md, `GET /v1/stream`). */
+export const requestFrames = {
+  requests(requests: RequestSummary[], claim: ClaimRecord | null = null): RequestFrame {
+    return { type: "requests", requests, claim };
+  },
+  request(request: RequestSummary): RequestFrame {
+    return { type: "request", request };
+  },
+  claim(claim: ClaimRecord | null): RequestFrame {
+    return { type: "claim", claim };
+  },
+};
+
+/** The keys the fake server knows: the UI names none of them. */
+const SETTING_DEFS: Array<{ key: string; built_in: SettingValue; applies: "next_turn" | "next_launch" }> = [
+  { key: "chat.self_turn_cap", built_in: 4, applies: "next_turn" },
+  { key: "chat.deny_commands", built_in: ["rm -rf"], applies: "next_launch" },
+  { key: "chat.propose_per_min", built_in: 6, applies: "next_turn" },
+];
+
+interface FakeLayer {
+  scope: SettingScope;
+  value: SettingValue;
+  set_by: string;
+  set_at: string;
+}
+
 /** The frames of the chat stream (docs/contracts/api.md, `GET /v1/stream`). */
 export const frames = {
   hello(sessions: ChatSessionRecord[], following: string | null = null, afterSeq = 0): ChatFrame {
@@ -226,6 +348,26 @@ export interface OpenStream {
 
 export class FakeTransport implements Transport {
   readonly calls: Method[] = [];
+  readonly requestsArgs: Array<RequestsArgs | undefined> = [];
+  readonly showArgs: ShowArgs[] = [];
+  readonly confirmArgs: ConfirmCodeArgs[] = [];
+  /** The arguments of `answer`, `clear` and `ack`, in order, with the verb that took them. */
+  readonly actArgs: Array<{ verb: "answer" | "clear" | "ack"; args: DeviceAnswerArgs | DeviceClearArgs | DeviceAckArgs }> = [];
+  readonly settingsGetArgs: Array<SettingsGetArgs | undefined> = [];
+  readonly settingsSetArgs: SettingsSetArgs[] = [];
+  readonly settingsUnsetArgs: SettingsUnsetArgs[] = [];
+  /** Every request the server holds, open or not. */
+  requestRows: RequestSummary[] = [];
+  /** The body each request's `show` answers. A request with none has an empty body. */
+  bodies: Record<string, unknown> = {};
+  /** The head branch a `merge_ack`'s confirm code shows. */
+  headBranch = "spine/s1";
+  claim: ClaimRecord | null = null;
+  runs: RunSummary[] = [];
+  /** The rows of the fake's settings table. */
+  settingLayers: Record<string, FakeLayer[]> = {};
+  private replays = new Set<Method>();
+  private codeCounter = 0;
   readonly addArgs: ProjectAddArgs[] = [];
   readonly pairArgs: Array<{ code: string; deviceName: string }> = [];
   readonly sendArgs: SessionSendArgs[] = [];
@@ -250,8 +392,8 @@ export class FakeTransport implements Transport {
   }
 
   /** Fail the next `times` calls of a method (default: every call until `heal`). */
-  fail(method: Method, kind: TransportErrorKind, message = `fake ${kind}`, times = Infinity): void {
-    this.failures.set(method, { error: new TransportError(kind, message), left: times });
+  fail(method: Method, kind: TransportErrorKind, message = `fake ${kind}`, times = Infinity, refusal?: string): void {
+    this.failures.set(method, { error: new TransportError(kind, message, refusal), left: times });
   }
 
   /** The next answer of a method carries this `note`. */
@@ -414,6 +556,233 @@ export class FakeTransport implements Transport {
     this.enter("sessionEnd");
     this.changed("sessionEnd", args.session_id, { state: "idle", ended_at: "2026-11-09T11:00:00Z" });
     return { replayed: false, session_id: args.session_id, note: null };
+  }
+
+  // ---- requests, the claim, runs ----
+
+  /** Replace the requests the server holds, and the claim. */
+  seedRequests(rows: RequestSummary[], claim: ClaimRecord | null = this.claim): void {
+    this.requestRows = rows.map((r) => ({ ...r }));
+    this.claim = claim;
+  }
+
+  /** The next `answer`, `clear` or `ack` answers `replayed: true` with every other field null and acts on nothing. */
+  replayOnce(method: "answer" | "clear" | "ack"): void {
+    this.replays.add(method);
+  }
+
+  async requests(args?: RequestsArgs): Promise<RequestList> {
+    this.requestsArgs.push(args);
+    this.enter("requests");
+    const rows = this.requestRows.filter(
+      (r) => (args?.all === true || r.status === "open") && (!args?.run || r.run === args.run),
+    );
+    return {
+      schema_version: 1,
+      open: rows.filter((r) => r.status === "open").length,
+      requests: rows.map((r) => ({ ...r })),
+      claim: this.claim,
+    };
+  }
+
+  async show(args: ShowArgs): Promise<RequestDetail> {
+    this.showArgs.push(args);
+    this.enter("show");
+    const row = this.requestRows.find((r) => r.id === args.id);
+    if (!row) throw new TransportError("refused", `request ${args.id} is unknown`);
+    return { schema_version: 1, ...row, body: this.bodies[args.id] ?? {}, answer: null, answer_generation: null };
+  }
+
+  async confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued> {
+    this.confirmArgs.push(args);
+    this.enter("confirmCode");
+    const row = this.requestRows.find((r) => r.id === args.subject.request);
+    if (!row) throw new TransportError("refused", `request ${args.subject.request} is unknown`);
+    this.codeCounter += 1;
+    const code = `pfc1-${this.codeCounter.toString(16).padStart(32, "0")}`;
+    const merge = row.kind === "merge_ack";
+    return {
+      schema_version: 1,
+      replayed: false,
+      code,
+      expires_at: "2026-11-10T10:02:00.000Z",
+      device: this.server?.device.id ?? "D-1",
+      generation: this.claim?.generation ?? null,
+      holder: this.claim,
+      subject: {
+        request: row.id,
+        revision: row.revision,
+        kind: row.kind,
+        run: row.run,
+        unit: row.unit,
+        reason: row.reason,
+        ...(merge ? { pr: row.pr, base: row.base, head_branch: this.headBranch, head_sha: row.head_sha } : {}),
+      },
+    };
+  }
+
+  /** Move the claim to this device, as a device's act does. */
+  private takeClaim(): ClaimRecord {
+    const device = this.server?.device.id ?? "D-1";
+    const claim: ClaimRecord = {
+      generation: (this.claim?.generation ?? 0) + 1,
+      holder: `device ${device}`,
+      device,
+      revoked: false,
+      claimed_at: "2026-11-10T10:05:00.000Z",
+    };
+    this.claim = claim;
+    return claim;
+  }
+
+  private acted(
+    method: "answer" | "clear" | "ack",
+    args: DeviceAnswerArgs | DeviceClearArgs | DeviceAckArgs,
+  ): RequestActed {
+    this.actArgs.push({ verb: method, args });
+    this.enter(method);
+    const device = this.server?.device.id ?? "D-1";
+    const empty = { request: null, merged: null, head_sha: null, pr: null, base: null, outcome: null, resumed: null, hook: null, to_stage: null };
+    if (this.replays.delete(method)) {
+      return { schema_version: 1, replayed: true, verb: method, device, generation: null, ...empty };
+    }
+    const index = this.requestRows.findIndex((r) => r.id === args.request);
+    if (index < 0) throw new TransportError("refused", `request ${args.request} is unknown`);
+    const claim = this.takeClaim();
+    const row = this.requestRows[index] as RequestSummary;
+    const request: RequestSummary = { ...row, status: "answered", answered_at: "2026-11-10T10:05:00.000Z", verbs: [] };
+    this.requestRows[index] = request;
+    return {
+      schema_version: 1,
+      replayed: false,
+      verb: method,
+      device,
+      generation: claim.generation,
+      ...empty,
+      request,
+      ...(method === "ack"
+        ? { merged: true, head_sha: row.head_sha ?? null, pr: row.pr ?? null, base: row.base ?? null, outcome: "landed" }
+        : { resumed: true, hook: "none" }),
+    };
+  }
+
+  async answer(args: DeviceAnswerArgs): Promise<RequestActed> {
+    return this.acted("answer", args);
+  }
+
+  async clear(args: DeviceClearArgs): Promise<RequestActed> {
+    return this.acted("clear", args);
+  }
+
+  async ack(args: DeviceAckArgs): Promise<RequestActed> {
+    return this.acted("ack", args);
+  }
+
+  async runList(): Promise<RunList> {
+    this.enter("runList");
+    return { schema_version: 1, runs: this.runs.map((r) => ({ ...r })) };
+  }
+
+  // ---- settings ----
+
+  private applies(scope: SettingScope, project: string | null, agent: string | null): boolean {
+    switch (scope.kind) {
+      case "server":
+        return true;
+      case "project":
+        return project !== null && scope.project_id === project;
+      case "agent":
+        return agent !== null && scope.agent_id === agent;
+      case "project_agent":
+        return project !== null && agent !== null && scope.project_id === project && scope.agent_id === agent;
+      default:
+        return false;
+    }
+  }
+
+  private static specificity(scope: SettingScope): number {
+    return { project_agent: 3, agent: 2, project: 1, server: 0, built_in: -1 }[scope.kind];
+  }
+
+  private record(key: string, project: string | null, agent: string | null): SettingRecord {
+    const def = SETTING_DEFS.find((d) => d.key === key);
+    if (!def) throw new TransportError("refused", `unknown setting ${key}`);
+    const chain = (this.settingLayers[key] ?? [])
+      .filter((l) => this.applies(l.scope, project, agent))
+      .sort((a, b) => FakeTransport.specificity(b.scope) - FakeTransport.specificity(a.scope));
+    const winner = chain[0];
+    return {
+      key,
+      value: winner ? winner.value : def.built_in,
+      from: winner ? winner.scope : { kind: "built_in", project_id: null, agent_id: null },
+      built_in: def.built_in,
+      merge: "override",
+      applies: def.applies,
+      layers: chain.map((l) => ({ ...l })),
+      masked: chain.slice(1).map((l) => ({ ...l })),
+    };
+  }
+
+  async settingsGet(args?: SettingsGetArgs): Promise<SettingsView> {
+    this.settingsGetArgs.push(args);
+    this.enter("settingsGet");
+    const project = args?.project_id ?? null;
+    const agent = args?.agent_id ?? null;
+    const keys = args?.key ? [args.key] : SETTING_DEFS.map((d) => d.key);
+    return {
+      schema_version: 1,
+      project_id: project,
+      agent_id: agent,
+      settings: keys.map((k) => this.record(k, project, agent)),
+    };
+  }
+
+  private static scopeOf(project: string | null | undefined, agent: string | null | undefined): SettingScope {
+    const p = project ?? null;
+    const a = agent ?? null;
+    const kind = p && a ? "project_agent" : p ? "project" : a ? "agent" : "server";
+    return { kind, project_id: p, agent_id: a };
+  }
+
+  async settingsSet(args: SettingsSetArgs): Promise<SettingChanged> {
+    this.settingsSetArgs.push(args);
+    this.enter("settingsSet");
+    const scope = FakeTransport.scopeOf(args.project_id, args.agent_id);
+    const layers = (this.settingLayers[args.key] ?? []).filter(
+      (l) => !(l.scope.project_id === scope.project_id && l.scope.agent_id === scope.agent_id),
+    );
+    layers.push({ scope, value: args.value, set_by: this.server?.device.id ?? "D-1", set_at: "2026-11-10T10:06:00.000Z" });
+    this.settingLayers[args.key] = layers;
+    return {
+      schema_version: 1,
+      replayed: false,
+      key: args.key,
+      scope,
+      value: args.value,
+      resolved: this.record(args.key, scope.project_id, scope.agent_id),
+    };
+  }
+
+  async settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged> {
+    this.settingsUnsetArgs.push(args);
+    this.enter("settingsUnset");
+    const scope = FakeTransport.scopeOf(args.project_id, args.agent_id);
+    this.settingLayers[args.key] = (this.settingLayers[args.key] ?? []).filter(
+      (l) => !(l.scope.project_id === scope.project_id && l.scope.agent_id === scope.agent_id),
+    );
+    return {
+      schema_version: 1,
+      replayed: false,
+      key: args.key,
+      scope,
+      value: null,
+      resolved: this.record(args.key, scope.project_id, scope.agent_id),
+    };
+  }
+
+  /** Deliver a request frame to every open stream. */
+  requestFrame(frame: RequestFrame): void {
+    this.emit({ event: "request_frame", frame });
   }
 
   async openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle> {
