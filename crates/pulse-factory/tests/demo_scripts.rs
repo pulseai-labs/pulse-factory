@@ -416,6 +416,55 @@ fn chat_api_passes() {
     }
 }
 
+/// The limit of `needs-you-api.sh`: one controller start, a paper spine to its spine PR, a few
+/// seconds of confirm-code waits and about forty `curl` calls. The script's own limit is 100 seconds.
+const NEEDS_YOU_API_LIMIT: Duration = Duration::from_secs(120);
+
+#[test]
+fn needs_you_api_passes() {
+    // d20: a paired device answers a stop-rule question and acks the spine PR with one-use confirm
+    // codes, and a process under a chat is refused on `arm`, `claim` and `ack`. The replay binary is
+    // built beside the controller's; a missing one fails the test, never skips it
+    // (`cargo build -p pf-adapter-claude --bin pf-claude-replay`).
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let (out, took) = run(
+        "needs-you-api.sh",
+        &[("PF_REPLAY_BIN", replay.to_str().unwrap())],
+    );
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < NEEDS_YOU_API_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+        "step 6:",
+        "step 7:",
+        "step 8:",
+        "step 9:",
+        "needs-you-api: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
 #[test]
 fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
     for name in [
@@ -426,6 +475,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "seat-tamper.sh",
         "pair-api.sh",
         "chat-api.sh",
+        "needs-you-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         for bad in [

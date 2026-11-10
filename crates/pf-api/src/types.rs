@@ -131,6 +131,11 @@ pub struct ApiStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ApiError {
     pub error: String,
+    /// Why a device verb refused, as one word of the closed list `host::REFUSALS` (`r1.s4.w1`). Only
+    /// a 422 of a device verb carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<String>,
 }
 
 /// The arguments of `device_revoke`.
@@ -625,6 +630,259 @@ pub struct SessionRedactArgs {
     pub command_id: String,
 }
 
+// ------------------------------------------------------------------ requests and the claim (r1.s4.w1)
+
+/// The current claim, as `requests` and the stream show it. It never holds the token or its hash.
+/// `device` is the ID of the paired device that holds it, and null for a CLI holder. `revoked` is true
+/// when that device was revoked: the claim stays current and no one can use it until the operator
+/// claims again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ClaimRecord {
+    #[ts(type = "number")]
+    pub generation: u64,
+    pub holder: String,
+    pub device: Option<String>,
+    pub revoked: bool,
+    pub claimed_at: String,
+}
+
+/// One request, as `requests` and the stream show it. `verbs` are the verbs that answer it now:
+/// `ack` for a `merge_ack`, `answer` and `clear` for a unit's request, `answer` alone for a run-level
+/// request, none once it is closed. A `merge_ack` row also names its PR, its base and its head SHA.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestSummary {
+    pub id: String,
+    pub revision: u32,
+    pub kind: String,
+    pub status: String,
+    pub run: String,
+    pub unit: Option<String>,
+    pub stage: String,
+    pub blocks: Vec<String>,
+    pub opened_at: String,
+    pub answered_at: Option<String>,
+    pub reason: String,
+    pub verbs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+}
+
+/// The answer of `show`: the summary, the request's body and answer, and the generation that
+/// answered it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestDetail {
+    pub schema_version: u32,
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub summary: RequestSummary,
+    #[ts(type = "unknown")]
+    pub body: serde_json::Value,
+    #[ts(type = "unknown")]
+    pub answer: serde_json::Value,
+    #[ts(type = "number | null")]
+    pub answer_generation: Option<u64>,
+}
+
+/// The answer of `requests`: the requests (the open ones, or all with `all`), newest last, the count of
+/// open ones and the current claim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestList {
+    pub schema_version: u32,
+    #[ts(type = "number")]
+    pub open: u64,
+    pub requests: Vec<RequestSummary>,
+    pub claim: Option<ClaimRecord>,
+}
+
+/// The arguments of `requests`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestsArgs {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub run: Option<String>,
+    /// Also the requests that are answered or withdrawn.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub all: Option<bool>,
+}
+
+/// The arguments of `show`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ShowArgs {
+    pub id: String,
+}
+
+/// The verb a confirm code is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ConfirmVerb {
+    Answer,
+    Clear,
+    Ack,
+}
+
+/// What a confirm code is for. The tag `kind` names the subject, so a later subject is a new tag and
+/// not a new field. A request subject binds the request, its revision, the verb and the verb's own
+/// parameters: for `answer` the SHA-256 of the answer text (64 lower-case hex digits: the text never
+/// reaches the controller's code table), for `clear` the target stage `to` or its absence, for `ack`
+/// nothing (the code binds the PR's head SHA the controller reads when it issues the code).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case")]
+pub enum ConfirmSubjectArg {
+    Request {
+        request: String,
+        revision: u32,
+        verb: ConfirmVerb,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        text_sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to: Option<String>,
+    },
+}
+
+/// The arguments of `confirm_code`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ConfirmCodeArgs {
+    pub subject: ConfirmSubjectArg,
+    pub command_id: String,
+}
+
+/// The subject of a confirm code as the dialog shows it: the request, and for a `merge_ack` the PR, its
+/// base, its head branch and its head SHA.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ConfirmSubjectShown {
+    pub request: String,
+    pub revision: u32,
+    pub kind: String,
+    pub run: String,
+    pub unit: Option<String>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+}
+
+/// The answer of `confirm_code`. Issuing a code changes no claim. `code` is shown once: it is `pfc1-` and
+/// 32 lower-case hex digits, it works once, for this device and this subject, and it stops working at
+/// `expires_at`. It is null on a replay of the command ID, and a replay answers the first record: the same
+/// `expires_at`, `generation`, `holder` and `subject` as the first answer gave, whatever moved since. (A
+/// replay after a restart, or 10 minutes past the expiry, has lost the first record: it carries the facts
+/// the store still has, with `expires_at` and `generation` null.) `generation` is the claim generation the
+/// code binds, null when no claim existed. `holder` is the claim at the issue: spending the code takes it
+/// from that holder, or refuses `claim_moved` when the claim moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ConfirmIssued {
+    pub schema_version: u32,
+    pub replayed: bool,
+    pub code: Option<String>,
+    pub expires_at: Option<String>,
+    pub device: String,
+    #[ts(type = "number | null")]
+    pub generation: Option<u64>,
+    pub holder: Option<ClaimRecord>,
+    pub subject: ConfirmSubjectShown,
+}
+
+/// The arguments of `answer` from a device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DeviceAnswerArgs {
+    pub request: String,
+    pub rev: u32,
+    pub text: String,
+    pub code: String,
+    pub command_id: String,
+}
+
+/// The arguments of `clear` from a device. `request` names the unit's open request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DeviceClearArgs {
+    pub request: String,
+    pub rev: u32,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub to: Option<String>,
+    pub code: String,
+    pub command_id: String,
+}
+
+/// The arguments of `ack` from a device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DeviceAckArgs {
+    pub request: String,
+    pub rev: u32,
+    pub code: String,
+    pub command_id: String,
+}
+
+/// The answer of a device's `answer`, `clear` or `ack`. The act moved the claim to this device, or
+/// found it there. On a replay of the command ID the fields after `device` are null: nothing ran again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestActed {
+    pub schema_version: u32,
+    pub replayed: bool,
+    pub verb: String,
+    pub device: String,
+    #[ts(type = "number | null")]
+    pub generation: Option<u64>,
+    /// The request after the act.
+    pub request: Option<RequestSummary>,
+    /// `ack`: the PR merged.
+    pub merged: Option<bool>,
+    /// `ack`: the head SHA the merge pinned.
+    pub head_sha: Option<String>,
+    pub pr: Option<String>,
+    pub base: Option<String>,
+    /// `ack`: `landed`, or why the merge did not land.
+    pub outcome: Option<String>,
+    /// `answer`: the unit resumed.
+    pub resumed: Option<bool>,
+    /// `answer`: `none`, `passed` or `failed`.
+    pub hook: Option<String>,
+    /// `clear`: the stage the unit resumes at.
+    pub to_stage: Option<String>,
+}
+
+/// One frame about requests on `GET /v1/stream`, beside the chat frames (`ChatFrame`). A reader keys
+/// a request by `(id, revision, status)`: a change that lands between the snapshot and the live
+/// frames can arrive twice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+// A frame is built, sent and dropped, never stored in bulk: a `Box` would change nothing but the
+// size of a temporary, and it would show in every caller.
+#[allow(clippy::large_enum_variant)]
+pub enum RequestFrame {
+    /// Sent on every connection right after `hello`: the open requests and the claim.
+    Requests {
+        requests: Vec<RequestSummary>,
+        claim: Option<ClaimRecord>,
+    },
+    /// A request opened, was revised, answered or withdrawn.
+    Request { request: RequestSummary },
+    /// The current claim changed.
+    Claim { claim: Option<ClaimRecord> },
+}
+
 /// Write the TypeScript file of every wire type, with its dependencies, as `cfg` says. The
 /// generated files in `apps/api-client/src/gen/` are exactly this output.
 pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
@@ -674,6 +932,22 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     DevicePairing::export_all(cfg)?;
     ListenState::export_all(cfg)?;
     ApiState::export_all(cfg)?;
+    ClaimRecord::export_all(cfg)?;
+    RequestSummary::export_all(cfg)?;
+    RequestDetail::export_all(cfg)?;
+    RequestList::export_all(cfg)?;
+    RequestsArgs::export_all(cfg)?;
+    ShowArgs::export_all(cfg)?;
+    ConfirmVerb::export_all(cfg)?;
+    ConfirmSubjectArg::export_all(cfg)?;
+    ConfirmCodeArgs::export_all(cfg)?;
+    ConfirmSubjectShown::export_all(cfg)?;
+    ConfirmIssued::export_all(cfg)?;
+    DeviceAnswerArgs::export_all(cfg)?;
+    DeviceClearArgs::export_all(cfg)?;
+    DeviceAckArgs::export_all(cfg)?;
+    RequestActed::export_all(cfg)?;
+    RequestFrame::export_all(cfg)?;
     Ok(())
 }
 

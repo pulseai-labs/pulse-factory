@@ -59,7 +59,12 @@ runtime it needs.
   (the agent's server-side environment, `NAME=value` pairs separated by spaces; the agent ID is
   upper-cased and each other character is `_`), `PF_SERVER_NAME` (the name every API answer carries)
   and `PF_CHAT_REGISTRY` (default `https://registry.npmjs.org`). No `PF_*` name reaches a chat
-  process.
+  process. The controller marks each chat with `PULSE_FACTORY_CHAT=<session ID>`, which is no `PF_`
+  name (`requests.md`, "The caller check").
+- **`PF_CONFIRM_TTL`.** How long a device's confirm code works, in whole seconds. The controller reads
+  it at start. It can only shorten the default of 120 seconds: a value from 1 to 120 is used, and a
+  bad or larger value prints one line on stderr and keeps 120. The tombstone window stays 10 minutes
+  (`requests.md`, "Confirm codes").
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -74,8 +79,10 @@ runtime it needs.
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
   `project list`, `device list`, `api status`, `session list` and `session items` are reads and stay
-  open. The controller checks the caller of `claim`, `answer`, `clear`, `ack`, `device pair`,
-  `device revoke` and the state-changing `session` verbs again (see `claim` and `session`).
+  open. The controller checks the caller of `arm`, `claim`, `answer`, `clear`, `ack`, `device pair`,
+  `device revoke` and the state-changing `session` verbs again: a caller that is, or descends from, a
+  seat or a chat process, or that holds `PULSE_FACTORY_CHAT` in its environment, is refused (see
+  `claim` and `session`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
   both.
@@ -100,7 +107,10 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   arm-set parameter; a failed `plan_check`; a plugin not found at its minimum version; a
   `--plugin-root` that does not exist; `--dry-run` with `--yes`; a run with a running session; an
   earlier run not at an end state that `--replace` does not name; and, without `--paper`, a `repo`
-  whose `origin` is not on GitHub or a failed `gh` read.
+  whose `origin` is not on GitHub or a failed `gh` read; and a caller that is, or descends from, a
+  chat process, or that holds `PULSE_FACTORY_CHAT` (`arm refused: the caller is, or descends from,
+  chat process <pid>`). `arm` runs only through the peer-aware path of the socket, so a request with
+  no peer is refused with `arm refused: the controller cannot tell which process called`.
 - **The summary.** Spine, item count, workflow name and file version, each role with runtime and
   model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, each stage-outcome loop, one
   relaunch per stage), the pinned plugins, the most launches,
@@ -168,7 +178,10 @@ opened and the reason. `--run` narrows to one run; an unknown run exits 1 and na
 answered and withdrawn requests, each marked with its status. With nothing open it prints
 `no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
 `requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
-`opened_at`, `answered_at` and `reason`). It needs no claim.
+`opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
+`merge_ack`), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
+null), `revoked` and `claimed_at`; null when none). The new fields join the old ones: none is
+removed and `schema_version` stays 1. The API serves the same JSON (`api.md`). It needs no claim.
 
 ## `show`
 
@@ -179,8 +192,8 @@ pulse-factory show <R-n> [--json]
 Prints every field of one request: the body, the answer if there is one, and the verbs that answer
 it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
 holds and the text of a `stop` request. The JSON adds `body`, `answer`,
-`answer_generation` and `verbs` to the fields of `requests`. An unknown ID exits 1 and names it. It
-needs no claim.
+`answer_generation` to the fields of `requests` (`verbs` and a `merge_ack`'s `pr`, `base` and
+`head_sha` are in them already). An unknown ID exits 1 and names it. It needs no claim.
 
 ## `claim`
 
@@ -195,8 +208,12 @@ and the path, never the token. The default holder is `<user>@<host>:<process>`. 
 the latest that has not ended.
 
 - **Refusals** (exit 1, nothing recorded): `PF_SEAT_TOKEN` set; a caller that is, or descends from, a
-  seat; a `/proc` read that fails; no random bytes (`no token can be made`); no run that takes a
-  claim.
+  seat or a chat process (`claim refused: the caller is, or descends from, chat process <pid>`), or
+  that holds `PULSE_FACTORY_CHAT` in its environment; a `/proc` read that fails; no random bytes
+  (`no token can be made`); no run that takes a claim; a holder label that starts with `device `
+  (`the holder label "device …" is kept for paired devices`).
+- A paired device takes the claim only by acting with a confirm code (`requests.md`, "The claim").
+  There is no `claim` verb on the API.
 - The JSON holds `schema_version`, `generation`, `holder`, `run` and `token_file`.
 
 ## `answer`
@@ -211,7 +228,10 @@ never run. `--rev` must be the request's current revision.
 
 - **Refusals** (exit 1, nothing recorded): the refusals of `claim`; a token file that is missing or
   empty (the message names the path); a token that matches no claim; a fenced token
-  (`claim <old> was fenced by claim <new>`); an unknown request; a request that is not open; another
+  (`claim <old> was fenced by claim <new>`); a token that a paired device fenced (the message ends
+  `the claim moved to device D-n (<name>) at <time>; claim again with pulse-factory claim`); a call
+  with `code` and no token (`confirm codes are for paired devices; on this host use pulse-factory
+  claim`); an unknown request; a request that is not open; another
   revision (the message names the current one); a changed pinned file (the message names it).
 - When the workflow declares an `on_answer` hook for the request, it runs first (`workflow-file.md`,
   "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
@@ -231,7 +251,8 @@ ledger line `answer <R-n>@<rev> by claim <generation>: clear <unit> --to <stage>
 is the one the unit parked in. The next tick launches it. A halted run accepts the clear and
 launches nothing.
 
-- **Refusals** (exit 1, nothing recorded): those of `answer`; a unit that is not parked or has no
+- **Refusals** (exit 1, nothing recorded): those of `answer`, the refusal that names `the claim
+  moved to device D-n` included; a unit that is not parked or has no
   open request; a `--to` that is not a stage of the unit's track; a `merge_ack` request (the
   message names `ack`).
 - The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation` and
@@ -258,7 +279,7 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
    back to the merge, which opens a new `merge_ack`.
 
 - **Refusals** (exit 1): those of `claim`; a token file that is missing or empty; a token that
-  matches no claim; a fenced token; an unknown request; a request of another kind (the message
+  matches no claim; a fenced token, or one that a device fenced (`the claim moved to device D-n`); an unknown request; a request of another kind (the message
   names the kind: `ack` answers only a `merge_ack` request); a request that is not open; another
   revision (the message names the current one); a halted or ended run; a moved head or any cause in
   step 2; a changed pinned file. A refusal after the request is known writes the ledger line
@@ -559,10 +580,11 @@ allowlist"). They launch nothing and change no run, so `halt` does not apply to 
   <reason>`): `pair` while the API is off (the message names `PF_API_LISTEN`) or while it failed to
   start (the message gives the cause); `revoke` of an unknown device or one that is already revoked,
   and of an ID of more than 64 characters; `pair` and `revoke` with `PF_SEAT_TOKEN` set, and a caller
-  that the controller finds to be, or to descend from, a seat. An invalid command ID is refused
+  that the controller finds to be, or to descend from, a seat or a chat process, or to hold
+  `PULSE_FACTORY_CHAT`. An invalid command ID is refused
   before any command is admitted.
 - **Ledger lines.** The redeem of a code is the command `device_pair`:
-  `device_pair D-1 admitted name=<name> peer=<address>`. A revoke is
+  `device_pair D-1 admitted name=<name> peer=<address>`. A revoke also voids the device's live confirm codes. A revoke is
   `device_revoke D-1 admitted command=<id>`, or `device_revoke refused reason="<reason>"
   command=<id>`. A line names the device, its name and the peer, and never the code or the token.
 

@@ -227,8 +227,10 @@ impl Controller {
                 let Some(id) = &admission.unit_id else {
                     return Response::err("the admission names no device");
                 };
-                // A revoke closes the device's open streams at once (C13).
+                // A revoke closes the device's open streams at once (C13), and voids its confirm
+                // codes: they become `code_voided` tombstones. An act already past `take` completes.
                 self.close_device_streams(id);
+                self.confirm.void_device(id);
                 match self.store.devices() {
                     Ok(rows) => match rows.into_iter().find(|d| &d.id == id) {
                         Some(row) => Response::ok(

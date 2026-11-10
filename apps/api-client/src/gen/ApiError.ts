@@ -3,4 +3,9 @@
 /**
  * The body of every error answer of the API. It never holds a token, a code or a key.
  */
-export type ApiError = { error: string, };
+export type ApiError = { error: string, 
+/**
+ * Why a device verb refused, as one word of the closed list `host::REFUSALS` (`r1.s4.w1`). Only
+ * a 422 of a device verb carries it.
+ */
+refusal?: string, };

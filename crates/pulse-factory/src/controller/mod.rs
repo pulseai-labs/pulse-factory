@@ -11,11 +11,14 @@ pub mod chat_view;
 pub mod chats;
 pub mod client;
 pub mod commands;
+pub mod confirm;
+pub mod device_acts;
 pub mod devices;
 pub mod driver;
 pub mod files;
 pub mod ports;
 pub mod projects;
+pub mod request_frames;
 pub mod requests;
 pub mod seat;
 pub mod sessions;
@@ -92,6 +95,12 @@ pub struct Config {
     /// True when the chat runs the managed copy, so a runtime list can say whether the copy is
     /// there.
     pub chat_managed: bool,
+    /// How long a confirm code works: 120 seconds. `PF_CONFIRM_TTL` can only shorten it. A test sets a
+    /// short time.
+    pub confirm_ttl: Duration,
+    /// How long a used, voided or expired confirm code stays in the table as a tombstone, past its
+    /// expiry: 10 minutes. A test sets a short time.
+    pub confirm_tombstone: Duration,
 }
 
 impl Config {
@@ -117,6 +126,8 @@ impl Config {
             chat_agent_env: BTreeMap::new(),
             server_name: "server".to_string(),
             chat_managed: false,
+            confirm_ttl: DEFAULT_CONFIRM_TTL,
+            confirm_tombstone: DEFAULT_CONFIRM_TOMBSTONE,
         }
     }
 
@@ -127,8 +138,15 @@ impl Config {
         self.chat_agent_env = env.agent_env.clone();
         self.server_name = env.server_name.clone();
         self.chat_registry = Some(env.registry.clone());
+        self.confirm_ttl = env.confirm_ttl;
     }
 }
+
+/// How long a confirm code works: 2 minutes.
+pub const DEFAULT_CONFIRM_TTL: Duration = Duration::from_secs(120);
+
+/// How long a confirm code stays as a tombstone past its expiry: 10 minutes.
+pub const DEFAULT_CONFIRM_TOMBSTONE: Duration = Duration::from_secs(600);
 
 /// How long a device may be idle: 30 days.
 pub const DEFAULT_DEVICE_IDLE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -158,6 +176,8 @@ pub struct Controller {
     controller_ledger: Mutex<commands::ControllerLedger>,
     /// The network API: its key, its state and the one live pairing code.
     api: api::ApiRuntime,
+    /// The confirm codes of the paired devices, in memory only (`r1.s4.w1`).
+    confirm: confirm::ConfirmCodes,
     /// The chat processes, their pumps, `chat.ledger` and the stream's frames (`r1.s3.w3`).
     chats: chats::Chats,
     /// This controller, for the threads that outlive a call.
@@ -197,6 +217,7 @@ impl Controller {
             claim_lock: Mutex::new(()),
             controller_ledger: Mutex::new(controller_ledger),
             api,
+            confirm: confirm::ConfirmCodes::default(),
             chats,
             me: me.clone(),
         });
@@ -222,6 +243,7 @@ impl Controller {
                 Err(why) => eprintln!("pulse-factory: run {} is not loaded: {why}", info.run_id),
             }
         }
+        controller.prime_request_watch();
         Ok(controller)
     }
 
@@ -435,6 +457,7 @@ impl Controller {
                 );
             }
         }
+        self.publish_request_frames();
     }
 
     // ------------------------------------------------------------------ arm
@@ -658,17 +681,14 @@ fn drop_guard_infos(
         .collect()
 }
 
+/// The refusal of a confirm code on the socket.
+const SOCKET_CODE_REFUSAL: &str =
+    "{verb} refused: confirm codes are for paired devices; on this host use pulse-factory claim";
+
 impl Handler for Controller {
     fn handle(&self, request: Request) -> Response {
         match request.verb.as_str() {
             "runs" => Response::ok(json!({ "runs": self.run_infos() })),
-            "arm" => match serde_json::from_value::<ArmPlan>(request.args) {
-                Ok(plan) => match self.arm(plan) {
-                    Ok(id) => Response::ok(json!({ "run_id": id })),
-                    Err(why) => Response::err(why),
-                },
-                Err(e) => Response::err(format!("the plan is not readable: {e}")),
-            },
             "hook" => Response::ok(self.seats.answer(&request.args)),
             "status" => self.verb_status(&request.args),
             "halt" => self.verb_halt(&request.args),
@@ -688,8 +708,10 @@ impl Handler for Controller {
             "session_items" => self.verb_session_items(&request.args),
             "device_list" => self.verb_device_list(),
             "api_status" => self.verb_api_status(),
+            // A confirm code is for a paired device, on the API (`r1.s4.w1`).
+            "confirm_code" => Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "confirm_code")),
             // These change who acts and what runs. They need to know who calls.
-            "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke" => {
+            "arm" | "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke" => {
                 Response::err(format!(
                     "{} refused: the controller cannot tell which process called",
                     request.verb
@@ -700,18 +722,47 @@ impl Handler for Controller {
     }
 
     fn handle_from(&self, request: Request, peer: Peer) -> Response {
+        let verb = request.verb.clone();
+        let response = self.dispatch_from(request, peer);
+        // The verbs that change a request or the claim tell the open streams at once.
+        if matches!(verb.as_str(), "claim" | "answer" | "clear" | "ack") {
+            self.publish_request_frames();
+        }
+        response
+    }
+}
+
+impl Controller {
+    fn dispatch_from(&self, request: Request, peer: Peer) -> Response {
+        // A confirm code is for a paired device: the socket takes a claim token and nothing else.
+        if matches!(request.verb.as_str(), "answer" | "clear" | "ack")
+            && request.args.get("code").is_some()
+            && request.args.get("token").is_none()
+        {
+            return Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", &request.verb));
+        }
         match request.verb.as_str() {
             "claim" => self.verb_claim(&request.args, peer),
             "answer" => self.verb_answer(&request.args, peer),
             "clear" => self.verb_clear(&request.args, peer),
             "ack" => self.verb_ack(&request.args, peer),
-            // A seat cannot pair a device or revoke one (ADR-0005).
-            "device_pair" => match self.check_caller("device_pair", peer) {
+            // Neither can a chat, or a process below one (ADR-0005; `r1.s4.w1`).
+            "device_pair" => match self.check_chat_caller("device_pair", peer) {
                 Ok(()) => self.verb_device_pair(),
                 Err(why) => Response::err(why),
             },
-            "device_revoke" => match self.check_caller("device_revoke", peer) {
+            "device_revoke" => match self.check_chat_caller("device_revoke", peer) {
                 Ok(()) => self.verb_device_revoke(&request.args),
+                Err(why) => Response::err(why),
+            },
+            "arm" => match self.check_chat_caller("arm", peer) {
+                Ok(()) => match serde_json::from_value::<ArmPlan>(request.args) {
+                    Ok(plan) => match self.arm(plan) {
+                        Ok(id) => Response::ok(json!({ "run_id": id })),
+                        Err(why) => Response::err(why),
+                    },
+                    Err(e) => Response::err(format!("the plan is not readable: {e}")),
+                },
                 Err(why) => Response::err(why),
             },
             // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).

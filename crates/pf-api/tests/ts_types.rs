@@ -147,6 +147,23 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "SessionSetArgs.ts",
         "SessionEndArgs.ts",
         "SessionListArgs.ts",
+        // r1.s4.w1: the requests, the claim, the confirm code and the request frames.
+        "ClaimRecord.ts",
+        "RequestSummary.ts",
+        "RequestDetail.ts",
+        "RequestList.ts",
+        "RequestsArgs.ts",
+        "ShowArgs.ts",
+        "ConfirmVerb.ts",
+        "ConfirmSubjectArg.ts",
+        "ConfirmCodeArgs.ts",
+        "ConfirmSubjectShown.ts",
+        "ConfirmIssued.ts",
+        "DeviceAnswerArgs.ts",
+        "DeviceClearArgs.ts",
+        "DeviceAckArgs.ts",
+        "RequestActed.ts",
+        "RequestFrame.ts",
     ] {
         assert!(now.contains_key(name), "{name} is not rendered");
     }
@@ -228,6 +245,63 @@ fn the_chat_types_hold_no_bigint_and_the_stream_frames_are_tagged() {
         assert!(
             session.contains(field),
             "ChatSessionRecord.ts lacks {field}: {session}"
+        );
+    }
+}
+
+/// `r1.s4.w1`: the request frames are a tagged type of their own and `ChatFrame` does not change; the
+/// confirm subject is tagged by `kind`; `ApiError.refusal` is optional, so a body of an older server
+/// still fits; a `u64` is a `number`.
+#[test]
+fn the_request_frames_and_the_confirm_subject_are_tagged_and_the_chat_frame_is_unchanged() {
+    let (_dir, now) = rendered();
+    let frame = &now["RequestFrame.ts"];
+    for kind in ["requests", "request", "claim"] {
+        assert!(
+            frame.contains(&format!("\"type\": \"{kind}\"")),
+            "RequestFrame.ts lacks {kind}: {frame}"
+        );
+    }
+    let chat = &now["ChatFrame.ts"];
+    for kind in ["requests", "request", "claim"] {
+        assert!(
+            !chat.contains(&format!("\"type\": \"{kind}\"")),
+            "ChatFrame.ts names {kind}: the chat frames do not change"
+        );
+    }
+    let subject = &now["ConfirmSubjectArg.ts"];
+    assert!(subject.contains("\"kind\": \"request\""), "{subject}");
+    for field in ["text_sha256?: string", "to?: string", "verb: ConfirmVerb"] {
+        assert!(
+            subject.contains(field),
+            "ConfirmSubjectArg.ts lacks {field}: {subject}"
+        );
+    }
+    let verbs = &now["ConfirmVerb.ts"];
+    for verb in ["answer", "clear", "ack"] {
+        assert!(verbs.contains(&format!("\"{verb}\"")), "{verbs}");
+    }
+    assert!(
+        now["ApiError.ts"].contains("refusal?: string"),
+        "{}",
+        now["ApiError.ts"]
+    );
+    let claim = &now["ClaimRecord.ts"];
+    for field in [
+        "generation: number",
+        "device: string | null",
+        "revoked: boolean",
+    ] {
+        assert!(
+            claim.contains(field),
+            "ClaimRecord.ts lacks {field}: {claim}"
+        );
+    }
+    let issued = &now["ConfirmIssued.ts"];
+    for field in ["code: string | null", "generation: number | null"] {
+        assert!(
+            issued.contains(field),
+            "ConfirmIssued.ts lacks {field}: {issued}"
         );
     }
 }
