@@ -7,11 +7,20 @@ import type {
   ChatFrame,
   ConfirmCodeArgs,
   ConfirmIssued,
+  DeviceAckArgs,
+  DeviceAnswerArgs,
   DeviceArmArgs,
+  DeviceClearArgs,
   DeviceRecord,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
+  RequestActed,
+  RequestDetail,
+  RequestFrame,
+  RequestList,
+  RequestsArgs,
+  RunList,
   ServerRef,
   SessionAnswerArgs,
   SessionChanged,
@@ -22,6 +31,12 @@ import type {
   SessionSendArgs,
   SessionSetArgs,
   SessionStartArgs,
+  SettingChanged,
+  SettingsGetArgs,
+  SettingsSetArgs,
+  SettingsUnsetArgs,
+  SettingsView,
+  ShowArgs,
 } from "@pulse-factory/api-client";
 
 export type TransportErrorKind =
@@ -52,10 +67,16 @@ export const KEY_CHANGED_MESSAGE = "server key changed: re-pair";
 
 export class TransportError extends Error {
   readonly kind: TransportErrorKind;
-  constructor(kind: TransportErrorKind, message: string) {
+  /**
+   * The word of a refused device verb (`code_used`, `code_expired`, …), when the server gave one. The
+   * confirm dialog words its message by it, not by the server's text (r1.s4.w3, W3).
+   */
+  readonly refusal?: string;
+  constructor(kind: TransportErrorKind, message: string, refusal?: string) {
     super(message);
     this.name = "TransportError";
     this.kind = kind;
+    if (refusal !== undefined) this.refusal = refusal;
   }
 }
 
@@ -91,9 +112,12 @@ export interface StreamOptions {
 /**
  * One thing a chat stream tells the UI. `closed` is the last event: no event follows it or a
  * `close()`. The reconnect is native: while `reconnecting` the native side waits and tries again.
+ * A `request_frame` carries the requests and the claim; it rides the one stream the app holds, beside
+ * the chat frames and not inside them (r1.s4.w3, W1, W2).
  */
 export type StreamEvent =
   | { event: "frame"; frame: ChatFrame }
+  | { event: "request_frame"; frame: RequestFrame }
   | { event: "reconnecting"; after: number; retry_in_ms: number; reason: string }
   | { event: "closed"; error: { kind: TransportErrorKind; message: string } };
 
@@ -108,10 +132,39 @@ function isKind(value: unknown): value is TransportErrorKind {
   return typeof value === "string" && (TRANSPORT_ERROR_KINDS as readonly string[]).includes(value);
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
- * A native value as a `StreamEvent`, or `null` when it is none of the three shapes. Both
- * implementations use this, so a value of another shape is dropped the same way in each. A frame
- * is checked by its `type` only: the generated `ChatFrame` is the native side's to decode.
+ * A request frame, when its fields have the shape the requests state reads: `requests` an array and
+ * `claim` an object or null; `request` an object with a string `id`, a number `revision` and a string
+ * `status`; `claim` an object or null. Anything else is `null` and is dropped (never a closed stream).
+ */
+function parseRequestFrame(value: unknown): RequestFrame | null {
+  if (!isObject(value)) return null;
+  const nullableObject = (v: unknown) => v === null || isObject(v);
+  switch (value.type) {
+    case "requests":
+      return Array.isArray(value.requests) && nullableObject(value.claim) ? (value as unknown as RequestFrame) : null;
+    case "request": {
+      const r = value.request;
+      return isObject(r) && typeof r.id === "string" && typeof r.revision === "number" && typeof r.status === "string"
+        ? (value as unknown as RequestFrame)
+        : null;
+    }
+    case "claim":
+      return "claim" in value && nullableObject(value.claim) ? (value as unknown as RequestFrame) : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * A native value as a `StreamEvent`, or `null` when it is none of the four shapes. Both
+ * implementations use this, so a value of another shape is dropped the same way in each. A chat frame
+ * is checked by its `type` only: the generated `ChatFrame` is the native side's to decode. A request
+ * frame is checked by its type and the fields the requests state reads.
  */
 export function parseStreamEvent(value: unknown): StreamEvent | null {
   if (typeof value !== "object" || value === null) return null;
@@ -121,6 +174,10 @@ export function parseStreamEvent(value: unknown): StreamEvent | null {
     if (typeof frame !== "object" || frame === null) return null;
     if (!(FRAME_TYPES as readonly unknown[]).includes(frame.type)) return null;
     return { event: "frame", frame: frame as ChatFrame };
+  }
+  if (v.event === "request_frame") {
+    const frame = parseRequestFrame(v.frame);
+    return frame === null ? null : { event: "request_frame", frame };
   }
   if (v.event === "reconnecting") {
     if (typeof v.after !== "number" || typeof v.retry_in_ms !== "number" || typeof v.reason !== "string") return null;
@@ -150,9 +207,20 @@ export interface Transport {
   sessionInterrupt(args: SessionInterruptArgs): Promise<SessionChanged>;
   sessionSet(args: SessionSetArgs): Promise<SessionChanged>;
   sessionEnd(args: SessionEndArgs): Promise<SessionEnded>;
-  /** Asks for a one-use confirm code for a subject (a start card's arm, here). The code is shown once. */
+  /** The open requests (all of them with `all`) and the claim (r1.s4.w3). */
+  requests(args?: RequestsArgs): Promise<RequestList>;
+  show(args: ShowArgs): Promise<RequestDetail>;
+  /** One-use code for one act. It binds the subject; the dialog shows what it binds. */
   confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued>;
-  /** Arms the run of a start card with a code from `confirmCode`. */
+  answer(args: DeviceAnswerArgs): Promise<RequestActed>;
+  clear(args: DeviceClearArgs): Promise<RequestActed>;
+  ack(args: DeviceAckArgs): Promise<RequestActed>;
+  settingsGet(args?: SettingsGetArgs): Promise<SettingsView>;
+  settingsSet(args: SettingsSetArgs): Promise<SettingChanged>;
+  settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged>;
+  /** Every run the controller holds: its state, its waiting text, its open request count. */
+  runList(): Promise<RunList>;
+  /** Arms the run of a start card with a code from `confirmCode` (subject kind `start`). */
   arm(args: DeviceArmArgs): Promise<ArmActed>;
   /**
    * Opens the chat stream. It never rejects for a stream failure: every failure arrives as one

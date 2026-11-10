@@ -1193,6 +1193,38 @@ pub enum RequestFrame {
     Claim { claim: Option<ClaimRecord> },
 }
 
+// ------------------------------------------------------------------ the run list (r1.s4.w3)
+
+/// The arguments of `run_list`: none. An unknown field is ignored.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RunListArgs {}
+
+/// One run as `run_list` shows it: what the Needs you page reads of a run, and no more. The eight
+/// fields are all of it (W14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RunSummary {
+    pub id: String,
+    pub spine: String,
+    pub workflow: String,
+    /// `active` or `ended`.
+    pub state: String,
+    pub halted_reason: Option<String>,
+    /// The reason the run's last `EndRun` gave.
+    pub end_reason: Option<String>,
+    #[ts(type = "number")]
+    pub open_requests: u64,
+    /// The `end_when` waiting text the last tick noted, rendered from the run's workflow; null when
+    /// the last tick noted none.
+    pub waiting: Option<String>,
+}
+
+/// The answer of `run_list`: every run the controller holds, oldest first, ended runs included.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RunList {
+    pub schema_version: u32,
+    pub runs: Vec<RunSummary>,
+}
+
 /// Write the TypeScript file of every wire type, with its dependencies, as `cfg` says. The
 /// generated files in `apps/api-client/src/gen/` are exactly this output.
 pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
@@ -1280,6 +1312,9 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     DeviceAckArgs::export_all(cfg)?;
     RequestActed::export_all(cfg)?;
     RequestFrame::export_all(cfg)?;
+    RunListArgs::export_all(cfg)?;
+    RunSummary::export_all(cfg)?;
+    RunList::export_all(cfg)?;
     Ok(())
 }
 

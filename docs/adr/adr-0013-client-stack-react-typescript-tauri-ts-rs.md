@@ -5,7 +5,9 @@
 - **Date:** 2026-11-07
 - **Amended:** 2026-11-09, at `r1.s3.w4`: the chat verbs and the chat stream in the `Transport`
   interface, one bridge route and nine Tauri commands. 2026-11-09, at `r1.s3.w5`: the Agents rail item and
-  the chat screens, behind the unchanged `Transport`.
+  the chat screens, behind the unchanged `Transport`. 2026-11-10, at `r1.s4.w3`: the Needs you page and the
+  Settings rows, behind the `Transport` with ten more methods and one more stream event, and one `verb`
+  Tauri command.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk,
@@ -296,3 +298,72 @@ capability file and no storage key.
 - The chat runs in the Mac app's webview: the `Channel` delivers the stream, the approval card is answered and
   the controls work there. The d17 walk on the MacBook checks it, with the real qualified Claude Code copy.
 - The look of the chat screens. `r1.s5` compares them with canvas `1794071391-77bb`.
+
+## Amendment, 2026-11-10 (`r1.s4.w3`)
+
+The operator answers the factory in the app: a **Needs you** page and the **Chat policies** rows of the
+Settings page. Both are built for function from the structure of the approved screen 3f. The look is
+`r1.s5`'s.
+
+- **The `Transport` grows by ten methods and one event, and keeps its kind.** `requests`, `show`,
+  `confirmCode`, `answer`, `clear`, `ack`, `settingsGet`, `settingsSet`, `settingsUnset` and `runList`,
+  each a thin call of one verb that returns its generated type; the `request_frame` event beside
+  `frame`; and `TransportError.refusal`, the word of a refused device verb. No method takes or returns
+  the device token or the code's text beyond the one call that spends it.
+- **The request frames ride the one stream the app holds (W1).** The controller sends them on every
+  stream, the overview included, so Needs you opens no stream of its own: `ChatProvider`'s stream feeds
+  the requests state, and the rail's count follows from frames with no call. The page's `requests` read
+  when it opens is the correctness path: a fresh page fills its Open requests, its claim and its
+  Answered list from that read. No timer, no focus handler, and no second stream: the guards of the
+  earlier amendments hold.
+- **One `verb` Tauri command, a departure from one command per method (W5).** The interface grows by
+  a verb a spine, and a command for each means an edit of `apps/desktop`, a crate that draco-desk never
+  builds. `verb {name, args}` calls `pf-client`'s allowlisted `Transport::verb`, so the webview reaches
+  no verb a device may not call, and the commands, the handler list, `TAURI_COMMANDS` and the contract's
+  table are still one checked set. The ten methods and a later item's go through it. The test bridge
+  already had the one generic route.
+- **The confirm dialog.** An act is two clicks. The first asks for a one-use confirm code and the dialog
+  shows what the code binds (the PR, base, head branch and head SHA, or the exact answer text) and whom
+  the act takes the claim from; the second spends it. The claim moves at the final click, so the dialog
+  moves nothing, and Cancel, Escape and leaving the page spend nothing. A refusal ends the dialog with
+  one line by its word, and a new first click asks for a new code. The code is in memory only: never
+  rendered, stored, logged or put in a URL.
+- **Known limit (Q2, C1).** The code proves the device, the freshness and the head, not that a person
+  pressed the button. A script that holds the device's bridge can do both clicks. The dialog adds no
+  user-presence check: that boundary belongs to the Release 2 authority-rules spine.
+- **The Settings rows follow the server's registry (W11).** The page names no key. It renders the
+  records `settings_get` returns for a chosen project and agent, with the scope each value comes from and
+  the values it masks, and picks the editor by the type of `built_in`. A key the server adds later shows
+  with no change in the app.
+- **What the app shows of a run (W14).** Running, `Halted: <reason>`, `Waiting on you: <text>` (the
+  run's own text from `run_list`, never one the app spells) or `Done: <reason>`. A run that starts
+  waiting or ends while the page is on screen shows it at the next read (open, the link's return,
+  Refresh or the operator's own act). There is no run frame.
+- **No new dependency, storage key or capability.** `localStorage` keeps `pf.sidebar` only. Every call
+  goes through the `Transport`, and the Tauri app still declares no capability file.
+
+### Verified claims (r1.s4.w3)
+Checked on draco-desk on 2026-11-10 with the item's verification commands (each through
+`oss verify_step`, exit 0):
+- The UI unit tests: `requests-state.test.ts` (22 tests), `needs-you.test.tsx` (23),
+  `confirm.test.tsx` (33), `settings-rows.test.tsx` (19), `transport-contract.test.ts`,
+  `tauri-commands.test.ts` and `tauri-transport.test.ts`. The whole UI suite passes (349 tests) and
+  `tsc` is clean. The tests name the claims above: the dialog moves nothing before the second click, a
+  refusal ends the dialog by its word, the code is not rendered or stored, the rows follow the
+  server's records, and the page reads again only at open, link return, Refresh and the operator's act.
+- The source bans hold: no timer, stream, storage key or log call outside the files that owned them
+  before this item, and the Settings page names no key.
+- `pf-client` against a fake host and `pulse-factory` against the real controller: `request_frame`
+  events, the typed verbs, the `refusal` word through the bridge's error envelope, and `run_list`
+  (`needs_you`, `run_list`, `client_requests`, `client_chat`, `client_bridge`). `cargo test --workspace
+  --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings` and both format checks
+  pass.
+- Paper env d23 in `cli` mode (`scripts/demo/ui-needs-you.sh`): a real controller, API and engine on
+  the paper forge, the page through `pf-client-bridge` in headless Chromium. It prints
+  `ui-needs-you: ok (start: cli` and the browser run reports `1 passed`. The d12 pairing journey
+  (`ui-pair.sh`) and the d19 chat journey (`ui-chat.sh`) still pass.
+
+### Unverified claims (r1.s4.w3)
+- The `verb` command compiles and the page runs in the Mac app's webview. The item PR's `macos-app` job
+  compiles `main.rs`, and the d24 walk on the MacBook checks the page and the dialog there.
+- The look of the page, the dialog and the rows. `r1.s5` compares them with the canvas.

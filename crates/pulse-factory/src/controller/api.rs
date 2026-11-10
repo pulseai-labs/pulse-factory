@@ -71,6 +71,7 @@ pub const VERBS: &[&str] = &[
     "settings_get",
     "settings_set",
     "settings_unset",
+    "run_list",
 ];
 
 /// The text of the failure for an address outside the allowed ranges.

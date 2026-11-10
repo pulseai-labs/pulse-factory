@@ -2,10 +2,14 @@
 //!
 //! The Tauri commands are the operations of the UI's transport interface
 //! (`docs/contracts/ui-transport.md`), with the same names: the six of the pairing and the projects,
-//! the seven chat verbs, and `open_stream` and `close_stream` for the chat stream. Each calls
+//! the seven chat verbs, and `open_stream` and `close_stream` for the chat stream, and one `verb` command
+//! for every verb added since `r1.s4` (the device verbs, the settings verbs, `run_list`, and a later
+//! spine's). Each calls
 //! `pf-client`'s `Transport<KeychainStore>`: the pinned TLS call, and the device token in the macOS
 //! Keychain. A command returns the wire type, or rejects with `{"kind": …, "message": …}`, the same
-//! shape as the test bridge's error. No command takes or returns the device token, and the webview
+//! shape as the test bridge's error. `verb` calls `pf-client`'s `Transport::verb`, which refuses a verb
+//! that is not on `pf_api::ALLOWLIST` before it connects; a later item's verbs need no edit here. No
+//! command takes or returns the device token, and the webview
 //! opens no network connection (its CSP allows the bundle's own assets and Tauri's IPC only).
 //!
 //! The stream's events go to the webview on a `tauri::ipc::Channel`, not on Tauri's event system:
@@ -18,6 +22,7 @@ use pf_api::types::{
 };
 use pf_client::error::ClientError;
 use pf_client::keychain::KeychainStore;
+use pf_client::request::Value;
 use pf_client::stream::{StreamEvent, StreamOptions, Streams};
 use pf_client::transport::{PairedServer, SessionEnded, SessionStarted, Transport};
 use tauri::{Manager, State};
@@ -112,6 +117,14 @@ async fn session_end(
     device.session_end(args).await
 }
 
+/// Any verb of the allowlist that has no command of its own: the device verbs, the settings verbs and
+/// `run_list` (`r1.s4.w3`, W5). `pf-client` checks the name against the allowlist before it connects, so
+/// a webview cannot reach a verb a device may not call. The answer is the verb's JSON.
+#[tauri::command]
+async fn verb(device: State<'_, Device>, name: String, args: Value) -> Result<Value, ClientError> {
+    device.verb(&name, args).await
+}
+
 /// Open the chat stream. The events go to the webview on `on_event`, in order; a `closed` event is
 /// the last. Returns the stream's ID for `close_stream`.
 #[tauri::command]
@@ -166,6 +179,7 @@ fn main() {
             session_interrupt,
             session_set,
             session_end,
+            verb,
             open_stream,
             close_stream,
             forget

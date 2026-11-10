@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use pf_api::types::ChatFrame;
+use pf_api::types::{ChatFrame, RequestFrame};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
@@ -46,7 +46,7 @@ const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// How many events wait for the reader before the stream stops reading the socket.
 const EVENT_QUEUE: usize = 256;
 
-/// The `type` of every frame this client knows (`ChatFrame`). Another `type` is skipped.
+/// The `type` of every chat frame this client knows (`ChatFrame`). Another `type` is skipped.
 const KNOWN_FRAMES: [&str; 6] = [
     "hello",
     "session",
@@ -55,6 +55,10 @@ const KNOWN_FRAMES: [&str; 6] = [
     "delta",
     "tool_running",
 ];
+
+/// The `type` of every request frame (`RequestFrame`, `r1.s4.w3`). They ride every stream, whatever
+/// session it follows.
+const REQUEST_FRAMES: [&str; 3] = ["requests", "request", "claim"];
 
 /// What to follow: one session (and its items after `after`), or none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +78,9 @@ pub struct StreamOptions {
 pub enum StreamEvent {
     /// A frame of the server, decoded.
     Frame { frame: ChatFrame },
+    /// A request frame of the server, decoded: a separate event, so every `ChatFrame` reader stays
+    /// as it is (`r1.s4.w3`, W2). It never moves the `seq` a reconnect asks `after`.
+    RequestFrame { frame: RequestFrame },
     /// The connection is gone and the client will try again in `retry_in_ms`.
     Reconnecting {
         after: u64,
@@ -211,6 +218,8 @@ async fn run<S: DeviceStore>(
     }
     let tuning = transport.stream_tuning();
     let mut last_seq = options.after;
+    // The request frames this stream dropped, over every connection.
+    let mut dropped_requests = 0u64;
     let mut step = 0usize;
     let mut last_was_immediate = false;
     loop {
@@ -218,7 +227,13 @@ async fn run<S: DeviceStore>(
         let outcome = tokio::select! {
             biased;
             _ = forgotten.changed() => Attempt::Closed(not_paired()),
-            outcome = connection(&transport, &options.session, &mut last_seq, &tx) => outcome,
+            outcome = connection(
+                &transport,
+                &options.session,
+                &mut last_seq,
+                &mut dropped_requests,
+                &tx,
+            ) => outcome,
         };
         match outcome {
             Attempt::Gone => return,
@@ -271,6 +286,10 @@ async fn run<S: DeviceStore>(
 enum Decoded {
     Skip,
     Frame(Box<ChatFrame>),
+    Request(Box<RequestFrame>),
+    /// A request frame of a known `type` that does not decode. It is dropped: the requests state is
+    /// a cache that the next `requests` snapshot repairs, and ending the stream would cut the chat.
+    DroppedRequest,
     Unreadable,
 }
 
@@ -281,6 +300,12 @@ fn decode(text: &str) -> Decoded {
     let Some(kind) = value.get("type").and_then(Value::as_str) else {
         return Decoded::Skip;
     };
+    if REQUEST_FRAMES.contains(&kind) {
+        return match serde_json::from_value::<RequestFrame>(value) {
+            Ok(frame) => Decoded::Request(Box::new(frame)),
+            Err(_) => Decoded::DroppedRequest,
+        };
+    }
     if !KNOWN_FRAMES.contains(&kind) {
         return Decoded::Skip;
     }
@@ -321,6 +346,7 @@ async fn connection<S: DeviceStore>(
     transport: &Transport<S>,
     session: &Option<String>,
     last_seq: &mut u64,
+    dropped_requests: &mut u64,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Attempt {
     let paired = match transport.on_store(|store| store.load()).await {
@@ -421,6 +447,9 @@ async fn connection<S: DeviceStore>(
     transport.note_server_headers(&paired.pin, response.headers());
 
     let opened = Instant::now();
+    // One stderr line for each connection at most, so a server that sends many bad frames cannot
+    // fill a log.
+    let mut logged = false;
     loop {
         let next = tokio::select! {
             biased;
@@ -437,6 +466,26 @@ async fn connection<S: DeviceStore>(
         match message {
             Message::Text(text) => match decode(text.as_str()) {
                 Decoded::Skip => {}
+                Decoded::DroppedRequest => {
+                    *dropped_requests += 1;
+                    if !logged {
+                        logged = true;
+                        // No frame text: a request carries text a seat wrote.
+                        eprintln!(
+                            "pf-client: dropped a request frame this client cannot read ({} so far on this stream)",
+                            *dropped_requests
+                        );
+                    }
+                }
+                Decoded::Request(frame) => {
+                    if tx
+                        .send(StreamEvent::RequestFrame { frame: *frame })
+                        .await
+                        .is_err()
+                    {
+                        return Attempt::Gone;
+                    }
+                }
                 Decoded::Unreadable => {
                     return Attempt::Closed(ClientError::new(
                         ErrorKind::Server,

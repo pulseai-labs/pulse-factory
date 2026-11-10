@@ -34,7 +34,10 @@ export type TransportErrorKind =
   | 'rate_limited'  // 429
   | 'bad_request'   // 400 or 413
   | 'server';       // 5xx, or an answer that is not the documented JSON
-export class TransportError extends Error { readonly kind: TransportErrorKind }
+export class TransportError extends Error {
+  readonly kind: TransportErrorKind;
+  readonly refusal?: string;  // r1.s4.w3: the word of a refused device verb, one of `REFUSALS` (api.md)
+}
 export interface PairedServer { address: string; device: DeviceRecord; server?: ServerRef }
 export interface SessionStarted { replayed: boolean; session_id: string; worktree_id: string;
                                   worktree_dir: string; note: string | null }
@@ -42,6 +45,7 @@ export interface SessionEnded { replayed: boolean; session_id: string; note: str
 export interface StreamOptions { session?: string | null; after?: number }
 export type StreamEvent =
   | { event: 'frame'; frame: ChatFrame }
+  | { event: 'request_frame'; frame: RequestFrame }   // r1.s4.w3: requests, request, claim
   | { event: 'reconnecting'; after: number; retry_in_ms: number; reason: string }
   | { event: 'closed'; error: { kind: TransportErrorKind; message: string } };
 export interface StreamHandle { close(): Promise<void> }
@@ -58,6 +62,18 @@ export interface Transport {
   sessionInterrupt(args: SessionInterruptArgs): Promise<SessionChanged>;
   sessionSet(args: SessionSetArgs): Promise<SessionChanged>;
   sessionEnd(args: SessionEndArgs): Promise<SessionEnded>;
+  // r1.s4.w3: the device verbs, the settings verbs and `run_list` (api.md, "The device verbs")
+  requests(args?: RequestsArgs): Promise<RequestList>;
+  show(args: ShowArgs): Promise<RequestDetail>;
+  confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued>;
+  answer(args: DeviceAnswerArgs): Promise<RequestActed>;
+  clear(args: DeviceClearArgs): Promise<RequestActed>;
+  ack(args: DeviceAckArgs): Promise<RequestActed>;
+  settingsGet(args?: SettingsGetArgs): Promise<SettingsView>;
+  settingsSet(args: SettingsSetArgs): Promise<SettingChanged>;
+  settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged>;
+  runList(): Promise<RunList>;
+  // r1.s4.w2: the device `arm` of a start card (api.md, "The device `arm`")
   arm(args: DeviceArmArgs): Promise<ArmActed>;
   openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle>;
   forget(): Promise<void>;                          // drops the token on this device only
@@ -73,8 +89,8 @@ export interface Transport {
   `plan_sha256`, the confirm `code` from `confirmCode` and a `command_id`. The bridge serves it on
   `/bridge/verbs/arm`. `tauri.ts` sends it through w3's generic `verb` command,
   `command("verb", { name: "arm", args })` (O2), and adds no name to `TAURI_COMMANDS`: the desktop
-  app reaches `arm` once w3's `verb` command is merged. `confirmCode` is w3's line of this
-  interface.
+  app reaches `arm` through w3's `verb` command. `confirmCode` is w3's line of this interface; its
+  `arm` subject is w2's.
 - `projectAdd` and every state-changing chat verb carry a `command_id`. A retry of the same submit
   reuses it (`api.md`, A7).
 - `sessionStart` and `sessionEnd` answer `SessionStarted` and `SessionEnded`, which are transport types
@@ -85,6 +101,24 @@ export interface Transport {
 - `sessionStart` and `sessionSend` may open a chat process, so the native side waits up to 90 seconds
   for them (the other verbs wait 30). A timeout is `unreachable`, and a retry with the same `command_id`
   replays.
+- **The device verbs, the settings verbs and `run_list` (`r1.s4.w3`).** Ten methods, each a thin call of
+  one verb that returns the generated wire type (`requests`, `show`, `confirmCode`, `answer`, `clear`,
+  `ack`, `settingsGet`, `settingsSet`, `settingsUnset`, `runList`). `answer`, `clear`, `ack`,
+  `settingsSet` and `settingsUnset` carry a `command_id`, and `answer`, `clear` and `ack` carry the
+  one-use `code` that `confirmCode` issued. **`ack` waits up to 90 seconds**, as `sessionStart` does: it
+  merges through the forge. A timeout is `unreachable`, and a retry with the same `command_id` replays
+  (`RequestActed.replayed`, which acts on nothing). A `confirmCode` that ends `unreachable` is retried
+  with a **new** `command_id`: a replay answers `code: null`, so the same ID can never give the code.
+  The code is in memory only: no method, error message or log line holds it.
+- **`TransportError.refusal`.** A refused device verb is a 422 whose body holds `refusal`, one word of
+  `pf_api::host::REFUSALS` (`code_unknown`, `code_foreign`, `code_used`, `code_voided`, `code_expired`,
+  `code_subject`, `subject_moved`, `claim_moved`, `device_revoked`). Both implementations keep it, and
+  only a word of that list, on the `TransportError`; an engine refusal after the admission has the
+  server's text and no word. The error without a word has the JSON `{"kind", "message"}` as before.
+- **The request frames.** `{ event: 'request_frame', frame }` carries a `requests`, `request` or `claim`
+  frame of the one stream (next sections), beside `frame` and not inside it, so every consumer of a
+  `ChatFrame` stays as it is. A request frame that does not have its shape is dropped, and the stream
+  and the chat it carries go on.
 - **The server.** `PairedServer.server` is the server that the last answer named (`pf-server-id` and
   `pf-server-name` on every answer, a `101` and each `hello` frame's `server` too). The native side keeps
   it in memory, only when its ID is the pin: a header that names another ID is ignored, because the TLS pin is
@@ -92,7 +126,7 @@ export interface Transport {
   clears it.
 - **`openStream` never rejects for a stream failure.** Every failure arrives as one `closed` event, from
   either implementation, so a screen handles one path. No event follows `closed` or `close()`. A value
-  that is not one of the three event shapes is dropped.
+  that is not one of the four event shapes is dropped.
 
 ## Error kinds
 
@@ -152,6 +186,32 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
 - A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
   chat's items replay from `after=0`. The UI keeps no chat state in storage (`pf.sidebar` is its only key).
 
+**Needs you and the request frames (`r1.s4.w3`).** The controller sends the request frames on **every**
+stream, the overview included, so the UI needs no stream of its own for them: the one stream the app holds
+feeds the requests state (the rail's count, and the Needs you page while it is open), with no call. The
+page's calls (W9) are:
+
+- when it opens: one `requests {all: true}` (the correctness path: a fresh page fills its Open requests,
+  its claim and its Answered list from that read alone, with no frame), one `runList`, and one `show` for
+  each open request that takes `answer` (its question is in the body);
+- when the link comes back: the same, once;
+- on the operator's **Refresh**: `requests` and `runList`;
+- after the operator's own `ack`: `runList` once; after a replayed `answer` or `ack`: `requests` once;
+- while the page is on screen, a `request` frame that brings an open request that takes `answer` at a
+  revision the page holds no body for: one `show` for it.
+
+Nothing else: no timer, no focus handler, no second stream. **No `confirmCode` is asked for, and no code
+is spent, except on the operator's click** (the dialog's first and second click); a reload, a reconnect, a
+frame or a timer never asks. The page offers Answer and Merge only: `clear` is on the interface for
+parity and the CLI keeps it. A run that starts waiting or ends while the page is on screen shows it at
+the next read (known limit: there is no run frame).
+
+**The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its Project
+or Agent select changes (an operator action) and once when the link comes back, and `sessionList` once
+when the list is not loaded (for the Agent select). It names no key: it renders the records the server
+returns. A `settingsSet` or `settingsUnset` is one action with one `command_id`, reused only for a retry
+after `unreachable`.
+
 ## The bridge protocol
 
 HTTP on `127.0.0.1`, on the same origin as the bundle. The bridge serves the bundle's files at `/`
@@ -162,7 +222,7 @@ and these routes:
 | `GET /bridge/paired` | none | `PairedServer`, or `null` when no server is paired. No network call. |
 | `POST /bridge/pair` | `{"code": "<pf1-…>", "device_name": "<name>"}` | `PairedServer`. The bridge checks the pin, then calls `POST /v1/pair`, and keeps the token. |
 | `POST /bridge/status` | `{}` | `ApiStatus` (`GET /v1/status`). |
-| `POST /bridge/verbs/<verb>` | the verb's JSON arguments | the verb's JSON answer (`POST /v1/verbs/<verb>`). `<verb>` is `[a-z][a-z_]*`; anything else is `bad_request`. `project_add` and the seven chat verbs go through the typed methods, so a bad argument fails at the bridge and `session_start` and `session_end` answer `SessionStarted` and `SessionEnded`. A verb off the allowlist (`session_redact`, `session_items`) is `bad_request` with no connection. |
+| `POST /bridge/verbs/<verb>` | the verb's JSON arguments | the verb's JSON answer (`POST /v1/verbs/<verb>`). `<verb>` is `[a-z][a-z_]*`; anything else is `bad_request`. `project_add` and the seven chat verbs go through the typed methods, so a bad argument fails at the bridge and `session_start` and `session_end` answer `SessionStarted` and `SessionEnded`. The device verbs, the settings verbs and `run_list` (`r1.s4.w3`) go through `transport.verb`, which refuses a verb off the allowlist before it connects; a refused one answers `refusal` in the error envelope. A verb off the allowlist (`session_redact`, `session_items`) is `bad_request` with no connection. |
 | `GET /bridge/stream[?session=<S-n>&after=<n>]` | none | **Not an envelope.** `200` with `Content-Type: text/event-stream` and `Cache-Control: no-store`: each `StreamEvent` is one `data: <JSON>` line and a blank line, in order. The response ends after a `closed` event. Any other method is 405. |
 | `POST /bridge/forget` | `{}` | `null`. Removes the device file. |
 
@@ -183,10 +243,16 @@ else. The UI sees only the events below. The stream is read-only.
 
 - **`after`** is the last `seq` the UI holds. An omitted `after` is 0, on every path. A session ID that
   is not `S-<n>` (n at least 1) ends the stream as `bad_request` before any connection.
-- **Decoding.** Each text message is one JSON object. A `type` the client does not know is skipped
+- **Decoding.** Each text message is one JSON object. A `type` of `requests`, `request` or `claim` is a
+  request frame and reaches the UI as a `request_frame` event (below). A `type` the client does not know is skipped
   (a later server may add frames: ADR-0004). A known `type` that does not decode into `ChatFrame` ends
   the stream as `server` ("the server sent a frame this client cannot read"), so an item is never
-  skipped silently.
+  skipped silently. **A known request `type` that does not decode is dropped, and the stream goes on**
+  (`r1.s4.w3`): the requests state is a cache that the next `requests` snapshot (sent after every `hello`)
+  and the page's read repair, while ending the stream would also cut the chat it carries. `pf-client`
+  writes one stderr line per connection, `pf-client: dropped a request frame this client cannot read (<n>
+  so far on this stream)`, with no frame text (a request carries seat-written text). A request frame
+  never moves the client's last `seq`.
 - **No gap, no double.** The client keeps the last `seq` it holds and drops an `item` of the followed
   session with a `seq` it holds, except a redaction's re-send (`redacted_at` set), which always
   passes. A reconnect sends `after=<that seq>`, not the `<n>` of a 4002 reason, and the server's fresh
@@ -199,6 +265,7 @@ stream with no event.
 
 ```json
 {"event":"frame","frame":{"type":"caught","session_id":"S-1","last_seq":6}}
+{"event":"request_frame","frame":{"type":"claim","claim":null}}
 {"event":"reconnecting","after":6,"retry_in_ms":4000,"reason":"the server is stopping"}
 {"event":"closed","error":{"kind":"unauthorized","message":"this device was revoked; pair it again"}}
 ```
@@ -252,7 +319,7 @@ the UI follows one session per stream.
 
 ## The Tauri commands
 
-`apps/desktop/src-tauri` registers fifteen commands. Each is one method of the interface, in snake case
+`apps/desktop/src-tauri` registers sixteen commands. Each is one method of the interface, in snake case
 (the stream is two: `open_stream` and `close_stream`), and each calls `pf-client`'s
 `Transport<KeychainStore>`. `apps/ui/src/transport/tauri.ts` calls them
 with `invoke` from `@tauri-apps/api/core`, which turns a JavaScript argument name in camel case into
@@ -274,7 +341,17 @@ the Rust one in snake case.
 | `session_end` | `{args}`: a `SessionEndArgs` | `SessionEnded`. |
 | `open_stream` | `{options, onEvent}`: a `StreamOptions` and a Tauri `Channel` | the stream's ID (a number). Each `StreamEvent` goes to the channel, in order. |
 | `close_stream` | `{id}`: the ID `open_stream` returned | `true` when that stream was open. |
+| `verb` | `{name, args}`: a verb name and its JSON arguments | the verb's JSON answer. Every verb added since `r1.s4` (the device verbs, the settings verbs, `run_list`, and a later spine's) goes through this one command (`r1.s4.w3`). |
 | `forget` | none | nothing. Deletes the Keychain item and the pairing file, and ends this app's open streams. |
+
+**One `verb` command, not one per method (`r1.s4.w3`, W5).** From `r1.s4` the interface grows by a verb a
+spine, and a command for each would mean an edit of `apps/desktop` for each, in a crate that draco-desk
+never builds. `verb` calls `pf-client`'s `Transport::verb`, which checks the name against
+`pf_api::ALLOWLIST` **before it connects**: a webview can reach no verb a device may not call, and
+`session_redact` and `session_items` are refused with no connection. The UI's `tauri.ts` calls
+`command("verb", {name, args})` for the ten methods above, and a later item's methods go the same way.
+`pf-client` re-exports `serde_json::Value` (`pf_client::request::Value`), so the desktop's manifest and
+lock do not change. The `refusal` word of a rejection reaches `TransportError.refusal`.
 
 **A channel, not Tauri's event system.** Tauri's `listen` needs a capability that grants
 `core:event`, and the app declares no capability file (ADR-0013). A `Channel` is the IPC that Tauri
@@ -343,3 +420,16 @@ Tauri's IPC only, so the webview opens no network connection.
 - `scripts/demo/ui-chat.sh` (d19, `r1.s3.w5`): the Orchestrator chat of two projects in headless Chromium,
   through `pf-client-bridge`, against the real controller, the real Claude Code adapter and
   `pf-claude-replay`. Its journey is `apps/ui/e2e/chat.spec.ts`.
+- `crates/pf-client/tests/needs_you.rs` (`r1.s4.w3`; `cargo test -p pf-client --test needs_you`): the
+  request frames as `request_frame` events, a dropped request frame, the ten typed methods, the refusal
+  word, a code kept out of an error, `ack`'s 90 seconds and a changed key on `confirm_code`.
+  `crates/pulse-factory/tests/{client_requests,run_list}.rs` (`r1.s4.w3`): the client against a real
+  controller (a stop request answered, a merge approval merged, the settings round trip) and `run_list`.
+- `apps/ui/src/test/{needs-you,confirm,requests-state,settings-rows}.test.ts*` (Vitest, the fake
+  transport, `r1.s4.w3`): the Needs you page and what it calls, the confirm dialog's two clicks and its
+  refusals, the requests state's rules, and the Settings rows. `transport-contract.test.ts` and
+  `tauri-transport.test.ts` gain the ten methods, the `request_frame` event and the refusal word.
+- `scripts/demo/ui-needs-you.sh` (d23, `r1.s4.w3`): the Needs you and Settings journey in headless
+  Chromium through `pf-client-bridge`, against the real controller on the paper env. Its journey is
+  `apps/ui/e2e/needs-you.spec.ts`; `PF_D23_START=cli` starts the run with the CLI, and the default
+  `card` starts it from the start card of `r1.s4.w2`.

@@ -1,6 +1,8 @@
 // The shell (2a to 2c): a title bar with the page title, the history arrows and the tab strip, a slim
-// rail with Projects and Agents (top) and Settings (bottom), and on the Projects, Agents and chat
-// pages a left sidebar. The rail shows no other section: later spines add them (Q5, A9).
+// rail with Projects, Agents and Needs you (top) and Settings (bottom), and on the Projects, Agents and
+// chat pages a left sidebar. Needs you and Settings are focused pages with no sidebar. The rail shows no
+// other section: later spines add them (Q5, A9). The Needs you badge counts the open requests that the
+// one stream's frames brought, with no call (r1.s4.w3).
 //
 // An open chat is a tab. No tab exists until a chat opens. The sidebar lists each project's live
 // sessions; a click opens (or focuses) that chat's tab. The sidebar's open state is the only thing
@@ -8,20 +10,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { Banner } from "../components/Banner";
 import { StreamLine } from "../components/StreamLine";
-import { ArrowLeftIcon, ArrowRightIcon, BotIcon, FolderIcon, GearIcon } from "../components/Icons";
+import { ArrowLeftIcon, ArrowRightIcon, BellIcon, BotIcon, FolderIcon, GearIcon } from "../components/Icons";
 import { ServerMenu } from "../components/ServerMenu";
 import { branchText } from "../components/chat-format";
 import { agentName, stateLabel, useChat } from "../state/chat";
 import { useConnection } from "../state/connection";
+import { useRequests } from "../state/requests";
 import { Agents } from "./Agents";
 import { Chat } from "./Chat";
+import { NeedsYou } from "./NeedsYou";
 import { Projects } from "./Projects";
 import { Settings } from "./Settings";
 
-type Page = { kind: "projects" } | { kind: "agents" } | { kind: "settings" } | { kind: "chat"; session: string };
+type Page =
+  | { kind: "projects" }
+  | { kind: "agents" }
+  | { kind: "needs_you" }
+  | { kind: "settings" }
+  | { kind: "chat"; session: string };
 
 const PROJECTS: Page = { kind: "projects" };
 const AGENTS: Page = { kind: "agents" };
+const NEEDS_YOU: Page = { kind: "needs_you" };
 const SETTINGS: Page = { kind: "settings" };
 
 function sameChat(page: Page | undefined, session: string): boolean {
@@ -101,6 +111,7 @@ function Sidebar(props: { onOpen: (session: string) => void; current: string | n
 
 export function Shell() {
   const chat = useChat();
+  const requests = useRequests();
   const { follow } = chat;
   const [history, setHistory] = useState<{ entries: Page[]; index: number }>({
     entries: [PROJECTS],
@@ -156,7 +167,7 @@ export function Shell() {
 
   const toggleSidebar = useCallback(() => setSidebarOpen((o) => !o), []);
 
-  const hasSidebar = page.kind !== "settings";
+  const hasSidebar = page.kind !== "settings" && page.kind !== "needs_you";
 
   // ⌘B toggles the sidebar on a page that has one.
   useEffect(() => {
@@ -180,7 +191,15 @@ export function Shell() {
   };
 
   const title =
-    page.kind === "projects" ? "Projects" : page.kind === "agents" ? "Agents" : page.kind === "settings" ? "Settings" : "Chat";
+    page.kind === "projects"
+      ? "Projects"
+      : page.kind === "agents"
+        ? "Agents"
+        : page.kind === "needs_you"
+          ? "Needs you"
+          : page.kind === "settings"
+            ? "Settings"
+            : "Chat";
 
   return (
     <div className="app">
@@ -253,6 +272,21 @@ export function Shell() {
           >
             <BotIcon />
           </button>
+          <button
+            className={`rail-btn${page.kind === "needs_you" ? " rail-btn-on" : ""}`}
+            type="button"
+            aria-label="Needs you"
+            aria-current={page.kind === "needs_you" ? "page" : undefined}
+            title="Needs you"
+            onClick={() => go(NEEDS_YOU)}
+          >
+            <BellIcon />
+            {requests.open.length > 0 ? (
+              <span className="rail-badge" title={`${requests.open.length} open`}>
+                {requests.open.length}
+              </span>
+            ) : null}
+          </button>
           <span className="rail-spacer" />
           <button
             className={`rail-btn${page.kind === "settings" ? " rail-btn-on" : ""}`}
@@ -271,6 +305,8 @@ export function Shell() {
             <Projects />
           ) : page.kind === "agents" ? (
             <Agents onOpen={openChat} />
+          ) : page.kind === "needs_you" ? (
+            <NeedsYou />
           ) : page.kind === "settings" ? (
             <Settings />
           ) : (
