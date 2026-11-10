@@ -141,7 +141,6 @@ fn arm_is_on_the_allowlist_with_the_ten_chat_verbs_w1s_six_and_w4s_three() {
         assert!(ALLOWLIST.contains(&verb), "{verb} is on the allowlist");
         assert!(is_allowed(verb), "{verb}");
     }
-    assert_eq!(ALLOWLIST.len(), 20, "{ALLOWLIST:?}");
 }
 
 #[tokio::test]

@@ -514,6 +514,62 @@ fn start_api_passes() {
     }
 }
 
+#[test]
+fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
+    // The script's header names the defaults `pulse-factory`, `pf-claude-replay` and `pf-stream-reader`
+    // on PATH. `start-env.sh` is a child process that needs `PF_BIN` and `PF_REPLAY_BIN` in its
+    // environment, so the defaults must reach it exported (r1.s4.w2 review, B1).
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    let bin_dir = std::env::temp_dir().join(format!("pf-start-api-path-{}", std::process::id()));
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    for (name, from) in [
+        ("pulse-factory", env!("CARGO_BIN_EXE_pulse-factory")),
+        ("pf-claude-replay", replay.to_str().unwrap()),
+        ("pf-stream-reader", env!("CARGO_BIN_EXE_pf-stream-reader")),
+    ] {
+        let link = bin_dir.join(name);
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(from, &link).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let start = Instant::now();
+    let out = Command::new("bash")
+        .arg(script("start-api.sh"))
+        .env("PATH", path)
+        .env_remove("PF_BIN")
+        .env_remove("PF_REPLAY_BIN")
+        .env_remove("PF_STREAM_BIN")
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .output()
+        .expect("bash starts");
+    let took = start.elapsed();
+    let _ = std::fs::remove_dir_all(&bin_dir);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < START_API_LIMIT, "{took:?}");
+    assert!(stdout(&out).contains("start-api: ok"), "{}", stdout(&out));
+}
+
 /// The limit of `chat-policy.sh`: one controller, two launches of the replay, and two waits for the
 /// adapter's 30 s control timeout (the replay does not answer the context-usage request).
 const CHAT_POLICY_LIMIT: Duration = Duration::from_secs(240);

@@ -51,6 +51,9 @@ abs() {
 PF_BIN="$(abs "$PF_BIN")"
 PF_REPLAY_BIN="$(abs "$PF_REPLAY_BIN")"
 PF_STREAM_BIN="$(abs "$PF_STREAM_BIN")"
+# `start-env.sh` is a child process and reads the first two from its environment. When the caller set
+# none of them, the defaults above are plain shell variables, so export them here.
+export PF_BIN PF_REPLAY_BIN PF_STREAM_BIN
 
 tmp="$(mktemp -d)"
 pid=""
