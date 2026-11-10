@@ -2,6 +2,9 @@
 
 - **Status:** Accepted, 2026-11-05, at the Release 0 close
 - **Date:** 2026-10-25
+- **Amended:** 2026-11-09, at `r1.s4.w1`: a paired device may hold the claim, and the confirm code is
+  its claim-holder confirm; chats are refused on the claim verbs and `arm`, with a marker variable for
+  a detached child.
 
 ## Context
 - Seats are cheap model sessions that run unattended.
@@ -224,3 +227,31 @@ ADR-0012 adds a second kind of caller beside the operator's OS user and the seat
 - **Still a known limit:** a stolen device token acts as the operator on the allowlist until the
   operator revokes the device. The idle expiry (30 days), the rate limit and the per-request audit
   line come with `r1.s2.w5`.
+
+## Amendment, 2026-11-09 (`r1.s4.w1`): a device holds the claim through a confirm code, and a chat is refused like a seat
+
+- **The claim's holder may be a paired device.** Its label is `device D-n (<name>)`. No token exists
+  for a device's claim: the store keeps the SHA-256 of 32 random bytes that nobody holds, so no CLI
+  token can match it. A CLI holder label that starts with `device ` is refused, so a label cannot
+  pose as a device.
+- **The claim-holder confirm on a device is the confirm code.** A code is one-use, lasts 120 seconds,
+  and binds the device, one request, its revision, one verb with its parameters, the claim generation
+  current at issue and, for an ack, the PR's head SHA (`requests.md`, "Confirm codes"). A device
+  acts only with a code, for `answer`, `clear` and `ack` alike.
+- **The claim moves at the device's final click, not when it asks for a code.** `confirm_code` moves
+  no claim. The spend fences the holder its code saw and acts, in one admission. A claim that moved
+  since the issue refuses the spend (`claim_moved`). The first device to act wins. A fenced CLI
+  holder is refused with `the claim moved to device D-n`.
+- **Chats are refused like seats.** `claim`, `answer`, `clear`, `ack`, `arm`, `device pair` and
+  `device revoke` refuse a caller that is, or descends from, a live chat process. `halt` stays open
+  to every caller.
+- **The `PULSE_FACTORY_CHAT` marker.** The controller sets `PULSE_FACTORY_CHAT=<session ID>` last in
+  every chat's environment, so a child that a chat detaches (a double fork, `setsid -f`, `nohup`) is
+  refused too: the caller check reads the caller's environment for it.
+- **Known limit, and its owner.** The marker is a speed bump of the same class as the seat's
+  `PF_SEAT_TOKEN` and the chat's deny list, and no boundary. `env -u PULSE_FACTORY_CHAT` with a double
+  fork, `env -i`, `systemd-run --user`, a rewrite of the process's own `/proc/<pid>/environ` and the
+  operator's `gh` login (a chat keeps `HOME`) pass it. The Release 2 authority-rules spine owns the
+  residue.
+- **Still a known limit:** a code proves the device, the freshness and the head, not that a person
+  pressed the button.

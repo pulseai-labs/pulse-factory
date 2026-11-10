@@ -111,25 +111,62 @@ pub(crate) fn decide_claim(
             "claim generation {generation} is not the next one; the next is {next}"
         ));
     }
+    let (generation, effects) = claim_effects(&view.claims, holder, token_hash, now)?;
+    let mut d = Decision::admitted();
+    d.effects = effects;
+    d.ledger = Some(format!("claim {generation} by {}", holder.trim()));
+    Ok(d)
+}
+
+/// The effects of a claim: the fence of the current claim, when there is one, and the new claim
+/// row at the next generation. It holds the checks of a claim (the holder label is one line, the
+/// token hash is 64 hex digits) and writes nothing. The CLI's claim and a paired device's claim
+/// both take it (`r1.s4.w1`), so the store holds one shape of claim whoever makes it.
+pub fn claim_effects(
+    claims: &[ClaimRow],
+    holder: &str,
+    token_hash: &str,
+    now: &str,
+) -> Result<(u64, Vec<Effect>), Rejected> {
+    let generation = claims.iter().map(|c| c.generation).max().unwrap_or(0) + 1;
     let holder = check_reason(holder).map_err(|e| format!("the claim's holder: {e}"))?;
     if token_hash.len() != 64 || !token_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("the claim's token hash is not 64 hex digits".to_string());
     }
-    let mut d = Decision::admitted();
-    if let Some(old) = view.current_claim() {
+    let mut effects = Vec::new();
+    let current = claims
+        .iter()
+        .filter(|c| c.fenced_at.is_none())
+        .max_by_key(|c| c.generation);
+    if let Some(old) = current {
         let mut old = old.clone();
         old.fenced_at = Some(now.to_string());
-        d.effects.push(Effect::PutClaim(old));
+        effects.push(Effect::PutClaim(old));
     }
-    d.effects.push(Effect::PutClaim(ClaimRow {
+    effects.push(Effect::PutClaim(ClaimRow {
         generation,
         token_hash: token_hash.to_ascii_lowercase(),
         holder: holder.to_string(),
         claimed_at: now.to_string(),
         fenced_at: None,
     }));
-    d.ledger = Some(format!("claim {generation} by {holder}"));
-    Ok(d)
+    Ok((generation, effects))
+}
+
+/// The label a paired device holds a claim under: `device D-1 (MacBook)`. A name of more than one
+/// line is cut to its first line.
+pub fn device_holder(device_id: &str, name: &str) -> String {
+    let name = name.lines().next().unwrap_or_default().trim();
+    format!("device {device_id} ({name})")
+}
+
+/// The ID of the device a holder label names, or `None` for any other label. A CLI claim cannot
+/// take a label that starts with `device ` (`r1.s4.w1`, R9), so a label that reads as a device is
+/// one the controller made.
+pub fn holder_device(holder: &str) -> Option<&str> {
+    let rest = holder.strip_prefix("device ")?;
+    let (id, tail) = rest.split_once(" (")?;
+    (tail.ends_with(')') && !id.is_empty() && !id.contains(char::is_whitespace)).then_some(id)
 }
 
 // ------------------------------------------------------------------ parks and requests

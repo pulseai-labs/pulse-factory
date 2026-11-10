@@ -1,6 +1,7 @@
 # ADR-0014 — Chat sessions on a chat port, with a headless Claude Code adapter
 
-- **Status:** Proposed, 2026-11-08, at `r1.s3.w1`. It becomes Accepted at that item's close.
+- **Status:** Accepted, 2026-11-09. It was owed at the `r1.s3.w1` close (proposed 2026-11-08, at
+  `r1.s3.w1`). The line was written at `r1.s4.w1`.
 - **Date:** 2026-11-08
 - **Touch surface:** `crates/pf-engine/src/port/chat*`, `crates/pf-adapter-claude/**`.
 - **Revisit when:** a second chat runtime is planned, or the pinned CLI's stream-json control

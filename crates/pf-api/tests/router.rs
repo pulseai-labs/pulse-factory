@@ -425,12 +425,7 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
     let off = [
         "runs",
         "status",
-        "requests",
-        "show",
-        "answer",
         "claim",
-        "clear",
-        "ack",
         "arm",
         "halt",
         "hook",
@@ -460,23 +455,23 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{verb}");
     }
     assert_eq!(calls(&fake), 0);
-    // The allowlist is exactly these ten verbs: the project verbs and the chat verbs. `halt`, every
-    // ack, `session_redact` (the CLI only) and `session_items` (the stream reads the items) are off.
-    assert_eq!(
-        ALLOWLIST,
-        [
-            "project_add",
-            "project_list",
-            "project_remove",
-            "session_list",
-            "session_start",
-            "session_send",
-            "session_answer",
-            "session_interrupt",
-            "session_set",
-            "session_end",
-        ]
-    );
+    // The allowlist holds the ten verbs of the chat spine (the project verbs and the chat verbs), and
+    // `r1.s4.w1` adds the device verbs (`tests/device_verbs.rs`). `halt`, `claim`, `arm`,
+    // `session_redact` (the CLI only) and `session_items` (the stream reads the items) are off.
+    for verb in [
+        "project_add",
+        "project_list",
+        "project_remove",
+        "session_list",
+        "session_start",
+        "session_send",
+        "session_answer",
+        "session_interrupt",
+        "session_set",
+        "session_end",
+    ] {
+        assert!(ALLOWLIST.contains(&verb), "{verb}");
+    }
 }
 
 #[tokio::test]

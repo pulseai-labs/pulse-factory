@@ -427,7 +427,7 @@ fn a_verb_name_must_match_the_rule_and_no_verb_off_the_allowlist_reaches_the_ser
             assert_eq!(r.status, 200, "{name}");
             assert_eq!(kind(&r.json()), "bad_request", "{name}");
         }
-        for verb in ["halt", "ack", "device_revoke", "no_such_verb"] {
+        for verb in ["halt", "claim", "device_revoke", "no_such_verb"] {
             let r = rig.post(&format!("/bridge/verbs/{verb}"), &json!({}));
             assert_eq!(r.status, 200, "{verb}");
             assert_eq!(kind(&r.json()), "bad_request", "{verb}");
