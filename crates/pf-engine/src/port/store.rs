@@ -42,6 +42,10 @@ pub struct RunRow {
     pub state: RunState,
     /// The reason of the `halt` command, when the run is halted.
     pub halted_reason: Option<String>,
+    /// The project of the chat that proposed the run, when a device armed it from a start card.
+    /// `None` for every run armed from the CLI and for every run that existed before migration
+    /// 0008. `PutRun` never writes it: only [`Effect::SetRunProject`] does.
+    pub project_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -534,6 +538,10 @@ pub enum ChatItemKind {
     BackgroundTask,
     Notice,
     TurnResult,
+    /// A proposal to start a run, posted by the controller. It is no request: it holds no process.
+    StartCard,
+    /// The end of a start card: armed, withdrawn or failed.
+    StartResult,
 }
 
 impl ChatItemKind {
@@ -549,6 +557,8 @@ impl ChatItemKind {
             ChatItemKind::BackgroundTask => "background_task",
             ChatItemKind::Notice => "notice",
             ChatItemKind::TurnResult => "turn_result",
+            ChatItemKind::StartCard => "start_card",
+            ChatItemKind::StartResult => "start_result",
         }
     }
 
@@ -564,6 +574,8 @@ impl ChatItemKind {
             "background_task" => Some(ChatItemKind::BackgroundTask),
             "notice" => Some(ChatItemKind::Notice),
             "turn_result" => Some(ChatItemKind::TurnResult),
+            "start_card" => Some(ChatItemKind::StartCard),
+            "start_result" => Some(ChatItemKind::StartResult),
             _ => None,
         }
     }
@@ -573,6 +585,7 @@ impl ChatItemKind {
         match self {
             ChatItemKind::ApprovalAnswer => Some(ChatItemKind::ApprovalRequest),
             ChatItemKind::QuestionAnswer => Some(ChatItemKind::QuestionRequest),
+            ChatItemKind::StartResult => Some(ChatItemKind::StartCard),
             _ => None,
         }
     }
@@ -582,6 +595,7 @@ impl ChatItemKind {
         match self {
             ChatItemKind::ApprovalRequest => Some(ChatItemKind::ApprovalAnswer),
             ChatItemKind::QuestionRequest => Some(ChatItemKind::QuestionAnswer),
+            ChatItemKind::StartCard => Some(ChatItemKind::StartResult),
             _ => None,
         }
     }
@@ -885,6 +899,14 @@ pub enum Effect {
     UnsetSetting {
         scope: SettingScope,
         key: String,
+    },
+    /// Link a run to a live project (a run armed from a start card). Allowed only in an admission
+    /// under [`CONTROLLER_SCOPE`]. An unknown run, an unknown or removed project, a run that
+    /// names another project already, or a scope other than the controller's makes the commit
+    /// [`Committed::Rejected`]. The same pair a second time is a no-op that admits.
+    SetRunProject {
+        run_id: String,
+        project_id: String,
     },
 }
 

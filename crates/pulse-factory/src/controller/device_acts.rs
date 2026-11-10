@@ -27,7 +27,7 @@ use pf_ipc::{Request, Response};
 use serde_json::{Value, json};
 
 use super::commands::{Plan, check_command_id, field, now};
-use super::confirm::{CODE_BYTES, CODE_PREFIX, RequestVerb, Subject};
+use super::confirm::{CODE_BYTES, CODE_PREFIX, CodeRefusal, RequestVerb, Subject};
 use super::seat::{hex, random_bytes};
 use super::{Controller, lock};
 
@@ -55,7 +55,7 @@ fn split_reason(reason: &str) -> (Option<&'static str>, String) {
     (None, reason.to_string())
 }
 
-fn refused_reason(reason: &str) -> Response {
+pub(super) fn refused_reason(reason: &str) -> Response {
     match split_reason(reason) {
         (Some(word), text) => refusal(word, text),
         (None, text) => Response::err(text),
@@ -63,9 +63,9 @@ fn refused_reason(reason: &str) -> Response {
 }
 
 /// A refusal of the plan: its word, when it has one, and its text.
-type Refused = (Option<&'static str>, String);
+pub(super) type Refused = (Option<&'static str>, String);
 
-fn plan_refused(why: Refused) -> Plan {
+pub(super) fn plan_refused(why: Refused) -> Plan {
     Plan::Refuse(match why {
         (Some(word), text) => format!("{word}: {text}"),
         (None, text) => text,
@@ -170,6 +170,8 @@ impl Controller {
             "answer" => self.acted(device, Act::Answer, &request.args),
             "clear" => self.acted(device, Act::Clear, &request.args),
             "ack" => self.acted(device, Act::Ack, &request.args),
+            // A device arms the run of a start card with a confirm code (`r1.s4.w2`).
+            "arm" => self.device_arm(device, &request.args),
             _ => {
                 use pf_ipc::Handler;
                 self.handle(request)
@@ -185,7 +187,7 @@ impl Controller {
     }
 
     /// The device, read again: a revoke that committed after the router's token check refuses here.
-    fn live_device(&self, id: &str) -> Result<DeviceRow, Response> {
+    pub(super) fn live_device(&self, id: &str) -> Result<DeviceRow, Response> {
         match self.store.devices() {
             Ok(rows) => match rows.into_iter().find(|d| d.id == id) {
                 Some(d) if d.revoked_at.is_none() => Ok(d),
@@ -220,13 +222,21 @@ impl Controller {
         if let Err(why) = check_command_id(&args.command_id) {
             return Response::err(why);
         }
-        let ConfirmSubjectArg::Request {
-            request: request_id,
-            revision,
-            verb,
-            text_sha256,
-            to,
-        } = args.subject;
+        let (request_id, revision, verb, text_sha256, to) = match args.subject {
+            ConfirmSubjectArg::Request {
+                request,
+                revision,
+                verb,
+                text_sha256,
+                to,
+            } => (request, revision, verb, text_sha256, to),
+            ConfirmSubjectArg::Arm {
+                proposal,
+                plan_sha256,
+            } => {
+                return self.device_confirm_arm(device, &args.command_id, &proposal, &plan_sha256);
+            }
+        };
         // Fail closed: with no random bytes there is no code, and no admission.
         let bytes = match random_bytes(&self.cfg.random_device, CODE_BYTES) {
             Ok(b) => b,
@@ -446,6 +456,7 @@ impl Controller {
             device: dev.id.clone(),
             generation,
             holder,
+            start: None,
             subject: ConfirmSubjectShown {
                 request: row.id.clone(),
                 revision,
@@ -583,7 +594,13 @@ impl Controller {
             revision,
             head_sha,
             ..
-        } = &issued.subject;
+        } = &issued.subject
+        else {
+            return Err((
+                Some("code_subject"),
+                CodeRefusal::Subject.text().to_string(),
+            ));
+        };
         // The claim.
         let claims = self.store.claims().map_err(|e| plain(e.to_string()))?;
         let current = claims

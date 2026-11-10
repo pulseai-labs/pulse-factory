@@ -194,6 +194,11 @@ impl Store for FakeStore {
                 | Effect::RedactChatItem { .. }
                 | Effect::SetSetting(_)
                 | Effect::UnsetSetting { .. } => {}
+                Effect::SetRunProject { run_id, project_id } => {
+                    if let Some(run) = s.runs.get_mut(&run_id) {
+                        run.project_id = Some(project_id);
+                    }
+                }
             }
         }
         let ledger = commit.ledger.map(|entry| {

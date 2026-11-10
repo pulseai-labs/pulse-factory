@@ -1,9 +1,10 @@
 // The message stream of a chat (2a): one entry per held item in `seq` order, then the tool calls that
 // run and the delta text of the turn in progress. Every text is set as text: no Markdown, no HTML.
-// The answer items render inside their cards, not as entries of their own.
+// The answer items (and a start card's result) render inside their cards, not as entries of their own.
 import type { ChatItemRecord, QuestionRecord, ToolTextRecord } from "@pulse-factory/api-client";
 import { durationText, timeText } from "./chat-format";
 import { ApprovalCard, QuestionCard, type AnswerFn } from "./Cards";
+import { StartCard } from "./StartCard";
 import { ToolText } from "./ToolText";
 
 function Entry(props: { label: string; kind: string; children: React.ReactNode }) {
@@ -41,7 +42,10 @@ export function Messages(props: {
   const bySeq = new Map(items.map((i) => [i.seq, i]));
   const answers = new Map<number, ChatItemRecord>();
   for (const it of items) {
-    if (it.answers_seq !== null && (it.body.kind === "approval_answer" || it.body.kind === "question_answer")) {
+    if (
+      it.answers_seq !== null &&
+      (it.body.kind === "approval_answer" || it.body.kind === "question_answer" || it.body.kind === "start_result")
+    ) {
       answers.set(it.answers_seq, it);
     }
   }
@@ -109,6 +113,27 @@ export function Messages(props: {
                 <p className="entry-text">{`An answer to a request this app has not seen (${body.outcome})`}</p>
               </Entry>
             );
+          case "start_card": {
+            const answer = answers.get(it.seq);
+            return (
+              <StartCard
+                key={it.seq}
+                card={body}
+                result={answer && answer.body.kind === "start_result" ? answer.body : null}
+                readOnly={readOnly}
+              />
+            );
+          }
+          case "start_result": {
+            // Inside its card. A result whose card this app does not hold has no card to go in.
+            const card = it.answers_seq === null ? undefined : bySeq.get(it.answers_seq);
+            if (card && card.body.kind === "start_card") return null;
+            return (
+              <Entry key={it.seq} label="Answer" kind="notice">
+                <p className="entry-text">{`An answer to a start card this app has not seen (${body.result})`}</p>
+              </Entry>
+            );
+          }
           case "background_task":
             return (
               <Entry key={it.seq} label="Background task" kind="task">

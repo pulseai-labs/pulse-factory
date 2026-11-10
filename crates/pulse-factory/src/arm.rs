@@ -7,6 +7,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use pf_api::types::{
+    ArmBasePush, ArmCaps, ArmLoop, ArmMerge, ArmPlugin, ArmRole, ArmSeedCap, ArmSummary,
+    ArmWorkflow,
+};
 use pf_engine::render::RenderContext;
 use pf_workflow::commands::{run_argv, run_plan_check};
 use pf_workflow::package::Package;
@@ -23,7 +27,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const ARM_SET: [&str; 3] = ["spine", "briefs", "forge_repo"];
 
 /// Everything the controller needs to start a run. The client computes it all.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArmPlan {
     pub spine: String,
     pub workflow_dir: PathBuf,
@@ -37,6 +41,34 @@ pub struct ArmPlan {
     pub default_branch: String,
     /// The build target of the repo, or empty.
     pub target_dir: String,
+    /// The project a run belongs to, when a device armed it from a start card (`r1.s4.w2`). The
+    /// CLI never sets it, so its plan on the socket does not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The `content` hash the package pin of the run's copy must equal, when the plan was built
+    /// from a proposal's snapshot. The CLI never sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_package: Option<String>,
+}
+
+/// The inputs of a plan, as plain values: what `arm` takes and what `propose` takes (but for
+/// `replace`). Every path is absolute. The CLI client and the controller both build the plan from
+/// these with [`build_plan`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArmInputs {
+    pub spine: String,
+    /// The workflow as the caller named it: an installed name, or for the CLI's `arm` a path.
+    pub workflow: String,
+    pub ledger: PathBuf,
+    #[serde(default)]
+    pub params: Vec<String>,
+    #[serde(default)]
+    pub plugin_roots: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<PathBuf>,
+    /// The run a CLI `arm` replaces. A proposal never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<String>,
 }
 
 /// An earlier run, as the controller reports it.
@@ -49,6 +81,9 @@ pub struct RunInfo {
     pub state: String,
     #[serde(default)]
     pub running_sessions: u64,
+    /// The project a device armed the run for, or none (`r1.s4.w2`).
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// An arm refusal. The cause is redacted first: it can hold a URL, such as the origin of a repo.
@@ -59,7 +94,8 @@ fn refuse(cause: impl std::fmt::Display) -> String {
     )
 }
 
-fn absolute(p: &Path) -> PathBuf {
+/// A path made absolute from the working directory.
+pub fn absolute(p: &Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
@@ -102,143 +138,96 @@ fn parse_params(raw: &[String]) -> Result<BTreeMap<String, String>, String> {
     Ok(out)
 }
 
-/// What the plan will do, as the operator reads it.
-#[derive(Clone, Debug, Serialize)]
-pub struct Summary {
-    pub schema_version: u32,
-    pub spine: String,
-    pub items: Option<u64>,
-    pub workflow: Value,
-    pub roles: Vec<Value>,
-    pub caps: Value,
-    pub plugins: Vec<Value>,
-    pub most_launches: Option<u64>,
-    pub merges: Vec<Value>,
-    /// One `{track, stage, dir, branch}` for each stage with `base_push`.
-    pub base_pushes: Vec<Value>,
-    pub replaces: Option<String>,
-    pub paper: Option<String>,
-    pub forge_repo: String,
-    pub default_branch: String,
-}
-
-impl Summary {
-    /// The text form, one fact per line.
-    pub fn text(&self) -> String {
-        let mut t = String::new();
-        let line = |t: &mut String, s: String| {
-            t.push_str(&s);
-            t.push('\n');
-        };
-        line(&mut t, format!("spine: {}", self.spine));
+/// The text form of a summary, one fact per line.
+pub fn summary_text(summary: &ArmSummary) -> String {
+    let mut t = String::new();
+    let line = |t: &mut String, s: String| {
+        t.push_str(&s);
+        t.push('\n');
+    };
+    line(&mut t, format!("spine: {}", summary.spine));
+    line(
+        &mut t,
+        match summary.items {
+            Some(n) => format!("items: {n}"),
+            None => "items: unknown (the workflow has no plan_check)".to_string(),
+        },
+    );
+    line(
+        &mut t,
+        format!(
+            "workflow: {} (file version {})",
+            summary.workflow.name, summary.workflow.version
+        ),
+    );
+    for r in &summary.roles {
         line(
             &mut t,
-            match self.items {
-                Some(n) => format!("items: {n}"),
-                None => "items: unknown (the workflow has no plan_check)".to_string(),
-            },
+            format!("role {}: runtime {}, model {}", r.name, r.runtime, r.model),
         );
-        line(
-            &mut t,
-            format!(
-                "workflow: {} (file version {})",
-                self.workflow["name"].as_str().unwrap_or(""),
-                self.workflow["version"]
-            ),
-        );
-        for r in &self.roles {
-            line(
-                &mut t,
-                format!(
-                    "role {}: runtime {}, model {}",
-                    r["name"].as_str().unwrap_or(""),
-                    r["runtime"].as_str().unwrap_or(""),
-                    r["model"].as_str().unwrap_or("")
-                ),
-            );
-        }
-        line(
-            &mut t,
-            format!(
-                "caps: model_sessions {}, cold_builds {}",
-                self.caps["model_sessions"], self.caps["cold_builds"]
-            ),
-        );
-        for s in self.caps["seeds"].as_array().into_iter().flatten() {
-            line(
-                &mut t,
-                format!(
-                    "caps: seed {} runs at most {} times",
-                    s["id"].as_str().unwrap_or(""),
-                    s["max"]
-                ),
-            );
-        }
-        for l in self.caps["loops"].as_array().into_iter().flatten() {
-            line(
-                &mut t,
-                format!(
-                    "caps: loop {} -> {} at most {} times per {} unit",
-                    l["from"].as_str().unwrap_or(""),
-                    l["to"].as_str().unwrap_or(""),
-                    l["max"],
-                    l["track"].as_str().unwrap_or("")
-                ),
-            );
-        }
-        line(
-            &mut t,
-            format!("caps: {}", self.caps["relaunch"].as_str().unwrap_or("")),
-        );
-        for p in &self.plugins {
-            line(
-                &mut t,
-                format!(
-                    "plugin {} {}",
-                    p["name"].as_str().unwrap_or(""),
-                    p["version"].as_str().unwrap_or("")
-                ),
-            );
-        }
-        line(
-            &mut t,
-            match self.most_launches {
-                Some(n) => format!("most launches: {n}"),
-                None => "most launches: unknown (the workflow has no plan_check)".to_string(),
-            },
-        );
-        for m in &self.merges {
-            line(&mut t, m["sentence"].as_str().unwrap_or("").to_string());
-        }
-        for b in &self.base_pushes {
-            line(
-                &mut t,
-                format!(
-                    "base push: before {}.{}, push {} to origin when origin lacks it",
-                    b["track"].as_str().unwrap_or(""),
-                    b["stage"].as_str().unwrap_or(""),
-                    b["branch"].as_str().unwrap_or("")
-                ),
-            );
-        }
-        line(
-            &mut t,
-            format!(
-                "forge: {} (default branch {})",
-                self.forge_repo, self.default_branch
-            ),
-        );
-        if let Some(r) = &self.replaces {
-            line(&mut t, format!("replaces: {r}"));
-        }
-        if let Some(p) = &self.paper {
-            line(
-                &mut t,
-                format!("paper env: {p} (no model, no spend, no network)"),
-            );
-        }
-        t
     }
+    line(
+        &mut t,
+        format!(
+            "caps: model_sessions {}, cold_builds {}",
+            summary.caps.model_sessions, summary.caps.cold_builds
+        ),
+    );
+    for s in &summary.caps.seeds {
+        line(
+            &mut t,
+            format!("caps: seed {} runs at most {} times", s.id, s.max),
+        );
+    }
+    for l in &summary.caps.loops {
+        line(
+            &mut t,
+            format!(
+                "caps: loop {} -> {} at most {} times per {} unit",
+                l.from, l.to, l.max, l.track
+            ),
+        );
+    }
+    line(&mut t, format!("caps: {}", summary.caps.relaunch));
+    for p in &summary.plugins {
+        line(&mut t, format!("plugin {} {}", p.name, p.version));
+    }
+    line(
+        &mut t,
+        match summary.most_launches {
+            Some(n) => format!("most launches: {n}"),
+            None => "most launches: unknown (the workflow has no plan_check)".to_string(),
+        },
+    );
+    for m in &summary.merges {
+        line(&mut t, m.sentence.clone());
+    }
+    for b in &summary.base_pushes {
+        line(
+            &mut t,
+            format!(
+                "base push: before {}.{}, push {} to origin when origin lacks it",
+                b.track, b.stage, b.branch
+            ),
+        );
+    }
+    line(
+        &mut t,
+        format!(
+            "forge: {} (default branch {})",
+            summary.forge_repo, summary.default_branch
+        ),
+    );
+    if let Some(r) = &summary.replaces {
+        line(&mut t, format!("replaces: {r}"));
+    }
+    if let Some(p) = &summary.paper {
+        line(
+            &mut t,
+            format!("paper env: {p} (no model, no spend, no network)"),
+        );
+    }
+    t
 }
 
 /// The most launches the plan shows: `2 × (Σ seeds max × launches(track) + Σ unit-source tracks
@@ -285,37 +274,42 @@ pub fn most_launches(pkg: &Package, items: Option<u64>) -> Option<u64> {
 }
 
 /// One entry per `outcomes` entry of every stage: the loop a unit can take, and how often.
-fn loops(pkg: &Package) -> Vec<Value> {
+fn loops(pkg: &Package) -> Vec<ArmLoop> {
     pkg.file
         .tracks
         .iter()
         .flat_map(|t| {
             t.stages.iter().flat_map(move |s| {
-                s.outcomes.iter().map(
-                    move |o| json!({ "track": t.name, "from": s.name, "to": o.to, "max": o.max }),
-                )
+                s.outcomes.iter().map(move |o| ArmLoop {
+                    track: t.name.clone(),
+                    from: s.name.clone(),
+                    to: o.to.clone(),
+                    max: o.max,
+                })
             })
         })
         .collect()
 }
 
-fn build_summary(
-    plan: &ArmPlan,
-    pkg: &Package,
-    items: Option<u64>,
-    plugins: &[(String, String)],
-    ctx: &RenderContext,
-) -> Summary {
+/// The summary of a prepared plan, as the operator reads it. A merge base and a base push render
+/// with the run's values and no unit; a value that needs a unit shows as written.
+pub fn build_summary(prepared: &Prepared) -> ArmSummary {
+    let plan = &prepared.plan;
+    let pkg = &prepared.package;
+    let ctx = RenderContext {
+        run_id: "",
+        run_dir: "",
+        params: &plan.params,
+        unit: None,
+    };
     let merges = pkg
         .file
         .tracks
         .iter()
         .filter_map(|t| t.merge.as_ref().map(|m| (t, m)))
         .map(|(t, m)| {
-            // The base renders with the run's values and no unit. A base that needs a unit shows
-            // as written.
-            let base =
-                pf_engine::render::render(&m.base, ctx).map_or_else(|_| m.base.clone(), |r| r.text);
+            let base = pf_engine::render::render(&m.base, &ctx)
+                .map_or_else(|_| m.base.clone(), |r| r.text);
             // A `claim_ack` track merges only when the claim holder acks the PR; the others
             // merge on green checks.
             let sentence = match m.rule {
@@ -327,17 +321,15 @@ fn build_summary(
                     format!("item PRs merge into {base} on green checks with no ack")
                 }
             };
-            json!({
-                "track": t.name,
-                "base": base,
-                "sentence": sentence,
-            })
+            ArmMerge {
+                track: t.name.clone(),
+                base,
+                sentence,
+            }
         })
         .collect();
-    // Like a merge base, a base push renders with the run's values and no unit. A value that
-    // needs a unit shows as written.
     let shown = |template: &str| {
-        pf_engine::render::render(template, ctx).map_or_else(|_| template.to_string(), |r| r.text)
+        pf_engine::render::render(template, &ctx).map_or_else(|_| template.to_string(), |r| r.text)
     };
     let base_pushes = pkg
         .file
@@ -348,41 +340,55 @@ fn build_summary(
                 .iter()
                 .filter_map(move |s| s.base_push.as_ref().map(|b| (t, s, b)))
         })
-        .map(|(t, s, b)| {
-            json!({
-                "track": t.name,
-                "stage": s.name,
-                "dir": shown(&b.dir),
-                "branch": shown(&b.branch),
-            })
+        .map(|(t, s, b)| ArmBasePush {
+            track: t.name.clone(),
+            stage: s.name.clone(),
+            dir: shown(&b.dir),
+            branch: shown(&b.branch),
         })
         .collect();
-    Summary {
+    ArmSummary {
         schema_version: SCHEMA_VERSION,
         spine: plan.spine.clone(),
-        items,
-        workflow: json!({ "name": pkg.file.name, "version": pkg.file.version }),
+        items: prepared.items,
+        workflow: ArmWorkflow {
+            name: pkg.file.name.clone(),
+            version: pkg.file.version,
+        },
         roles: pkg
             .file
             .roles
             .iter()
-            .map(|r| json!({ "name": r.name, "runtime": r.runtime, "model": r.model }))
+            .map(|r| ArmRole {
+                name: r.name.clone(),
+                runtime: r.runtime.clone(),
+                model: r.model.clone(),
+            })
             .collect(),
-        caps: json!({
-            "model_sessions": pkg.file.settings.model_sessions,
-            "cold_builds": pkg.file.settings.cold_builds,
-            "seeds": pkg.file.seeds.iter().map(|s| json!({
-                "id": s.id,
-                "max": s.repeat.as_ref().map_or(1, |r| u64::from(r.max)),
-            })).collect::<Vec<_>>(),
-            "relaunch": "one relaunch per stage",
-            "loops": loops(pkg),
-        }),
-        plugins: plugins
+        caps: ArmCaps {
+            model_sessions: pkg.file.settings.model_sessions,
+            cold_builds: pkg.file.settings.cold_builds,
+            seeds: pkg
+                .file
+                .seeds
+                .iter()
+                .map(|s| ArmSeedCap {
+                    id: s.id.clone(),
+                    max: s.repeat.as_ref().map_or(1, |r| r.max),
+                })
+                .collect(),
+            relaunch: "one relaunch per stage".to_string(),
+            loops: loops(pkg),
+        },
+        plugins: prepared
+            .plugins
             .iter()
-            .map(|(n, v)| json!({ "name": n, "version": v }))
+            .map(|(n, v)| ArmPlugin {
+                name: n.clone(),
+                version: v.clone(),
+            })
             .collect(),
-        most_launches: most_launches(pkg, items),
+        most_launches: most_launches(pkg, prepared.items),
         merges,
         base_pushes,
         replaces: plan.replace.clone(),
@@ -400,15 +406,14 @@ pub struct Prepared {
     pub plugins: Vec<(String, String)>,
 }
 
-fn load_package(args: &ArmArgs) -> Result<(PathBuf, Package), String> {
-    let dir = if args.workflow.contains('/') {
-        absolute(Path::new(&args.workflow))
+/// The directory a workflow name or path stands for: a name is a package under
+/// `<share dir>/workflows/`, a value with a `/` is a path.
+pub fn workflow_dir(share: &Path, workflow: &str) -> PathBuf {
+    if workflow.contains('/') {
+        absolute(Path::new(workflow))
     } else {
-        share_dir().join("workflows").join(&args.workflow)
-    };
-    let pkg =
-        Package::load(&dir).map_err(|e| refuse(format!("the workflow does not load: {e}")))?;
-    Ok((dir, pkg))
+        share.join("workflows").join(workflow)
+    }
 }
 
 fn check_params(pkg: &Package, given: &BTreeMap<String, String>) -> Result<(), String> {
@@ -511,7 +516,7 @@ fn target_dir(params: &BTreeMap<String, String>) -> String {
     .unwrap_or_default()
 }
 
-/// Run every check that needs no controller.
+/// Run every check that needs no controller, for the CLI's `arm`.
 pub fn prepare(args: &ArmArgs) -> Result<Prepared, String> {
     if std::env::var_os("PF_SEAT_TOKEN").is_some() {
         return Err(refuse(
@@ -521,18 +526,37 @@ pub fn prepare(args: &ArmArgs) -> Result<Prepared, String> {
     if args.dry_run && args.yes {
         return Err(refuse("--dry-run and --yes cannot go together"));
     }
-    if !valid_spine(&args.spine) {
+    let inputs = ArmInputs {
+        spine: args.spine.clone(),
+        workflow: args.workflow.clone(),
+        ledger: absolute(&args.ledger),
+        params: args.params.clone(),
+        plugin_roots: args.plugin_roots.iter().map(|p| absolute(p)).collect(),
+        paper: args.paper.as_deref().map(absolute),
+        replace: args.replace.clone(),
+    };
+    let dir = workflow_dir(&share_dir(), &args.workflow);
+    build_plan(&inputs, &dir)
+}
+
+/// Build the plan from plain inputs and the directory of the workflow package: the spine name, the
+/// package load, the parameter checks, `plan_check`, the plugins, the forge facts and the build
+/// target. The CLI's `arm` and the controller's `propose` both call it. A refusal reads
+/// `pulse-factory: arm refused: <cause>`.
+pub fn build_plan(inputs: &ArmInputs, workflow_dir: &Path) -> Result<Prepared, String> {
+    if !valid_spine(&inputs.spine) {
         return Err(refuse(format!(
             "spine name {:?} must match [A-Za-z0-9._-]+",
-            args.spine
+            inputs.spine
         )));
     }
-    let (workflow_dir, package) = load_package(args)?;
-    let given = parse_params(&args.params)?;
+    let package = Package::load(workflow_dir)
+        .map_err(|e| refuse(format!("the workflow does not load: {e}")))?;
+    let given = parse_params(&inputs.params)?;
     check_params(&package, &given)?;
 
-    let ledger = absolute(&args.ledger);
-    let plugin_roots: Vec<PathBuf> = args.plugin_roots.iter().map(|p| absolute(p)).collect();
+    let ledger = inputs.ledger.clone();
+    let plugin_roots = inputs.plugin_roots.clone();
     for root in &plugin_roots {
         if !root.is_dir() {
             return Err(refuse(format!(
@@ -541,19 +565,18 @@ pub fn prepare(args: &ArmArgs) -> Result<Prepared, String> {
             )));
         }
     }
-    let paper = match &args.paper {
+    let paper = match &inputs.paper {
         Some(p) => {
-            let p = absolute(p);
             if !p.is_dir() {
                 return Err(refuse(format!("--paper {} does not exist", p.display())));
             }
-            Some(p)
+            Some(p.clone())
         }
         None => None,
     };
 
     let mut params = given;
-    params.insert("spine".to_string(), args.spine.clone());
+    params.insert("spine".to_string(), inputs.spine.clone());
 
     // plan_check has a run ID and a directory of no value yet: it renders with the parameters.
     let items = match &package.file.plan_check {
@@ -581,16 +604,18 @@ pub fn prepare(args: &ArmArgs) -> Result<Prepared, String> {
     let target_dir = target_dir(&params);
 
     let plan = ArmPlan {
-        spine: args.spine.clone(),
-        workflow_dir,
+        spine: inputs.spine.clone(),
+        workflow_dir: workflow_dir.to_path_buf(),
         ledger,
         params,
         plugin_roots,
         paper,
-        replace: args.replace.clone(),
+        replace: inputs.replace.clone(),
         forge_repo: facts.forge_repo,
         default_branch: facts.default_branch,
         target_dir,
+        project_id: None,
+        expect_package: None,
     };
     Ok(Prepared {
         plan,
@@ -689,19 +714,7 @@ fn run_inner(args: &ArmArgs) -> Result<i32, String> {
         }
     }
 
-    let run_dir_unknown = RenderContext {
-        run_id: "",
-        run_dir: "",
-        params: &prepared.plan.params,
-        unit: None,
-    };
-    let summary = build_summary(
-        &prepared.plan,
-        &prepared.package,
-        prepared.items,
-        &prepared.plugins,
-        &run_dir_unknown,
-    );
+    let summary = build_summary(&prepared);
     if !args.yes {
         if args.json {
             println!(
@@ -709,7 +722,7 @@ fn run_inner(args: &ArmArgs) -> Result<i32, String> {
                 serde_json::to_string_pretty(&summary).unwrap_or_default()
             );
         } else {
-            print!("{}", summary.text());
+            print!("{}", summary_text(&summary));
             if let Some(n) = &note {
                 println!("{n}");
             }
@@ -723,7 +736,7 @@ fn run_inner(args: &ArmArgs) -> Result<i32, String> {
 
     // The operator approves a summary they saw: print it, then start.
     if !args.json {
-        print!("{}", summary.text());
+        print!("{}", summary_text(&summary));
     }
     let resp = pf_ipc::call(
         &state,

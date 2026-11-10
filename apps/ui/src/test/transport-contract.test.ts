@@ -135,12 +135,14 @@ const RIGS: Array<[string, () => Rig]> = [
 ];
 
 /** Where a verb goes in each implementation. */
-function target(rig: Rig, verb: string): string {
-  return rig.name === "bridge" ? `/bridge/verbs/${verb}` : verb;
+function target(rig: Rig, verb: string, generic = false): string {
+  if (rig.name === "bridge") return `/bridge/verbs/${verb}`;
+  return generic ? "verb" : verb;
 }
 
-function payload(rig: Rig, args: unknown): unknown {
-  return rig.name === "bridge" ? args : { args };
+function payload(rig: Rig, verb: string, args: unknown, generic = false): unknown {
+  if (rig.name === "bridge") return args;
+  return generic ? { name: verb, args } : { args };
 }
 
 const SESSION = { id: "S-1" };
@@ -150,6 +152,8 @@ const CASES: Array<{
   args: unknown;
   run: (t: Transport) => Promise<unknown>;
   result: unknown;
+  /** The Tauri side reaches it through the generic `verb` command (O2), not a command of its own name. */
+  generic?: boolean;
 }> = [
   { method: "sessionList", verb: "session_list", args: { project_id: "P-1" }, run: (t) => t.sessionList({ project_id: "P-1" }), result: { sessions: [SESSION] } },
   { method: "sessionList (no arguments)", verb: "session_list", args: {}, run: (t) => t.sessionList(), result: { sessions: [] } },
@@ -195,6 +199,22 @@ const CASES: Array<{
     run: (t) => t.sessionEnd({ session_id: "S-1", command_id: "c-6" }),
     result: { replayed: false, session_id: "S-1", note: null },
   },
+  {
+    method: "confirmCode",
+    verb: "confirm_code",
+    args: { subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-7" },
+    run: (t) => t.confirmCode({ subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-7" }),
+    result: { schema_version: 1, replayed: false, code: "pfc1-x", expires_at: "2026-11-09T10:10:00Z", device: "D-1" },
+    generic: true,
+  },
+  {
+    method: "arm",
+    verb: "arm",
+    args: { proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-8" },
+    run: (t) => t.arm({ proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-8" }),
+    result: { schema_version: 1, replayed: false, device: "D-1", proposal: "sp-1", run_id: "run-1", project_id: "P-1" },
+    generic: true,
+  },
 ];
 
 /** The scripted native events: one of each. */
@@ -220,7 +240,10 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
       const rig = makeRig();
       rig.answerNext(c.result);
       await expect(c.run(rig.transport)).resolves.toEqual(c.result);
-      expect(rig.lastCall()).toEqual({ target: target(rig, c.verb), payload: payload(rig, c.args) });
+      expect(rig.lastCall()).toEqual({
+        target: target(rig, c.verb, c.generic),
+        payload: payload(rig, c.verb, c.args, c.generic),
+      });
     });
 
     it.each(TRANSPORT_ERROR_KINDS)("a native failure of kind %s is a TransportError of that kind", async (kind: TransportErrorKind) => {

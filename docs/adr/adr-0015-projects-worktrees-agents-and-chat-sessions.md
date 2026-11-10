@@ -280,3 +280,16 @@ The chat-lifetime side only. The cap's value comes from ADR-0016's settings laye
   `needs_you` of a cap stop does not survive a restart; its notice item does. The count does not
   survive a restart either, and needs not: the restart ends the process. The cap does not bound the
   turns the operator starts, or their cost.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): a run belongs to the project of the chat that proposed it
+
+- **`runs.project_id`.** A run that a device armed from a chat's start card records that chat's
+  project in `runs.project_id` (migration 0008). Existing runs are not moved, and a run armed from the
+  CLI keeps the column empty. The engine never reads a project.
+- **The start card and its result are chat items** (`start_card`, `start_result`). A card is not a
+  pending request, holds no chat process and sets no `needs_you`.
+- **Proposals live in memory only** (ADR-0007). A session holds at most one open proposal, and a new
+  one supersedes the last. A proposal is withdrawn on supersede, on session end, on `halt` and at a
+  controller restart. The package it names is copied into the controller's state dir at the propose,
+  and the arm runs that copy.
+- **The Orchestrator's persona names `propose`** and the skill's path, and never `arm`.

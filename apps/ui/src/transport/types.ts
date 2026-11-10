@@ -3,7 +3,11 @@
 // token lives on the native side (the test bridge, or the Tauri shell's Rust side).
 import type {
   ApiStatus,
+  ArmActed,
   ChatFrame,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceArmArgs,
   DeviceRecord,
   ProjectAddArgs,
   ProjectChanged,
@@ -146,6 +150,10 @@ export interface Transport {
   sessionInterrupt(args: SessionInterruptArgs): Promise<SessionChanged>;
   sessionSet(args: SessionSetArgs): Promise<SessionChanged>;
   sessionEnd(args: SessionEndArgs): Promise<SessionEnded>;
+  /** Asks for a one-use confirm code for a subject (a start card's arm, here). The code is shown once. */
+  confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued>;
+  /** Arms the run of a start card with a code from `confirmCode`. */
+  arm(args: DeviceArmArgs): Promise<ArmActed>;
   /**
    * Opens the chat stream. It never rejects for a stream failure: every failure arrives as one
    * `closed` event. The native side pushes and reconnects (with the last `seq` it holds), so the

@@ -118,7 +118,15 @@ fn version_six(path: &Path, run_state: &str) {
 /// Every row of one table, as text.
 fn rows(conn: &Connection, table: &str) -> Vec<String> {
     let mut stmt = conn
-        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+        .prepare(&format!(
+            "SELECT {} FROM {table} ORDER BY rowid",
+            // Migration 0008 adds `project_id` to `runs`: a version-6 dump reads the old columns.
+            if table == "runs" {
+                "id, workflow, ledger_file, state, halted_reason, created_at, updated_at"
+            } else {
+                "*"
+            }
+        ))
         .unwrap();
     let n = stmt.column_count();
     stmt.query_map([], |r| {
@@ -169,15 +177,16 @@ fn a_version_six_file_migrates_to_seven_with_every_row_unchanged() {
     };
     {
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 7);
+        // 0008 follows 0007, and the plain open applies both.
+        assert_eq!(store.schema_version().unwrap(), 8);
     }
     let conn = Connection::open(&path).unwrap();
     for (table, was) in &before {
         let now = rows(&conn, table);
         if table == "schema_version" {
-            // The old rows stay, and one row for 0007 follows.
+            // The old rows stay, and one row each for 0007 and 0008 follows.
             assert_eq!(&now[..was.len()], &was[..], "{table}");
-            assert_eq!(now.len(), was.len() + 1);
+            assert_eq!(now.len(), was.len() + 2);
         } else {
             assert_eq!(&now, was, "{table} changed");
         }
@@ -199,7 +208,7 @@ fn a_fresh_file_opens_at_seven_with_an_empty_settings_table() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "settings"), 0);
@@ -215,7 +224,7 @@ fn a_version_six_file_with_an_active_run_refuses_and_stays_at_six() {
         err,
         OpenError::RunActive {
             current: 6,
-            pending: 7
+            pending: 8
         }
     );
     let conn = Connection::open(&path).unwrap();

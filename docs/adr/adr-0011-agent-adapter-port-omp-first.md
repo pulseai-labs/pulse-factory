@@ -161,3 +161,13 @@ structured protocol, not a terminal. It does not replace the nine duties here an
 The version rule above stands for this port. The chat port has its own: each runtime version is
 qualified by a real run recorded in an ADR, and the Claude Code chat adapter pins one CLI version and
 its SHA-256 (ADR-0014).
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): the `--skills` known limit is closed for the Orchestrator
+
+The known limit of 2026-10-31 was that a launched session gets no skill of the method's plugin, so it
+cannot arm a run. A seat still acts through its done files and gets no CLI skill. The Orchestrator
+chat gets Pulse Factory's CLI skill through its persona, which names the skill's path (since `r1.s3`)
+and now the verb `pulse-factory propose`: the model works out the workflow inputs with the skill and
+the controller builds, checks and posts the start card. The adapter's launch does not change. No
+`--plugin-dir` and no skill install in the operator's `~/.claude` is made. The chat records one real
+case for this (case 20 of the Claude Code chat adapter, ADR-0014).

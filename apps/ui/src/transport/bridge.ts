@@ -3,6 +3,10 @@
 // call. This file sees no token and opens no TLS connection.
 import type {
   ApiStatus,
+  ArmActed,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceArmArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -138,6 +142,8 @@ export function createBridgeTransport(fetchImpl?: FetchLike, eventSourceFactory?
     sessionInterrupt: (args: SessionInterruptArgs) => verb<SessionChanged>("session_interrupt", args),
     sessionSet: (args: SessionSetArgs) => verb<SessionChanged>("session_set", args),
     sessionEnd: (args: SessionEndArgs) => verb<SessionEnded>("session_end", args),
+    confirmCode: (args: ConfirmCodeArgs) => verb<ConfirmIssued>("confirm_code", args),
+    arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
     openStream,
     forget: async () => {
       await request<null>("POST", "/bridge/forget", {});

@@ -188,6 +188,7 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
         verbs,
         vec![
             "arm",
+            "propose",
             "status",
             "halt",
             "requests",
@@ -206,22 +207,8 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "controller"
         ]
     );
-    // `settings` (`r1.s4.w4`) is a verb of the CLI contract, and the skill is `r1.s4.w2`'s to change
-    // (SPINE.md G4; AC-18 of `r1.s4.w4` keeps `skill/` as it is). Until w2 names it there, the
-    // skill check skips it. A verb the skill does name is checked whatever this list says. Remove
-    // the entry when w2 has named `settings` in the skill.
-    const AWAITING_THE_SKILL: [&str; 1] = ["settings"];
     let skill = read("skill/SKILL.md");
-    let checked: Vec<String> = verbs
-        .iter()
-        .filter(|v| {
-            !AWAITING_THE_SKILL.contains(&v.as_str())
-                || skill.contains(&format!("`{v}`"))
-                || skill.contains(&format!("pulse-factory {v}"))
-        })
-        .cloned()
-        .collect();
-    assert_eq!(skill_problems(&skill, &checked), Vec::<String>::new());
+    assert_eq!(skill_problems(&skill, &verbs), Vec::<String>::new());
 }
 
 // ---- each check fires on a bad sample

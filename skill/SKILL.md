@@ -1,6 +1,6 @@
 ---
 name: pulse-factory
-description: Arm a Pulse Factory run for a planned spine, read its status, and halt it. Use when the operator asks to run a spine unattended, to start a run on Pulse Factory, to see what a run costs, or to stop one.
+description: Arm a Pulse Factory run for a planned spine, propose a start from the Orchestrator chat, read its status, and halt it. Use when the operator asks to run a spine unattended, to start a run on Pulse Factory, to see what a run costs, or to stop one.
 ---
 
 # Pulse Factory
@@ -9,11 +9,12 @@ Pulse Factory runs the seats of a planned spine with no model session watching. 
 A controller (a systemd user service) then drives the seats until each item PR has merged into the
 spine branch. A spine-close seat then opens the spine PR, and the PR merges into the base branch
 only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers the verbs: `arm`,
-`status`, `halt`, `hook` and `controller`, the verbs of requests and the claim: `requests`,
-`show`, `claim`, `answer`, `clear` and `ack`, `project`, which lists the operator's projects,
-`session`, which chats with a project's Orchestrator, `chat-runtime`, which installs the runtime that
-chat needs, and `device` and `api`, which pair and revoke the devices that reach the controller over
-the network.
+`propose`, which posts a start card into the Orchestrator chat, `status`, `halt`, `hook` and
+`controller`, the verbs of requests and the claim: `requests`, `show`, `claim`, `answer`, `clear`
+and `ack`, `project`, which lists the operator's projects, `session`, which chats with a project's
+Orchestrator, `settings`, which reads and sets the chat policies, `chat-runtime`, which installs the
+runtime that chat needs, and `device` and `api`, which pair and revoke the devices that reach the
+controller over the network.
 
 ## Arm a run
 
@@ -64,6 +65,42 @@ the network.
 `arm` refuses with a cause and records nothing when the plan is wrong. A refusal is not an error to
 work around: tell the operator the cause.
 
+This is the operator's CLI path. A chat process, and anything that descends from one, is refused on
+`arm`. A chat proposes the start instead (next section).
+
+## Propose a start from the Orchestrator chat
+
+The Orchestrator chat starts nothing by itself. It posts a **start card** into its own chat, and the
+operator confirms the card on a paired device. Only then does the run arm.
+
+1. Work out the `--param` values as in step 1 of "Arm a run".
+2. Run `propose` with the spine and the same inputs as `arm`. It has no `--replace` and no `--yes`.
+   `--workflow` takes the name of an installed workflow, not a path, and `propose` refuses a path:
+
+   ```bash
+   pulse-factory propose "$spine" --workflow ossify-spine --ledger "$spine_dir/autopilot-ledger.md" \
+     --plugin-root "$plugin_root" \
+     --param spine_branch="$spine_branch" --param spine_dir="$spine_dir" \
+     --param repo="$PWD" --param method_root="$method_root" \
+     --param worktree_root="$PWD/.worktrees" --param state_file="$method_root/.state.json" \
+     --param oss="$(command -v oss)" --param base_branch="$base_branch"
+   ```
+
+3. The controller builds the plan in its own process, with the dry run that `arm` makes, and posts
+   the card into this chat. The card shows the spine, the project, the item count, each role with
+   its model, the caps, the most launches the run can make, and the two merge lines. `propose`
+   starts nothing and records no run. Tell the operator that the card is waiting for them.
+4. The operator presses **Confirm start** on a paired device and then **Arm the run**. The device
+   gets a one-use confirm code for exactly this card and this plan. The run belongs to the chat's
+   project. The card then shows the run, or the reason it was withdrawn or failed.
+5. A second `propose` in the same chat withdraws the first card. A card is also withdrawn when the
+   session ends, on `halt` and when the controller restarts. Propose again after any of these.
+
+`propose` refuses with a cause when the caller is not a chat process of a live session, when a plan
+check fails, when an earlier run is still active, or when the chat has proposed too often in the last
+minute (`chat.propose_per_min`). A refusal is not an error to work around: tell the operator the
+cause. Replacing a run is the operator's: `arm --replace` from the operator's CLI.
+
 ## Read a run
 
 `pulse-factory status [<run>]` prints the run, its state, any halt or degraded reason, the notes of
@@ -113,8 +150,8 @@ holder acks.
    request and ack the new revision. If the checks are not green, or the PR has a conflict, or the
    base or head branch changed, it refuses with the cause and the request stays open. Otherwise it
    merges the PR with that SHA pinned, then fetches the base branch.
-4. After the merge, run the second pass in the claim session: `/ossify:close <spine>` on Claude
-   Code, `skill://close <spine>` on OMP. It finds the merged PR and records the close, runs the
+4. After the merge, run the second pass in your own session or in the project's Orchestrator chat:
+   `/ossify:close <spine>` on Claude Code, `skill://close <spine>` on OMP. It finds the merged PR and records the close, runs the
    demo and runs the harvest. A seat does not run it. The run ends when the method records the
    spine as closed, and `status` shows each session's cost and the run's total.
 
@@ -191,11 +228,32 @@ Every state-changing verb is one line of `<state dir>/controller.ledger`, and ea
 turn and stop is one line of `<state dir>/chat.ledger`. A `send` line holds the byte count and never
 the text.
 
+## Read and set chat policies
+
+`pulse-factory settings get [<key>] [--project P-n] [--agent <id>]` prints the value of a chat
+policy for a context, with the scope it comes from. A chat reads its own policies this way.
+
+```bash
+pulse-factory settings get                                  # one line for each key
+pulse-factory settings get chat.propose_per_min --project P-1
+pulse-factory settings set chat.self_turn_cap 5 --project P-1   # the operator's CLI or a device
+pulse-factory settings unset chat.self_turn_cap --project P-1
+```
+
+1. The keys are `chat.self_turn_cap`, `chat.deny_commands` and `chat.propose_per_min`. The last one
+   bounds the proposals one chat session may build in a minute. It is a whole number from 0 to 60,
+   the built-in value is 4, and `0` turns the bound off.
+2. `settings set` and `settings unset` are the operator's: the CLI, and a paired device. A chat
+   process, and anything that descends from one, is refused on both. Tell the operator what you
+   want changed, and let them change it.
+3. A retry of `set` or `unset` sends the same `--command-id`, as for `project`.
+
 ## Pair a device
 
 The controller can serve a network API over TLS (ADR-0012). It is off until the operator sets
-`PF_API_LISTEN` (`docs/install.md`). A paired device calls the project verbs and the chat verbs and
-nothing else: no `answer`, `claim`, `clear`, `ack`, `arm` or `halt`. It reads a chat on the stream
+`PF_API_LISTEN` (`docs/install.md`). A paired device calls the project verbs, the chat verbs, `requests`,
+`show`, `confirm_code`, `answer`, `clear`, `ack`, the settings verbs and `arm` with a confirm code
+from a start card. `claim` and `halt` stay off it. It reads a chat on the stream
 (`docs/contracts/api.md`).
 
 ```bash
@@ -235,4 +293,5 @@ process and answers with the sessions it stopped (see "Chat with a project's Orc
   it yourself.
 
 A seat cannot arm or halt a run, it cannot add or remove a project, it cannot start or drive a chat,
-and it cannot pair or revoke a device: those verbs refuse when `PF_SEAT_TOKEN` is set.
+and it cannot pair or revoke a device: those verbs refuse when `PF_SEAT_TOKEN` is set. A chat cannot
+arm a run or change a setting: it proposes the start and the operator confirms it.

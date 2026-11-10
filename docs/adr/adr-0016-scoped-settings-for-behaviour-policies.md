@@ -130,3 +130,15 @@ project-scoped agent is an `agents` row, and its settings use the scopes above.
 - That no caller can evade the caller check in a way this record does not list. The check reads
   `/proc`, and any way to change what it reads is outside its guarantee.
 - That one minute is the right size for the refusal window. It is a `Config` value.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): the caller key reads the chat marker, and a third key
+
+- **The caller key reads `PULSE_FACTORY_CHAT`.** A refused settings write by a child that a chat
+  detached is audited as `chat:<S-n>`, not `unknown`. A marker value that is not `S-<digits>` (at most
+  20 characters) keys as `chat:invalid`, so a caller cannot write text of its own choice into
+  `controller.ledger`. `PF_SEAT_TOKEN` still wins and keys as `seat-token`.
+- **A third key, `chat.propose_per_min`.** A whole number from 0 to 60, built in at 4, with `0` meaning
+  off. It bounds the proposals one chat session may make in a minute, resolved for the session's
+  project and agent. It merges by `override` and applies at the next turn. A call over the bound is
+  refused with `propose_rate` before any build, and the over-bound refusals coalesce like a refused
+  settings write.

@@ -10,8 +10,9 @@ use tokio::sync::mpsc;
 use crate::types::{ApiStatus, DeviceRecord, PairResult, ServerRef};
 
 /// The verbs a device may call: exactly these. A later spine that adds a verb amends ADR-0012.
-/// `halt`, `claim`, `arm`, `device_pair` and `device_revoke` stay off this list: a device takes the
-/// claim only by spending a confirm code on `answer`, `clear` or `ack` (`r1.s4.w1`). So do
+/// `halt`, `claim`, `device_pair` and `device_revoke` stay off this list: a device takes the
+/// claim only by spending a confirm code on `answer`, `clear` or `ack` (`r1.s4.w1`). `arm` is on it
+/// (`r1.s4.w2`): a device arms only with a confirm code from a start card, and it takes no claim. So do
 /// `session_redact` (the CLI only: a redaction is the operator's, C12) and `session_items` (a device
 /// reads the items on the stream, from `after=0`).
 pub const ALLOWLIST: &[&str] = &[
@@ -31,6 +32,7 @@ pub const ALLOWLIST: &[&str] = &[
     "answer",
     "clear",
     "ack",
+    "arm",
     // `r1.s4.w4`: the scoped settings (ADR-0016). A device acts as the operator.
     "settings_get",
     "settings_set",

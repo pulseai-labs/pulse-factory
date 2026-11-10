@@ -379,7 +379,8 @@ itself; the adapter sends no notice).
   `<cli_version> (Claude Code)` for `--version`, checks the fixture's header and `body_sha256` (exit 2
   on a mismatch), plays the body in order, keeps the recorded gaps with `--pace recorded`, and starts
   no other program.
-- **Fixtures** live in `crates/pf-adapter-claude/fixtures/`. The recorder writes them and nobody else:
+- **Fixtures** live in `crates/pf-adapter-claude/fixtures/`. The recorder writes them and nobody else
+  (one exception, below):
   line 1 is a header (`cli_version`, `recorded`, `recorder`, `case`, `body_sha256`), and each later line
   is `{"to":"cli"|"host","t_ms":…,"msg":…}`. They are scrubbed before they are hashed: home and
   temporary paths, account blocks, e-mail addresses, tokens and artifact URLs are replaced or removed,
@@ -389,6 +390,40 @@ itself; the adapter sends no notice).
   `~/.local/state/pulse-factory/claude-probe-processes`. A plain `cargo test` and CI never start the
   real CLI. Case 19 (`case_19_deny_rules`) qualifies the deny rules of "The deny list" and records
   `fixtures/deny_rules.jsonl`: an operator turn and two `Task` turns, then the deny-rule prompts.
+- **Case 20** (`case_20_start_proposal`, `r1.s4.w2`) is the 30th and last process of the budget. It
+  asks whether the Orchestrator, with the persona of ADR-0015 and the skill under a temporary share
+  directory, starts a spine by running `pulse-factory propose` and never `pulse-factory arm`. A stub
+  `pulse-factory` first on `PATH` records its argv and starts nothing. One function in
+  `tests/common/propose_rule.rs` judges a call, for the stub's records and for the recorded `Bash`
+  command alike: a call is a proposal of `s1` when its program is `pulse-factory`, its first argument
+  is `propose` and `s1` is a positional argument (a flag and its value are not). Case 20 ran once on
+  2026-11-10 (`PF_REAL_CLAUDE=1`, AC-15; the counter reads 30). Its `FINDING` lines:
+  - `start_proposal.tools_used: Read,Bash,Bash,Bash`: the model read the skill, then used the shell
+    three times.
+  - `start_proposal.read_the_skill: true`: it read `<TMP>/share/skill/SKILL.md` first, from the path
+    the persona names.
+  - The first `Bash` call looked for the workflow and the CLI (`ls`, `find`, `command -v
+    pulse-factory`). The second listed the stub and read `pulse-factory propose --help`. Neither ran
+    `arm`.
+  - The third `Bash` call was `pulse-factory propose s1 --workflow paper-spine-d20 --ledger
+    <TMP>/ledger.md --param paper_env=<TMP>/paper --param base_branch=main`. It exited 0 and the
+    stub answered with the card line. The persona names `propose`, and the model read the skill
+    before it ran any call. The three calls above are the whole list: none is an `arm`.
+  - The model spelled the paper env as `--param paper_env=…`, not as `--paper …`. The matching rule
+    accepts both, because it needs only `propose` and the positional `s1`.
+  - The turn ended with 4 tool results, 10 content blocks and one `result` message. No operator hook
+    blocked the stub.
+
+  **The recording was not written.** The recorder's scrub guard (`dirty`) refused the stream with `a
+  body line still holds a home path after scrubbing; nothing was written`, and the one process was
+  already spent. The panic came before the case's own assertions, so the stub's `calls` file was not
+  judged by the rule; the `tool_use` findings above are the evidence. The cause: `skill/SKILL.md` holds the elided text `/home/…` (two lines, present
+  since before this item), the model read the whole file, and the scrubber replaces the real home
+  directory only, not that text. Until the operator rules on a second process, `fixtures/start_proposal.jsonl`
+  is still **synthetic**: it is hand-authored in the recorder's format, its header says `"recorder":
+  "synthetic"`, and it decodes to one `Bash` call of `pulse-factory propose s1 …` and no `arm`. The
+  scripts `start-env.sh`, `start-api.sh` and `ui-start.sh` replay it. It breaks the rule that fixtures
+  are recorded, and the report (section 8) names it as an open gap.
 
 ## Before you ship a chat adapter
 

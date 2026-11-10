@@ -417,3 +417,106 @@ fn the_deny_rules_recording_gives_every_bash_call_of_the_four_commands_an_error_
     }
     assert!(ran >= 3, "the recording holds {ran} of the four Bash calls");
 }
+
+/// The start recording (`r1.s4.w2`, case 20; hand-authored until the operator's run replaces it):
+/// one turn that runs `pulse-factory propose s1 …` through `Bash` and never `pulse-factory arm`. The
+/// rule that judges a call is the one case 20 applies to the stub's argv records.
+#[test]
+fn the_start_proposal_recording_holds_a_bash_proposal_of_s1_and_no_arm() {
+    let f = load_fixture("start_proposal");
+    assert_eq!(f.header["pf_fixture"]["case"], "start_proposal");
+    assert_eq!(f.header["pf_fixture"]["cli_version"], "2.1.319");
+    let (events, _) = decode_recording("2.1.319", "", &f.body);
+    check_order(&events).unwrap();
+    let blocks: Vec<&Value> = f
+        .body
+        .iter()
+        .filter(|(to, _)| to == "host")
+        .flat_map(|(_, m)| m["message"]["content"].as_array().into_iter().flatten())
+        .collect();
+    let (mut proposals, mut arms) = (0, 0);
+    for b in &blocks {
+        if b["type"] == "tool_use" && b["name"] == "Bash" {
+            let (p, a) = propose_rule::judge_bash(b["input"]["command"].as_str().unwrap(), "s1");
+            proposals += p;
+            arms += a;
+        }
+    }
+    assert!(proposals >= 1, "no Bash call proposes s1: {blocks:?}");
+    assert_eq!(arms, 0, "a Bash call arms");
+    // The words of the recorded call, so a change of the recording shows here.
+    let command = blocks
+        .iter()
+        .find(|b| b["type"] == "tool_use" && b["name"] == "Bash")
+        .and_then(|b| b["input"]["command"].as_str())
+        .unwrap();
+    assert!(
+        command.contains("pulse-factory propose"),
+        "the recorded command: {command}"
+    );
+    // One operator turn and one result.
+    let n = names(&events);
+    assert_eq!(n.iter().filter(|x| **x == "TurnResult").count(), 1, "{n:?}");
+}
+
+#[test]
+fn the_matching_rule_reads_flags_values_quotes_prefixes_and_operators() {
+    use propose_rule::*;
+    let words = |s: &str| simple_commands(s).remove(0);
+    // A flag's value is not a positional, in either spelling and in any order.
+    assert!(is_proposal_of(
+        &words("pulse-factory propose s1 --workflow w --ledger /l"),
+        "s1"
+    ));
+    assert!(is_proposal_of(
+        &words("pulse-factory propose --workflow w --ledger=/l s1 --json"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("pulse-factory propose s2 --workflow s1"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("pulse-factory propose s2 --param s1"),
+        "s1"
+    ));
+    assert!(is_proposal_of(
+        &words("pulse-factory propose s2 --param=x=1 s1"),
+        "s1"
+    ));
+    // A boolean flag takes no value: `--json s1` leaves `s1` a positional.
+    assert!(is_proposal_of(
+        &words("pulse-factory propose --json s1"),
+        "s1"
+    ));
+    // The program's basename, quotes, and `env` / `VAR=value` prefixes.
+    assert!(is_proposal_of(
+        &words("env PF=1 FOO='a b' /usr/local/bin/pulse-factory propose \"s1\""),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("echo pulse-factory propose s1"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(&words("pulse-factory-x propose s1"), "s1"));
+    // `arm` is judged by the first argument only.
+    assert!(is_arm(&words("pulse-factory arm s1 --yes")));
+    assert!(!is_arm(&words("pulse-factory propose s1 --param arm=1")));
+    // Operators split a command; quoted operators do not.
+    let all = simple_commands("cd x && pulse-factory propose s1 | tee o; echo 'a; b' || true\nls");
+    assert_eq!(all.len(), 6, "{all:?}");
+    assert_eq!(all[3], ["echo", "a; b"]);
+    assert_eq!(
+        judge_bash("cd x && pulse-factory propose s1 --json | jq .", "s1"),
+        (1, 0)
+    );
+    assert_eq!(
+        judge_bash("pulse-factory propose s1; pulse-factory arm s1", "s1"),
+        (1, 1)
+    );
+    // A stub's records: NUL-terminated words, one call a line.
+    let calls = stub_calls("pulse-factory\0propose\0s1\0--json\0\npulse-factory\0arm\0s1\0\n");
+    assert_eq!(calls.len(), 2);
+    assert!(is_proposal_of(&calls[0], "s1"));
+    assert!(is_arm(&calls[1]));
+}

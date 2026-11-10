@@ -402,6 +402,10 @@ pub struct QuestionRecord {
 /// binary does not know shows as `unknown` with its own kind text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// An item is built, serialised and dropped, and a store row holds its text. Only a start card carries
+// a whole plan summary, and boxing it would change every construction site and match for a size that
+// no one keeps.
+#[allow(clippy::large_enum_variant)]
 pub enum ChatItemBody {
     OperatorMessage {
         text: String,
@@ -462,6 +466,26 @@ pub enum ChatItemBody {
         #[ts(type = "number")]
         duration_ms: u64,
         cache_ttl_seconds: Option<u32>,
+    },
+    /// A start card: the controller built a plan from a proposal, and nothing is armed until the
+    /// operator confirms it on a paired device.
+    StartCard {
+        proposal: String,
+        project_id: String,
+        project_name: String,
+        plan_sha256: String,
+        summary: ArmSummary,
+        params: BTreeMap<String, String>,
+        ledger: String,
+        plugin_roots: Vec<String>,
+    },
+    /// How a start card ended: armed, withdrawn or failed.
+    StartResult {
+        outcome: AnswerOutcome,
+        result: StartResultKind,
+        reason: Option<String>,
+        run: Option<String>,
+        device: Option<String>,
     },
     /// A redacted row: the marks only.
     Redacted {
@@ -897,6 +921,11 @@ pub enum ConfirmSubjectArg {
         #[ts(optional)]
         to: Option<String>,
     },
+    /// A start card's proposal and the hash of its plan. An arm code takes no claim.
+    Arm {
+        proposal: String,
+        plan_sha256: String,
+    },
 }
 
 /// The arguments of `confirm_code`.
@@ -949,6 +978,139 @@ pub struct ConfirmIssued {
     pub generation: Option<u64>,
     pub holder: Option<ClaimRecord>,
     pub subject: ConfirmSubjectShown,
+    /// An arm code: the typed facts of the proposal. Absent for a request code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start: Option<StartShown>,
+}
+
+/// The proposal an arm code binds, as the dialog shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct StartShown {
+    pub proposal: String,
+    pub session: String,
+    pub project_id: String,
+    pub spine: String,
+    pub plan_sha256: String,
+}
+
+/// How a start card ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum StartResultKind {
+    Armed,
+    Withdrawn,
+    Failed,
+}
+
+/// The workflow a plan runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmWorkflow {
+    pub name: String,
+    pub version: u32,
+}
+
+/// One role of the workflow, with its runtime and model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmRole {
+    pub name: String,
+    pub runtime: String,
+    pub model: String,
+}
+
+/// How often a seed runs at most.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmSeedCap {
+    pub id: String,
+    pub max: u32,
+}
+
+/// One loop a unit can take, and how often.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmLoop {
+    pub track: String,
+    pub from: String,
+    pub to: String,
+    pub max: u32,
+}
+
+/// The caps of a plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmCaps {
+    pub model_sessions: u32,
+    pub cold_builds: u32,
+    pub seeds: Vec<ArmSeedCap>,
+    pub relaunch: String,
+    pub loops: Vec<ArmLoop>,
+}
+
+/// A plugin the plan needs, as found.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmPlugin {
+    pub name: String,
+    pub version: String,
+}
+
+/// One merge line of a plan.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmMerge {
+    pub track: String,
+    pub base: String,
+    pub sentence: String,
+}
+
+/// One stage that pushes a base branch before it runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmBasePush {
+    pub track: String,
+    pub stage: String,
+    pub dir: String,
+    pub branch: String,
+}
+
+/// What a plan will do, as the operator reads it. `arm --dry-run --json` prints it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmSummary {
+    pub schema_version: u32,
+    pub spine: String,
+    #[ts(type = "number | null")]
+    pub items: Option<u64>,
+    pub workflow: ArmWorkflow,
+    pub roles: Vec<ArmRole>,
+    pub caps: ArmCaps,
+    pub plugins: Vec<ArmPlugin>,
+    #[ts(type = "number | null")]
+    pub most_launches: Option<u64>,
+    pub merges: Vec<ArmMerge>,
+    /// One entry for each stage with `base_push`.
+    pub base_pushes: Vec<ArmBasePush>,
+    pub replaces: Option<String>,
+    pub paper: Option<String>,
+    pub forge_repo: String,
+    pub default_branch: String,
+}
+
+/// The arguments of `arm` from a device: the proposal of a start card, the hash of its plan and a
+/// one-use confirm code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DeviceArmArgs {
+    pub proposal: String,
+    pub plan_sha256: String,
+    pub code: String,
+    pub command_id: String,
+}
+
+/// The answer of a device's `arm`. On a replay of the command ID `run_id` names the run the first
+/// call armed, or is null.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ArmActed {
+    pub schema_version: u32,
+    pub replayed: bool,
+    pub device: String,
+    pub proposal: String,
+    pub run_id: Option<String>,
+    pub project_id: Option<String>,
 }
 
 /// The arguments of `answer` from a device.
@@ -1100,6 +1262,19 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ConfirmCodeArgs::export_all(cfg)?;
     ConfirmSubjectShown::export_all(cfg)?;
     ConfirmIssued::export_all(cfg)?;
+    StartShown::export_all(cfg)?;
+    StartResultKind::export_all(cfg)?;
+    ArmWorkflow::export_all(cfg)?;
+    ArmRole::export_all(cfg)?;
+    ArmSeedCap::export_all(cfg)?;
+    ArmLoop::export_all(cfg)?;
+    ArmCaps::export_all(cfg)?;
+    ArmPlugin::export_all(cfg)?;
+    ArmMerge::export_all(cfg)?;
+    ArmBasePush::export_all(cfg)?;
+    ArmSummary::export_all(cfg)?;
+    DeviceArmArgs::export_all(cfg)?;
+    ArmActed::export_all(cfg)?;
     DeviceAnswerArgs::export_all(cfg)?;
     DeviceClearArgs::export_all(cfg)?;
     DeviceAckArgs::export_all(cfg)?;

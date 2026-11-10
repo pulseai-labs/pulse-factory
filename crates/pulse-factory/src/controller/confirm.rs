@@ -53,10 +53,14 @@ impl RequestVerb {
     }
 }
 
-/// What a code is for. A later subject is a new variant, and nothing else changes shape: w2's start
-/// card adds `Arm { proposal, plan_sha256 }`.
+/// What a code is for. A later subject is a new variant, and nothing else changes shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Subject {
+    /// A start card's proposal and the hash of its plan (`r1.s4.w2`). An arm code binds no claim.
+    Arm {
+        proposal: String,
+        plan_sha256: String,
+    },
     /// A request and the verb that will act on it. `head_sha` is the request body's `head_sha` at
     /// issue, for a `merge_ack` only.
     Request {
@@ -71,6 +75,10 @@ impl Subject {
     /// Read the store again: is the subject still what the code was issued for? `Err` names what moved.
     pub(super) fn fresh(&self, controller: &Controller) -> Result<(), String> {
         match self {
+            Subject::Arm {
+                proposal,
+                plan_sha256,
+            } => controller.proposal_is_open_for(proposal, plan_sha256),
             Subject::Request {
                 id,
                 revision,
@@ -374,6 +382,19 @@ fn same_target(code: &Subject, call: &Subject) -> bool {
                 ..
             },
         ) => a == b && ra == rb && va == vb,
+        (
+            Subject::Arm {
+                proposal: a,
+                plan_sha256: ha,
+            },
+            Subject::Arm {
+                proposal: b,
+                plan_sha256: hb,
+            },
+        ) => a == b && ha == hb,
+        // An arm code on a request verb, or a request code on `arm`: another subject.
+        (Subject::Arm { .. }, Subject::Request { .. })
+        | (Subject::Request { .. }, Subject::Arm { .. }) => false,
     }
 }
 
