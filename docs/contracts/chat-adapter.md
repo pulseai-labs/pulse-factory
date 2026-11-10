@@ -386,44 +386,40 @@ itself; the adapter sends no notice).
   temporary paths, account blocks, e-mail addresses, tokens and artifact URLs are replaced or removed,
   and the lists that name the operator's own setup are empty.
 - **The qualification recorder** (`tests/real_probe_chat.rs`) runs only with `PF_REAL_CLAUDE=1`, from
-  `#[ignore]`d tests, against a counted budget of 30 real processes in
-  `~/.local/state/pulse-factory/claude-probe-processes`. A plain `cargo test` and CI never start the
+  `#[ignore]`d tests, against a counted budget of 31 real processes (30, and one more for case 20 alone, by the
+  operator's ruling of 2026-11-10) in `~/.local/state/pulse-factory/claude-probe-processes`. A plain `cargo test` and CI never start the
   real CLI. Case 19 (`case_19_deny_rules`) qualifies the deny rules of "The deny list" and records
   `fixtures/deny_rules.jsonl`: an operator turn and two `Task` turns, then the deny-rule prompts.
-- **Case 20** (`case_20_start_proposal`, `r1.s4.w2`) is the 30th and last process of the budget. It
+- **Case 20** (`case_20_start_proposal`, `r1.s4.w2`) is the 31st and last process of the budget. It
   asks whether the Orchestrator, with the persona of ADR-0015 and the skill under a temporary share
   directory, starts a spine by running `pulse-factory propose` and never `pulse-factory arm`. A stub
   `pulse-factory` first on `PATH` records its argv and starts nothing. One function in
   `tests/common/propose_rule.rs` judges a call, for the stub's records and for the recorded `Bash`
   command alike: a call is a proposal of `s1` when its program is `pulse-factory`, its first argument
-  is `propose` and `s1` is a positional argument (a flag and its value are not). Case 20 ran once on
-  2026-11-10 (`PF_REAL_CLAUDE=1`, AC-15; the counter reads 30). Its `FINDING` lines:
-  - `start_proposal.tools_used: Read,Bash,Bash,Bash`: the model read the skill, then used the shell
-    three times.
+  is `propose` and `s1` is a positional argument (a flag and its value are not). Case 20 ran twice.
+  The first process (the 30th) made no recording: the scrub guard refused the skill's own text,
+  which holds the elided path `/home/…`. The operator ruled (2026-11-10) that the scrubber gets a rule
+  for that text, that the guard stays as it is, and that the limit rises to 31 for this case alone.
+  The second process (the 31st, 2026-11-10, `PF_REAL_CLAUDE=1`, AC-15; the counter reads 31) wrote
+  `fixtures/start_proposal.jsonl`, a real recording of 152 body lines. Its `FINDING` lines:
+  - `start_proposal.tools_used: Read,Bash`: the model read the skill, then ran one shell call.
   - `start_proposal.read_the_skill: true`: it read `<TMP>/share/skill/SKILL.md` first, from the path
     the persona names.
-  - The first `Bash` call looked for the workflow and the CLI (`ls`, `find`, `command -v
-    pulse-factory`). The second listed the stub and read `pulse-factory propose --help`. Neither ran
-    `arm`.
-  - The third `Bash` call was `pulse-factory propose s1 --workflow paper-spine-d20 --ledger
-    <TMP>/ledger.md --param paper_env=<TMP>/paper --param base_branch=main`. It exited 0 and the
-    stub answered with the card line. The persona names `propose`, and the model read the skill
-    before it ran any call. The three calls above are the whole list: none is an `arm`.
-  - The model spelled the paper env as `--param paper_env=…`, not as `--paper …`. The matching rule
-    accepts both, because it needs only `propose` and the positional `s1`.
-  - The turn ended with 4 tool results, 10 content blocks and one `result` message. No operator hook
-    blocked the stub.
+  - `start_proposal.tool_use: "Bash"` was `pulse-factory propose s1 --workflow paper-spine-d20 --ledger
+    <TMP>/ledger.md --param paper_env=<TMP>/paper --param base_branch=main 2>&1; echo "exit=$?"`. It
+    exited 0 and the stub answered with the card line. The model never ran `arm`.
+  - `start_proposal.stub.calls: 1`, `start_proposal.stub.proposals_of_s1: 1`,
+    `start_proposal.stub.arms: 0`: the stub's own record agrees with the recorded stream.
+  - The model spelled the paper env as `--param paper_env=…`, not as `--paper …`: `skill/SKILL.md`
+    does not name `--paper`. The matching rule accepts both, because it needs only `propose` and the
+    positional `s1`. The demos do not read the recorded command: `start-env.sh` runs `propose` with
+    its own arguments.
+  - The turn ended with 2 tool results and one `result` message. No operator hook blocked the stub.
 
-  **The recording was not written.** The recorder's scrub guard (`dirty`) refused the stream with `a
-  body line still holds a home path after scrubbing; nothing was written`, and the one process was
-  already spent. The panic came before the case's own assertions, so the stub's `calls` file was not
-  judged by the rule; the `tool_use` findings above are the evidence. The cause: `skill/SKILL.md` holds the elided text `/home/…` (two lines, present
-  since before this item), the model read the whole file, and the scrubber replaces the real home
-  directory only, not that text. Until the operator rules on a second process, `fixtures/start_proposal.jsonl`
-  is still **synthetic**: it is hand-authored in the recorder's format, its header says `"recorder":
-  "synthetic"`, and it decodes to one `Bash` call of `pulse-factory propose s1 …` and no `arm`. The
-  scripts `start-env.sh`, `start-api.sh` and `ui-start.sh` replay it. It breaks the rule that fixtures
-  are recorded, and the report (section 8) names it as an open gap.
+  The first process (the 30th) read the skill and then ran three `Bash` calls: two looked for the
+  workflow and the CLI (`ls`, `find`, `command -v pulse-factory`) and read `propose --help`, and the
+  third was the same `propose s1` call. The second process went to the proposal at once. Neither run
+  ran `arm`.
 
 ## Before you ship a chat adapter
 

@@ -205,6 +205,15 @@ fn scrub_probe_paths(t: &str) -> String {
     replace_run(&t, "/tmp/claude-", true, "<CLAUDE_TMP>")
 }
 
+/// Replace an elided home path with the placeholder a real one gets. The chat skill's own text
+/// spells an example path as `/home/…` (the ellipsis stands for the rest), and a case that reads
+/// the skill back records it. The guard (`dirty`) still refuses every other `/home/` and
+/// `/Users/` path (operator ruling, 2026-11-10, case 20).
+fn scrub_home_elisions(t: &str) -> String {
+    t.replace("/home/\u{2026}", "<HOME>")
+        .replace("/Users/\u{2026}", "<HOME>")
+}
+
 fn token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | '-')
 }
@@ -279,6 +288,7 @@ impl Scrubber {
         }
         // A rescrub knows no temp directory, and a path can also be spelled in its slug form.
         let t = scrub_probe_paths(&t);
+        let t = scrub_home_elisions(&t);
         // Token pass: split on separators, keep them.
         let sep = |c: char| {
             c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '(' | '<' | '>' | ',' | '`')
@@ -2448,7 +2458,8 @@ fn start_stub(calls: &Path) -> String {
     )
 }
 
-/// Case 20 (`r1.s4.w2`, AC-15; the 30th and last process of `LIMIT`): does the Orchestrator, with
+/// Case 20 (`r1.s4.w2`, AC-15; the 31st and last process of `LIMIT`, granted to this case only by the
+/// operator's ruling of 2026-11-10 after the 30th produced no recording): does the Orchestrator, with
 /// the persona of Approach 10 and the skill under a temporary share directory, start a spine by
 /// running `pulse-factory propose` and never `pulse-factory arm`? The launch is the chat's own:
 /// `bypassPermissions`, the pinned CLI, and the operator's `HOME`. A stub `pulse-factory` first on
@@ -2576,4 +2587,43 @@ fn rescrub_one_fixture() {
         })
         .collect();
     scrub_and_write(&name, recs, Scrubber::new(), &recorded);
+}
+
+/// Case 20's refusal (operator ruling, 2026-11-10): the chat skill's own text, read back through
+/// the `Read` tool, spells an example home path as `/home/…` (the ellipsis stands for the rest).
+/// The scrubber knew only the real `HOME`, so the line reached the guard and `dirty` refused the
+/// whole recording. The scrubber must give the elision the same `<HOME>` placeholder as any home
+/// path, and the guard must keep refusing what the scrubber misses.
+#[test]
+fn scrub_skill_text_home_elision() {
+    let scrub = Scrubber {
+        homes: vec!["/home/probe-operator".to_string()],
+        temps: Vec::new(),
+        ids: Vec::new(),
+    };
+    // The shapes of `skill/SKILL.md` lines 170 and 197, as the `Read` tool numbers them.
+    let skill_text = "170\tpulse-factory project list                                    # P-1  pulse-factory  /home/…\n\
+                      197\tpulse-factory session start --project P-1            # session S-1 started in /home/… (worktree W-1)\n\
+                      198\tpulse-factory session send S-1 \"what is open?\"";
+    let mut msg = json!({
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "content": skill_text}]},
+    });
+    scrub.value(&mut msg);
+    let line = msg.to_string();
+    assert_eq!(dirty(&line), None, "the scrubbed line still leaks: {line}");
+    assert!(
+        line.contains("pulse-factory  <HOME>\\n"),
+        "the first elision keeps its place: {line}"
+    );
+    assert!(
+        line.contains("started in <HOME> (worktree W-1)"),
+        "the second elision keeps its place: {line}"
+    );
+
+    // The guard is not loosened: a path the scrubber does not know is still refused, and so is an
+    // elision the rule does not match.
+    assert_eq!(dirty("see /home/someone-else/notes"), Some("a home path"));
+    assert_eq!(dirty("see /home/"), Some("a home path"));
+    assert_eq!(dirty("see /Users/someone-else/notes"), Some("a home path"));
 }

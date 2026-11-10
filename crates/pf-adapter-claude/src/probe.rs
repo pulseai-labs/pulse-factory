@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-/// The most real processes, in total.
-pub const LIMIT: u32 = 30;
+/// The most real processes, in total. It was 30. The operator raised it to 31 (ruling, 2026-11-10,
+/// case 20 only): case 20's 30th process produced no recording, because the scrub guard refused the
+/// skill's own text, and that one case may run once more. No other case spends the 31st.
+pub const LIMIT: u32 = 31;
 
 /// The model every probe uses.
 pub const PROBE_MODEL: &str = "haiku";

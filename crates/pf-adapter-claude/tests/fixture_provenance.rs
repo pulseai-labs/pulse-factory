@@ -56,17 +56,8 @@ fn every_header_names_the_version_the_recorder_the_case_and_the_hash_of_its_body
         );
         assert_eq!(h["cli_version"], "2.1.319", "{}", f.name);
         assert_eq!(h["cli_version"], pinned::CLI_VERSION, "{}: the pin", f.name);
-        // One recording is hand-authored, and that is an open gap: `start_proposal` stands for the
-        // real recording of case 20 (`r1.s4.w2`, AC-15). Case 20 ran once, but the scrub guard
-        // refused the stream (the skill text `/home/…`), so nothing was written, and the process
-        // budget (30 of 30) is spent. Its header says `synthetic`. A second process needs the
-        // operator's ruling; its recording replaces the file, and this allowance goes with it.
-        let recorder = if f.name == "start_proposal" {
-            "synthetic"
-        } else {
-            "real_probe_chat"
-        };
-        assert_eq!(h["recorder"], recorder, "{}", f.name);
+        // Every fixture is a recording: none is hand-written.
+        assert_eq!(h["recorder"], "real_probe_chat", "{}", f.name);
         assert_eq!(
             h["case"],
             f.name.as_str(),
