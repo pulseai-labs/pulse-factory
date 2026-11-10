@@ -148,6 +148,7 @@ pub fn spec(cwd: &Path) -> ChatOpen {
         permission_mode: "bypassPermissions".into(),
         env: BTreeMap::new(),
         options: BTreeMap::new(),
+        deny_commands: Vec::new(),
     }
 }
 

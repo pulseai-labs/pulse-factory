@@ -174,3 +174,25 @@ active run.
   `set_chat_session_state`, `set_chat_runtime_ref`, `append_chat_item`). This item adds none: the pump
   writes through them, and a `SessionMoved` is a `set_chat_runtime_ref`.
 
+
+## Amendment, 2026-11-09 (`r1.s4.w4`): the settings table
+
+The store side only. The layer's rules (scopes, order, merge modes, callers) are ADR-0016's.
+
+- **Migration 0007** (`0007_settings.sql`) adds the `settings` table: `(project_id, agent_id, key,
+  value, set_by, set_at)` with the primary key `(project_id, agent_id, key)`, `''` for "every", a
+  `json_valid(value)` check, a key grammar check, a `set_by` of `cli` or a device ID, and triggers
+  that hold a live project and a known agent at insert and keep a row's scope and key fixed. It is
+  forward only (ADR-0007) and is empty after the migration. The migrations are now 0001 init, 0002
+  requests, 0003 projects, 0004 devices, 0005 hierarchy, 0006 session options and 0007 settings.
+- **Two effects and two reads.** `SetSetting` inserts a row or replaces the one at the same scope and
+  key, and `UnsetSetting` deletes it. Each is `Rejected` for an unknown or removed project, an unknown
+  agent, or a row that is not there, with one line that names it. `setting_rows` lists every row and
+  `setting_chain(key, project, agent)` lists the rows on the scope chain, most specific first. The
+  port has no method named `settings`: `SqliteStore::settings()` is the `PRAGMA` read.
+- **The commands.** `setting_set` and `setting_unset` are admissions under `@controller`, beside the
+  project, device and chat commands, each with a command ID and one controller-ledger line. A refused
+  caller's write is audited under a command ID the controller makes (`caller-refused-<hex>`).
+- **No write outside admission.** The store trait gains no settings write but the two effects. This
+  item adds no write to the list of writes outside admission.
+- Rules and limits: ADR-0016.

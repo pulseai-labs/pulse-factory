@@ -39,6 +39,10 @@ pub struct ChatOpen {
     pub env: BTreeMap<String, String>,
     /// Runtime-specific options, by option id.
     pub options: BTreeMap<String, String>,
+    /// Shell command patterns the runtime must refuse to run, in a runtime-neutral form (see
+    /// [`check_deny_command`]). The controller resolves the list at each open (ADR-0016). A deny
+    /// rule is a speed bump, not a boundary: it stops the command text the model writes.
+    pub deny_commands: Vec<String>,
 }
 
 /// The channel that carries a chat's events. It is unbounded, so a reader thread never blocks the
@@ -310,6 +314,104 @@ pub trait ChatPort: Send + Sync {
     fn process_id(&self, _chat: &ChatId) -> Option<u32> {
         None
     }
+}
+
+/// The most characters of one deny pattern.
+pub const DENY_COMMAND_MAX_CHARS: usize = 100;
+
+/// The most patterns in one deny list.
+pub const DENY_COMMANDS_MAX: usize = 32;
+
+/// Check one shell command pattern of [`ChatOpen::deny_commands`]. One rule for the controller and
+/// both adapters.
+///
+/// A pattern is words; `*` stands for any text.
+///
+/// - 1 to 100 characters of `A-Z a-z 0-9`, space, `.`, `_`, `/`, `:`, `=`, `@`, `+`, `-` and `*`;
+/// - the first character is a letter or a digit; no trailing space; no two spaces in a row;
+/// - `*` only as a whole word (`git push * --force`) or as the last character of a word
+///   (`--force*`, `--repo=*`, `+*`); never inside a word, never `**`;
+/// - no `:*` anywhere: a runtime's rule syntax may read a rule that ends `:*` as a legacy prefix
+///   form, so `Bash(git push * :*)` would deny every push;
+/// - so no `(`, `)`, `,`, quote, `;`, `&`, `|` or control character can reach a rule.
+pub fn check_deny_command(pattern: &str) -> Result<(), String> {
+    let shown = |c: char| -> String {
+        if c.is_control() {
+            format!("U+{:04X}", u32::from(c))
+        } else {
+            format!("{c:?}")
+        }
+    };
+    let n = pattern.chars().count();
+    if n == 0 {
+        return Err("a deny pattern is empty".to_string());
+    }
+    if n > DENY_COMMAND_MAX_CHARS {
+        return Err(format!(
+            "a deny pattern has {n} characters, and the limit is {DENY_COMMAND_MAX_CHARS}"
+        ));
+    }
+    if let Some(c) = pattern.chars().find(|c| {
+        !(c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '.' | '_' | '/' | ':' | '=' | '@' | '+' | '-' | '*'))
+    }) {
+        return Err(format!(
+            "deny pattern {pattern:?} holds {}, which a pattern may not hold",
+            shown(c)
+        ));
+    }
+    if !pattern.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "deny pattern {pattern:?} must start with a letter or a digit"
+        ));
+    }
+    if pattern.ends_with(' ') {
+        return Err(format!("deny pattern {pattern:?} ends with a space"));
+    }
+    if pattern.contains("  ") {
+        return Err(format!(
+            "deny pattern {pattern:?} holds two spaces in a row"
+        ));
+    }
+    if pattern.contains("**") {
+        return Err(format!(
+            "deny pattern {pattern:?} holds ** : a * stands alone"
+        ));
+    }
+    if pattern.contains(":*") {
+        return Err(format!(
+            "deny pattern {pattern:?} holds :* , which a runtime's rule syntax may read as a legacy prefix form"
+        ));
+    }
+    for word in pattern.split(' ') {
+        let inside = word
+            .char_indices()
+            .any(|(i, c)| c == '*' && i + 1 != word.len());
+        if inside {
+            return Err(format!(
+                "deny pattern {pattern:?}: a * may stand only as a whole word or end a word, not sit inside {word:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check a deny list: at most 32 patterns, no duplicate, each passing [`check_deny_command`].
+pub fn check_deny_commands(list: &[String]) -> Result<(), String> {
+    if list.len() > DENY_COMMANDS_MAX {
+        return Err(format!(
+            "the deny list has {} patterns, and the limit is {DENY_COMMANDS_MAX}",
+            list.len()
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for pattern in list {
+        check_deny_command(pattern)?;
+        if !seen.insert(pattern.as_str()) {
+            return Err(format!("the deny list holds {pattern:?} twice"));
+        }
+    }
+    Ok(())
 }
 
 /// Cut `text` to at most [`CAP_BYTES`] bytes, mark included.

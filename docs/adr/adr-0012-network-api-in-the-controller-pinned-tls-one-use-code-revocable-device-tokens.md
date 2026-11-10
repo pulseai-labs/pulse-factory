@@ -392,3 +392,19 @@ This amends the allowlist rule: a later spine that adds a verb amends this ADR, 
 - **Known limit.** The code proves the device, the freshness and the head SHA, not that a person
   pressed the button. A paired device's token that is stolen, with an unspent code, acts until the
   operator revokes the device.
+
+## The settings verbs (r1.s4.w4)
+
+- **Three verbs join the allowlist:** `settings_get`, `settings_set` and `settings_unset`. A device
+  acts as the operator (ADR-0009), so it reads and writes the scoped settings of ADR-0016. The verbs
+  are in `pf_api::host::ALLOWLIST` and in the request ledger's list of verb names, and the router test
+  names the three, and the verbs that stay off the list, with no exact count.
+- **A device write goes through the same admission as the CLI's:** `settings_set` and `settings_unset`
+  commit through `run_command` under `@controller` with a command ID, and the bridge passes the device
+  (`by=D-<n>`). A device is no local process, so the controller's caller check does not apply to it. The
+  router has authenticated the token and refuses a revoked one with 401 before the bridge runs.
+- **The ledgers.** The `controller.ledger` line of a device's write ends `by=D-<n> command=<id>`.
+  The `api.ledger` has one line for the call, with the device and the outcome (`ok`, `replayed` or
+  `refused`).
+- **The wire types** are generated with `ts-rs` into `apps/api-client/src/gen/` (ADR-0013).
+- Rules and limits: ADR-0016. The verbs' arguments and answers are `cli.md`'s.

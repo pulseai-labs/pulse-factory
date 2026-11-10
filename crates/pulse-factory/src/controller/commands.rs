@@ -111,6 +111,9 @@ pub fn now() -> String {
 pub enum Plan {
     /// The controller refuses it, with this one-line reason.
     Refuse(String),
+    /// The same, and the refused line carries `detail` (a text that starts with a space) between
+    /// `refused` and `reason=`: `caller=`, `bucket=` and `refused=` of a refused settings caller.
+    RefuseDetailed { why: String, detail: String },
     /// The store applies these effects. `subject` is the entity the command names, or
     /// [`pf_engine::port::store::NEW_ID`] for the ID the store assigns. `line` is the admitted
     /// ledger line.
@@ -149,7 +152,10 @@ impl Controller {
             return Err(format!("controller commands are stopped: {why}"));
         }
         let committed = match plan {
-            Plan::Refuse(why) => self.commit_refusal(&ledger, kind, command_id, &content, &why),
+            Plan::Refuse(why) => self.commit_refusal(&ledger, kind, command_id, &content, &why, ""),
+            Plan::RefuseDetailed { why, detail } => {
+                self.commit_refusal(&ledger, kind, command_id, &content, &why, &detail)
+            }
             Plan::Admit {
                 effects,
                 subject,
@@ -179,7 +185,7 @@ impl Controller {
                     // The store refused an effect and wrote nothing. The refusal is a command
                     // of its own: an admission with the reason, and one ledger line.
                     Ok(Committed::Rejected(why)) => {
-                        self.commit_refusal(&ledger, kind, command_id, &content, &why)
+                        self.commit_refusal(&ledger, kind, command_id, &content, &why, "")
                     }
                     other => other.map_err(|e| e.to_string()),
                 }
@@ -210,7 +216,8 @@ impl Controller {
         }
     }
 
-    /// Commit a refused admission: the reason, no effect and one ledger line.
+    /// Commit a refused admission: the reason, no effect and one ledger line. `detail` is empty, or
+    /// text that starts with a space and goes between `refused` and `reason=` in the line.
     fn commit_refusal(
         &self,
         ledger: &MutexGuard<'_, ControllerLedger>,
@@ -218,12 +225,13 @@ impl Controller {
         command_id: &str,
         content: &str,
         why: &str,
+        detail: &str,
     ) -> Result<Committed, String> {
         // The reason is redacted and cut to one line once, here. The admission, the ledger line
         // and the answer all carry this text.
         let reason = one_line_reason(why);
         let body = format!(
-            "{kind} refused reason={} command={command_id}",
+            "{kind} refused{detail} reason={} command={command_id}",
             serde_json::to_string(&reason).unwrap_or_default()
         );
         self.store

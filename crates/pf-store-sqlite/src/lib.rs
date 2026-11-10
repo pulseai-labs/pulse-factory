@@ -28,8 +28,9 @@ pub struct Migration {
 /// adds requests and claims. Migration `0003` adds projects, and a trigger that keeps `@` out of a
 /// run id, so the admission scope `@controller` can never be a run. Migration `0004` adds devices.
 /// Migration `0005` adds the project hierarchy: the project kind and remote key, worktrees, agents,
-/// chat sessions and chat items. Migration `0006` adds the session's own runtime options.
-/// `RunActive` covers every migration, `0006` too: the store never migrates under an active run.
+/// chat sessions and chat items. Migration `0006` adds the session's own runtime options. Migration
+/// `0007` adds the scoped settings. `RunActive` covers every migration, `0007` too: the store never
+/// migrates under an active run.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -60,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         name: "session_options",
         sql: include_str!("../migrations/0006_session_options.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "settings",
+        sql: include_str!("../migrations/0007_settings.sql"),
     },
 ];
 

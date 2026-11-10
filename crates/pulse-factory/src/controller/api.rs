@@ -67,6 +67,9 @@ pub const VERBS: &[&str] = &[
     "device_pair",
     "device_revoke",
     "confirm_code",
+    "settings_get",
+    "settings_set",
+    "settings_unset",
 ];
 
 /// The text of the failure for an address outside the allowed ranges.
@@ -328,6 +331,16 @@ impl ApiHost for ApiBridge {
         // here reaches a verb that the list does not name.
         if !pf_api::host::is_allowed(verb) {
             return Response::err(format!("the verb {verb:?} is not open to devices"));
+        }
+        // A device writes a setting as the operator does, through the same admission, and its ledger
+        // line names it. A device is no local process, so no caller check applies: the router has
+        // authenticated it and refuses a revoked token (ADR-0016).
+        if matches!(verb, "settings_set" | "settings_unset") {
+            return self.controller.settings_write(
+                verb,
+                &args,
+                super::settings::By::Device(device.id.clone()),
+            );
         }
         // A device acts as the operator (ADR-0009). The device verbs on requests run as that device's
         // own, with a confirm code (`r1.s4.w1`); every other verb runs the code the socket runs.

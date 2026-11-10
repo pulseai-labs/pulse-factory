@@ -412,6 +412,9 @@ struct Spec {
     inherited_extra: BTreeMap<String, String>,
     /// Reuse this directory (a resume must run in the same worktree).
     cwd: Option<Arc<tempfile::TempDir>>,
+    /// The deny patterns of the launch (case 19). Empty for every other case, so their command
+    /// lines do not change.
+    deny: Vec<String>,
 }
 
 impl Spec {
@@ -517,7 +520,7 @@ impl Chat {
             "--effort",
             probe::PROBE_EFFORT,
             "--disallowedTools",
-            "ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger",
+            &pf_adapter_claude::launch::disallowed_tools(&spec.deny),
         ]);
         if spec.resume.is_some() {
             cmd.args(["--resume", &session]);
@@ -2151,6 +2154,247 @@ fn case_18_artifact_publish() {
     if let Err(e) = deleted {
         std::panic::resume_unwind(e);
     }
+}
+
+/// The fifteen built-in deny patterns of `r1.s4.w4` (Approach 5, ruling 9), in the controller's
+/// order. Case 19 runs the adapter's own `--disallowedTools` string over them.
+const DENY_BUILT_INS: [&str; 15] = [
+    "git push -f*",
+    "git push * -f*",
+    "git push --force*",
+    "git push * --force*",
+    "git push * +*",
+    "git push --delete",
+    "git push * --delete",
+    "git push -d",
+    "git push * -d",
+    "git branch -D",
+    "git branch * -D",
+    "gh pr merge",
+    "gh -R * pr merge",
+    "gh --repo * pr merge",
+    "gh --repo=* pr merge",
+];
+
+/// One `git` call in `dir`, answering its trimmed stdout. It fails the case when git fails.
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=probe",
+            "-c",
+            "user.email=probe@example.invalid",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The stage of case 19. Every effect of a command that gets past a rule stays in this temporary
+/// directory: a bare `origin.git` whose `main` is at commit A while the local `main` is at the
+/// diverged commit B (so only a forced push moves it), a branch `pf-probe` that is not merged into
+/// `main` (so `git branch -d` cannot take it either), and a stub `gh` that only touches `gh-ran`.
+/// Answers the directory and A.
+fn stage_deny_repo() -> (Arc<tempfile::TempDir>, String) {
+    let dir = make_repo();
+    let p = dir.path();
+    git_in(p, &["branch", "-M", "main"]);
+    let origin = p.join("origin.git");
+    git_in(p, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git_in(p, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git_in(p, &["push", "-q", "origin", "main"]);
+    let a = git_in(p, &["rev-parse", "main"]);
+    git_in(p, &["checkout", "-q", "-b", "pf-probe"]);
+    git_in(p, &["commit", "-q", "--allow-empty", "-m", "probe-branch"]);
+    git_in(p, &["checkout", "-q", "main"]);
+    git_in(
+        p,
+        &["commit", "-q", "--amend", "--allow-empty", "-m", "diverged"],
+    );
+    assert_ne!(
+        git_in(p, &["rev-parse", "main"]),
+        a,
+        "main must diverge from origin"
+    );
+    let bin = p.join("stub-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    std::fs::write(
+        &gh,
+        format!("#!/bin/sh\ntouch '{}'\n", p.join("gh-ran").display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (dir, a)
+}
+
+/// One Bash prompt of case 19: the turn, then the `Bash` calls it made and the results they got.
+/// A turn with no `Bash` call is inconclusive: it is printed as a `FINDING`, and the caller fails
+/// after the fixture is written.
+fn deny_prompt(c: &mut Chat, n: usize, command: &str) -> (Vec<Value>, Vec<Value>) {
+    let msgs = c.turn(&format!(
+        "Use the Bash tool to run exactly `{command}`. Then reply with the word done."
+    ));
+    let s = Summary::of(&msgs);
+    let calls: Vec<Value> = s
+        .tool_uses
+        .iter()
+        .filter(|u| u["name"] == "Bash")
+        .cloned()
+        .collect();
+    c.say(&format!("prompt{n}.command"), command);
+    c.say(&format!("prompt{n}.bash_calls"), calls.len().to_string());
+    for u in &calls {
+        c.say(&format!("prompt{n}.tool_use"), u["input"].to_string());
+    }
+    for r in &s.tool_results {
+        c.say(
+            &format!("prompt{n}.tool_result"),
+            format!("is_error={} {}", r["is_error"], r["content"]),
+        );
+    }
+    if calls.is_empty() {
+        c.say(
+            &format!("prompt{n}.inconclusive"),
+            "the model made no Bash call",
+        );
+    }
+    (calls, s.tool_results)
+}
+
+/// Is any result of a prompt an error?
+fn any_error(results: &[Value]) -> bool {
+    results.iter().any(|r| r["is_error"] == true)
+}
+
+/// Case 19: do the deny rules of the launch hold under `bypassPermissions`? One process runs the
+/// adapter's own `--disallowedTools` string over the fifteen built-in patterns. Prompt 0 records two
+/// self-started turns (for the replay of d21); prompts 1 to 4 must be refused, prompt 5 is a finding.
+/// The assertions come after the fixture is written, so a failing run still records what it saw.
+#[test]
+#[ignore = "spends real turns; runs only with PF_REAL_CLAUDE=1"]
+fn case_19_deny_rules() {
+    real_only!();
+    let (dir, a) = stage_deny_repo();
+    let mut spec = Spec::new("deny_rules");
+    spec.cwd = Some(dir.clone());
+    spec.deny = DENY_BUILT_INS.iter().map(ToString::to_string).collect();
+    let stub = dir.path().join("stub-bin");
+    let path = std::env::var("PATH").unwrap_or_default();
+    spec.inherited_extra
+        .insert("PATH".into(), format!("{}:{path}", stub.display()));
+    let mut c = Chat::start(spec);
+    c.initialize();
+    c.say(
+        "deny_string",
+        pf_adapter_claude::launch::disallowed_tools(&c.spec.deny),
+    );
+
+    // Prompt 0: two background tasks, and the two turns the CLI starts on its own.
+    let msgs = c.turn(
+        "Use the Bash tool to run `sleep 3` in the background and, separately, `sleep 12` in the \
+         background. Then reply with the word done.",
+    );
+    c.say("prompt0.kinds", brief(&msgs));
+    let mut task_turns = 0;
+    for i in 1..=2 {
+        let (rest, hit) = c.collect(Duration::from_secs(90), |m| ty(m) == "result");
+        c.say(&format!("prompt0.task_turn{i}.kinds"), brief(&rest));
+        if hit {
+            task_turns += 1;
+        } else {
+            c.say(
+                &format!("prompt0.task_turn{i}"),
+                "no turn started by itself within 90 s",
+            );
+        }
+    }
+    c.say("prompt0.task_turns", task_turns.to_string());
+
+    // Prompt 1: the branch stays.
+    let (calls1, results1) = deny_prompt(&mut c, 1, "git branch -D pf-probe");
+    let branch_left = git_in(dir.path(), &["branch", "--list", "pf-probe"]).contains("pf-probe");
+    c.say("prompt1.branch_still_listed", branch_left.to_string());
+    // Prompt 2: a forced push does not move origin.
+    let origin = dir.path().join("origin.git");
+    let origin_main = |c: &Chat| {
+        let out = git_in(&origin, &["rev-parse", "main"]);
+        c.say("origin_main_is_a", (out == a).to_string());
+        out
+    };
+    let (calls2, results2) = deny_prompt(&mut c, 2, "git push -f origin main");
+    let moved2 = origin_main(&c) != a;
+    // Prompt 3: flags after the arguments (a mid-command `*`).
+    let (calls3, results3) = deny_prompt(&mut c, 3, "git push origin main --force");
+    let moved3 = origin_main(&c) != a;
+    // Prompt 4: `gh -R <repo> pr merge`.
+    let (calls4, results4) = deny_prompt(&mut c, 4, "gh -R pulseai-labs/pf-probe pr merge 1");
+    let gh_ran = dir.path().join("gh-ran").exists();
+    c.say("prompt4.gh_ran", gh_ran.to_string());
+    // Prompt 5: a compound command is a finding, not a requirement.
+    let (calls5, results5) = deny_prompt(&mut c, 5, "true && git branch -D pf-probe");
+    let branch_left5 = git_in(dir.path(), &["branch", "--list", "pf-probe"]).contains("pf-probe");
+    c.say(
+        "prompt5.compound_reached_the_rule",
+        (any_error(&results5) && branch_left5).to_string(),
+    );
+    c.say("prompt5.branch_still_listed", branch_left5.to_string());
+
+    c.close();
+    // The one process of this case cannot be repeated. With `PF_RAW_DUMP=<file>` set, the raw lines
+    // go to that file first, so a scrub check that refuses the recording loses nothing. The file is
+    // outside the repository and is never committed.
+    if let Ok(path) = std::env::var("PF_RAW_DUMP") {
+        let raw: Vec<String> = c.host_msgs().iter().map(Value::to_string).collect();
+        std::fs::write(path, raw.join("\n")).expect("write the raw dump");
+    }
+    c.write_fixture("deny_rules");
+
+    assert_eq!(task_turns, 2, "prompt 0 must give two self-started turns");
+    for (n, calls) in [(1, &calls1), (2, &calls2), (3, &calls3), (4, &calls4)] {
+        assert!(
+            !calls.is_empty(),
+            "prompt {n}: the model made no Bash call (inconclusive)"
+        );
+    }
+    let _ = calls5;
+    assert!(
+        branch_left,
+        "prompt 1: `git branch -D pf-probe` deleted the branch"
+    );
+    assert!(
+        any_error(&results1),
+        "prompt 1: the Bash call got no error result"
+    );
+    assert!(
+        !moved2,
+        "prompt 2: `git push -f origin main` moved origin/main"
+    );
+    assert!(
+        any_error(&results2),
+        "prompt 2: the Bash call got no error result"
+    );
+    assert!(
+        !moved3,
+        "prompt 3: `git push origin main --force` moved origin/main"
+    );
+    assert!(
+        any_error(&results3),
+        "prompt 3: the Bash call got no error result"
+    );
+    assert!(!gh_ran, "prompt 4: the stub gh ran");
+    assert!(
+        any_error(&results4),
+        "prompt 4: the Bash call got no error result"
+    );
 }
 
 /// Scrub a fixture that is already on disk again, with the current scrubber. It starts no process

@@ -630,6 +630,154 @@ pub struct SessionRedactArgs {
     pub command_id: String,
 }
 
+// ------------------------------------------------------------------ settings (ADR-0016)
+
+/// The value of a setting: a JSON number or a list of strings. The controller's registry decides
+/// which keys exist and what each value may be.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum SettingValue {
+    Number(#[ts(type = "number")] u64),
+    List(Vec<String>),
+}
+
+/// Where a setting row sits: the server default, one project, one agent, or one agent in one
+/// project. `built_in` is the scope of a value that no row set (the binary's own default).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingScope {
+    #[ts(inline)]
+    pub kind: SettingScopeKind,
+    pub project_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+/// The kinds of a [`SettingScope`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SettingScopeKind {
+    Server,
+    Project,
+    Agent,
+    ProjectAgent,
+    BuiltIn,
+}
+
+/// How a key combines the rows of its scope chain. `override` is the one mode built: the most
+/// specific row wins whole, and every other stored row on the chain is masked. Later modes (`union`,
+/// `min`) add variants, with no migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SettingMerge {
+    Override,
+}
+
+/// When a change of a setting takes effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SettingApplies {
+    /// At the next self-started turn of a live process.
+    NextTurn,
+    /// At the chat's next launch.
+    NextLaunch,
+}
+
+/// One stored row on the scope chain of a context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingLayer {
+    pub scope: SettingScope,
+    pub value: SettingValue,
+    /// `cli`, or the ID of the device that set it.
+    pub set_by: String,
+    pub set_at: String,
+}
+
+/// One key as a context reads it: the resolved value and the scope it came from, the binary's
+/// default, how the key merges, when a change applies, every stored row on the chain (`layers`,
+/// most specific first) and the rows the resolved value hides (`masked`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingRecord {
+    pub key: String,
+    pub value: SettingValue,
+    pub from: SettingScope,
+    pub built_in: SettingValue,
+    pub merge: SettingMerge,
+    #[ts(inline)]
+    pub applies: SettingApplies,
+    #[ts(inline)]
+    pub layers: Vec<SettingLayer>,
+    #[ts(inline)]
+    pub masked: Vec<SettingLayer>,
+}
+
+/// The arguments of `settings_get`. No key asks for every key.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingsGetArgs {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub key: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub agent_id: Option<String>,
+}
+
+/// The arguments of `settings_set`. The scope is the project and the agent named: none is the server
+/// default.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingsSetArgs {
+    pub key: String,
+    pub value: SettingValue,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub agent_id: Option<String>,
+    pub command_id: String,
+}
+
+/// The arguments of `settings_unset`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingsUnsetArgs {
+    pub key: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub agent_id: Option<String>,
+    pub command_id: String,
+}
+
+/// The answer of `settings_get`: one record for each known key, or the one key asked for, as the
+/// context (`project_id`, `agent_id`) reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingsView {
+    pub schema_version: u32,
+    pub project_id: Option<String>,
+    pub agent_id: Option<String>,
+    #[ts(inline)]
+    pub settings: Vec<SettingRecord>,
+}
+
+/// The answer of `settings_set` and `settings_unset`. `replayed` is true when the command ID was
+/// admitted before with the same content. `value` is null after an unset. `resolved` is the key as the
+/// scope of the change reads it now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettingChanged {
+    pub schema_version: u32,
+    pub replayed: bool,
+    pub key: String,
+    pub scope: SettingScope,
+    pub value: Option<SettingValue>,
+    pub resolved: SettingRecord,
+}
+
 // ------------------------------------------------------------------ requests and the claim (r1.s4.w1)
 
 /// The current claim, as `requests` and the stream show it. It never holds the token or its hash.
@@ -925,6 +1073,15 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     SessionSetArgs::export_all(cfg)?;
     SessionEndArgs::export_all(cfg)?;
     SessionListArgs::export_all(cfg)?;
+    SettingValue::export_all(cfg)?;
+    SettingScope::export_all(cfg)?;
+    SettingMerge::export_all(cfg)?;
+    SettingRecord::export_all(cfg)?;
+    SettingsGetArgs::export_all(cfg)?;
+    SettingsSetArgs::export_all(cfg)?;
+    SettingsUnsetArgs::export_all(cfg)?;
+    SettingsView::export_all(cfg)?;
+    SettingChanged::export_all(cfg)?;
     ApiError::export_all(cfg)?;
     DeviceRevokeArgs::export_all(cfg)?;
     DeviceRevoked::export_all(cfg)?;

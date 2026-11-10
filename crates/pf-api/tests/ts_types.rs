@@ -147,6 +147,16 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "SessionSetArgs.ts",
         "SessionEndArgs.ts",
         "SessionListArgs.ts",
+        // r1.s4.w4: the scoped settings.
+        "SettingValue.ts",
+        "SettingScope.ts",
+        "SettingMerge.ts",
+        "SettingRecord.ts",
+        "SettingsGetArgs.ts",
+        "SettingsSetArgs.ts",
+        "SettingsUnsetArgs.ts",
+        "SettingsView.ts",
+        "SettingChanged.ts",
         // r1.s4.w1: the requests, the claim, the confirm code and the request frames.
         "ClaimRecord.ts",
         "RequestSummary.ts",
@@ -247,6 +257,31 @@ fn the_chat_types_hold_no_bigint_and_the_stream_frames_are_tagged() {
             "ChatSessionRecord.ts lacks {field}: {session}"
         );
     }
+}
+
+/// `r1.s4.w4`: a setting's value is a number or a list of strings, and a record carries the layers
+/// the UI's Settings rows read.
+#[test]
+fn a_setting_value_reads_number_or_list_and_a_record_carries_its_layers() {
+    let (_dir, now) = rendered();
+    assert!(
+        now["SettingValue.ts"].contains("number | Array<string>"),
+        "{}",
+        now["SettingValue.ts"]
+    );
+    let record = &now["SettingRecord.ts"];
+    for field in [
+        "from: SettingScope",
+        "layers: Array<",
+        "masked: Array<",
+        "merge: SettingMerge",
+    ] {
+        assert!(
+            record.contains(field),
+            "SettingRecord.ts lacks {field}: {record}"
+        );
+    }
+    assert!(now["SettingMerge.ts"].contains("\"override\""));
 }
 
 /// `r1.s4.w1`: the request frames are a tagged type of their own and `ChatFrame` does not change; the

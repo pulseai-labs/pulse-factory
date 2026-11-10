@@ -22,6 +22,7 @@ fn open_spec() -> ChatOpen {
         permission_mode: "bypass".into(),
         env: BTreeMap::new(),
         options: BTreeMap::new(),
+        deny_commands: Vec::new(),
     }
 }
 
@@ -807,4 +808,53 @@ fn the_counters_count_opens_stops_and_sent_messages() {
         vec!["one".to_string(), "two".to_string()]
     );
     assert!(c.port.sent(&ChatId("x".into())).is_empty());
+}
+
+// ------------------------------------------------------------------ the deny list (ADR-0016)
+
+/// The fifteen built-in deny patterns of `r1.s4.w4`.
+const BUILT_IN_DENY: [&str; 15] = [
+    "git push -f*",
+    "git push * -f*",
+    "git push --force*",
+    "git push * --force*",
+    "git push * +*",
+    "git push --delete",
+    "git push * --delete",
+    "git push -d",
+    "git push * -d",
+    "git branch -D",
+    "git branch * -D",
+    "gh pr merge",
+    "gh -R * pr merge",
+    "gh --repo * pr merge",
+    "gh --repo=* pr merge",
+];
+
+#[test]
+fn open_refuses_a_bad_deny_entry_and_names_it() {
+    let port = FakeChat::new();
+    for bad in ["git push * :*", "git (push", " git", "git  push"] {
+        let mut spec = open_spec();
+        spec.deny_commands = vec!["npm publish".into(), bad.into()];
+        match port.open(&spec) {
+            Err(ChatError::Refused(why)) => assert!(why.contains(bad.trim()), "{why}"),
+            other => panic!("{bad:?} must be refused, got {other:?}"),
+        }
+    }
+    assert_eq!(port.open_count(), 0, "a refused open is not counted");
+    let mut dup = open_spec();
+    dup.deny_commands = vec!["npm publish".into(), "npm publish".into()];
+    assert!(matches!(port.open(&dup), Err(ChatError::Refused(_))));
+}
+
+#[test]
+fn open_takes_the_fifteen_built_ins_and_an_empty_list() {
+    let port = FakeChat::new();
+    let mut spec = open_spec();
+    spec.deny_commands = BUILT_IN_DENY.iter().map(ToString::to_string).collect();
+    port.open(&spec).expect("the built-ins open");
+    spec.deny_commands = Vec::new();
+    port.open(&spec).expect("an empty list opens");
+    assert_eq!(port.open_count(), 2);
 }

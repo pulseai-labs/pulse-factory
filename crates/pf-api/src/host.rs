@@ -31,6 +31,10 @@ pub const ALLOWLIST: &[&str] = &[
     "answer",
     "clear",
     "ack",
+    // `r1.s4.w4`: the scoped settings (ADR-0016). A device acts as the operator.
+    "settings_get",
+    "settings_set",
+    "settings_unset",
 ];
 
 /// The words a device verb gives for a refusal, a closed list (`r1.s4.w1`, R7). The controller puts one

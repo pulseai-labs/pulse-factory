@@ -243,7 +243,7 @@ fn with_a_session() -> (tempfile::TempDir, Connection) {
 
 #[test]
 fn the_migration_list_has_the_hierarchy_as_version_five() {
-    assert_eq!(MIGRATIONS.len(), 6);
+    assert_eq!(MIGRATIONS.len(), 7);
     assert_eq!(MIGRATIONS[4].version, 5);
     assert_eq!(MIGRATIONS[4].name, "hierarchy");
 }
@@ -256,11 +256,11 @@ fn a_version_four_store_migrates_to_five_and_keeps_every_row() {
     let before = dump_v4(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(dump_v4(&conn), before, "no row of version 4 changed");
 
     // The two new columns are NULL on both projects: the backfill is the controller's (it runs git).
@@ -352,10 +352,10 @@ fn a_fresh_file_opens_at_five() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 7);
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(count(&conn, "agents"), 1);
     assert_eq!(count(&conn, "chat_sessions"), 0);
 }
@@ -374,7 +374,7 @@ fn a_version_four_store_with_an_active_run_refuses_and_stays_at_four() {
         err,
         OpenError::RunActive {
             current: 4,
-            pending: 6
+            pending: 7
         }
     );
 

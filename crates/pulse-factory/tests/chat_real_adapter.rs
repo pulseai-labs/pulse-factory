@@ -121,12 +121,26 @@ fn real(
     name: &str,
     tweak: impl FnOnce(&mut pulse_factory::controller::Config) + Send + 'static,
 ) -> Real {
+    real_with(name, None, tweak)
+}
+
+/// [`real`], with the adapter's control timeout set. The replay answers only the control requests
+/// the recording holds, so the usage call after a turn waits for the whole timeout (30 s by
+/// default) and holds the pump behind it. A test that waits for a second turn shortens it.
+fn real_with(
+    name: &str,
+    control_seconds: Option<u64>,
+    tweak: impl FnOnce(&mut pulse_factory::controller::Config) + Send + 'static,
+) -> Real {
     let dir = tempfile::tempdir().unwrap();
     let wrapper = wrapper(dir.path(), &fixture(name));
     let mut cc = ClaudeConfig::new(dir.path().join("share"));
     cc.claude_bin_override = Some(wrapper);
     cc.config_dir = dir.path().join("claude-config");
     cc.init_seconds = 30;
+    if let Some(seconds) = control_seconds {
+        cc.control_seconds = seconds;
+    }
     cc.inherited_env = Some(BTreeMap::from([
         (
             "PATH".to_string(),
@@ -459,4 +473,180 @@ fn the_persona_names_the_skill_at_the_real_share_dir_and_that_file_exists() {
         named.display()
     );
     assert!(named.is_file(), "the named path exists");
+}
+
+// ------------------------------------------------------------------ r1.s4.w4: the chat policies
+
+/// The fifteen built-in deny patterns of ruling 9, in order.
+const BUILT_IN_DENY: [&str; 15] = [
+    "git push -f*",
+    "git push * -f*",
+    "git push --force*",
+    "git push * --force*",
+    "git push * +*",
+    "git push --delete",
+    "git push * --delete",
+    "git push -d",
+    "git push * -d",
+    "git branch -D",
+    "git branch * -D",
+    "gh pr merge",
+    "gh -R * pr merge",
+    "gh --repo * pr merge",
+    "gh --repo=* pr merge",
+];
+
+/// The `--disallowedTools` value of the built-ins: the five timer tools, then `Bash(<c>)` and
+/// `Bash(<c> *)` for each pattern, or `Bash(<c>)` alone for a pattern that ends in `*` (25 rules).
+fn expected_disallowed_tools() -> String {
+    let mut rules: Vec<String> = [
+        "ScheduleWakeup",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "RemoteTrigger",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    for c in BUILT_IN_DENY {
+        rules.push(format!("Bash({c})"));
+        if !c.ends_with('*') {
+            rules.push(format!("Bash({c} *)"));
+        }
+    }
+    assert_eq!(rules.len(), 5 + 25);
+    rules.join(",")
+}
+
+#[test]
+fn the_launch_carries_the_deny_rules() {
+    let real = real("init", |_| {});
+    let live = &real.live;
+    started(live, "alpha");
+    assert_eq!(real.launches(), 1);
+    let argv = real.argv(0);
+    let rules = value_after(&argv, "--disallowedTools").expect("a --disallowedTools argument");
+    assert_eq!(rules, expected_disallowed_tools());
+    // The rules of the four accidents are in it, in the pinned CLI's own syntax.
+    for rule in [
+        "Bash(gh pr merge *)",
+        "Bash(git push * --force*)",
+        "Bash(git branch -D *)",
+        "Bash(git push --delete *)",
+        "Bash(gh -R * pr merge *)",
+    ] {
+        assert!(rules.split(',').any(|r| r == rule), "{rule} is missing");
+    }
+    // The list is one argument, and the argument before it is the flag.
+    let at = argv.iter().position(|a| a == "--disallowedTools").unwrap();
+    assert_eq!(argv[at + 1], rules);
+
+    // A project row changes the next launch only: the argument follows the list in force.
+    let out = live.cli(&[
+        "settings",
+        "set",
+        "chat.deny_commands",
+        r#"["npm publish"]"#,
+        "--project",
+        "P-1",
+    ]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(real.launches(), 1, "a settings change launches nothing");
+    let sessions = cli_json(live, &["session", "list"]);
+    let s = sessions["sessions"][0]["id"].as_str().unwrap().to_string();
+    cli_json(live, &["session", "end", &s]);
+    cli_json(live, &["session", "start", "--project", "P-1"]);
+    assert_eq!(real.launches(), 2);
+    let rules = value_after(&real.argv(1), "--disallowedTools").unwrap();
+    assert_eq!(
+        rules,
+        "ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger,Bash(npm publish),Bash(npm publish *)"
+    );
+}
+
+#[test]
+fn the_self_turn_cap_stops_the_replayed_chat_past_its_cap() {
+    use pf_engine::port::chat::{ChatEvent, TurnCause};
+    use pf_engine::port::store::ChatSessionState;
+
+    let real = real_with("background_task", Some(1), |_| {});
+    let live = &real.live;
+    let (_, s) = started(live, "alpha");
+    cli_json(live, &["settings", "set", "chat.self_turn_cap", "1"]);
+
+    // The operator turn, then the recorded `Task` turn: one self-started turn is within a cap of 1.
+    cli_json(live, &["session", "send", &s, "start a task"]);
+    wait_for(
+        live,
+        &s,
+        "the operator turn and the recorded Task turn",
+        |i| i.iter().filter(|x| x.kind == "turn_result").count() >= 2,
+    );
+    let causes: Vec<String> = items(live, &s)
+        .iter()
+        .filter(|i| i.kind == "turn_result")
+        .map(|i| {
+            serde_json::from_str::<Value>(&i.payload).unwrap()["cause"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(causes, ["operator", "task"], "{causes:?}");
+    assert!(
+        chat_ledger(live)
+            .iter()
+            .all(|l| !l.contains("reason=self_turn_cap")),
+        "the first self-started turn ran whole"
+    );
+    assert_eq!(live.controller.live_chat_sessions(), [s.as_str()]);
+    let pid = real.pid();
+    assert!(
+        Path::new(&format!("/proc/{pid}")).exists(),
+        "the replay is running"
+    );
+
+    // A second `Task` turn is cut as it starts: the real adapter stops the process.
+    live.controller
+        .apply_chat_event(
+            &s,
+            ChatEvent::TurnStarted {
+                cause: TurnCause::Task,
+            },
+        )
+        .unwrap();
+    let lines: Vec<String> = chat_ledger(live)
+        .into_iter()
+        .filter(|l| l.contains("reason=self_turn_cap"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:#?}");
+    assert!(
+        lines[0].contains("self_turns=2 cap=1 from=server"),
+        "{}",
+        lines[0]
+    );
+    let row = live.controller.store().chat_session(&s).unwrap().unwrap();
+    assert_eq!(row.state, ChatSessionState::NeedsYou);
+    assert!(live.controller.live_chat_sessions().is_empty());
+    let notice = items(live, &s)
+        .into_iter()
+        .filter(|i| i.kind == "notice")
+        .map(|i| serde_json::from_str::<Value>(&i.payload).unwrap())
+        .find(|v| v["code"] == "self_turn_cap")
+        .expect("the self_turn_cap notice");
+    assert!(
+        notice["text"].as_str().unwrap().contains("cap is 1"),
+        "{notice}"
+    );
+
+    // No process is left: the stop ended it.
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(
+            std::time::Instant::now() < end,
+            "process {pid} is still there after the stop"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

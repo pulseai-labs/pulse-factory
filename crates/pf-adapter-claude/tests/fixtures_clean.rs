@@ -11,7 +11,7 @@ use common::*;
 use serde_json::Value;
 
 /// Every case of the qualification that was kept.
-const CASES: [&str; 21] = [
+const CASES: [&str; 22] = [
     "plain_turn",
     "init",
     "env_allowlist",
@@ -33,6 +33,7 @@ const CASES: [&str; 21] = [
     "artifacts_on",
     "artifacts_off",
     "artifact_publish",
+    "deny_rules",
 ];
 
 /// The lists that name the operator's own setup. Each must be empty wherever it is a list, and
