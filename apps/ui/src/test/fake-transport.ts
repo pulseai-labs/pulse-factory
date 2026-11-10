@@ -3,12 +3,16 @@
 import type {
   AgentRecord,
   ApiStatus,
+  ArmActed,
   ChatFrame,
   ChatItemBody,
   ChatItemRecord,
   ChatOptionRecord,
   ChatRuntimeRecord,
   ChatSessionRecord,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceArmArgs,
   DeviceRecord,
   ProjectAddArgs,
   ProjectChanged,
@@ -50,6 +54,8 @@ export type Method =
   | "sessionInterrupt"
   | "sessionSet"
   | "sessionEnd"
+  | "confirmCode"
+  | "arm"
   | "openStream";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -234,6 +240,8 @@ export class FakeTransport implements Transport {
   readonly setArgs: SessionSetArgs[] = [];
   readonly interruptArgs: SessionInterruptArgs[] = [];
   readonly endArgs: SessionEndArgs[] = [];
+  readonly confirmArgs: ConfirmCodeArgs[] = [];
+  readonly armArgs: DeviceArmArgs[] = [];
   readonly streams: OpenStream[] = [];
   server: PairedServer | null;
   projects: ProjectRecord[];
@@ -414,6 +422,46 @@ export class FakeTransport implements Transport {
     this.enter("sessionEnd");
     this.changed("sessionEnd", args.session_id, { state: "idle", ended_at: "2026-11-09T11:00:00Z" });
     return { replayed: false, session_id: args.session_id, note: null };
+  }
+
+  /** The code the next `confirmCode` issues (a replay of a command ID answers `null`, as the server does). */
+  nextCode = "pfc1-" + "a".repeat(32);
+  private issued = new Map<string, ConfirmIssued>();
+
+  async confirmCode(args: ConfirmCodeArgs): Promise<ConfirmIssued> {
+    this.confirmArgs.push(args);
+    this.enter("confirmCode");
+    const first = this.issued.get(args.command_id);
+    if (first) return { ...first, replayed: true, code: null };
+    const subject = args.subject;
+    const issued: ConfirmIssued = {
+      schema_version: 1,
+      replayed: false,
+      code: this.nextCode,
+      expires_at: "2026-11-09T10:10:00Z",
+      device: this.server?.device.id ?? "D-1",
+      generation: null,
+      holder: null,
+      subject: { request: "", revision: 0, kind: subject.kind, run: "", unit: null, reason: "" },
+      ...(subject.kind === "arm"
+        ? { start: { proposal: subject.proposal, session: "S-1", project_id: "P-1", spine: "s1", plan_sha256: subject.plan_sha256 } }
+        : {}),
+    };
+    this.issued.set(args.command_id, issued);
+    return issued;
+  }
+
+  async arm(args: DeviceArmArgs): Promise<ArmActed> {
+    this.armArgs.push(args);
+    this.enter("arm");
+    return {
+      schema_version: 1,
+      replayed: false,
+      device: this.server?.device.id ?? "D-1",
+      proposal: args.proposal,
+      run_id: "run-1",
+      project_id: "P-1",
+    };
   }
 
   async openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle> {

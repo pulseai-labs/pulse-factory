@@ -264,5 +264,5 @@ tracks:
 end_when:
   when:
     - file: "{param.spine_dir}/closed.flag"
-  waiting: "the spine PR is merged: close {param.spine} in the claim session"
+  waiting: "the spine PR is merged: close {param.spine} in your own session or in the project's Orchestrator chat"
   reason: "paper spine {param.spine} closed"

@@ -5,6 +5,10 @@
 // (`listen` needs a capability, and the app declares no capability file).
 import type {
   ApiStatus,
+  ArmActed,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceArmArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -136,6 +140,9 @@ export function createTauriTransport(invokeImpl?: InvokeLike, channelFactory?: C
     sessionInterrupt: (args: SessionInterruptArgs) => command<SessionChanged>("session_interrupt", { args }),
     sessionSet: (args: SessionSetArgs) => command<SessionChanged>("session_set", { args }),
     sessionEnd: (args: SessionEndArgs) => command<SessionEnded>("session_end", { args }),
+    // Through the generic `verb` command (O2): `TAURI_COMMANDS` gains no name here.
+    confirmCode: (args: ConfirmCodeArgs) => command<ConfirmIssued>("verb", { name: "confirm_code", args }),
+    arm: (args: DeviceArmArgs) => command<ArmActed>("verb", { name: "arm", args }),
     openStream,
     forget: async () => {
       await command<null>("forget", undefined);

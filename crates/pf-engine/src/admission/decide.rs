@@ -79,6 +79,7 @@ pub fn decide(
             ledger_file: ledger_file.clone(),
             state: RunState::Active,
             halted_reason: None,
+            project_id: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),
         }));

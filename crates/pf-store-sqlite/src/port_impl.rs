@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 
 use pf_engine::port::store::{
-    ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, ChatItemKind, ChatItemRow,
-    ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect, LedgerLine,
-    NEW_ID, NewChatItem, NewChatSession, NewDevice, NewProject, NewRequest, NodeKind, NodeRow,
-    ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
-    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow,
-    SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy,
-    WorktreeRow,
+    ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatItemKind,
+    ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect,
+    LedgerLine, NEW_ID, NewChatItem, NewChatSession, NewDevice, NewProject, NewRequest, NodeKind,
+    NodeRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT,
+    RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree,
+    SettingRow, SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID,
+    WorktreeCreatedBy, WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -870,6 +870,36 @@ fn unset_setting(tx: &Transaction<'_>, scope: &SettingScope, key: &str) -> Resul
     Ok(())
 }
 
+/// Link a run to a live project. The triggers of migration 0008 are the backstop of these checks.
+/// The same pair a second time changes nothing.
+fn set_run_project(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    project_id: &str,
+) -> Result<(), EffectError> {
+    let current: Option<Option<String>> = tx
+        .query_row("SELECT project_id FROM runs WHERE id = ?1", [run_id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match current {
+        None => Err(EffectError::Rejected(format!("run {run_id} is unknown"))),
+        Some(Some(held)) if held == project_id => Ok(()),
+        Some(Some(held)) => Err(EffectError::Rejected(format!(
+            "run {run_id} keeps its project {held}"
+        ))),
+        Some(None) => {
+            live_project(tx, project_id)?;
+            tx.execute(
+                "UPDATE runs SET project_id = ?2 WHERE id = ?1",
+                params![run_id, project_id],
+            )
+            .map_err(backstop)?;
+            Ok(())
+        }
+    }
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
 fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
@@ -932,6 +962,7 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
         } => redact_chat_item(tx, session_id, *seq, redacted_at)?,
         Effect::SetSetting(row) => set_setting(tx, row)?,
         Effect::UnsetSetting { scope, key } => unset_setting(tx, scope, key)?,
+        Effect::SetRunProject { run_id, project_id } => set_run_project(tx, run_id, project_id)?,
     }
     Ok(Assigned::default())
 }
@@ -956,6 +987,17 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
         ],
     )?;
     let admission_seq = tx.last_insert_rowid();
+    // A run's project is the controller's to set: the effect is refused in any other scope, and
+    // the admission rolls back with it.
+    if c.run_id != CONTROLLER_SCOPE
+        && c.effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetRunProject { .. }))
+    {
+        return Ok(Committed::Rejected(
+            "a run's project is set only in an admission under @controller".to_string(),
+        ));
+    }
     let mut assigned: Option<String> = None;
     let mut worktree_assigned: Option<String> = None;
     for effect in &c.effects {
@@ -1341,7 +1383,7 @@ impl Store for SqliteStore {
         let run_id = run_id.to_string();
         self.call(move |conn| {
             conn.query_row(
-                "SELECT id, workflow, ledger_file, state, halted_reason, created_at, updated_at FROM runs WHERE id = ?1",
+                "SELECT id, workflow, ledger_file, state, halted_reason, created_at, updated_at, project_id FROM runs WHERE id = ?1",
                 [&run_id],
                 |r| {
                     let state: String = r.get(3)?;
@@ -1353,6 +1395,7 @@ impl Store for SqliteStore {
                         halted_reason: r.get(4)?,
                         created_at: r.get(5)?,
                         updated_at: r.get(6)?,
+                        project_id: r.get(7)?,
                     })
                 },
             )

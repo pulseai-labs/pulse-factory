@@ -36,6 +36,17 @@ pub const SELF_TURN_CAP: &str = "chat.self_turn_cap";
 /// The key of the deny list of a chat's launch.
 pub const DENY_COMMANDS: &str = "chat.deny_commands";
 
+/// The key of the bound on `propose` builds, per chat session and minute (`r1.s4.w2`).
+pub const PROPOSE_PER_MIN: &str = "chat.propose_per_min";
+
+/// The bound's built-in value: four builds a minute. A legitimate Orchestrator proposes once and
+/// re-proposes after a correction. Each build runs `plan_check`, `git` and maybe `gh`, so four a
+/// minute leaves room for corrections and bounds a looping chat to 240 builds an hour.
+pub const DEFAULT_PROPOSE_PER_MIN: u64 = 4;
+
+/// The most the bound may be set to.
+pub const PROPOSE_PER_MIN_MAX: u64 = 60;
+
 /// The cap's built-in value: three self-started turns run whole.
 pub const DEFAULT_SELF_TURN_CAP: u64 = 3;
 
@@ -64,7 +75,7 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 2] = [DENY_COMMANDS, SELF_TURN_CAP];
+const KEYS: [&str; 3] = [DENY_COMMANDS, SELF_TURN_CAP, PROPOSE_PER_MIN];
 
 /// The setting names that a refusal bucket can take. Any other name is bucket `other`.
 const OTHER_BUCKET: &str = "other";
@@ -78,14 +89,14 @@ fn unknown_key(key: &str) -> String {
 
 /// When a change of `key` applies.
 fn applies_of(key: &str) -> SettingApplies {
-    if key == SELF_TURN_CAP {
+    if key == SELF_TURN_CAP || key == PROPOSE_PER_MIN {
         SettingApplies::NextTurn
     } else {
         SettingApplies::NextLaunch
     }
 }
 
-/// The merge mode of `key`. Both keys are `override`: the first row on the chain wins whole.
+/// The merge mode of `key`. Every key is `override`: the first row on the chain wins whole.
 fn merge_of(_key: &str) -> SettingMerge {
     SettingMerge::Override
 }
@@ -94,6 +105,8 @@ fn merge_of(_key: &str) -> SettingMerge {
 fn built_in(key: &str) -> SettingValue {
     if key == SELF_TURN_CAP {
         SettingValue::Number(DEFAULT_SELF_TURN_CAP)
+    } else if key == PROPOSE_PER_MIN {
+        SettingValue::Number(DEFAULT_PROPOSE_PER_MIN)
     } else {
         SettingValue::List(BUILT_IN_DENY.iter().map(ToString::to_string).collect())
     }
@@ -107,6 +120,12 @@ fn check_value(key: &str, value: &Value) -> Result<SettingValue, String> {
             Some(n) if n <= SELF_TURN_CAP_MAX => Ok(SettingValue::Number(n)),
             _ => Err(format!(
                 "{SELF_TURN_CAP} is a whole number from 0 to {SELF_TURN_CAP_MAX} (0 is off), not {value}"
+            )),
+        },
+        PROPOSE_PER_MIN => match value.as_u64() {
+            Some(n) if n <= PROPOSE_PER_MIN_MAX => Ok(SettingValue::Number(n)),
+            _ => Err(format!(
+                "{PROPOSE_PER_MIN} is a whole number from 0 to {PROPOSE_PER_MIN_MAX} (0 is off), not {value}"
             )),
         },
         DENY_COMMANDS => {
@@ -368,6 +387,23 @@ impl Controller {
         }
     }
 
+    /// The resolved `chat.propose_per_min` for a context, and the scope it came from. A resolver
+    /// failure is the built-in, with one stderr line.
+    pub(super) fn propose_per_min(&self, project: &str, agent: &str) -> (u64, String) {
+        match self.resolve_setting(PROPOSE_PER_MIN, Some(project), Some(agent)) {
+            Ok(Resolved {
+                value: SettingValue::Number(n),
+                from_text,
+                ..
+            }) => (n, from_text),
+            Ok(_) => (DEFAULT_PROPOSE_PER_MIN, "built_in".to_string()),
+            Err(why) => {
+                eprintln!("pulse-factory: {PROPOSE_PER_MIN} is not read: {why}");
+                (DEFAULT_PROPOSE_PER_MIN, "built_in".to_string())
+            }
+        }
+    }
+
     /// The resolved deny list for a context, and the scope it came from.
     pub(super) fn deny_commands(&self, project: &str, agent: &str) -> (Vec<String>, String) {
         match self.resolve_setting(DENY_COMMANDS, Some(project), Some(agent)) {
@@ -598,18 +634,25 @@ impl Controller {
         pids
     }
 
-    /// Name a refused caller by its own walk of the peer's ancestors: `seat-token` for any caller
-    /// with `PF_SEAT_TOKEN` in its environment, `chat:<S-n>` for a process that is, or descends
-    /// from, a live chat process, `seat:<pid>` for one that descends from a tracked seat, and
+    /// Name a refused caller: `seat-token` for any caller with `PF_SEAT_TOKEN` in its environment,
+    /// `chat:<S-n>` for a caller whose `PULSE_FACTORY_CHAT` is `S-<digits>` (`chat:invalid` for any
+    /// other value), and with no marker, by its own walk of the peer's ancestors: `chat:<S-n>` for a
+    /// process that is, or descends from, a live chat process, `seat:<pid>` for one that descends from a tracked seat, and
     /// `unknown` when the walk cannot finish. A chat that forks many processes is one key.
-    fn settings_caller_key(&self, peer: Peer) -> String {
+    pub(super) fn settings_caller_key(&self, peer: Peer) -> String {
         let Some(pid) = peer.pid else {
             return "unknown".to_string();
         };
         let root = &self.cfg.proc_root;
         match std::fs::read(root.join(pid.to_string()).join("environ")) {
             Ok(environ) if has_seat_token(&environ) => return "seat-token".to_string(),
-            Ok(_) => {}
+            // A detached child keeps the chat's marker where the walk finds no chat. The value is
+            // cleaned first, so a caller cannot write text of its own choice into the ledger.
+            Ok(environ) => {
+                if let Some(value) = super::requests::environment_chat_marker(&environ) {
+                    return super::requests::chat_marker_key(&value);
+                }
+            }
             Err(_) => return "unknown".to_string(),
         }
         let seats = self.seat_pids();
@@ -653,6 +696,20 @@ impl Controller {
         let content = serde_json::from_value::<RawWrite>(args.clone())
             .map(|raw| content_of(kind, &raw))
             .unwrap_or_else(|_| "{}".to_string());
+        self.refuse_coalesced(kind, bucket, content, caller, why);
+    }
+
+    /// The window of one caller and one bucket: the first refusal commits one refused admission at
+    /// once, and later ones are counted for the closing line. `kind` is the admission kind, and
+    /// `content` its content. `propose` shares this with the settings writes (`r1.s4.w2`).
+    pub(super) fn refuse_coalesced(
+        &self,
+        kind: &'static str,
+        bucket: String,
+        content: String,
+        caller: &str,
+        why: &str,
+    ) {
         let end = self.cfg.refusal_window;
         let mut windows = lock(&self.settings_refusals.windows);
         let key = (caller.to_string(), bucket.clone());
@@ -683,7 +740,7 @@ impl Controller {
         let detail = format!(" caller={caller} bucket={bucket} refused=1");
         if let Err(note) = self.commit_caller_refusal(kind, &content, why, &detail) {
             window.noted = true;
-            eprintln!("pulse-factory: a refused settings write is not audited: {note}");
+            eprintln!("pulse-factory: a refused call is not audited: {note}");
         }
         windows.insert(key, window);
     }
@@ -705,7 +762,7 @@ impl Controller {
             self.commit_caller_refusal(window.kind, &content, &window.last_reason, &detail)
             && !window.noted
         {
-            eprintln!("pulse-factory: a refused settings write is not audited: {note}");
+            eprintln!("pulse-factory: a refused call is not audited: {note}");
         }
     }
 

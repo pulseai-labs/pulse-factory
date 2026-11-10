@@ -41,6 +41,7 @@ pub const REQUEST_LEDGER_FILE: &str = "api.ledger";
 pub const VERBS: &[&str] = &[
     "runs",
     "arm",
+    "propose",
     "hook",
     "status",
     "halt",

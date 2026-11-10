@@ -169,6 +169,20 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "ConfirmCodeArgs.ts",
         "ConfirmSubjectShown.ts",
         "ConfirmIssued.ts",
+        // r1.s4.w2: the start card, the arm summary and the device arm.
+        "StartShown.ts",
+        "StartResultKind.ts",
+        "ArmWorkflow.ts",
+        "ArmRole.ts",
+        "ArmSeedCap.ts",
+        "ArmLoop.ts",
+        "ArmCaps.ts",
+        "ArmPlugin.ts",
+        "ArmMerge.ts",
+        "ArmBasePush.ts",
+        "ArmSummary.ts",
+        "DeviceArmArgs.ts",
+        "ArmActed.ts",
         "DeviceAnswerArgs.ts",
         "DeviceClearArgs.ts",
         "DeviceAckArgs.ts",
@@ -237,6 +251,8 @@ fn the_chat_types_hold_no_bigint_and_the_stream_frames_are_tagged() {
         "background_task",
         "notice",
         "turn_result",
+        "start_card",
+        "start_result",
         "redacted",
         "unknown",
     ] {
@@ -332,8 +348,17 @@ fn the_request_frames_and_the_confirm_subject_are_tagged_and_the_chat_frame_is_u
             "ClaimRecord.ts lacks {field}: {claim}"
         );
     }
+    assert!(
+        now["ConfirmSubjectArg.ts"].contains("\"kind\": \"arm\""),
+        "{}",
+        now["ConfirmSubjectArg.ts"]
+    );
     let issued = &now["ConfirmIssued.ts"];
-    for field in ["code: string | null", "generation: number | null"] {
+    for field in [
+        "code: string | null",
+        "generation: number | null",
+        "start?: StartShown",
+    ] {
         assert!(
             issued.contains(field),
             "ConfirmIssued.ts lacks {field}: {issued}"

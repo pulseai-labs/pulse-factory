@@ -306,6 +306,10 @@ impl Controller {
         };
         let (_, replayed) =
             self.run_command("chat_session_end", &args.command_id, content, plan)?;
+        // An open start card of the session is withdrawn: nothing can confirm it into a dead chat.
+        if !replayed {
+            self.withdraw_open_proposals(Some(&args.session_id), "the session ended");
+        }
         let session = self
             .store
             .chat_session(&args.session_id)

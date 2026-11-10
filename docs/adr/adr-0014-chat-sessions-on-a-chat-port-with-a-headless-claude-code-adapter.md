@@ -78,7 +78,8 @@
   `claude`: the real `ClaudeChat` runs against it with no token and no network. `FakeChat`
   (`crates/pf-adapter-fake`) is a scripted adapter with no process, for the controller's and the
   API's tests. No ordinary test, no `auto:` line and no CI job starts the real CLI. The qualification
-  recorder runs only with `PF_REAL_CLAUDE=1`, against a counted budget of 30 processes.
+  recorder runs only with `PF_REAL_CLAUDE=1`, against a counted
+  budget of 31 processes (30, and one more for case 20 alone, by the operator's ruling of 2026-11-10).
 - **The 16 KB cap.** `cap` cuts a tool's input and output once, in the event, to at most 16 KB with
   its mark, and `Capped` carries the original size. The adapter keeps an approval's original input
   for its answer.

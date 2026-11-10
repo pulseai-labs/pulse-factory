@@ -48,7 +48,7 @@ fn the_budget_counts_processes_and_stops_a_start_before_it_happens() {
         .path()
         .join(".local/state/pulse-factory/claude-probe-processes");
     assert_eq!(probe::counter_path(), counter);
-    assert_eq!(LIMIT, 30);
+    assert_eq!(LIMIT, 31);
 
     let work = tempfile::tempdir().unwrap();
     let ran = work.path().join("ran");
@@ -83,22 +83,22 @@ fn the_budget_counts_processes_and_stops_a_start_before_it_happens() {
     assert_eq!(probe::reserve(3).unwrap(), 5);
 
     // 4. A start that would pass the limit fails before it starts, and changes nothing.
-    std::fs::write(&counter, "29\n").unwrap();
+    std::fs::write(&counter, "30\n").unwrap();
     std::fs::remove_file(&ran).unwrap();
     started(probe::start(&mut stub(work.path())));
-    assert_eq!(probe::used().unwrap(), 30);
+    assert_eq!(probe::used().unwrap(), 31);
     std::fs::remove_file(&ran).unwrap();
     let err = probe::start(&mut stub(work.path()))
         .err()
-        .expect("30 + 1 passes 30");
-    assert!(err.contains("30 of 30") && err.contains("limit"), "{err}");
+        .expect("31 + 1 passes 31");
+    assert!(err.contains("31 of 31") && err.contains("limit"), "{err}");
     assert!(!ran.exists(), "the stub did not run");
-    assert_eq!(probe::used().unwrap(), 30, "the count did not change");
+    assert_eq!(probe::used().unwrap(), 31, "the count did not change");
     assert!(probe::reserve(1).is_err());
-    std::fs::write(&counter, "28\n").unwrap();
-    let err = probe::reserve(3).expect_err("28 + 3 passes 30");
-    assert!(err.contains("28 of 30"), "{err}");
-    assert_eq!(probe::used().unwrap(), 28);
+    std::fs::write(&counter, "29\n").unwrap();
+    let err = probe::reserve(3).expect_err("29 + 3 passes 31");
+    assert!(err.contains("29 of 31"), "{err}");
+    assert_eq!(probe::used().unwrap(), 29);
 
     // 5. A counter file that holds no number is an error. It never resets by accident.
     std::fs::write(&counter, "lots\n").unwrap();

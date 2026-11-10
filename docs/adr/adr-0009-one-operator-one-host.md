@@ -66,3 +66,14 @@ ADR-0012 adds paired devices.
   project. The `claims` table has no run or project column, and `claims_one_current` (migration 0002)
   allows at most one row with no `fenced_at`. A claim taken for any run fences the holder of every
   other. This amendment states it as the rule. The store does not change.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): a device arms from a start card
+
+- **A device arms a run from a start card.** The Orchestrator's `propose` posts a start card into its
+  chat. The device asks `confirm_code` for an `arm` code, which binds the proposal and the hash of the
+  plan, and sends `arm` with the code. `arm` joins the device allowlist for this and nothing else. The
+  device still acts as the operator and has no scope of its own.
+- **There is still no `claim` and no `halt` on the API.** `halt` withdraws every open proposal, so a
+  stale card cannot start a run after the kill switch.
+- **Known limit, unchanged:** a code proves the device, the freshness and the plan, not that a person
+  pressed the button.

@@ -67,6 +67,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "settings",
         sql: include_str!("../migrations/0007_settings.sql"),
     },
+    Migration {
+        version: 8,
+        name: "run_project",
+        sql: include_str!("../migrations/0008_run_project.sql"),
+    },
 ];
 
 /// Why the store cannot open.

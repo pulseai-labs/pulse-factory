@@ -25,6 +25,9 @@ pub struct Cli {
 pub enum Verb {
     /// Check a plan, show what it will spend, and start a run.
     Arm(ArmArgs),
+    /// Propose a start from the Orchestrator chat: the controller posts a start card, and nothing
+    /// is armed until the operator confirms it on a paired device.
+    Propose(ProposeArgs),
     /// Show a run: its units, sessions, cost and notes.
     Status(StatusArgs),
     /// Stop new launches and merges. Running seats finish their stage.
@@ -87,6 +90,34 @@ pub struct ArmArgs {
     /// Start the run.
     #[arg(long)]
     pub yes: bool,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The inputs of `arm` except `--replace`: replacing a run stays the operator's.
+#[derive(Args, Debug, Clone)]
+pub struct ProposeArgs {
+    /// The spine ID. It fills `param.spine`.
+    pub spine: String,
+    /// The name of a workflow installed under the share directory. A path is refused.
+    #[arg(long)]
+    pub workflow: String,
+    /// The ledger file of the run.
+    #[arg(long)]
+    pub ledger: PathBuf,
+    /// A workflow parameter, `key=value`. Repeat for each.
+    #[arg(long = "param", value_name = "K=V")]
+    pub params: Vec<String>,
+    /// A directory that holds plugins. Repeat for each.
+    #[arg(long = "plugin-root", value_name = "DIR")]
+    pub plugin_roots: Vec<PathBuf>,
+    /// Run the seats as paper scripts against a bare repo in this directory. No model, no spend.
+    #[arg(long, value_name = "DIR")]
+    pub paper: Option<PathBuf>,
+    /// The command ID. The same ID again answers the first proposal.
+    #[arg(long)]
+    pub command_id: Option<String>,
     /// Print JSON.
     #[arg(long)]
     pub json: bool,
@@ -595,6 +626,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
     };
     match cli.verb {
         Verb::Arm(a) => crate::arm::run(&a),
+        Verb::Propose(a) => crate::controller::client::propose(&a),
         Verb::Status(a) => crate::controller::client::status(&a),
         Verb::Halt(a) => crate::controller::client::halt(&a),
         Verb::Requests(a) => crate::controller::client::requests(&a),

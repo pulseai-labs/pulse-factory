@@ -109,6 +109,8 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
         "spine": h.info.spine,
         "workflow": h.info.workflow,
         "env": h.info.env,
+        // The project of the chat that proposed the run; null for a CLI arm (`r1.s4.w2`).
+        "project_id": run.as_ref().and_then(|r| r.project_id.clone()),
         "state": run.as_ref().map_or("unknown", |r| r.state.as_str()),
         "driven": h.driven.load(Ordering::SeqCst),
         "halted_reason": run.as_ref().and_then(|r| r.halted_reason.clone()),

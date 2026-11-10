@@ -108,17 +108,17 @@ fn masked_values(r: &Value) -> Vec<Value> {
 }
 
 #[test]
-fn a_fresh_store_reads_the_two_built_ins() {
+fn a_fresh_store_reads_the_three_built_ins() {
     let (live, _) = live();
     let v = get(&live, &[]);
     assert_eq!(v["schema_version"], 1);
     let settings = v["settings"].as_array().unwrap();
-    assert_eq!(settings.len(), 2, "{v}");
+    assert_eq!(settings.len(), 3, "{v}");
     let keys: Vec<&str> = settings
         .iter()
         .map(|r| r["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys, [DENY, CAP]);
+    assert_eq!(keys, [DENY, CAP, "chat.propose_per_min"]);
     for r in settings {
         assert_eq!(from_kind(r), "built_in", "{r}");
         assert_eq!(r["merge"], "override", "{r}");
@@ -128,6 +128,8 @@ fn a_fresh_store_reads_the_two_built_ins() {
     }
     assert_eq!(settings[1]["value"], 3);
     assert_eq!(settings[1]["applies"], "next_turn");
+    assert_eq!(settings[2]["value"], 4);
+    assert_eq!(settings[2]["applies"], "next_turn");
     assert_eq!(settings[0]["value"], json!(BUILT_IN));
     assert_eq!(settings[0]["applies"], "next_launch");
 
@@ -545,7 +547,7 @@ fn a_caller_that_descends_from_a_live_chat_can_read_but_not_write() {
     // The read answers for a descendant of the live chat.
     let resp = pf_ipc::call(&live.sb.state, "settings_get", json!({})).unwrap();
     assert!(resp.ok, "{:?}", resp.error);
-    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 2);
+    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 3);
     // The write is refused, and names the chat process. Its audit is AC-25's.
     let resp = pf_ipc::call(
         &live.sb.state,

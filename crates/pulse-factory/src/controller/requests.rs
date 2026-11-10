@@ -85,13 +85,29 @@ fn environment_has_seat_token(environ: &[u8]) -> bool {
 pub const CHAT_MARKER: &str = "PULSE_FACTORY_CHAT";
 
 /// The session a process runs under, when its environment text holds the chat marker.
-fn environment_chat_marker(environ: &[u8]) -> Option<String> {
+pub(super) fn environment_chat_marker(environ: &[u8]) -> Option<String> {
     let prefix = format!("{CHAT_MARKER}=");
     environ.split(|b| *b == 0).find_map(|entry| {
         entry
             .strip_prefix(prefix.as_bytes())
             .map(|v| String::from_utf8_lossy(v).into_owned())
     })
+}
+
+/// A marker value that names a session: `S-` and digits, at most 20 characters in all.
+pub(super) fn marker_session(value: &str) -> Option<&str> {
+    let digits = value.strip_prefix("S-")?;
+    (value.len() <= 20 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(value)
+}
+
+/// The key that names a caller by its chat marker: `chat:<S-n>`, or `chat:invalid` for any other
+/// value. Neither the ledger nor a refusal text ever holds the raw value, which the caller chose.
+pub(super) fn chat_marker_key(value: &str) -> String {
+    match marker_session(value) {
+        Some(session) => format!("chat:{session}"),
+        None => "chat:invalid".to_string(),
+    }
 }
 
 impl Controller {
@@ -153,10 +169,15 @@ impl Controller {
                 "PF_SEAT_TOKEN is in the caller's environment, so it is a seat".to_string(),
             ));
         }
-        if let Some(session) = environment_chat_marker(&environ) {
-            return Err(refuse(format!(
-                "{CHAT_MARKER} is in the caller's environment, so it runs under chat session {session}"
-            )));
+        if let Some(value) = environment_chat_marker(&environ) {
+            return Err(refuse(match marker_session(&value) {
+                Some(session) => format!(
+                    "{CHAT_MARKER} is in the caller's environment, so it runs under chat session {session}"
+                ),
+                None => format!(
+                    "{CHAT_MARKER} is in the caller's environment with a value that names no session (chat:invalid), so it runs under a chat"
+                ),
+            }));
         }
         let seats = self.tracked_seat_pids();
         let mut current = pid;
@@ -180,6 +201,83 @@ impl Controller {
         Err(refuse(format!(
             "the caller's parent chain is longer than {MAX_ANCESTORS} processes, so the controller cannot clear it"
         )))
+    }
+
+    /// Which chat session a `propose` caller runs under (`r1.s4.w2`, W16). The refusal is the cause
+    /// alone: `propose` puts `propose refused:` before it. The walk of the caller's
+    /// ancestors finds a live chat process, and that is the only way a caller names a session:
+    /// `PULSE_FACTORY_CHAT` never identifies a caller, it only refuses. In this order:
+    /// 1. a seat, by token or by a tracked seat on the chain, is refused, and so is a failed read;
+    /// 2. a live chat process on the chain names the session, unless the marker names another one;
+    /// 3. no chat on the chain but the marker held (a child the chat detached) is refused;
+    /// 4. neither is refused.
+    pub(super) fn identify_chat_caller(&self, peer: Peer) -> Result<String, String> {
+        let refuse = |why: String| why;
+        let pid = peer.pid.ok_or_else(|| {
+            refuse("the controller cannot tell which process called, so it refuses".to_string())
+        })?;
+        let proc_root = &self.cfg.proc_root;
+        let environ_path = proc_root.join(pid.to_string()).join("environ");
+        let environ = std::fs::read(&environ_path).map_err(|e| {
+            refuse(format!(
+                "cannot read {} ({e}), so the controller cannot tell the caller is not a seat",
+                environ_path.display()
+            ))
+        })?;
+        if environment_has_seat_token(&environ) {
+            return Err(refuse(
+                "PF_SEAT_TOKEN is in the caller's environment, so it is a seat".to_string(),
+            ));
+        }
+        let marker = environment_chat_marker(&environ);
+        let seats = self.tracked_seat_pids();
+        let chats: Vec<(u32, String)> = self
+            .live_chats()
+            .iter()
+            .filter_map(|l| l.port.process_id(&l.chat).map(|p| (p, l.session.clone())))
+            .collect();
+        let mut found: Option<(u32, String)> = None;
+        let mut current = pid;
+        let mut reached_top = false;
+        for _ in 0..MAX_ANCESTORS {
+            if seats.contains(&current) {
+                return Err(refuse(format!(
+                    "the caller is, or descends from, seat process {current}, so it is a seat"
+                )));
+            }
+            if let Some((p, session)) = chats.iter().find(|(p, _)| *p == current) {
+                found = Some((*p, session.clone()));
+                break;
+            }
+            let parent = parent_of(proc_root, current).map_err(refuse)?;
+            if parent <= 1 {
+                reached_top = true;
+                break;
+            }
+            current = parent;
+        }
+        match (found, marker) {
+            (Some((chat_pid, session)), Some(value)) => {
+                if marker_session(&value) == Some(session.as_str()) {
+                    Ok(session)
+                } else {
+                    Err(refuse(format!(
+                        "the chat marker names {}, but the caller runs under chat process {chat_pid} of {session}",
+                        marker_session(&value).unwrap_or("chat:invalid")
+                    )))
+                }
+            }
+            (Some((_, session)), None) => Ok(session),
+            (None, _) if !reached_top => Err(refuse(format!(
+                "the caller's parent chain is longer than {MAX_ANCESTORS} processes, so the controller cannot clear it"
+            ))),
+            (None, Some(_)) => Err(refuse(format!(
+                "the caller holds {CHAT_MARKER} but runs under no live chat process; the marker never names the caller"
+            ))),
+            (None, None) => Err(refuse(
+                "the caller runs under no chat session; propose posts a start card into the calling chat, and an operator on this host starts a run with pulse-factory arm".to_string(),
+            )),
+        }
     }
 
     /// The generation of the claim that owns the token the request carries. A fenced or unknown

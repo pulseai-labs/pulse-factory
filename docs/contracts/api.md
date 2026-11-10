@@ -146,7 +146,11 @@ a `ClaimRecord`. A client that does not know a `type` skips it.
 - `item` carries one stored item of the followed session: `operator_message`, `assistant_text`,
   `tool_call` (with its `input` and `output` as `{text, bytes, truncated}`), `approval_request`,
   `approval_answer`, `question_request`, `question_answer`, `background_task`, `notice`,
-  `turn_result` (with its `usage` and `cost_micros`), `redacted` and `unknown`. Its `seq` counts
+  `turn_result` (with its `usage` and `cost_micros`), `start_card`, `start_result`, `redacted` and
+  `unknown`. A `start_card` holds `proposal`, `project_id`, `project_name`, `plan_sha256`, the
+  `summary` (an `ArmSummary`), `params`, `ledger` and `plugin_roots`. A `start_result` answers a card
+  once: `outcome` (`answered` or `withdrawn`), `result` (`armed`, `withdrawn` or `failed`), and
+  `reason`, `run` and `device` when they apply. Its `seq` counts
   from 1 within the session with no gap. A redaction by `session redact` sends the item again with
   `redacted_at` set and the same `seq`. An open stream receives this frame even though it already
   holds that `seq`, and the client replaces its copy. A device that was not connected keeps the
@@ -220,16 +224,19 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `answer` | `answer`, with a confirm code in place of the token |
 | `clear` | `clear`, with a confirm code in place of the token |
 | `ack` | `ack`, with a confirm code in place of the token |
+| `arm` | none (API only): `arm`, with a confirm code from a start card in place of a plan |
 | `settings_get` | `settings get` |
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
 
-Every other verb is 403: `runs`, `status`, `claim`, `arm`, `halt`, `hook`, `device_pair`,
+Every other verb is 403: `runs`, `status`, `claim`, `propose`, `halt`, `hook`, `device_pair`,
 `device_list`, `device_revoke`, `api_status`, `session_items` and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
 read the item before keeps its copy (ADR-0015's known limit), and the operator decides on the host.
 `session_items` is off the list because the stream's `after=0` gives the history. There is no way
-for a device to pair another device, revoke one, claim, arm or halt. A device takes the claim only
-by acting with a confirm code: there is no `claim` verb on the API. `halt` stays off the list.
+for a device to pair another device, revoke one, claim, propose or halt. A device takes the claim only
+by acting with a confirm code: there is no `claim` verb on the API. `halt` stays off the list. A
+device arms a run only through `arm` with a confirm code from a start card, and that arm takes no
+claim (`r1.s4.w2`).
 
 The chat verbs take the arguments and give the answers that `cli.md` lists under `session`. Each
 state-changing one takes a `command_id`, and the same ID with the same content returns the first
@@ -270,6 +277,13 @@ second merge.
   record with `replayed` true and `code` null, whatever moved since; after a restart, or 10 minutes
   past the code's expiry, the first record is gone and a replay carries the facts the store still
   has, with `expires_at` and `generation` null.
+  The subject of a start card is `{"kind": "arm", "proposal": "sp-…", "plan_sha256": "<64 hex>"}`.
+  The code binds that proposal and that plan hash, takes no claim (`generation` and `holder` are
+  null), and the answer's `subject` has `kind` `start`, `request` the proposal and `reason` `start
+  spine <spine>`. `ConfirmIssued.start` is a `StartShown`: `proposal`, `session`, `project_id`,
+  `spine` and `plan_sha256`, so a dialog can name what the code starts. A proposal that is unknown
+  (a restart), withdrawn, failed, being armed, already armed or whose plan hash differs is refused
+  `subject_moved`, and the refusal text names the cause.
 - **`answer`**: `{"request","rev","text","code","command_id"}`. The answer is a `RequestActed`:
   `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record after the act),
   and `resumed`, `hook` for an answer. Fields that do not belong to the verb, and every field on a
@@ -279,6 +293,16 @@ second merge.
 - **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
   `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
   CLI's `ack`.
+- **`arm`** (`r1.s4.w2`): a `DeviceArmArgs`, `{"proposal","plan_sha256","code","command_id"}`. The
+  answer is an `ArmActed`: `schema_version`, `replayed`, `device`, `proposal`, `run_id` and
+  `project_id` (`run_id` is null on a replay that cannot name the run). The controller spends the code, then builds
+  the plan again from the proposal's package snapshot and compares `plan_sha256`. A changed plan or a
+  changed snapshot is a 422 `subject_moved` and the card gets a `failed` result. A transient cause
+  (an earlier run is still active) is a 422 with the cause. The code is spent, and the proposal
+  stays open for a new code. On success the run belongs to the chat's project, and the card gets a `start_result` with
+  `result` `armed`, the run and the device. The device takes no claim, and the CLI's claim is
+  untouched. A replay of the command ID names the same run and arms nothing again. `arm` on the Unix
+  socket with a `code` and no plan is refused (`confirm codes are for paired devices; …`).
 
 `answer`, `clear` and `ack` move the claim to the device when they act (`requests.md`, "The claim"):
 the first device to act wins. An engine refusal after the controller admitted the act (checks red, a
@@ -290,7 +314,7 @@ code is a 422 and no guard failure.
 
 ### Confirm codes
 
-A device must hold a one-use confirm code to act on a request. The code binds one request, its
+A device must hold a one-use confirm code to act on a request, or to arm a run from a start card. The code binds one request, its
 revision, one verb with its parameters (`text_sha256` or `to`), the device, the claim generation
 current at issue and, for an ack, the PR's head SHA. It is `pfc1-` and 32 hex digits, it works once,
 and it expires 120 seconds after issue. At most 4 codes of a device are live. Codes live in memory,
