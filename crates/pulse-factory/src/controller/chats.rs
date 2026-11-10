@@ -74,6 +74,8 @@ pub struct ChatEnv {
     pub server_name: String,
     /// `PF_CHAT_REGISTRY`, default [`DEFAULT_REGISTRY`].
     pub registry: String,
+    /// `PF_CONFIRM_TTL`, whole seconds: it can only shorten the default of 120 seconds (`r1.s4.w1`).
+    pub confirm_ttl: std::time::Duration,
 }
 
 /// The key of an agent in `PF_AGENT_ENV_<AGENT>`: the ID upper-cased, each other character `_`.
@@ -126,6 +128,21 @@ pub fn parse_chat_env(
             }
         },
     };
+    let default_ttl = super::DEFAULT_CONFIRM_TTL;
+    let confirm_ttl = match get("PF_CONFIRM_TTL") {
+        None => default_ttl,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) if (1..=default_ttl.as_secs()).contains(&n) => std::time::Duration::from_secs(n),
+            _ => {
+                warnings.push(format!(
+                    "pulse-factory: PF_CONFIRM_TTL={text:?} is not a number of seconds from 1 to {}; the confirm code lives {} seconds",
+                    default_ttl.as_secs(),
+                    default_ttl.as_secs()
+                ));
+                default_ttl
+            }
+        },
+    };
     let mut agent_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (name, value) in vars {
         let Some(key) = name.strip_prefix("PF_AGENT_ENV_") else {
@@ -134,6 +151,10 @@ pub fn parse_chat_env(
         let mut pairs = BTreeMap::new();
         for pair in value.split_whitespace() {
             match pair.split_once('=') {
+                // The controller sets the marker itself, last; a setting cannot name it.
+                Some((n, _)) if n == super::requests::CHAT_MARKER => warnings.push(format!(
+                    "pulse-factory: {name} names {n}, which the controller sets itself; it is skipped"
+                )),
                 Some((n, v)) if !n.is_empty() => {
                     pairs.insert(n.to_string(), v.to_string());
                 }
@@ -171,6 +192,7 @@ pub fn parse_chat_env(
             agent_env,
             server_name,
             registry,
+            confirm_ttl,
         },
         warnings,
     )
@@ -334,6 +356,10 @@ pub(super) struct Chats {
     /// The branch of each session's worktree as the last live read saw it.
     pub branches: Mutex<BTreeMap<String, (Option<String>, bool)>>,
     pub frames: broadcast::Sender<wire::ChatFrame>,
+    /// The request frames: a second wire type on the same stream (`r1.s4.w1`).
+    pub request_frames: broadcast::Sender<wire::RequestFrame>,
+    /// What the controller last sent of the requests and the claim.
+    pub request_watch: Mutex<super::request_frames::RequestWatch>,
     /// Open streams: the device and the channel that ends the stream.
     pub streams: Mutex<Vec<(String, mpsc::UnboundedSender<StreamEnd>)>>,
     pub ledger: ChatLedger,
@@ -349,6 +375,8 @@ impl Chats {
             meta: Mutex::new(BTreeMap::new()),
             branches: Mutex::new(BTreeMap::new()),
             frames: broadcast::channel(FRAME_CAPACITY).0,
+            request_frames: broadcast::channel(FRAME_CAPACITY).0,
+            request_watch: Mutex::new(Default::default()),
             streams: Mutex::new(Vec::new()),
             ledger: ChatLedger::new(state_dir.join(CHAT_LEDGER_FILE)),
         }
@@ -691,6 +719,9 @@ impl Controller {
                 env.insert(name.clone(), value.clone());
             }
         }
+        // Last, so neither the agent row nor the setting can remove or replace it. A child the chat
+        // detaches keeps the chat's environment, and the caller check reads the marker there.
+        env.insert(super::requests::CHAT_MARKER.to_string(), row.id.clone());
         // Only a session that has had a message has a conversation to resume. The runtime writes
         // no transcript before the first message, so a resume of a session with none would fail
         // as "context lost" (operator ruling on PR #41, class C1). A session with no message
@@ -1391,6 +1422,8 @@ impl Controller {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| StreamRefusal::BadRequest("the controller has no runtime".to_string()))?;
         let rx = self.chats.frames.subscribe();
+        // Subscribed before `hello` is built, so a change that lands meanwhile is not lost.
+        let rrx = self.chats.request_frames.subscribe();
         let (end_tx, end_rx) = mpsc::unbounded_channel();
         {
             let mut streams = lock(&self.chats.streams);
@@ -1417,6 +1450,7 @@ impl Controller {
             session.map(str::to_string),
             after,
             rx,
+            rrx,
             end_rx,
             tx,
         ));
@@ -1485,6 +1519,7 @@ async fn forward(
     session: Option<String>,
     after: u64,
     mut rx: broadcast::Receiver<wire::ChatFrame>,
+    mut rrx: broadcast::Receiver<wire::RequestFrame>,
     mut end: mpsc::UnboundedReceiver<StreamEnd>,
     tx: mpsc::Sender<StreamEvent>,
 ) {
@@ -1506,6 +1541,24 @@ async fn forward(
         }
         Ok(Err(why)) => {
             eprintln!("pulse-factory: the stream's hello cannot be built: {why}");
+            return;
+        }
+        Err(_) => return,
+    }
+    // The open requests and the claim, after `hello` and before the stored items (`r1.s4.w1`).
+    let requests = {
+        let c = controller.clone();
+        tokio::task::spawn_blocking(move || c.requests_frame()).await
+    };
+    match requests {
+        Ok(Ok(frame)) => {
+            let text = serde_json::to_string(&frame).unwrap_or_default();
+            if tx.send(StreamEvent::Frame(text)).await.is_err() {
+                return;
+            }
+        }
+        Ok(Err(why)) => {
+            eprintln!("pulse-factory: the stream's requests frame cannot be built: {why}");
             return;
         }
         Err(_) => return,
@@ -1576,6 +1629,22 @@ async fn forward(
                         _ => false,
                     };
                     if wanted && tx.send(frame_text(&frame)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Lagged { after_seq: last })).await;
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Shutdown)).await;
+                    return;
+                }
+            },
+            received = rrx.recv() => match received {
+                Ok(frame) => {
+                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    if tx.send(StreamEvent::Frame(text)).await.is_err() {
                         return;
                     }
                 }

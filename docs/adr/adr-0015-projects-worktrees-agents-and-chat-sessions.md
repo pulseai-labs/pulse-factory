@@ -1,6 +1,7 @@
 # ADR-0015 — Projects, worktrees, agents and chat sessions: the hierarchy in the controller's store
 
-- **Status:** Proposed, 2026-11-08, at `r1.s3.w2`. It becomes Accepted at the `r1.s3` close.
+- **Status:** Accepted, 2026-11-09. It was owed at the `r1.s3` close (proposed 2026-11-08, at
+  `r1.s3.w2`). The line was written at `r1.s4.w1`.
 - **Date:** 2026-11-08
 - **Amended:** 2026-11-09, at `r1.s3.w3`: the controller's half of the chat: verbs, processes, pump,
   `chat.ledger`, lifetime, `halt` and the caller rule.

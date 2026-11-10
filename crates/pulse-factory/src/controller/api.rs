@@ -26,7 +26,7 @@ use pf_api::types::{
     ApiState, ApiStatus, DeviceRecord, ListenState, PairResult, SCHEMA_VERSION, ServerRef,
 };
 use pf_api::{ApiHost, Outcome, Refusal, RequestRecord, tls};
-use pf_ipc::{Handler, Request, Response};
+use pf_ipc::{Request, Response};
 use serde_json::Value;
 
 use super::commands::{field, now};
@@ -66,6 +66,7 @@ pub const VERBS: &[&str] = &[
     "ack",
     "device_pair",
     "device_revoke",
+    "confirm_code",
     "settings_get",
     "settings_set",
     "settings_unset",
@@ -139,6 +140,10 @@ pub(super) fn request_line(at: &str, record: &RequestRecord) -> String {
     }
     if let Some(until) = &record.blocked_until {
         line.push_str(&format!(" blocked_until={}", field(until)));
+    }
+    // The word of a refused device verb, from the closed list the router checked.
+    if let Some(word) = &record.refusal {
+        line.push_str(&format!(" refusal={}", field(word)));
     }
     line
 }
@@ -337,8 +342,10 @@ impl ApiHost for ApiBridge {
                 super::settings::By::Device(device.id.clone()),
             );
         }
-        // A device acts as the operator (ADR-0009), through the code the socket runs.
-        self.controller.handle(Request::new(verb, args))
+        // A device acts as the operator (ADR-0009). The device verbs on requests run as that device's
+        // own, with a confirm code (`r1.s4.w1`); every other verb runs the code the socket runs.
+        self.controller
+            .handle_device(device, Request::new(verb, args))
     }
 
     fn audit(&self, record: &RequestRecord) {

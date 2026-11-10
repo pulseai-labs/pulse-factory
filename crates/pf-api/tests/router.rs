@@ -425,12 +425,7 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
     let off = [
         "runs",
         "status",
-        "requests",
-        "show",
-        "answer",
         "claim",
-        "clear",
-        "ack",
         "arm",
         "halt",
         "hook",
@@ -460,9 +455,10 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{verb}");
     }
     assert_eq!(calls(&fake), 0);
-    // The three settings verbs are on the list (`r1.s4.w4`), and so are the project and chat verbs.
-    // The test pins no exact count, so it holds whatever the other round-1 item adds. `halt`, every
-    // ack, `session_redact` (the CLI only) and `session_items` (the stream reads the items) are off.
+    // The allowlist holds the ten verbs of the chat spine (the project verbs and the chat verbs), the
+    // three settings verbs (`r1.s4.w4`), and `r1.s4.w1` adds the device verbs (`tests/device_verbs.rs`).
+    // The test pins no exact count. `halt`, `claim`, `arm`, `session_redact` (the CLI only) and
+    // `session_items` (the stream reads the items) are off.
     for verb in [
         "project_add",
         "project_list",

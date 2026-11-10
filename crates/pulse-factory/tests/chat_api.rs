@@ -415,7 +415,8 @@ fn the_verbs_and_the_stream_carry_a_chat_with_no_polling() {
     let turn = &frames[result]["item"]["body"];
     assert_eq!(turn["usage"]["cost_micros"], 270);
 
-    // The overview stream saw `session` frames and nothing of the chat's own.
+    // The overview stream saw `session` frames and the request frames (`r1.s4.w1`: they go to every
+    // stream), and nothing of the chat's own.
     let seen = collect(&mut overview, "a session frame", |f| {
         f.iter().any(|x| x["type"] == "session")
     });
@@ -426,8 +427,10 @@ fn the_verbs_and_the_stream_carry_a_chat_with_no_polling() {
     }
     for f in seen.iter().chain(more.iter()) {
         assert!(
-            f["type"] == "session",
-            "an overview stream carries session frames only: {f}"
+            ["session", "requests", "request", "claim"]
+                .iter()
+                .any(|t| f["type"] == *t),
+            "an overview stream carries session and request frames only: {f}"
         );
     }
 

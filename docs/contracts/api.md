@@ -18,7 +18,9 @@ verbs that manage it are `device` and `api` in `cli.md`. The Rust types are in `
   `schema_version` (now `1`). A change that removes or renames a field raises it, as for the CLI
   (ADR-0004).
 - **Errors.** Every error answer is `{"error": "<text>"}`. The text never holds a token, a pairing
-  code or a key.
+  code, a confirm code or a key. A refused device verb (422) also holds `"refusal": "<word>"`, one
+  word of the closed list in "Confirm codes": `{"error": "<text>", "refusal": "code_used"}`. A client
+  that reads no `refusal` still reads the error text.
 - **The token.** A route that needs a device token reads `Authorization: Bearer <token>`. The token is
   64 lower-case hex digits (32 random bytes). The server keeps only the SHA-256 of the 32 bytes. The
   token appears once, in the answer of `POST /v1/pair`, and nowhere else.
@@ -31,7 +33,9 @@ verbs that manage it are `device` and `api` in `cli.md`. The Rust types are in `
   is null only with the API off).
 - **Acting as the operator.** A device acts as the operator and has no scope of its own (ADR-0009). A
   call goes through the controller's verb handler, the same code that the Unix socket runs, so each
-  admission, refusal and ledger line is the CLI's.
+  admission, refusal and ledger line is the CLI's. The exceptions are the device verbs `confirm_code`,
+  `answer`, `clear` and `ack`: they go through the controller's device path, where a one-use confirm
+  code replaces the claim token (see "Confirm codes").
 
 ## Routes
 
@@ -78,7 +82,7 @@ with `replayed` true.
 - **403** `{"error": "the verb \"<verb>\" is not open to devices"}` for a verb that is not on the
   allowlist, and for an unknown verb. The call does not reach the handler.
 - **422** with the handler's message when the controller refuses the command (for example a root that
-  does not exist).
+  does not exist). A refused device verb adds `refusal` (see "Confirm codes").
 - **400** `{"error": "the body is not JSON"}` for a body that is not JSON. **413** for a body over
   1 MiB.
 
@@ -111,13 +115,34 @@ already holds (default 0). With no `session` the stream carries the overview onl
 {"type":"tool_running","session_id":"S-1","call_id":"toolu_01V9…","tool":"Bash"}
 ```
 
+The same stream carries three more frames, the **request frames** (`RequestFrame`, a separate wire
+type; the chat frames above do not change). Each holds a `RequestSummary`, as `requests` rows do, and
+a `ClaimRecord`. A client that does not know a `type` skips it.
+
+```json
+{"type":"requests","requests":[{"id":"R-4","revision":1,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR waits for the claim's ack","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"9f2c0d1e5b7a43c8d6e1f0a2b3c4d5e6f7a8b9c0"}],"claim":{"generation":2,"holder":"device D-1 (MacBook)","device":"D-1","revoked":false,"claimed_at":"2026-11-09T21:04:50.118Z"}}
+{"type":"request","request":{"id":"R-4","revision":2,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR head moved","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"0a1b2c3d4e5f60718293a4b5c6d7e8f901234567"}}
+{"type": "claim", "claim": {"generation":3,"holder":"ann@draco-desk:claude","device":null,"revoked":false,"claimed_at":"2026-11-09T21:09:02.771Z"}}
+```
+
+- `requests` is sent on every connection right after `hello`, before the stored items. It holds the
+  open requests of every run and the current claim (null when none). Reading `requests` on reopen is
+  enough on its own: the stream only keeps it live.
+- `request` is sent when a request is new or changed: opened, revised, answered or withdrawn.
+- `claim` is sent when the current claim changes, with `claim` null when none holds it. A
+  `confirm_code` changes no claim and sends none.
+- The controller sends them after each tick and after each request verb, from the socket or the API.
+  A change that lands between the snapshot and the live frames arrives twice, so a reader keys by
+  `(id, revision, status)`. A request frame goes to every stream, whatever session it follows. A
+  stream that lags closes with 4002, as for the chat frames.
+
 - `hello` comes first. It names the server, holds every live session as a `ChatSessionRecord`
   (id, project, worktree, branch, state, process with its `qualified` flag and holders, model,
   effort, permission mode, runtime options, pending options, summed usage, the cache-warm time,
   the context gauge), `following` (the session ID or null) and `after_seq`.
 - `session` carries a session's record again after anything that changes it: its state, its cost,
   its holders, its process. The app never polls (A8). A stream with no `session` query carries
-  `hello` and `session` frames only.
+  `hello`, `session` and the request frames only.
 - `item` carries one stored item of the followed session: `operator_message`, `assistant_text`,
   `tool_call` (with its `input` and `output` as `{text, bytes, truncated}`), `approval_request`,
   `approval_answer`, `question_request`, `question_answer`, `background_task`, `notice`,
@@ -189,17 +214,22 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `session_interrupt` | `session interrupt` |
 | `session_set` | `session set` |
 | `session_end` | `session end` |
+| `requests` | `requests` |
+| `show` | `show` |
+| `confirm_code` | none (API only) |
+| `answer` | `answer`, with a confirm code in place of the token |
+| `clear` | `clear`, with a confirm code in place of the token |
+| `ack` | `ack`, with a confirm code in place of the token |
 | `settings_get` | `settings get` |
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
 
-Every other verb is 403: `runs`, `status`, `requests`, `show`, `answer`, `claim`, `clear`, `ack`,
-`arm`, `halt`, `hook`, `device_pair`, `device_list`, `device_revoke`, `api_status`, `session_items`
-and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
+Every other verb is 403: `runs`, `status`, `claim`, `arm`, `halt`, `hook`, `device_pair`,
+`device_list`, `device_revoke`, `api_status`, `session_items` and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
 read the item before keeps its copy (ADR-0015's known limit), and the operator decides on the host.
 `session_items` is off the list because the stream's `after=0` gives the history. There is no way
-for a device to pair another device, revoke one, claim, answer, ack, arm or halt. `halt` and every
-merge-ack verb stay off the list: the human confirm of an ack comes with `r1.s4`.
+for a device to pair another device, revoke one, claim, arm or halt. A device takes the claim only
+by acting with a confirm code: there is no `claim` verb on the API. `halt` stays off the list.
 
 The chat verbs take the arguments and give the answers that `cli.md` lists under `session`. Each
 state-changing one takes a `command_id`, and the same ID with the same content returns the first
@@ -215,6 +245,76 @@ revoked one (401), and the write is admitted as the operator's (ADR-0009). The `
 line of a device's write names it, `setting_set <key> admitted scope=<scope> value=<json> by=D-<n>
 command=<id>`, and the request ledger has one `api.ledger` line for the call, with `verb=settings_<…>`,
 `device=D-<n>` and the outcome (`ok`, `replayed`, or `refused` for an unknown key or a bad value).
+
+### The device verbs
+
+Each takes a JSON body. A state-changing verb takes a `command_id`: the same ID with the same content
+returns the first record with `replayed` true and acts on nothing, with no second engine call and no
+second merge.
+
+- **`requests`**: `{"run"?: "<run>", "all"?: true}`. The answer is a `RequestList`: `schema_version`,
+  `open`, `requests` (each a `RequestSummary` with `verbs`, and `pr`, `base` and `head_sha` for a
+  `merge_ack`) and `claim` (the current claim, or null). It is the JSON of the CLI's `requests --json`.
+- **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer` and
+  `answer_generation`. It is the JSON of `show --json`.
+- **`confirm_code`**: `{"subject": {"kind":"request","request":"R-4","revision":1,"verb":"ack"},
+  "command_id": "<id>"}`. The `verb` is `answer`, `clear` or `ack`, and it must be one that the
+  request takes (`ack` for a `merge_ack`, `answer` or `clear` for the rest). An `answer` subject
+  adds `"text_sha256": "<64 lower-case hex digits>"`, the SHA-256 of the answer text; the text never
+  reaches the controller at issue. A `clear` subject adds `"to": "<stage>"` or no `to`. The answer
+  is a `ConfirmIssued`: `schema_version`, `replayed`, `code` (null on a replay), `expires_at`,
+  `device`, `generation` (the claim generation the code binds, or null), `holder` (the claim at
+  the issue, so a dialog can say whom the act takes the claim from) and `subject` (the request,
+  revision, kind, run, unit, reason, and for a `merge_ack` the `pr`, `base`, `head_branch` and
+  `head_sha`). **Issuing a code moves no claim.** A replay of the command ID returns this first
+  record with `replayed` true and `code` null, whatever moved since; after a restart, or 10 minutes
+  past the code's expiry, the first record is gone and a replay carries the facts the store still
+  has, with `expires_at` and `generation` null.
+- **`answer`**: `{"request","rev","text","code","command_id"}`. The answer is a `RequestActed`:
+  `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record after the act),
+  and `resumed`, `hook` for an answer. Fields that do not belong to the verb, and every field on a
+  replay, are null.
+- **`clear`**: `{"request","rev","to"?,"code","command_id"}`. The request names the unit and must be
+  its open request. The answer is a `RequestActed` with `to_stage`.
+- **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
+  `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
+  CLI's `ack`.
+
+`answer`, `clear` and `ack` move the claim to the device when they act (`requests.md`, "The claim"):
+the first device to act wins. An engine refusal after the controller admitted the act (checks red, a
+halted run, a changed pinned file) is a 422 with the engine's cause, and the code is spent. A
+`confirm_code`, `answer`, `clear` or `ack` on the Unix socket is refused (`confirm codes are for
+paired devices; on this host use pulse-factory claim`). The peer guard covers these verbs: the token
+is checked first, so five bad tokens on `confirm_code` block the peer as on any route. A refused
+code is a 422 and no guard failure.
+
+### Confirm codes
+
+A device must hold a one-use confirm code to act on a request. The code binds one request, its
+revision, one verb with its parameters (`text_sha256` or `to`), the device, the claim generation
+current at issue and, for an ack, the PR's head SHA. It is `pfc1-` and 32 hex digits, it works once,
+and it expires 120 seconds after issue. At most 4 codes of a device are live. Codes live in memory,
+and a restart voids them. The full rules are in `requests.md`, "Confirm codes".
+
+A refused code is a 422 whose body holds `refusal`, one word of this closed list
+(`pf_api::host::REFUSALS`):
+
+| Word | Meaning |
+|---|---|
+| `code_unknown` | The table never held the code. Every live code of the calling device is voided. |
+| `code_foreign` | Another device's code. That code is spent. |
+| `code_used` | The code was spent before. |
+| `code_voided` | The 4-per-device cap or a revoke voided the code. |
+| `code_expired` | The code is past its time. |
+| `code_subject` | The request, verb or parameters differ from those the code binds. |
+| `subject_moved` | The request is closed, its revision moved, or the PR head moved. |
+| `claim_moved` | The claim moved to someone else since the issue. The text names the new holder. |
+| `device_revoked` | The device was revoked after the router checked its token. |
+
+A word outside the list is dropped from the body and from the ledger. A revoke refuses the device's
+next call with 401 and voids its live codes, but an act already past the code check completes, so an
+ack in flight still merges. That is a known limit. The code proves the device, the freshness and the
+head SHA, not that a person pressed the button.
 
 **Each later spine that adds a verb amends ADR-0012** (planning audit C2). The list lives in
 `pf_api::host::ALLOWLIST`, and the router test names every verb that must stay off it.
@@ -338,6 +438,9 @@ state-changing call has both lines: its admission line in `controller.ledger` an
 <UTC time> api route=<route> verb=<verb|-> device=<D-n|-> peer=<ip> status=<code> outcome=<outcome>
 ```
 
+A refused device verb ends with ` refusal=<word>`, one word of the closed list in "Confirm codes":
+`… status=422 outcome=refused refusal=code_used`. No other line has it.
+
 - `route` is `pair`, `status`, `verb`, `stream` or `other`. `device` is the device whose token matched, and
   `-` when none did (a pairing has no token, so it shows `-`). The device ID is the only name of the
   caller.
@@ -358,7 +461,7 @@ state-changing call has both lines: its admission line in `controller.ledger` an
   for the `101` (a refusal has its usual outcome). The close writes no second line. A ninth open
   stream of one device is answered 429, and the router maps every 429 to `outcome=blocked`, so that
   refusal reads `outcome=blocked` in `api.ledger` although it is no guard block.
-- **No token, code, secret, key or message text** is in any line.
+- **No token, code, confirm code, secret, key or message text** is in any line.
 - The file is append-only, with no `fsync` per line, and it is not in the store. A crash can lose the
   last lines. A failed append prints one line on stderr, and the request still gets its answer.
 - A TLS failure before HTTP (a pin mismatch, a handshake timeout) is no request and writes no line.
@@ -400,8 +503,9 @@ There is no key rotation without a re-pair in this version.
 
 ## Out of this version
 
-These come in later items and spines: the chat screens (`r1.s3.w5`); per-device scopes and the
-merge-ack confirm (`r1.s4`); rotation or a size cap of `api.ledger`, `chat.ledger` and `controller.ledger` (the feature map's "controller ledger
+These come in later items and spines: the chat screens (`r1.s3.w5`); the Needs you screens and the
+arm through a confirm code (`r1.s4`, later rounds); per-device scopes, and a user-presence check on
+the confirm (a person's press, not only the device's); rotation or a size cap of `api.ledger`, `chat.ledger` and `controller.ledger` (the feature map's "controller ledger
 rotation"); a per-device rate limit, a ban list that survives a restart and a limit on successful
 calls; a `session_items` verb for devices (the stream's `after=0` gives the history); several
 servers in one app (the server headers are its groundwork).

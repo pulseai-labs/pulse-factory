@@ -5,6 +5,8 @@
 - **Amended:** 2026-11-07, at `r1.s2.w2`: the operator's paired devices act as the operator, and "no
   headless or API execution" now means no execution beyond the API allowlist. Nothing else above
   changes.
+- **Amended:** 2026-11-09, at `r1.s4.w1`: a device reads requests and answers, clears and acks with a
+  confirm code, taking the claim as it acts; the claim is one for the whole store.
 
 ## Context
 - The first build supports one operator, one Linux host and a Mac client.
@@ -51,3 +53,16 @@ ADR-0012 adds paired devices.
 - **The control core is unchanged.** A device command is an admission under `@controller` with a
   command ID. The same ID with the same content returns the same record, and changed content is a
   conflict (ADR-0003, amended).
+
+## Amendment, 2026-11-09 (`r1.s4.w1`): the device verbs, and the claim's scope
+
+- **Devices answer.** A device now reads `requests` and `show`, and it calls `confirm_code`,
+  `answer`, `clear` and `ack` with a confirm code (ADR-0005, amended; ADR-0012, amended). It takes
+  the claim as it acts: `confirm_code` moves nothing, and the spend fences the holder its code saw.
+  There is still no `claim` verb, no `halt` and no `arm` for a device on the API (`arm` comes with
+  `r1.s4.w2`). The device still acts as the operator and has no scope of its own.
+- **One current claim for the whole store.** The Decision's "one active claim per project" is
+  reconciled with what the code does: one current claim for the whole store, across every run and
+  project. The `claims` table has no run or project column, and `claims_one_current` (migration 0002)
+  allows at most one row with no `fenced_at`. A claim taken for any run fences the holder of every
+  other. This amendment states it as the rule. The store does not change.

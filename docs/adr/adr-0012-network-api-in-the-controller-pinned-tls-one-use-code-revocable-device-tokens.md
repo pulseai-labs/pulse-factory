@@ -6,6 +6,10 @@
   headers and `upgraded` in the request ledger.
 - **Amended:** 2026-11-09, at `r1.s3.w4`: the client half of the stream in `pf-client`, the server
   memory, and the reconnect rule. No route, verb or wire type is added.
+- **Amended:** 2026-11-09, at `r1.s4.w1`: six verbs on the allowlist (`requests`, `show`,
+  `confirm_code`, `answer`, `clear`, `ack`), the per-device confirm code, the request frames on the
+  stream, `refusal` in the error body and `refusal=` in the request ledger, and the revoke window as a
+  known limit.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -78,8 +82,9 @@
   pairing time, last-seen time, last peer address and revoke time (migration 0004).
 - Pairing and revoking are admissions under `@controller`, each with one controller-ledger line that
   names the device and never the code or the token (ADR-0003, amended).
-- A device acts as the operator and has no scope of its own (ADR-0009, amended). Per-device scopes
-  and the human confirm of a merge-ack come with `r1.s4`.
+- A device acts as the operator and has no scope of its own (ADR-0009, amended). There are still no
+  per-device scopes. The per-device confirm of an act is the confirm code (see the amendment of
+  `r1.s4.w1` below).
 
 Rejected alternatives:
 - **Caddy as the TLS edge.** It adds a second process and a certificate qualification (D-186), and
@@ -359,6 +364,34 @@ no decision above.
   no gap), a revoke (`closed` within a second, no later upgrade in `api.ledger`, the next call `unauthorized`),
   one `route=stream` line per connection and none while a stream is idle, and the bridge carrying the same
   frames (`crates/pulse-factory/tests/client_chat.rs`, 2026-11-09).
+
+## The device verbs and the confirm code (r1.s4.w1)
+
+This amends the allowlist rule: a later spine that adds a verb amends this ADR, and this item does.
+
+- **Six verbs join the allowlist:** `requests`, `show`, `confirm_code`, `answer`, `clear`, `ack`.
+  `claim`, `arm`, `halt`, `device_pair` and `device_revoke` stay off it. `confirm_code` is on the
+  API only. `confirm_code`, `answer`, `clear` and `ack` go through the controller's device path
+  (`handle_device`), which is not on the socket; `requests` and `show` run through the ordinary
+  handler.
+- **The per-device confirm is the confirm code.** It replaces "the human confirm of a merge-ack comes
+  with `r1.s4`". A code is one-use, 120 seconds, in memory only, bound to the device, one request, its
+  revision, one verb with its parameters, the claim generation at issue and, for an ack, the PR's head
+  SHA. There are still no per-device scopes. `docs/contracts/api.md` and `requests.md` hold the rules.
+- **A refusal has a word.** The closed list is `pf_api::host::REFUSALS`. The 422 body carries
+  `refusal`, `RequestRecord.refusal` carries it, and the request ledger line ends with
+  `refusal=<word>`. A word outside the list is dropped.
+- **Request frames.** `RequestFrame` (`requests`, `request`, `claim`) is a second wire type on the
+  same stream. `ChatFrame` does not change, and a client skips a `type` it does not know.
+- **No secret in a log.** No confirm code is in any ledger, the store, stderr or an error. The store
+  keeps its SHA-256 in the admission content, and the code table keeps only the hash.
+- **Known limit (the revoke window).** A revoke refuses the device's next call (401) and voids its
+  live codes, but an act already past the code check completes, because the check and the engine call
+  run under one lock and the revoke does not wait for it. An ack in flight still merges. A revoked
+  device's claim stays current until the operator's next `claim`.
+- **Known limit.** The code proves the device, the freshness and the head SHA, not that a person
+  pressed the button. A paired device's token that is stolen, with an unspent code, acts until the
+  operator revokes the device.
 
 ## The settings verbs (r1.s4.w4)
 

@@ -643,8 +643,6 @@ fn verbs_off_the_allowlist_are_refused_with_403_on_the_real_controller() {
     let token = rig.paired("macbook");
     for verb in [
         "halt",
-        "ack",
-        "answer",
         "claim",
         "arm",
         "runs",
