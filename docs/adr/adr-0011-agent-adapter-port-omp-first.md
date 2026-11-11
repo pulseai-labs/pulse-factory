@@ -12,7 +12,7 @@
   adapter measures a push in git and no longer reads it from a call's output.
 - **Amended:** 2026-11-08, at `r1.s3.w1`: the terminal rule holds for run seats. Chat sessions run
   on the chat port (ADR-0014).
-- **Amended:** 2026-11-11, in a patch: OMP 18.16.0 is qualified by a real probe run on DeepSeek V4.1
+- **Amended:** 2026-11-11, in a patch: OMP 18.16.0 is qualified by the real probes on DeepSeek V4.1
   Flash, and the probes' model moved to it (see "Qualified versions"). No decision changed.
 
 ## Context
@@ -128,8 +128,9 @@ model, and no decision here changes. (Superseded in part the same day: see "Qual
 ### Qualified versions
 - **18.11.3:** the spike of 2026-10-25 and the probes of 2026-11-01, on `zai/glm-5.3-flash`.
 - **18.16.0 (2026-11-11):** the real probes ran on OMP 18.16.0 with
-  `ollama-daemon/deepseek-v4.1-flash:1017-cloud`, now `probe::PROBE_MODEL`. They spent 6 sessions
-  of the budget (13 used before, 19 after, `LIMIT` 20). Each probe passed, and each result matched
+  `ollama-daemon/deepseek-v4.1-flash:1017-cloud`, now `probe::PROBE_MODEL`. Before the run,
+  `omp --version` on the probe host printed `omp/18.16.0`, and the budget counter file read 13. After
+  the run it read 19: the probes spent 6 sessions of `LIMIT` 20. Each probe passed, and each result matched
   the claim above it:
   - `real_probe_launch`: the turn ended, the session was idle, and `usage` carried input, output,
     cache-read and cost fields. No launch dialog appeared (duty 6).
@@ -149,7 +150,8 @@ model, and no decision here changes. (Superseded in part the same day: see "Qual
   qualification shipped. A launch on an unqualified version parks the unit with a request, as before.
 
 ### Unverified claims
-None. `r0.s1.w3` settled the six that this ADR listed.
+None on 18.11.3: `r0.s1.w3` settled the six that this ADR listed. On 18.16.0 the subagents probe was
+not re-run (see "Qualified versions").
 
 ### Spike contract
 
