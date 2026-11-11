@@ -117,6 +117,11 @@ These were settled on 2026-11-01, on OMP 18.11.3 and `zai/glm-5.3-flash`, by the
   files: the seat's system prompt held the operator's `~/.omp/agent/AGENTS.md`. This is a known
   limit, not a settled claim.
 
+Note, 2026-11-11: the claims above were verified on `zai/glm-5.3-flash`, the model of their day.
+The Z.AI quota has since ended, and the shipped `ossify-spine` roles now run
+`ollama-daemon/deepseek-v4.1-flash:1017-cloud` (operator ruling G10). No claim was re-run on that
+model, and no decision here changes.
+
 ### Unverified claims
 None. `r0.s1.w3` settled the six that this ADR listed.
 

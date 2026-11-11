@@ -36,29 +36,30 @@ plugins:
     # 1.30.0: the first close with `--verdict`; it reads a caller's verdict, `agent` key included.
     min_version: 1.30.0
 
-# Cheap models. Every role runs in the OMP runtime.
+# Cheap models. Every role runs in the OMP runtime, on DeepSeek V4.1 Flash since 2026-11-11 (G10).
 roles:
   lane:
     runtime: omp
-    model: zai/glm-5.3-flash
+    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
     rules: rules/lane.yaml
   implementer:
     runtime: omp
-    model: zai/glm-5.3-flash
+    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
     rules: rules/implementer.yaml
   verifier:
     runtime: omp
-    model: zai/glm-5.3-flash
+    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
     rules: rules/verifier.yaml
   close:
     runtime: omp
-    model: zai/glm-5.3-flash
+    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
     rules: rules/close.yaml
   # The item PR reviewer. It reads the PR and writes one review file. The operator ruled the
-  # model (G10): zai/glm-5.3 now, DeepSeek V4.1 Flash when the Z.AI quota ends.
+  # model (G10): zai/glm-5.3 now, DeepSeek V4.1 Flash when the Z.AI quota ends. The quota ended,
+  # and on 2026-11-11 every role switched to DeepSeek V4.1 Flash through the local Ollama daemon.
   reviewer:
     runtime: omp
-    model: zai/glm-5.3
+    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
     rules: rules/reviewer.yaml
 
 settings:

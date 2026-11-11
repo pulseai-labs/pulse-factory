@@ -68,10 +68,9 @@ want() { printf '%s\n' "$out" | grep -qxF -- "$1" || fail "the summary lacks the
 want "spine: s1"
 want "items: 3"
 want "workflow: ossify-spine (file version 1)"
-for role in lane implementer verifier close; do
-  want "role $role: runtime omp, model zai/glm-5.3-flash"
+for role in lane implementer verifier close reviewer; do
+  want "role $role: runtime omp, model ollama-daemon/deepseek-v4.1-flash:1017-cloud"
 done
-want "role reviewer: runtime omp, model zai/glm-5.3"
 want "caps: model_sessions 2, cold_builds 1"
 want "caps: seed lane runs at most 12 times"
 want "caps: seed spine runs at most 1 times"
