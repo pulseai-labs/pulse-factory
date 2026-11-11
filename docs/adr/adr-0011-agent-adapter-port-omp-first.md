@@ -150,8 +150,8 @@ model, and no decision here changes. (Superseded in part the same day: see "Qual
   qualification shipped. A launch on an unqualified version parks the unit with a request, as before.
 
 ### Unverified claims
-None on 18.11.3: `r0.s1.w3` settled the six that this ADR listed. On 18.16.0 the subagents probe was
-not re-run (see "Qualified versions").
+None on 18.11.3: `r0.s1.w3` settled the six that this ADR listed. For 18.16.0, "Qualified versions"
+names the one probe that was not re-run.
 
 ### Spike contract
 
