@@ -205,6 +205,23 @@ describe("Set and Unset", () => {
     expect(cap.getByText("Enter a number.")).toBeTruthy();
   });
 
+  it("does not send a list field that holds no pattern, and says so: an empty list is an Unset, not a Set", async () => {
+    const fake = seeded();
+    const user = await open(fake);
+    const deny = row("chat.deny_commands");
+
+    // Left blank.
+    await user.click(deny.getByRole("button", { name: "Set at this scope" }));
+    expect(fake.count("settingsSet")).toBe(0);
+    expect(deny.getByRole("alert").textContent).toBe("Enter at least one pattern, or use Unset.");
+
+    // Blank lines and spaces only: still no pattern.
+    await user.type(deny.getByLabelText("New value"), "  {Enter}{Enter} {Enter}");
+    await user.click(deny.getByRole("button", { name: "Set at this scope" }));
+    expect(fake.count("settingsSet")).toBe(0);
+    expect(deny.getByRole("alert").textContent).toBe("Enter at least one pattern, or use Unset.");
+  });
+
   it("shows Unset only for a layer at exactly the chosen scope, and unsetting shows the built-in value again", async () => {
     const fake = seeded();
     fake.settingLayers["chat.self_turn_cap"] = [{ scope: SERVER, value: 6, set_by: "cli", set_at: AT }];

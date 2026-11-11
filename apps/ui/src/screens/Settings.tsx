@@ -65,19 +65,23 @@ const APPLIES: Record<SettingRecord["applies"], string> = {
   next_launch: "at the next launch",
 };
 
-/** The value the operator typed, as the key's type wants it; a string is the line to show when it does not parse. */
+/**
+ * The value the operator typed, as the key's type wants it; a string is the line to show when it does not
+ * parse. A list with no pattern does not parse: a blank field would set an empty list at this scope, and
+ * the page does not set one on a click. Clearing this scope's value is Unset.
+ */
 function parseDraft(record: SettingRecord, draft: string): { value: SettingValue } | { error: string } {
   if (typeof record.built_in === "number") {
     const n = Number(draft);
     if (draft.trim() === "" || !Number.isFinite(n)) return { error: "Enter a number." };
     return { value: n };
   }
-  return {
-    value: draft
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== ""),
-  };
+  const patterns = draft
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (patterns.length === 0) return { error: "Enter at least one pattern, or use Unset." };
+  return { value: patterns };
 }
 
 /** What a lost answer leaves to retry: the same call, with the command ID it already has. */
