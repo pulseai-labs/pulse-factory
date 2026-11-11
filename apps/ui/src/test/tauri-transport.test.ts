@@ -63,10 +63,41 @@ describe("the Tauri transport invokes the command of each method's name", () => 
     expect(invoke).toHaveBeenCalledWith("project_add", { args });
   });
 
+  it("confirmCode and arm invoke the generic verb command with {name, args} (O2)", async () => {
+    invoke.mockResolvedValue({ ok: 1 });
+    const t = createTauriTransport();
+    const confirmArgs = { subject: { kind: "arm" as const, proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c-1" };
+    const armArgs = { proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c-2" };
+    await t.confirmCode(confirmArgs);
+    await t.arm(armArgs);
+    expect(invoke).toHaveBeenNthCalledWith(1, "verb", { name: "confirm_code", args: confirmArgs });
+    expect(invoke).toHaveBeenNthCalledWith(2, "verb", { name: "arm", args: armArgs });
+  });
+
   it("forget invokes forget and returns nothing", async () => {
     invoke.mockResolvedValueOnce(null);
     await expect(createTauriTransport().forget()).resolves.toBeUndefined();
     expect(invoke).toHaveBeenCalledWith("forget", undefined);
+  });
+
+  it("the device verbs, the settings verbs and runList go through the one `verb` command (r1.s4.w3, W5)", async () => {
+    invoke.mockResolvedValue({ schema_version: 1 });
+    const t = createTauriTransport();
+    await t.runList();
+    expect(invoke).toHaveBeenLastCalledWith("verb", { name: "run_list", args: {} });
+    const ack = { request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c-1" };
+    await t.ack(ack);
+    expect(invoke).toHaveBeenLastCalledWith("verb", { name: "ack", args: ack });
+    await t.requests();
+    expect(invoke).toHaveBeenLastCalledWith("verb", { name: "requests", args: {} });
+    await t.settingsSet({ key: "chat.self_turn_cap", value: 5, command_id: "c-2" });
+    expect(invoke).toHaveBeenLastCalledWith("verb", {
+      name: "settings_set",
+      args: { key: "chat.self_turn_cap", value: 5, command_id: "c-2" },
+    });
+    // No new command of its own for any of them: the names are in the `verb` payload only.
+    const commands = invoke.mock.calls.map(([c]) => c as string);
+    expect(new Set(commands)).toEqual(new Set(["verb"]));
   });
 
   it("returns what the command returns, and no method takes a token", async () => {
@@ -94,6 +125,14 @@ describe("a rejection becomes a TransportError of its kind", () => {
     ["sessionInterrupt", (t) => t.sessionInterrupt({ session_id: "S-1", command_id: "c" })],
     ["sessionSet", (t) => t.sessionSet({ session_id: "S-1", effort: "low", command_id: "c" })],
     ["sessionEnd", (t) => t.sessionEnd({ session_id: "S-1", command_id: "c" })],
+    ["requests", (t) => t.requests()],
+    ["show", (t) => t.show({ id: "R-1" })],
+    ["confirmCode", (t) => t.confirmCode({ subject: { kind: "request", request: "R-1", revision: 1, verb: "ack" }, command_id: "c" })],
+    ["answer", (t) => t.answer({ request: "R-1", rev: 1, text: "x", code: "pfc1-0123", command_id: "c" })],
+    ["ack", (t) => t.ack({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c" })],
+    ["runList", (t) => t.runList()],
+    ["confirmCode", (t) => t.confirmCode({ subject: { kind: "arm", proposal: "sp-1", plan_sha256: "a".repeat(64) }, command_id: "c" })],
+    ["arm", (t) => t.arm({ proposal: "sp-1", plan_sha256: "a".repeat(64), code: "pfc1-x", command_id: "c" })],
   ];
 
   it.each(TRANSPORT_ERROR_KINDS)("kind %s", async (kind) => {
@@ -105,6 +144,16 @@ describe("a rejection becomes a TransportError of its kind", () => {
       expect((err as TransportError).kind, name).toBe(kind);
       expect((err as TransportError).message, name).toBe(`text of ${kind}`);
     }
+  });
+
+  it("a refusal word reaches the error, and a rejection with a non-string one has none", async () => {
+    const t = createTauriTransport();
+    invoke.mockRejectedValueOnce({ kind: "refused", message: "that code was used", refusal: "code_used" });
+    const a = (await t.ack({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c" }).catch((e: unknown) => e)) as TransportError;
+    expect([a.kind, a.message, a.refusal]).toEqual(["refused", "that code was used", "code_used"]);
+    invoke.mockRejectedValueOnce({ kind: "refused", message: "x", refusal: 7 });
+    const b = (await t.ack({ request: "R-1", rev: 1, code: "pfc1-0123", command_id: "c" }).catch((e: unknown) => e)) as TransportError;
+    expect(b.refusal).toBeUndefined();
   });
 
   it("an unknown kind or a rejection of another shape is a server error", async () => {

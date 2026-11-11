@@ -207,6 +207,9 @@ async fn collect(
     while !done(&frames) {
         match next_event(stream, what).await {
             StreamEvent::Frame { frame } => frames.push(serde_json::to_value(frame).unwrap()),
+            // The controller sends a `requests` frame after every `hello` (`r1.s4.w1`), and the
+            // client carries it as its own event (`r1.s4.w3`): this test is about the chat.
+            StreamEvent::RequestFrame { .. } => {}
             other => panic!("{other:?} while waiting for {what}: {}", summary(&frames)),
         }
     }
@@ -505,6 +508,7 @@ fn a_dropped_connection_reconnects_and_every_item_arrives_once_in_order() {
                         }
                     }
                 }
+                StreamEvent::RequestFrame { .. } => {}
                 StreamEvent::Reconnecting { reason, .. } => {
                     assert_eq!(reason, "the connection dropped");
                     reconnecting += 1;
@@ -650,6 +654,11 @@ impl Sse {
         let mut frames = Vec::new();
         loop {
             let event = self.event().await;
+            // The bridge carries the controller's `requests` frame as `request_frame`
+            // (`r1.s4.w3`); this test is about the chat, as `collect` above.
+            if event["event"] == "request_frame" {
+                continue;
+            }
             assert_eq!(event["event"], "frame", "{event}");
             let frame = event["frame"].clone();
             let end = done(&frame);

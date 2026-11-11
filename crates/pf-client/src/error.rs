@@ -3,7 +3,8 @@
 //!
 //! One type, [`ClientError`], is the failure of every call. Its `kind` serializes to the nine names
 //! of the transport contract. Its message is short and never holds a secret: it is the server's own
-//! `{"error": "<text>"}` cut to 300 characters, or `the server answered <status>`.
+//! `{"error": "<text>"}` cut to 300 characters, or `the server answered <status>`. A refused device
+//! verb also carries `refusal`, the word of the closed list.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,11 +48,14 @@ pub enum Route {
 }
 
 /// The failure of one call. It serializes as `{"kind": …, "message": …}`, the shape of a Tauri
-/// rejection and of the bridge's error.
+/// rejection and of the bridge's error. A refused device verb adds `refusal`, one word of
+/// `pf_api::host::REFUSALS` (`r1.s4.w3`, W3); an error with no word keeps the two-field JSON.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientError {
     pub kind: ErrorKind,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
 }
 
 impl ClientError {
@@ -59,6 +63,7 @@ impl ClientError {
         ClientError {
             kind,
             message: message.into(),
+            refusal: None,
         }
     }
 
@@ -124,11 +129,23 @@ pub fn error_from_status(status: u16, route: Route, body: &[u8], secrets: &[&str
         (400 | 413, _) => ErrorKind::BadRequest,
         _ => ErrorKind::Server,
     };
-    let raw = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
+    let parsed = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let raw = parsed
+        .as_ref()
         .and_then(|v| v.get("error").and_then(|e| e.as_str().map(str::to_string)))
         .unwrap_or_default();
     let message =
         safe_text(&raw, secrets).unwrap_or_else(|| format!("the server answered {status}"));
-    ClientError::new(kind, message)
+    let mut error = ClientError::new(kind, message);
+    // Only a 422 carries a refusal word, and only a word of the closed list is kept: any other
+    // value is the server's text, not a word.
+    if status == 422 {
+        error.refusal = parsed
+            .as_ref()
+            .and_then(|v| v.get("refusal"))
+            .and_then(|w| w.as_str())
+            .filter(|w| pf_api::host::REFUSALS.contains(w))
+            .map(str::to_string);
+    }
+    error
 }

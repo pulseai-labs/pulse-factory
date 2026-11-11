@@ -1,6 +1,7 @@
 # ADR-0014 — Chat sessions on a chat port, with a headless Claude Code adapter
 
-- **Status:** Proposed, 2026-11-08, at `r1.s3.w1`. It becomes Accepted at that item's close.
+- **Status:** Accepted, 2026-11-09. It was owed at the `r1.s3.w1` close (proposed 2026-11-08, at
+  `r1.s3.w1`). The line was written at `r1.s4.w1`.
 - **Date:** 2026-11-08
 - **Touch surface:** `crates/pf-engine/src/port/chat*`, `crates/pf-adapter-claude/**`.
 - **Revisit when:** a second chat runtime is planned, or the pinned CLI's stream-json control
@@ -77,7 +78,8 @@
   `claude`: the real `ClaudeChat` runs against it with no token and no network. `FakeChat`
   (`crates/pf-adapter-fake`) is a scripted adapter with no process, for the controller's and the
   API's tests. No ordinary test, no `auto:` line and no CI job starts the real CLI. The qualification
-  recorder runs only with `PF_REAL_CLAUDE=1`, against a counted budget of 30 processes.
+  recorder runs only with `PF_REAL_CLAUDE=1`, against a counted
+  budget of 31 processes (30, and one more for case 20 alone, by the operator's ruling of 2026-11-10).
 - **The 16 KB cap.** `cap` cuts a tool's input and output once, in the event, to at most 16 KB with
   its mark, and `Capped` carries the original size. The adapter keeps an approval's original input
   for its answer.
@@ -220,3 +222,70 @@ recordings. This is a fact of the recordings, held by a test, and not a rule of 
 - The behaviour of a session whose last turn a newer terminal CLI wrote, when the managed copy
   resumes it.
 - Any CLI version other than 2.1.319. Each needs its own qualification run.
+
+## Amendment, 2026-11-09 (`r1.s4.w4`): the deny list at launch
+
+The chat port gains one runtime-neutral field, and the Claude Code adapter turns it into deny rules.
+The setting that supplies the list is ADR-0016's.
+
+- **`ChatOpen.deny_commands`** is a list of shell command patterns that the runtime must refuse to
+  run. The controller resolves `chat.deny_commands` for the session's project and agent at each open,
+  new or resumed, and writes the count and the scope on the `chat.ledger` `open` line (`deny=`,
+  `deny_from=`). A change reaches a process only at its next launch.
+- **The pattern grammar** is one rule for the controller and both adapters (`check_deny_command`):
+  1 to 100 characters of letters, digits, space, `.`, `_`, `/`, `:`, `=`, `@`, `+`, `-` and `*`; a
+  letter or a digit first; no trailing space and no two spaces in a row; `*` only as a whole word or the
+  last character of a word; **no `:*` anywhere**, because Claude Code reads a rule that ends `:*` as its
+  legacy prefix form and `Bash(git push * :*)` would deny every push; so no `(`, `)`, `,`, quote, `;`,
+  `&`, `|` or control character reaches a rule. A list holds at most 32 entries and no duplicate.
+  `validate` and `FakeChat::open` refuse a list that fails it, and name the entry.
+- **The rule form.** `launch::disallowed_tools` is the five timer tools, then `Bash(c)` and
+  `Bash(c *)` for each entry `c`, or `Bash(c)` alone when `c` ends in `*`, joined by `,`, as the one
+  argument after `--disallowedTools`. With an empty list it is the old argument.
+- **The fifteen built-in patterns** cover the common spellings of a forced push (`-f`, `--force`,
+  `--force-with-lease`, a `+` refspec, with a flag before or after the remote or branch), a remote
+  branch delete (`--delete`, `-d`), `git branch -D`, and `gh pr merge`, with `-R` or `--repo` before the
+  subcommand. The colon refspec (`git push origin :branch`) is not covered: its only rule would end
+  `:*`. The list is in `chat-adapter.md`.
+- **The known limit, in Q4's words.** The deny list is a **speed bump**, not a boundary. A deny rule
+  matches the command text the model writes, so it stops an accidental merge by the model and not a
+  determined one. The residue gets past it: an absolute path, `gh api …/merge`, a script, an alias, a
+  combined short flag (`git push -uf`), the colon refspec, an environment prefix and another tool. The
+  chat keeps `HOME`, so it reaches the operator's `gh` login and git credentials, and a merge it makes
+  skips the ack, its confirm code and its ledger line. Cutting credentials at launch was not taken.
+  The owner of the limit is the Release 2 authority-rules spine.
+- **Rejected: a PATH shim.** A shim that stood in for `git` and `gh`, first on the chat's `PATH`, was
+  considered and not taken. An absolute path bypasses it, so it is no stronger than the rules, and it
+  adds a file the adapter must place and keep.
+
+### Verified claims (case 19, `r1.s4.w4`)
+
+Case 19 (`case_19_deny_rules`) ran once, on CLI 2.1.319 with `bypassPermissions`, in a temporary git
+repo with a bare `origin` and a stub `gh`, with the fifteen built-in patterns (30 rules). It spent one
+probe process (the counter reads 29 of 30). The planner granted that process. The recording is
+`fixtures/deny_rules.jsonl`.
+- **The 30-rule argument parses.** The CLI ran, so a comma-joined list with spaces inside the
+  parentheses is accepted.
+- **A deny rule holds under `bypassPermissions`,** and the CLI answers in the rule's own text:
+  `Permission to use Bash with command … has been denied.` Prompt 4, `gh -R pulseai-labs/pf-probe pr
+  merge 1`, met `Bash(gh -R * pr merge *)`, so a `*` in the middle of a command matches in 2.1.319. The
+  stub `gh` did not run (`gh-ran` was not created).
+- **Prompt 0 gives the self-started turns.** Its two background `sleep` commands finish and the CLI
+  starts two turns by itself: the recorded causes are `Operator`, `Task`, `Task`. That is the replay's
+  input for `scripts/demo/chat-policy.sh`.
+- Nothing changed in the temporary repo: the branch stayed and `origin/main` stayed at its commit.
+
+### Unverified claims (case 19)
+
+Case 19's required checks are not all met, and the one process is spent. A second run needs a new grant.
+- **Prompts 1 and 2** (`git branch -D pf-probe`, `git push -f origin main`) were refused by the host's
+  own `PreToolUse` hook, with a `seat-mods (implementer)` text, before any deny rule applied. The probe
+  inherits the operator's `HOME` and hooks, so the recording shows a hook and not the rules. Whether
+  `Bash(git branch -D *)` and `Bash(git push -f*)` hold is unverified. A clean rerun needs an isolated
+  `HOME`, which is the operator's call.
+- **Prompts 3 and 5** (`git push origin main --force`, `true && git branch -D pf-probe`): the model made
+  no `Bash` call. The test is inconclusive on a flag after the arguments and on a compound command.
+- That every built-in pattern's `*` matches as prompt 4 showed for one. The decode test
+  (`decode_fixtures.rs`) asserts only that each recorded `Bash` call of the four commands got an error,
+  and that at least three exist.
+- The recording holds the hook's text, which names the operator's setup. The scrub leaves it as it is.

@@ -6,6 +6,12 @@
   headers and `upgraded` in the request ledger.
 - **Amended:** 2026-11-09, at `r1.s3.w4`: the client half of the stream in `pf-client`, the server
   memory, and the reconnect rule. No route, verb or wire type is added.
+- **Amended:** 2026-11-09, at `r1.s4.w1`: six verbs on the allowlist (`requests`, `show`,
+  `confirm_code`, `answer`, `clear`, `ack`), the per-device confirm code, the request frames on the
+  stream, `refusal` in the error body and `refusal=` in the request ledger, and the revoke window as a
+  known limit.
+- **Amended:** 2026-11-10, at `r1.s4.w3`: `run_list` on the allowlist, the client's `request_frame`
+  event and its `refusal` word, and the `verb` command of the Mac app.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -78,8 +84,9 @@
   pairing time, last-seen time, last peer address and revoke time (migration 0004).
 - Pairing and revoking are admissions under `@controller`, each with one controller-ledger line that
   names the device and never the code or the token (ADR-0003, amended).
-- A device acts as the operator and has no scope of its own (ADR-0009, amended). Per-device scopes
-  and the human confirm of a merge-ack come with `r1.s4`.
+- A device acts as the operator and has no scope of its own (ADR-0009, amended). There are still no
+  per-device scopes. The per-device confirm of an act is the confirm code (see the amendment of
+  `r1.s4.w1` below).
 
 Rejected alternatives:
 - **Caddy as the TLS edge.** It adds a second process and a certificate qualification (D-186), and
@@ -359,3 +366,101 @@ no decision above.
   no gap), a revoke (`closed` within a second, no later upgrade in `api.ledger`, the next call `unauthorized`),
   one `route=stream` line per connection and none while a stream is idle, and the bridge carrying the same
   frames (`crates/pulse-factory/tests/client_chat.rs`, 2026-11-09).
+
+## The device verbs and the confirm code (r1.s4.w1)
+
+This amends the allowlist rule: a later spine that adds a verb amends this ADR, and this item does.
+
+- **Six verbs join the allowlist:** `requests`, `show`, `confirm_code`, `answer`, `clear`, `ack`.
+  `claim`, `arm`, `halt`, `device_pair` and `device_revoke` stay off it. `confirm_code` is on the
+  API only. `confirm_code`, `answer`, `clear` and `ack` go through the controller's device path
+  (`handle_device`), which is not on the socket; `requests` and `show` run through the ordinary
+  handler.
+- **The per-device confirm is the confirm code.** It replaces "the human confirm of a merge-ack comes
+  with `r1.s4`". A code is one-use, 120 seconds, in memory only, bound to the device, one request, its
+  revision, one verb with its parameters, the claim generation at issue and, for an ack, the PR's head
+  SHA. There are still no per-device scopes. `docs/contracts/api.md` and `requests.md` hold the rules.
+- **A refusal has a word.** The closed list is `pf_api::host::REFUSALS`. The 422 body carries
+  `refusal`, `RequestRecord.refusal` carries it, and the request ledger line ends with
+  `refusal=<word>`. A word outside the list is dropped.
+- **Request frames.** `RequestFrame` (`requests`, `request`, `claim`) is a second wire type on the
+  same stream. `ChatFrame` does not change, and a client skips a `type` it does not know.
+- **No secret in a log.** No confirm code is in any ledger, the store, stderr or an error. The store
+  keeps its SHA-256 in the admission content, and the code table keeps only the hash.
+- **Known limit (the revoke window).** A revoke refuses the device's next call (401) and voids its
+  live codes, but an act already past the code check completes, because the check and the engine call
+  run under one lock and the revoke does not wait for it. An ack in flight still merges. A revoked
+  device's claim stays current until the operator's next `claim`.
+- **Known limit.** The code proves the device, the freshness and the head SHA, not that a person
+  pressed the button. A paired device's token that is stolen, with an unspent code, acts until the
+  operator revokes the device.
+
+## The settings verbs (r1.s4.w4)
+
+- **Three verbs join the allowlist:** `settings_get`, `settings_set` and `settings_unset`. A device
+  acts as the operator (ADR-0009), so it reads and writes the scoped settings of ADR-0016. The verbs
+  are in `pf_api::host::ALLOWLIST` and in the request ledger's list of verb names, and the router test
+  names the three, and the verbs that stay off the list, with no exact count.
+- **A device write goes through the same admission as the CLI's:** `settings_set` and `settings_unset`
+  commit through `run_command` under `@controller` with a command ID, and the bridge passes the device
+  (`by=D-<n>`). A device is no local process, so the controller's caller check does not apply to it. The
+  router has authenticated the token and refuses a revoked one with 401 before the bridge runs.
+- **The ledgers.** The `controller.ledger` line of a device's write ends `by=D-<n> command=<id>`.
+  The `api.ledger` has one line for the call, with the device and the outcome (`ok`, `replayed` or
+  `refused`).
+- **The wire types** are generated with `ts-rs` into `apps/api-client/src/gen/` (ADR-0013).
+- Rules and limits: ADR-0016. The verbs' arguments and answers are `cli.md`'s.
+
+## The device `arm` and the `arm` subject (r1.s4.w2)
+
+Each spine that adds a verb amends this ADR (the allowlist rule). This one adds one.
+
+- **`arm` joins the allowlist.** It takes `DeviceArmArgs { proposal, plan_sha256, code, command_id }`
+  and answers `ArmActed`. It runs only with a confirm code from a start card. The operator's CLI
+  `arm` is unchanged, and a socket `arm` that carries a code and no plan is refused.
+- **The `arm` subject of the confirm code** is `{ kind: "arm", proposal, plan_sha256 }`. The code binds
+  the proposal and `plan_sha256`, the SHA-256 of the plan, its summary and the package snapshot's
+  pin. It binds no claim generation. A wrong hash, an unknown, withdrawn, failed, armed or
+  being-armed proposal is refused `subject_moved`. The nine refusal words do not change.
+- **The spend checks the plan again.** It checks the snapshot's hash before any of its code runs, then
+  builds the plan again from the snapshot. A different hash is `subject_moved`.
+- **Two chat item kinds** reach the stream: `start_card` and `start_result`. `ConfirmIssued` keeps its
+  required `subject`, and gains an optional `start`.
+
+## The run list, the request frames in the client and the `verb` command (r1.s4.w3)
+
+Amendment, 2026-11-10. This item amends the allowlist rule again, as its own text asks: a later spine
+that adds a verb amends this ADR.
+
+- **One verb joins the allowlist: `run_list`.** It is a typed read of every run the controller holds:
+  `RunList { schema_version, runs }` with one `RunSummary` per run (`id`, `spine`, `workflow`, `state`,
+  `halted_reason`, `end_reason`, `open_requests` and `waiting`). `waiting` is the `end_when` waiting
+  text that the last tick noted, which the driver now records beside its notes; it is what lets a device
+  show a run that waits for the operator and see it end. A device had no read of a run: `runs` and
+  `status` stay off the allowlist (`status` is untyped and large, `runs` has no waiting text, and the
+  router test keeps both off).
+- **Its controls.** Device auth only (the router's token check; the peer guard counts a failure),
+  read-only (no admission, no `controller.ledger` line, no store write, no driver action; the one
+  `api.ledger` line is its only trace), one allowlist entry, and no run units, sessions, costs or tokens
+  in the answer. `run_list` is in the request ledger's list of verb names.
+- **The client carries the request frames.** `pf-client` decodes a `type` of `requests`, `request` or
+  `claim` into `RequestFrame` and emits it as its own event, `{"event":"request_frame","frame":…}`,
+  beside `frame`, so no consumer of `ChatFrame` changes (the client half of the `r1.s4.w1` rule that a
+  client skips a `type` it does not know). A request frame that does not decode is **dropped and
+  logged, and the stream goes on**: the requests state is a cache that the next `requests` snapshot
+  repairs, and ending the stream would cut the chat it carries. The log is one stderr line per
+  connection, with no frame text, because a request carries seat-written text. A request frame never
+  moves the client's last chat `seq`.
+- **The client carries the refusal word.** `ClientError` gains `refusal`, kept only for a 422 and only
+  when the word is in `pf_api::host::REFUSALS`; an error with no word keeps its JSON `{"kind",
+  "message"}` byte for byte, and the test bridge's error envelope carries the word beside them. The
+  client treats a call's `code` argument as a secret when it builds an error: a server text that holds
+  it becomes `the server answered <status>`.
+- **`ack` waits up to 90 seconds.** It merges through the forge. A timeout is `unreachable`, and a
+  retry with the same command ID replays and acts on nothing.
+- **The Mac app reaches every verb added since `r1.s4` through one `verb` command.** It calls
+  `pf-client`'s `Transport::verb`, which checks the name against `pf_api::ALLOWLIST` before it
+  connects, so the command passes only allowlisted verbs and a webview reaches no verb a device may not
+  call. A later item's verb needs no edit in `apps/desktop`. `pf-client` re-exports `serde_json::Value`
+  for it, so the desktop's manifest and lock do not change.
+- **No other change.** No route, no admission, no store change and no new frame.

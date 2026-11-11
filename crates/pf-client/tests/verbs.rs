@@ -19,7 +19,7 @@ fn the_allowlisted_verbs_build_a_post_to_their_path() {
 fn halt_ack_and_an_unknown_verb_are_bad_requests() {
     for verb in [
         "halt",
-        "ack",
+        "claim",
         "no_such_verb",
         "",
         "project_add/../halt",
@@ -72,7 +72,7 @@ async fn a_refused_verb_never_connects() {
         })
         .unwrap();
     let transport = Transport::new(store);
-    for verb in ["halt", "ack", "nope"] {
+    for verb in ["halt", "claim", "nope"] {
         let e = transport.verb(verb, json!({})).await.unwrap_err();
         assert_eq!(e.kind, ErrorKind::BadRequest, "{verb}");
     }

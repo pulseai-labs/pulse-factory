@@ -24,6 +24,16 @@ fn free_port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
+/// The address a rig asks its controller to bind: port 0, so the kernel picks the port at the bind.
+/// A probe (`free_port`: bind port 0, read the port, close) names a port some time before the
+/// controller binds it (the start of a process, a store, a key). Tests run in parallel, and the
+/// kernel can hand the same closed port to two probes in that time: one controller then fails with
+/// "Address already in use", and its test waits out `wait_state` (10 s) and fails while the suite
+/// passes alone.
+fn listen_request() -> String {
+    "127.0.0.1:0".to_string()
+}
+
 fn b64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -98,13 +108,24 @@ impl Rig {
     fn on() -> Rig {
         let mut rig = Rig {
             sb: Sandbox::new(),
-            port: free_port(),
+            port: 0,
             proc: None,
         };
-        let addr = rig.addr();
-        rig.start(&["--api-listen", &addr]);
+        rig.start(&["--api-listen", &listen_request()]);
         rig.wait_state("listening");
+        rig.port = rig.bound_port();
         rig
+    }
+
+    /// The port the controller says it bound.
+    fn bound_port(&self) -> u16 {
+        let state = self.state_json();
+        let listen = state["listen"].as_str().unwrap_or_default();
+        listen
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or_else(|| panic!("the API reports no bound port: {state}"))
     }
 
     /// Start the controller with these extra arguments. It does nothing on a tick.
@@ -643,10 +664,7 @@ fn verbs_off_the_allowlist_are_refused_with_403_on_the_real_controller() {
     let token = rig.paired("macbook");
     for verb in [
         "halt",
-        "ack",
-        "answer",
         "claim",
-        "arm",
         "runs",
         "device_pair",
         "device_revoke",
@@ -775,6 +793,21 @@ fn device_list_shows_each_device_with_its_name_times_peer_and_revoke_state() {
         "{text}"
     );
     assert!(lines[1].contains("  revoked "), "{text}");
+}
+
+/// Correction of `r1.s4.w3` (AC-20 failed once under workspace load on the device list test, 1 of 25
+/// tests, the suite 10.28 s against 1.59 s alone). The rig picked its port with a probe and a
+/// controller that lost a collision of two probes sat in `failed` until `wait_state` gave up. The
+/// rig now asks for port 0 and reads the bound port back, so no port exists before the controller
+/// holds it.
+#[test]
+fn a_rig_leaves_its_port_to_the_controller_and_reads_the_bound_one_back() {
+    assert_eq!(listen_request(), "127.0.0.1:0");
+    let rig = Rig::on();
+    assert_ne!(rig.port, 0);
+    assert_eq!(rig.state_json()["listen"], rig.addr());
+    let reply = rig.pair(&rig.code(), "macbook");
+    assert_eq!(reply.status, 200, "{}", reply.body);
 }
 
 #[test]

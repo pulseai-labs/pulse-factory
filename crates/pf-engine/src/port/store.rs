@@ -42,6 +42,10 @@ pub struct RunRow {
     pub state: RunState,
     /// The reason of the `halt` command, when the run is halted.
     pub halted_reason: Option<String>,
+    /// The project of the chat that proposed the run, when a device armed it from a start card.
+    /// `None` for every run armed from the CLI and for every run that existed before migration
+    /// 0008. `PutRun` never writes it: only [`Effect::SetRunProject`] does.
+    pub project_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -534,6 +538,10 @@ pub enum ChatItemKind {
     BackgroundTask,
     Notice,
     TurnResult,
+    /// A proposal to start a run, posted by the controller. It is no request: it holds no process.
+    StartCard,
+    /// The end of a start card: armed, withdrawn or failed.
+    StartResult,
 }
 
 impl ChatItemKind {
@@ -549,6 +557,8 @@ impl ChatItemKind {
             ChatItemKind::BackgroundTask => "background_task",
             ChatItemKind::Notice => "notice",
             ChatItemKind::TurnResult => "turn_result",
+            ChatItemKind::StartCard => "start_card",
+            ChatItemKind::StartResult => "start_result",
         }
     }
 
@@ -564,6 +574,8 @@ impl ChatItemKind {
             "background_task" => Some(ChatItemKind::BackgroundTask),
             "notice" => Some(ChatItemKind::Notice),
             "turn_result" => Some(ChatItemKind::TurnResult),
+            "start_card" => Some(ChatItemKind::StartCard),
+            "start_result" => Some(ChatItemKind::StartResult),
             _ => None,
         }
     }
@@ -573,6 +585,7 @@ impl ChatItemKind {
         match self {
             ChatItemKind::ApprovalAnswer => Some(ChatItemKind::ApprovalRequest),
             ChatItemKind::QuestionAnswer => Some(ChatItemKind::QuestionRequest),
+            ChatItemKind::StartResult => Some(ChatItemKind::StartCard),
             _ => None,
         }
     }
@@ -582,6 +595,7 @@ impl ChatItemKind {
         match self {
             ChatItemKind::ApprovalRequest => Some(ChatItemKind::ApprovalAnswer),
             ChatItemKind::QuestionRequest => Some(ChatItemKind::QuestionAnswer),
+            ChatItemKind::StartCard => Some(ChatItemKind::StartResult),
             _ => None,
         }
     }
@@ -703,6 +717,106 @@ pub struct NewDevice {
     pub paired_at: String,
 }
 
+/// Which of the four scopes a setting row sits at (ADR-0016).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingScopeKind {
+    /// Every project and every agent.
+    Server,
+    /// One project, every agent in it.
+    Project,
+    /// One agent, every project.
+    Agent,
+    /// One agent in one project.
+    ProjectAgent,
+}
+
+impl SettingScopeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SettingScopeKind::Server => "server",
+            SettingScopeKind::Project => "project",
+            SettingScopeKind::Agent => "agent",
+            SettingScopeKind::ProjectAgent => "project_agent",
+        }
+    }
+}
+
+/// The scope of one setting row. `None` means "every": no project, or no agent. The store keeps
+/// `None` as `''` and the port maps it both ways.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SettingScope {
+    pub project_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+impl SettingScope {
+    /// The server default: every project and every agent.
+    pub fn server() -> SettingScope {
+        SettingScope {
+            project_id: None,
+            agent_id: None,
+        }
+    }
+
+    pub fn new(project_id: Option<&str>, agent_id: Option<&str>) -> SettingScope {
+        SettingScope {
+            project_id: project_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+        }
+    }
+
+    pub fn kind(&self) -> SettingScopeKind {
+        match (&self.project_id, &self.agent_id) {
+            (None, None) => SettingScopeKind::Server,
+            (Some(_), None) => SettingScopeKind::Project,
+            (None, Some(_)) => SettingScopeKind::Agent,
+            (Some(_), Some(_)) => SettingScopeKind::ProjectAgent,
+        }
+    }
+
+    /// The text form, for ledger lines and admission subjects: `server`, `project:P-1`,
+    /// `agent:orchestrator`, `project:P-1/agent:orchestrator`.
+    pub fn text(&self) -> String {
+        match (&self.project_id, &self.agent_id) {
+            (None, None) => "server".to_string(),
+            (Some(p), None) => format!("project:{p}"),
+            (None, Some(a)) => format!("agent:{a}"),
+            (Some(p), Some(a)) => format!("project:{p}/agent:{a}"),
+        }
+    }
+
+    /// The scopes a context reads, most specific first: (project, agent), (project, every),
+    /// (every, agent), server. A context with no project skips the two project scopes; one with no
+    /// agent skips the two agent scopes.
+    pub fn chain(project: Option<&str>, agent: Option<&str>) -> Vec<SettingScope> {
+        let mut scopes = Vec::with_capacity(4);
+        if project.is_some() && agent.is_some() {
+            scopes.push(SettingScope::new(project, agent));
+        }
+        if project.is_some() {
+            scopes.push(SettingScope::new(project, None));
+        }
+        if agent.is_some() {
+            scopes.push(SettingScope::new(None, agent));
+        }
+        scopes.push(SettingScope::server());
+        scopes
+    }
+}
+
+/// One value of one key at one scope. The engine core never reads it (ADR-0002): the key is opaque
+/// text and the value is canonical JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingRow {
+    pub scope: SettingScope,
+    pub key: String,
+    /// Canonical JSON.
+    pub value: String,
+    /// `cli`, or the ID of the device that set it.
+    pub set_by: String,
+    pub set_at: String,
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -776,6 +890,23 @@ pub enum Effect {
         session_id: String,
         seq: u64,
         redacted_at: String,
+    },
+    /// Insert a setting row, or replace the row at the same scope and key. An unknown or removed
+    /// project, or an unknown agent, makes the commit [`Committed::Rejected`] (ADR-0016).
+    SetSetting(SettingRow),
+    /// Delete the setting row at this scope and key. When no row is there, the commit is
+    /// [`Committed::Rejected`] (`no value of <key> is set at <scope>`).
+    UnsetSetting {
+        scope: SettingScope,
+        key: String,
+    },
+    /// Link a run to a live project (a run armed from a start card). Allowed only in an admission
+    /// under [`CONTROLLER_SCOPE`]. An unknown run, an unknown or removed project, a run that
+    /// names another project already, or a scope other than the controller's makes the commit
+    /// [`Committed::Rejected`]. The same pair a second time is a no-op that admits.
+    SetRunProject {
+        run_id: String,
+        project_id: String,
     },
 }
 
@@ -906,6 +1037,17 @@ pub trait Store: Send + Sync {
     /// Read the approval and question requests of a session that have no answer item yet, in
     /// `seq` order.
     fn pending_requests(&self, session_id: &str) -> Result<Vec<ChatItemRow>, StoreError>;
+    /// Read every setting row, by key then scope text (ADR-0016). The name is not `settings`:
+    /// `SqliteStore::settings` reads the `PRAGMA` values.
+    fn setting_rows(&self) -> Result<Vec<SettingRow>, StoreError>;
+    /// Read the rows of one key on the scope chain of a context, most specific first
+    /// ([`SettingScope::chain`]).
+    fn setting_chain(
+        &self,
+        key: &str,
+        project_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> Result<Vec<SettingRow>, StoreError>;
 
     /// Mark a worktree gone, for display: what the file system or git showed. It writes only a
     /// row that is not gone and not removed, and answers whether it wrote. It makes no admission

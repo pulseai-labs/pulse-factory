@@ -40,7 +40,7 @@ use serde::Serialize;
 use crate::code::{PairingCode, hex, token_sha256};
 use crate::guard::{Blocked, Clock, Failure, Guard, GuardConfig, system_clock};
 use crate::host::{
-    ApiHost, Outcome, Refusal, RequestRecord, Route, StreamEnd, StreamEvent, StreamFeed,
+    ApiHost, Outcome, REFUSALS, Refusal, RequestRecord, Route, StreamEnd, StreamEvent, StreamFeed,
     StreamRefusal, is_allowed,
 };
 use crate::types::{ApiError, DeviceRecord, PairRequest, ServerRef, check_device_name};
@@ -150,6 +150,8 @@ struct Answer {
     device: Option<String>,
     /// A 200 whose verb answer says `"replayed": true`.
     replayed: bool,
+    /// The word of a refused device verb, when it is one of [`REFUSALS`].
+    refusal: Option<String>,
 }
 
 impl From<Response> for Answer {
@@ -158,6 +160,7 @@ impl From<Response> for Answer {
             response,
             device: None,
             replayed: false,
+            refusal: None,
         }
     }
 }
@@ -205,8 +208,15 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         status,
         &ApiError {
             error: message.into(),
+            refusal: None,
         },
     )
+}
+
+/// The refusal word a host answer carries in `result.refusal`, when it is on the closed list.
+fn refusal_word(result: &serde_json::Value) -> Option<String> {
+    let word = result.get("refusal")?.as_str()?;
+    REFUSALS.contains(&word).then(|| word.to_string())
 }
 
 fn not_authorized() -> Response {
@@ -287,6 +297,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
                 outcome: Outcome::Blocked,
                 count,
                 blocked_until: None,
+                refusal: None,
             };
             audit(&app.host, record).await;
         }
@@ -325,6 +336,7 @@ async fn handle(State(app): State<App>, request: Request) -> Response {
         outcome: outcome_of(code, answer.replayed),
         count: 1,
         blocked_until,
+        refusal: answer.refusal,
     };
     audit(&app.host, record).await;
     name_server(answer.response, &app.server)
@@ -395,6 +407,7 @@ async fn status(host: Arc<dyn ApiHost>, peer: IpAddr, request: Request) -> Answe
         response,
         device: Some(id),
         replayed: false,
+        refusal: None,
     }
 }
 
@@ -408,6 +421,7 @@ async fn verb_call(host: Arc<dyn ApiHost>, peer: IpAddr, verb: String, request: 
         response,
         device: Some(id.clone()),
         replayed: false,
+        refusal: None,
     };
     if !is_allowed(&verb) {
         let shown: String = verb.chars().take(64).collect();
@@ -435,14 +449,28 @@ async fn verb_call(host: Arc<dyn ApiHost>, peer: IpAddr, verb: String, request: 
                 response: json(StatusCode::OK, &answer.result),
                 device: Some(id.clone()),
                 replayed,
+                refusal: None,
             }
         }
-        Ok(answer) => named(error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            answer
+        Ok(answer) => {
+            // A device verb that refuses may name why, with one word of a closed list (`r1.s4.w1`).
+            let refusal = refusal_word(&answer.result);
+            let text = answer
                 .error
-                .unwrap_or_else(|| "the controller refused".to_string()),
-        )),
+                .unwrap_or_else(|| "the controller refused".to_string());
+            Answer {
+                response: json(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &ApiError {
+                        error: text,
+                        refusal: refusal.clone(),
+                    },
+                ),
+                device: Some(id.clone()),
+                replayed: false,
+                refusal,
+            }
+        }
         Err(_) => named(failed_inside()),
     }
 }
@@ -506,6 +534,7 @@ async fn stream(
         response,
         device: Some(id.clone()),
         replayed: false,
+        refusal: None,
     };
     let query = request.uri().query().map(str::to_string);
     let upgrade = match WebSocketUpgrade::from_request(request, &()).await {

@@ -566,7 +566,7 @@ fn a_version_five_file_upgrades_with_an_empty_option_map_on_every_session() {
         .unwrap();
     }
     let store = pf_store_sqlite::SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 6);
+    assert_eq!(store.schema_version().unwrap(), 8);
     let sessions = store.chat_sessions("P-1").unwrap();
     assert_eq!(sessions.len(), 2);
     for s in &sessions {

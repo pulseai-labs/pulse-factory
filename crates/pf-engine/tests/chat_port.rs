@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::{
     BackgroundTask, CAP_BYTES, Capped, ChatAnswer, ChatError, ChatEvent, ChatOption, ContextUsage,
-    InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd, TurnCause, cap, check_order,
+    InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd, TurnCause, cap, check_deny_command,
+    check_deny_commands, check_order,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -631,4 +632,104 @@ fn check_order_accepts_every_fixtures_event_sequence_decoded_from_the_recordings
         total += events.len();
     }
     assert!(total > 200, "the recordings give events: {total}");
+}
+
+// ------------------------------------------------------------------ deny patterns (ADR-0016)
+
+/// The fifteen built-in deny patterns (ruling 9 of `r1.s4.w4`).
+const BUILT_IN: [&str; 15] = [
+    "git push -f*",
+    "git push * -f*",
+    "git push --force*",
+    "git push * --force*",
+    "git push * +*",
+    "git push --delete",
+    "git push * --delete",
+    "git push -d",
+    "git push * -d",
+    "git branch -D",
+    "git branch * -D",
+    "gh pr merge",
+    "gh -R * pr merge",
+    "gh --repo * pr merge",
+    "gh --repo=* pr merge",
+];
+
+#[test]
+fn check_deny_command_takes_the_fifteen_built_ins_and_a_plain_command() {
+    for p in BUILT_IN.iter().chain(["npm publish"].iter()) {
+        assert_eq!(check_deny_command(p), Ok(()), "{p}");
+    }
+    let hundred = "a".repeat(100);
+    assert_eq!(check_deny_command(&hundred), Ok(()));
+}
+
+#[test]
+fn check_deny_command_refuses_each_bad_shape_and_names_the_rule() {
+    let hundred_and_one = "a".repeat(101);
+    let cases: Vec<(&str, String, &str)> = vec![
+        ("empty", String::new(), "empty"),
+        ("101 characters", hundred_and_one, "101"),
+        ("a leading space", " git push".into(), "start"),
+        ("a leading dash", "-f".into(), "start"),
+        ("a leading star", "* push".into(), "start"),
+        ("a trailing space", "git push ".into(), "space"),
+        ("two spaces", "git  push".into(), "two spaces"),
+        ("a star inside a word", "gi*t push".into(), "inside"),
+        ("a double star", "git push **".into(), "**"),
+        ("the legacy prefix form", "git push * :*".into(), ":*"),
+        ("a colon star elsewhere", "git push a:* b".into(), ":*"),
+        ("an open parenthesis", "git (push".into(), "'('"),
+        ("a close parenthesis", "git push)".into(), "')'"),
+        ("a comma", "git push, force".into(), "','"),
+        ("a double quote", "git push \"x\"".into(), "'\"'"),
+        ("a single quote", "git push 'x'".into(), "'\\''"),
+        ("a semicolon", "git push; ls".into(), "';'"),
+        ("an ampersand", "git push && ls".into(), "'&'"),
+        ("a pipe", "git push | ls".into(), "'|'"),
+        ("a tab", "git\tpush".into(), "U+0009"),
+        ("a newline", "git\npush".into(), "U+000A"),
+    ];
+    for (what, pattern, needle) in cases {
+        let why = check_deny_command(&pattern).expect_err(what);
+        assert!(why.contains(needle), "{what}: {why}");
+    }
+}
+
+#[test]
+fn check_deny_commands_refuses_33_entries_and_a_duplicate() {
+    let ok: Vec<String> = (0..32).map(|i| format!("tool{i}")).collect();
+    assert_eq!(check_deny_commands(&ok), Ok(()));
+    let mut many = ok.clone();
+    many.push("tool32".into());
+    assert!(check_deny_commands(&many).unwrap_err().contains("33"));
+    let dup = vec![
+        "npm publish".to_string(),
+        "cargo publish".into(),
+        "npm publish".into(),
+    ];
+    assert!(check_deny_commands(&dup).unwrap_err().contains("twice"));
+    let bad = vec!["npm publish".to_string(), "git push * :*".into()];
+    assert!(check_deny_commands(&bad).unwrap_err().contains(":*"));
+    assert_eq!(check_deny_commands(&[]), Ok(()));
+}
+
+#[test]
+fn a_chat_open_with_deny_commands_keeps_them_in_order() {
+    let open = pf_engine::port::chat::ChatOpen {
+        cwd: "/w".into(),
+        resume: None,
+        instructions: String::new(),
+        model: "m".into(),
+        effort: "high".into(),
+        permission_mode: "bypass".into(),
+        env: BTreeMap::new(),
+        options: BTreeMap::new(),
+        deny_commands: BUILT_IN.iter().map(ToString::to_string).collect(),
+    };
+    let copy = open.clone();
+    assert_eq!(copy, open);
+    assert_eq!(copy.deny_commands.len(), 15);
+    assert_eq!(copy.deny_commands[0], "git push -f*");
+    assert_eq!(copy.deny_commands[14], "gh --repo=* pr merge");
 }

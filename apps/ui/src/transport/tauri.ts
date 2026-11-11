@@ -5,9 +5,21 @@
 // (`listen` needs a capability, and the app declares no capability file).
 import type {
   ApiStatus,
+  ArmActed,
+  ConfirmCodeArgs,
+  ConfirmIssued,
+  DeviceAckArgs,
+  DeviceAnswerArgs,
+  DeviceArmArgs,
+  DeviceClearArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
+  RequestActed,
+  RequestDetail,
+  RequestList,
+  RequestsArgs,
+  RunList,
   SessionAnswerArgs,
   SessionChanged,
   SessionEndArgs,
@@ -17,6 +29,12 @@ import type {
   SessionSendArgs,
   SessionSetArgs,
   SessionStartArgs,
+  SettingChanged,
+  SettingsGetArgs,
+  SettingsSetArgs,
+  SettingsUnsetArgs,
+  SettingsView,
+  ShowArgs,
 } from "@pulse-factory/api-client";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
@@ -55,6 +73,7 @@ export const TAURI_COMMANDS: readonly string[] = [
   "session_interrupt",
   "session_set",
   "session_end",
+  "verb",
   "open_stream",
   "close_stream",
   "forget",
@@ -64,12 +83,12 @@ function isKind(value: unknown): value is TransportErrorKind {
   return typeof value === "string" && (TRANSPORT_ERROR_KINDS as readonly string[]).includes(value);
 }
 
-/** A rejection of a command is `{kind, message}`. Anything else is a `server` error. */
+/** A rejection of a command is `{kind, message}`, with a `refusal` word for a refused device verb. Anything else is a `server` error. */
 function toTransportError(rejection: unknown): TransportError {
   if (typeof rejection === "object" && rejection !== null) {
-    const r = rejection as { kind?: unknown; message?: unknown };
+    const r = rejection as { kind?: unknown; message?: unknown; refusal?: unknown };
     const message = typeof r.message === "string" && r.message !== "" ? r.message : "the app refused the call";
-    return new TransportError(isKind(r.kind) ? r.kind : "server", message);
+    return new TransportError(isKind(r.kind) ? r.kind : "server", message, typeof r.refusal === "string" ? r.refusal : undefined);
   }
   return new TransportError("server", "the app refused the call");
 }
@@ -85,6 +104,12 @@ export function createTauriTransport(invokeImpl?: InvokeLike, channelFactory?: C
       throw toTransportError(rejection);
     }
   }
+
+  /**
+   * Every verb added since `r1.s4` goes through the one `verb` command (r1.s4.w3, W5): the Rust side
+   * calls `pf-client`'s allowlisted `Transport::verb`, so a later item's verbs need no new command.
+   */
+  const verb = <T>(name: string, args: unknown) => command<T>("verb", { name, args });
 
   /** The chat stream: a `Channel` that the Rust side sends each event on, and `close_stream`. */
   async function openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle> {
@@ -136,6 +161,17 @@ export function createTauriTransport(invokeImpl?: InvokeLike, channelFactory?: C
     sessionInterrupt: (args: SessionInterruptArgs) => command<SessionChanged>("session_interrupt", { args }),
     sessionSet: (args: SessionSetArgs) => command<SessionChanged>("session_set", { args }),
     sessionEnd: (args: SessionEndArgs) => command<SessionEnded>("session_end", { args }),
+    requests: (args?: RequestsArgs) => verb<RequestList>("requests", args ?? {}),
+    show: (args: ShowArgs) => verb<RequestDetail>("show", args),
+    confirmCode: (args: ConfirmCodeArgs) => verb<ConfirmIssued>("confirm_code", args),
+    answer: (args: DeviceAnswerArgs) => verb<RequestActed>("answer", args),
+    clear: (args: DeviceClearArgs) => verb<RequestActed>("clear", args),
+    ack: (args: DeviceAckArgs) => verb<RequestActed>("ack", args),
+    settingsGet: (args?: SettingsGetArgs) => verb<SettingsView>("settings_get", args ?? {}),
+    settingsSet: (args: SettingsSetArgs) => verb<SettingChanged>("settings_set", args),
+    settingsUnset: (args: SettingsUnsetArgs) => verb<SettingChanged>("settings_unset", args),
+    runList: () => verb<RunList>("run_list", {}),
+    arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
     openStream,
     forget: async () => {
       await command<null>("forget", undefined);

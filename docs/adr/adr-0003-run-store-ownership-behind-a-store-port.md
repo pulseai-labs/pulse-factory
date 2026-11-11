@@ -174,3 +174,46 @@ active run.
   `set_chat_session_state`, `set_chat_runtime_ref`, `append_chat_item`). This item adds none: the pump
   writes through them, and a `SessionMoved` is a `set_chat_runtime_ref`.
 
+
+## Amendment, 2026-11-09 (`r1.s4.w4`): the settings table
+
+The store side only. The layer's rules (scopes, order, merge modes, callers) are ADR-0016's.
+
+- **Migration 0007** (`0007_settings.sql`) adds the `settings` table: `(project_id, agent_id, key,
+  value, set_by, set_at)` with the primary key `(project_id, agent_id, key)`, `''` for "every", a
+  `json_valid(value)` check, a key grammar check, a `set_by` of `cli` or a device ID, and triggers
+  that hold a live project and a known agent at insert and keep a row's scope and key fixed. It is
+  forward only (ADR-0007) and is empty after the migration. The migrations are now 0001 init, 0002
+  requests, 0003 projects, 0004 devices, 0005 hierarchy, 0006 session options and 0007 settings.
+- **Two effects and two reads.** `SetSetting` inserts a row or replaces the one at the same scope and
+  key, and `UnsetSetting` deletes it. Each is `Rejected` for an unknown or removed project, an unknown
+  agent, or a row that is not there, with one line that names it. `setting_rows` lists every row and
+  `setting_chain(key, project, agent)` lists the rows on the scope chain, most specific first. The
+  port has no method named `settings`: `SqliteStore::settings()` is the `PRAGMA` read.
+- **The commands.** `setting_set` and `setting_unset` are admissions under `@controller`, beside the
+  project, device and chat commands, each with a command ID and one controller-ledger line. A refused
+  caller's write is audited under a command ID the controller makes (`caller-refused-<hex>`).
+- **No write outside admission.** The store trait gains no settings write but the two effects. This
+  item adds no write to the list of writes outside admission.
+- Rules and limits: ADR-0016.
+
+## Amendment, 2026-11-10 (`r1.s4.w2`): a run's project, and the start commands
+
+- **The store gains migration 0008** (`0008_run_project.sql`), which adds `runs.project_id`, nullable, and three triggers:
+  a project that a run names is live (`runs_project_is_live`), a run's project never changes once
+  set (`runs_project_never_changes`), and a non-null value names a row of `projects`
+  (`runs_project_names_a_project`). Every existing row and every run armed from the CLI keeps NULL.
+  It is forward only and is refused under an active run (ADR-0007). The migrations are now 0001 to
+  0008, the last being `run_project`.
+- **One effect.** `Effect::SetRunProject { run_id, project_id }` sets the column. It is allowed only
+  in an admission under `@controller`, and the same pair a second time is a no-op that admits.
+  `PutRun` never writes the column, so a later upsert of the run keeps the project. `RunRow` gains
+  `project_id`.
+- **Two item kinds.** `start_card` and `start_result` join the chat items. A `start_result` answers
+  its card through `answers_seq`, so the one-answer index lets a card be armed at most once. A
+  `start_card` is not a pending request.
+- **Three admissions under `@controller`**, each with a command ID and one controller-ledger line:
+  `propose` (the proposal posted into a chat), `device_arm` (the device's arm, committed inside the
+  arm's critical section) and `run_project` (the link of a new run to its project, committed before
+  `run.json` is written, so an arm whose link fails fails whole).
+- Rules and limits: ADR-0015 (the proposals), ADR-0005 (who may arm), ADR-0012 (the wire).

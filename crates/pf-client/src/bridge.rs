@@ -157,15 +157,22 @@ fn text(status: StatusCode, body: &'static str) -> Response {
     send(status, "text/plain", body)
 }
 
+/// The envelope of a bridge answer. The error is the `ClientError` itself, so a refused device verb
+/// keeps its `refusal` word (`r1.s4.w3`, W3) and any other error is exactly `{"kind", "message"}`.
+fn envelope_value(answer: Result<Value, ClientError>) -> Value {
+    match answer {
+        Ok(result) => json!({ "ok": true, "result": result }),
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
+}
+
 /// A bridge answer: always HTTP 200, with the envelope.
 fn envelope(answer: Result<Value, ClientError>) -> Response {
-    let value = match answer {
-        Ok(result) => json!({ "ok": true, "result": result }),
-        Err(error) => {
-            json!({ "ok": false, "error": { "kind": error.kind, "message": error.message } })
-        }
-    };
-    send(StatusCode::OK, "application/json", value.to_string())
+    send(
+        StatusCode::OK,
+        "application/json",
+        envelope_value(answer).to_string(),
+    )
 }
 
 fn bad(message: &str) -> ClientError {
@@ -467,5 +474,32 @@ fn read_bundle_file(root: &Path, raw_path: &str) -> Response {
     match std::fs::read(&real) {
         Ok(data) => send(StatusCode::OK, content_type(&real), data),
         Err(_) => text(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // r1.s4.w3, W3: the refusal word of a refused device verb reaches the browser through the bridge's
+    // error envelope; an error with no word keeps exactly `{"kind", "message"}`.
+    #[test]
+    fn the_error_envelope_carries_the_refusal_word_only_when_there_is_one() {
+        let mut refused = ClientError::new(ErrorKind::Refused, "the code was used");
+        refused.refusal = Some("code_used".to_string());
+        assert_eq!(
+            envelope_value(Err(refused)),
+            json!({"ok": false, "error": {
+                "kind": "refused", "message": "the code was used", "refusal": "code_used"
+            }})
+        );
+        assert_eq!(
+            envelope_value(Err(ClientError::new(ErrorKind::Server, "boom"))),
+            json!({"ok": false, "error": {"kind": "server", "message": "boom"}})
+        );
+        assert_eq!(
+            envelope_value(Ok(json!({"a": 1}))),
+            json!({"ok": true, "result": {"a": 1}})
+        );
     }
 }

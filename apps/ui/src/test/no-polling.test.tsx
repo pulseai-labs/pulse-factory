@@ -49,10 +49,27 @@ describe("the UI never polls", () => {
     await advance(0);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     await advance(0);
-    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "status"]);
+    // r1.s4.w3: the page also reads its settings, and the session list for its Agent select (once, as
+    // the list is not loaded yet).
+    const opened = ["paired", "projectList", "openStream", "settingsGet", "sessionList", "status"];
+    expect(fake.calls).toEqual(opened);
 
     await wiggle();
-    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "status"]);
+    expect(fake.calls).toEqual(opened);
+  });
+
+  it("makes no call on the Needs you page for an hour, blurred or focused", async () => {
+    const fake = new FakeTransport();
+    render(<App transport={fake} />);
+    await advance(0);
+    fireEvent.click(screen.getByRole("button", { name: "Needs you" }));
+    await advance(0);
+    // r1.s4.w3: the requests and the runs, once, when the page opens; no stream of its own.
+    const opened = ["paired", "projectList", "openStream", "requests", "runList"];
+    expect(fake.calls).toEqual(opened);
+
+    await wiggle();
+    expect(fake.calls).toEqual(opened);
   });
 
   it("makes no call on the pair screen for an hour", async () => {

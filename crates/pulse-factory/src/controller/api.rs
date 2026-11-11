@@ -26,7 +26,7 @@ use pf_api::types::{
     ApiState, ApiStatus, DeviceRecord, ListenState, PairResult, SCHEMA_VERSION, ServerRef,
 };
 use pf_api::{ApiHost, Outcome, Refusal, RequestRecord, tls};
-use pf_ipc::{Handler, Request, Response};
+use pf_ipc::{Request, Response};
 use serde_json::Value;
 
 use super::commands::{field, now};
@@ -41,6 +41,7 @@ pub const REQUEST_LEDGER_FILE: &str = "api.ledger";
 pub const VERBS: &[&str] = &[
     "runs",
     "arm",
+    "propose",
     "hook",
     "status",
     "halt",
@@ -66,6 +67,11 @@ pub const VERBS: &[&str] = &[
     "ack",
     "device_pair",
     "device_revoke",
+    "confirm_code",
+    "settings_get",
+    "settings_set",
+    "settings_unset",
+    "run_list",
 ];
 
 /// The text of the failure for an address outside the allowed ranges.
@@ -136,6 +142,10 @@ pub(super) fn request_line(at: &str, record: &RequestRecord) -> String {
     }
     if let Some(until) = &record.blocked_until {
         line.push_str(&format!(" blocked_until={}", field(until)));
+    }
+    // The word of a refused device verb, from the closed list the router checked.
+    if let Some(word) = &record.refusal {
+        line.push_str(&format!(" refusal={}", field(word)));
     }
     line
 }
@@ -324,9 +334,20 @@ impl ApiHost for ApiBridge {
         if !pf_api::host::is_allowed(verb) {
             return Response::err(format!("the verb {verb:?} is not open to devices"));
         }
-        // A device acts as the operator (ADR-0009), through the code the socket runs.
-        let _ = device;
-        self.controller.handle(Request::new(verb, args))
+        // A device writes a setting as the operator does, through the same admission, and its ledger
+        // line names it. A device is no local process, so no caller check applies: the router has
+        // authenticated it and refuses a revoked token (ADR-0016).
+        if matches!(verb, "settings_set" | "settings_unset") {
+            return self.controller.settings_write(
+                verb,
+                &args,
+                super::settings::By::Device(device.id.clone()),
+            );
+        }
+        // A device acts as the operator (ADR-0009). The device verbs on requests run as that device's
+        // own, with a confirm code (`r1.s4.w1`); every other verb runs the code the socket runs.
+        self.controller
+            .handle_device(device, Request::new(verb, args))
     }
 
     fn audit(&self, record: &RequestRecord) {

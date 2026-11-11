@@ -361,7 +361,12 @@ impl Controller {
             if let Err(why) = appended {
                 return Err(format!("the message is not stored: {why}"));
             }
-            lock(&live.inner).idle_since = std::time::SystemTime::now();
+            {
+                let mut inner = lock(&live.inner);
+                inner.idle_since = std::time::SystemTime::now();
+                // The operator's message resets the count of self-started turns (ADR-0016).
+                inner.self_turns = 0;
+            }
             live.port
                 .send(&live.chat, InputKind::Operator, text)
                 .map_err(|e| e.to_string())

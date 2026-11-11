@@ -32,8 +32,9 @@ runs it with `spawn_blocking`.
 
 `ChatOpen` holds `cwd` (the session's worktree; a resume uses the same one), `resume`
 (`Option<SessionRef>`: `None` starts a new runtime session), `instructions`, `model`, `effort`,
-`permission_mode`, `env` (the agent's launch-env map) and `options` (runtime-specific options by id).
-`ChatOpened` holds `chat` (a `ChatId`), `session` (the runtime's own session id, which survives the
+`permission_mode`, `env` (the agent's launch-env map), `options` (runtime-specific options by id) and
+`deny_commands` (`Vec<String>`: shell command patterns the runtime must refuse to run, in a
+runtime-neutral form; see "The deny list"). `ChatOpened` holds `chat` (a `ChatId`), `session` (the runtime's own session id, which survives the
 process), `runtime_version`, `qualified` and `events`.
 
 ## Events
@@ -251,10 +252,13 @@ claude -p --input-format stream-json --output-format stream-json --verbose
        --include-partial-messages --permission-prompt-tool stdio
        --allow-dangerously-skip-permissions
        --permission-mode <permission_mode> --model <model> --effort <effort>
-       --disallowedTools ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger
+       --disallowedTools <timer tools>,Bash(<c>),Bash(<c> *),…     (one argument; see "The deny list")
        [--append-system-prompt <instructions>]       (left out when empty)
        (--session-id <uuid> | --resume <uuid>)
 ```
+
+`<timer tools>` is `ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger`. With an empty
+`deny_commands` the argument is those five and nothing else, as before `r1.s4.w4`.
 
 A new session gets a fresh version-4 UUID. The flags never include `--bare`, `--no-session-persistence`,
 `--setting-sources` or `--max-turns`, and the environment never sets `CLAUDE_CONFIG_DIR`. The
@@ -276,6 +280,58 @@ The child's environment is an allowlist:
 So `ANTHROPIC_API_KEY`, `PF_SEAT_TOKEN`, the Orca and herdr hook tokens and a parent Claude Code
 session's variables never reach the chat. An `init` whose `apiKeySource` is not `none` ends the
 process, and so does one whose tool list holds a timer tool.
+
+### The deny list
+
+`ChatOpen.deny_commands` is the list of shell commands that the runtime must refuse to run. The
+controller resolves it at each open, new or resumed, from the setting `chat.deny_commands` (`cli.md`,
+ADR-0016), so a change reaches a process only at its next launch. The adapter turns each entry into
+Claude Code deny rules, as `Bash(...)` entries of the one `--disallowedTools` argument.
+
+**The pattern grammar** is one rule for the controller and both adapters: `pf_engine::port::chat::
+check_deny_command` for an entry and `check_deny_commands` for a list.
+
+- A pattern is words, and `*` stands for any text.
+- It is 1 to 100 characters of `A-Z a-z 0-9`, space, `.`, `_`, `/`, `:`, `=`, `@`, `+`, `-` and `*`.
+- Its first character is a letter or a digit. It has no trailing space and no two spaces in a row.
+- `*` is a whole word (`git push * --force`) or the last character of a word (`--force*`, `--repo=*`,
+  `+*`). It is never inside a word and never `**`.
+- It holds **no `:*` anywhere**. Claude Code reads a rule that ends `:*` as its legacy prefix form,
+  so `Bash(git push * :*)` would deny every push.
+- So no `(`, `)`, `,`, quote, `;`, `&`, `|` or control character can reach a rule.
+- A list holds at most 32 entries and no duplicate.
+
+`validate` refuses a spec whose list fails the check, and names the entry. `FakeChat::open` refuses
+it the same way and otherwise ignores the list.
+
+**The rule form.** `launch::disallowed_tools(deny)` is the five timer tools, then, for each entry `c`
+in order, `Bash(c)` and `Bash(c *)`, or `Bash(c)` alone when `c` ends in `*`, all joined by `,`.
+`Bash(c)` matches the bare command, and `Bash(c *)` matches it with arguments (the pinned help's
+`Bash(git *)` form). The fifteen built-in patterns make 25 rules, so the argument holds 30.
+
+**The built-in patterns,** in order: `git push -f*`, `git push * -f*`, `git push --force*`,
+`git push * --force*`, `git push * +*`, `git push --delete`, `git push * --delete`, `git push -d`,
+`git push * -d`, `git branch -D`, `git branch * -D`, `gh pr merge`, `gh -R * pr merge`,
+`gh --repo * pr merge` and `gh --repo=* pr merge`. They cover the common spellings of a forced push,
+a remote branch delete, a local branch delete and `gh pr merge`, with a flag before or after the
+remote or branch.
+
+**A speed bump, not a boundary.** A deny rule matches the command text the model writes. It stops an
+accidental merge, not a determined one. The residue gets past it: an absolute path
+(`/usr/bin/git push -f`), `gh api …/merge`, a script, an alias, a combined short flag
+(`git push -uf`), the colon refspec (`git push origin :branch`, whose only rule would end `:*`), an
+environment prefix (`GIT_DIR=… git push -f`) and another tool. The chat keeps `HOME`, so it reaches
+the operator's `gh` login and git credentials, and a merge it makes skips the ack, its confirm code
+and its ledger line. The owner of that limit is the Release 2 authority-rules spine. A PATH shim
+was considered and not taken: an absolute path bypasses it, so it is no stronger than the rules.
+
+**Qualified by case 19** (`real_probe_chat.rs`, CLI 2.1.319, `bypassPermissions`, one probe process).
+The 30-rule argument parsed, since the CLI ran. One rule held under `bypassPermissions`, in the
+rule's own text (`Permission to use Bash with command … has been denied.`): `gh -R <repo> pr merge 1`
+met `Bash(gh -R * pr merge *)`, so a `*` in the middle of a command matches in 2.1.319. The recording
+does not show the rest. The host's own `PreToolUse` hook refused `git branch -D` and `git push -f`
+before a rule applied, and the model made no `Bash` call for `git push origin main --force` and for
+`true && git branch -D …`. Those four are unverified; ADR-0014's amendment records them.
 
 ### The control protocol subset
 
@@ -323,15 +379,47 @@ itself; the adapter sends no notice).
   `<cli_version> (Claude Code)` for `--version`, checks the fixture's header and `body_sha256` (exit 2
   on a mismatch), plays the body in order, keeps the recorded gaps with `--pace recorded`, and starts
   no other program.
-- **Fixtures** live in `crates/pf-adapter-claude/fixtures/`. The recorder writes them and nobody else:
+- **Fixtures** live in `crates/pf-adapter-claude/fixtures/`. The recorder writes them and nobody else
+  (one exception, below):
   line 1 is a header (`cli_version`, `recorded`, `recorder`, `case`, `body_sha256`), and each later line
   is `{"to":"cli"|"host","t_ms":…,"msg":…}`. They are scrubbed before they are hashed: home and
   temporary paths, account blocks, e-mail addresses, tokens and artifact URLs are replaced or removed,
   and the lists that name the operator's own setup are empty.
 - **The qualification recorder** (`tests/real_probe_chat.rs`) runs only with `PF_REAL_CLAUDE=1`, from
-  `#[ignore]`d tests, against a counted budget of 30 real processes in
-  `~/.local/state/pulse-factory/claude-probe-processes`. A plain `cargo test` and CI never start the
-  real CLI.
+  `#[ignore]`d tests, against a counted budget of 31 real processes (30, and one more for case 20 alone, by the
+  operator's ruling of 2026-11-10) in `~/.local/state/pulse-factory/claude-probe-processes`. A plain `cargo test` and CI never start the
+  real CLI. Case 19 (`case_19_deny_rules`) qualifies the deny rules of "The deny list" and records
+  `fixtures/deny_rules.jsonl`: an operator turn and two `Task` turns, then the deny-rule prompts.
+- **Case 20** (`case_20_start_proposal`, `r1.s4.w2`) is the 31st and last process of the budget. It
+  asks whether the Orchestrator, with the persona of ADR-0015 and the skill under a temporary share
+  directory, starts a spine by running `pulse-factory propose` and never `pulse-factory arm`. A stub
+  `pulse-factory` first on `PATH` records its argv and starts nothing. One function in
+  `tests/common/propose_rule.rs` judges a call, for the stub's records and for the recorded `Bash`
+  command alike: a call is a proposal of `s1` when its program is `pulse-factory`, its first argument
+  is `propose` and `s1` is a positional argument (a flag and its value are not). Case 20 ran twice.
+  The first process (the 30th) made no recording: the scrub guard refused the skill's own text,
+  which holds the elided path `/home/…`. The operator ruled (2026-11-10) that the scrubber gets a rule
+  for that text, that the guard stays as it is, and that the limit rises to 31 for this case alone.
+  The second process (the 31st, 2026-11-10, `PF_REAL_CLAUDE=1`, AC-15; the counter reads 31) wrote
+  `fixtures/start_proposal.jsonl`, a real recording of 152 body lines. Its `FINDING` lines:
+  - `start_proposal.tools_used: Read,Bash`: the model read the skill, then ran one shell call.
+  - `start_proposal.read_the_skill: true`: it read `<TMP>/share/skill/SKILL.md` first, from the path
+    the persona names.
+  - `start_proposal.tool_use: "Bash"` was `pulse-factory propose s1 --workflow paper-spine-d20 --ledger
+    <TMP>/ledger.md --param paper_env=<TMP>/paper --param base_branch=main 2>&1; echo "exit=$?"`. It
+    exited 0 and the stub answered with the card line. The model never ran `arm`.
+  - `start_proposal.stub.calls: 1`, `start_proposal.stub.proposals_of_s1: 1`,
+    `start_proposal.stub.arms: 0`: the stub's own record agrees with the recorded stream.
+  - The model spelled the paper env as `--param paper_env=…`, not as `--paper …`: `skill/SKILL.md`
+    does not name `--paper`. The matching rule accepts both, because it needs only `propose` and the
+    positional `s1`. The demos do not read the recorded command: `start-env.sh` runs `propose` with
+    its own arguments.
+  - The turn ended with 2 tool results and one `result` message. No operator hook blocked the stub.
+
+  The first process (the 30th) read the skill and then ran three `Bash` calls: two looked for the
+  workflow and the CLI (`ls`, `find`, `command -v pulse-factory`) and read `propose --help`, and the
+  third was the same `propose s1` call. The second process went to the proposal at once. Neither run
+  ran `arm`.
 
 ## Before you ship a chat adapter
 

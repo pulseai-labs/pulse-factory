@@ -10,9 +10,11 @@ use tokio::sync::mpsc;
 use crate::types::{ApiStatus, DeviceRecord, PairResult, ServerRef};
 
 /// The verbs a device may call: exactly these. A later spine that adds a verb amends ADR-0012.
-/// `halt` and every verb that acks, answers or claims stay off this list. So do `session_redact`
-/// (the CLI only: a redaction is the operator's, C12) and `session_items` (a device reads the items
-/// on the stream, from `after=0`).
+/// `halt`, `claim`, `device_pair` and `device_revoke` stay off this list: a device takes the
+/// claim only by spending a confirm code on `answer`, `clear` or `ack` (`r1.s4.w1`). `arm` is on it
+/// (`r1.s4.w2`): a device arms only with a confirm code from a start card, and it takes no claim. So do
+/// `session_redact` (the CLI only: a redaction is the operator's, C12) and `session_items` (a device
+/// reads the items on the stream, from `after=0`).
 pub const ALLOWLIST: &[&str] = &[
     "project_add",
     "project_list",
@@ -24,6 +26,35 @@ pub const ALLOWLIST: &[&str] = &[
     "session_interrupt",
     "session_set",
     "session_end",
+    "requests",
+    "show",
+    "confirm_code",
+    "answer",
+    "clear",
+    "ack",
+    "arm",
+    // `r1.s4.w4`: the scoped settings (ADR-0016). A device acts as the operator.
+    "settings_get",
+    "settings_set",
+    "settings_unset",
+    // `r1.s4.w3`: every run the controller holds, for the Needs you page. A read: no admission, no
+    // run units or costs.
+    "run_list",
+];
+
+/// The words a device verb gives for a refusal, a closed list (`r1.s4.w1`, R7). The controller puts one
+/// in the `result` of a refused answer as `{"refusal": "<word>"}`. The router carries a word that is
+/// on this list into the 422 body and the audit record, and drops any other value.
+pub const REFUSALS: &[&str] = &[
+    "code_unknown",
+    "code_foreign",
+    "code_used",
+    "code_voided",
+    "code_expired",
+    "code_subject",
+    "subject_moved",
+    "claim_moved",
+    "device_revoked",
 ];
 
 /// Whether a device may call this verb.
@@ -132,6 +163,8 @@ pub struct RequestRecord {
     pub count: u64,
     /// Set on the record of the failure that starts a block: when the block ends, as UTC text.
     pub blocked_until: Option<String>,
+    /// The word of a refused device verb, from [`REFUSALS`]. `None` for every other record.
+    pub refusal: Option<String>,
 }
 
 /// Why the host ends a stream. The router turns each into a WebSocket close frame.

@@ -427,7 +427,7 @@ fn a_verb_name_must_match_the_rule_and_no_verb_off_the_allowlist_reaches_the_ser
             assert_eq!(r.status, 200, "{name}");
             assert_eq!(kind(&r.json()), "bad_request", "{name}");
         }
-        for verb in ["halt", "ack", "device_revoke", "no_such_verb"] {
+        for verb in ["halt", "claim", "device_revoke", "no_such_verb"] {
             let r = rig.post(&format!("/bridge/verbs/{verb}"), &json!({}));
             assert_eq!(r.status, 200, "{verb}");
             assert_eq!(kind(&r.json()), "bad_request", "{verb}");
@@ -571,7 +571,9 @@ fn every_answer_for_the_bundle_carries_the_csp() {
 }
 
 /// The bridge prints nothing but its `listening` line, and that line is the binary's. The library
-/// has no print macro at all. (The built binary's whole output is checked in d12, AC-4.)
+/// has no print macro at all, with one exception (`r1.s4.w3`): the stream's one stderr line for a
+/// request frame it cannot read, one `eprintln!` in `stream.rs` that carries no frame text.
+/// (The built binary's whole output is checked in d12, AC-4.)
 #[test]
 fn the_bridge_library_has_no_print_macro() {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pf-client/src");
@@ -583,7 +585,9 @@ fn the_bridge_library_has_no_print_macro() {
             for (n, line) in text.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 for mac in ["println!", "eprintln!", "print!", "eprint!", "dbg!"] {
-                    if code.contains(mac) {
+                    let dropped_frame_line =
+                        code.contains("eprintln!") && path.ends_with("stream.rs");
+                    if code.contains(mac) && !dropped_frame_line {
                         hits.push(format!("{}:{}: {mac}", path.display(), n + 1));
                     }
                 }
@@ -591,4 +595,14 @@ fn the_bridge_library_has_no_print_macro() {
         }
     }
     assert!(hits.is_empty(), "{}", hits.join("\n"));
+    // The exception is one line, not a licence: `stream.rs` holds exactly one `eprintln!`.
+    let stream = std::fs::read_to_string(src.join("stream.rs")).unwrap();
+    let lines = stream
+        .lines()
+        .filter(|l| l.split("//").next().unwrap_or("").contains("eprintln!"))
+        .count();
+    assert_eq!(
+        lines, 1,
+        "stream.rs may print only the dropped-request-frame line"
+    );
 }

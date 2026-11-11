@@ -188,6 +188,7 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
         verbs,
         vec![
             "arm",
+            "propose",
             "status",
             "halt",
             "requests",
@@ -198,6 +199,7 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "ack",
             "project",
             "session",
+            "settings",
             "chat-runtime",
             "device",
             "api",
@@ -205,10 +207,8 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "controller"
         ]
     );
-    assert_eq!(
-        skill_problems(&read("skill/SKILL.md"), &verbs),
-        Vec::<String>::new()
-    );
+    let skill = read("skill/SKILL.md");
+    assert_eq!(skill_problems(&skill, &verbs), Vec::<String>::new());
 }
 
 // ---- each check fires on a bad sample

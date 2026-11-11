@@ -32,3 +32,21 @@ Since `r1.s3.w4` the bridge carries the chat too (`docs/contracts/ui-transport.m
   reaches it with no change to the content security policy.
 
 The bridge still writes nothing to stdout or stderr but its one `listening` line.
+
+## Needs you and the Settings rows
+
+Since `r1.s4.w3` the bridge carries the device verbs, the settings verbs and `run_list` too:
+
+- `POST /bridge/verbs/<verb>` reaches `requests`, `show`, `confirm_code`, `answer`, `clear`, `ack`,
+  `settings_get`, `settings_set`, `settings_unset` and `run_list` through `pf-client`'s `transport.verb`,
+  which checks the name against the allowlist before it connects. A refused device verb answers the
+  error envelope with its `refusal` word beside `kind` and `message`; an error with no word is exactly
+  `{"kind", "message"}`.
+- The stream's SSE carries the request frames as `{"event":"request_frame","frame":{…}}` lines, beside
+  the `frame` events of the chat. A request frame that `pf-client` cannot read is dropped and the stream
+  goes on.
+
+**The one exception to the rule above** (the bridge writes nothing to stdout or stderr but its
+`listening` line): `pf-client` writes one stderr line per connection for a dropped request frame,
+`pf-client: dropped a request frame this client cannot read (<n> so far on this stream)`, with no frame
+text. The bridge prints no confirm code, token or answer text.

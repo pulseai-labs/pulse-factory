@@ -2,11 +2,12 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has sixteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has eighteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
 `add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
 `session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
-runtime it needs.
+runtime it needs, `settings` (`r1.s4`), which reads and sets how a chat behaves, per server,
+project or agent, and `propose` (`r1.s4`), which posts a start card into the calling chat.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -17,7 +18,8 @@ runtime it needs.
 - **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
   ledger of the controller's own commands (`project`, the device commands, which are the redeem of a
   pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end`,
-  `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, with the kind
+  `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, the settings
+  commands `setting_set` and `setting_unset` (`r1.s4`), with the kind
   backfill `project_kind` that runs at controller start). A `chat_send` line holds the byte count of
   the text and never the text. It is
   not a run's ledger. Each command is admitted once under the admission scope `@controller`, where
@@ -35,7 +37,9 @@ runtime it needs.
 - **`halt` and the projects.** `halt` applies to runs and to live chat processes. A `project` command
   launches nothing and changes no run, so a halt neither stops it nor needs it. The same holds for
   `device` commands and for the commands `project_kind`, `chat_session_start`, `chat_session_end`
-  and `chat_item_redact`. `halt` stops every live chat process (see `halt` and `session`). `halt` is
+  and `chat_item_redact`. The commands `setting_set` and `setting_unset` launch nothing and change
+  no run either, so `halt` neither stops them nor needs them, and they still commit after a halt.
+  `halt` stops every live chat process (see `halt` and `session`). `halt` is
   not open to a device over the API either (`api.md`).
 - **`chat.ledger`.** `<state dir>/chat.ledger` is the audit trail of the chat processes, beside
   `api.ledger`. It is append-only, has one writer, writes no `fsync` per line, is not in the store
@@ -44,10 +48,17 @@ runtime it needs.
   `field()`, and no line holds a message, a tool text, a token or a key:
 
   ```
-  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|->
+  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in>
   <UTC> chat turn session=S-1 cause=operator input_tokens=9 output_tokens=12 cache_read_tokens=0 cache_write_tokens=13006 cost_micros=3465 duration_ms=1042 stop=end_turn is_error=false
   <UTC> chat stop session=S-1 reason=end|idle|halt|exited|shutdown|option [code=<n>]
+  <UTC> chat stop session=S-1 reason=self_turn_cap self_turns=<n> cap=<n> from=<scope|built_in>
   ```
+
+  `deny=` is the number of shell command patterns the launch passed to the runtime, and `deny_from=`
+  is the scope of the list in force (`built_in`, `server`, `project:P-1`, `agent:orchestrator` or
+  `project:P-1/agent:orchestrator`; see `settings`). A stop with `reason=self_turn_cap` is the cap on
+  the turns a chat starts on its own: `self_turns` counts the turn that was cut, so it is the cap plus
+  one, and `from` is the scope the cap came from.
 
   `qualified=false` marks an override binary. A turn that the CLI starts on its own (a `task` turn)
   has its line too, with `cause=task`.
@@ -59,7 +70,14 @@ runtime it needs.
   (the agent's server-side environment, `NAME=value` pairs separated by spaces; the agent ID is
   upper-cased and each other character is `_`), `PF_SERVER_NAME` (the name every API answer carries)
   and `PF_CHAT_REGISTRY` (default `https://registry.npmjs.org`). No `PF_*` name reaches a chat
-  process.
+  process. These are "the chat settings": the controller's environment, and a restart changes them.
+  The values that `settings` reads and sets are "settings": scoped values in the store, and no restart
+  changes them. The two share no name and no storage. The controller marks each chat with
+  `PULSE_FACTORY_CHAT=<session ID>`, which is no `PF_` name (`requests.md`, "The caller check").
+- **`PF_CONFIRM_TTL`.** How long a device's confirm code works, in whole seconds. The controller reads
+  it at start. It can only shorten the default of 120 seconds: a value from 1 to 120 is used, and a
+  bad or larger value prints one line on stderr and keeps 120. The tombstone window stays 10 minutes
+  (`requests.md`, "Confirm codes").
 - **Share directory.** `$PF_SHARE_DIR`, else `~/.local/share/pulse-factory`. It holds `workflows/`
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
@@ -68,14 +86,19 @@ runtime it needs.
   `schema_version` (now `1`). A change that removes or renames a field raises the version.
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
   `--yes`, and a command line that clap refuses.
-- **A seat cannot spend.** `arm`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
+- **A seat cannot spend.** `arm`, `propose`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
   `project remove`, `device pair`, `device revoke` and the state-changing `session` verbs (`start`,
   `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
-  `project list`, `device list`, `api status`, `session list` and `session items` are reads and stay
-  open. The controller checks the caller of `claim`, `answer`, `clear`, `ack`, `device pair`,
-  `device revoke` and the state-changing `session` verbs again (see `claim` and `session`).
+  `project list`, `device list`, `api status`, `session list`, `session items` and `settings get` are
+  reads and stay open. `settings set` and `settings unset` are the named exception: the CLI does not
+  refuse them under `PF_SEAT_TOKEN`. They always reach the controller, whose caller check refuses the
+  seat and audits the refusal (see `settings`). The controller checks the caller of `arm`, `propose`, `claim`,
+  `answer`, `clear`, `ack`, `device pair`, `device revoke`, the state-changing `session` verbs and
+  `settings set` and `settings unset` again: a caller that is, or descends from, a seat or a chat
+  process, or that holds `PULSE_FACTORY_CHAT` in its environment, is refused (see `claim`, `session`
+  and `settings`).
 - **The wire.** One request and one answer for each connection, each one line of JSON, at most
   1 MiB. Each carries `protocol_version`; a different version is refused with a message that names
   both.
@@ -100,7 +123,10 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   arm-set parameter; a failed `plan_check`; a plugin not found at its minimum version; a
   `--plugin-root` that does not exist; `--dry-run` with `--yes`; a run with a running session; an
   earlier run not at an end state that `--replace` does not name; and, without `--paper`, a `repo`
-  whose `origin` is not on GitHub or a failed `gh` read.
+  whose `origin` is not on GitHub or a failed `gh` read; and a caller that is, or descends from, a
+  chat process, or that holds `PULSE_FACTORY_CHAT` (`arm refused: the caller is, or descends from,
+  chat process <pid>`). `arm` runs only through the peer-aware path of the socket, so a request with
+  no peer is refused with `arm refused: the controller cannot tell which process called`.
 - **The summary.** Spine, item count, workflow name and file version, each role with runtime and
   model, the caps (`model_sessions`, `cold_builds`, each seed's `max`, each stage-outcome loop, one
   relaunch per stage), the pinned plugins, the most launches,
@@ -128,6 +154,85 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   which pins and records the run and prints `run: <run id>`.
 - **`--replace <run>`** replaces an earlier run that is not at an end state and has no running
   session. After the new run's pins succeed, the old run ends with `replaced by <new run>`.
+- **The device path** (`r1.s4.w2`). A paired device arms a run from a start card that a chat posted
+  with `propose`. It sends the `arm` verb over the API with a confirm code for that card and that
+  plan (`api.md`, "Confirm codes"). The controller then builds the plan again from the snapshot of
+  the package that it took at `propose`, and arms only when the plan, the summary and the package
+  are the same. The CLI's `arm` and the device path share one plan builder and one summary, so the
+  card shows what `arm --dry-run` prints. The plan has two optional fields that the CLI never sets,
+  `project_id` (the project of the chat that proposed) and `expect_package` (the content hash of the
+  snapshot). A request on the socket that carries a confirm code and no plan is refused with `arm
+  refused: confirm codes are for paired devices; …`.
+- **The run's project.** A run armed from a start card belongs to the chat's project. `status` and
+  `runs` show it as `project_id`. A run that the CLI armed has `project_id` null.
+
+## `propose`
+
+```
+pulse-factory propose <spine> --workflow <name> --ledger <file> [--param k=v]...
+                      [--plugin-root <dir>]... [--paper <dir>] [--command-id <id>] [--json]
+```
+
+`propose` posts a **start card** into the chat that called it, and starts nothing. A paired device
+confirms the card, and only then does the run arm (`arm`, "The device path"). It is the Orchestrator
+chat's way to start a spine: a chat is refused on `arm`.
+
+- **The inputs** are `arm`'s, with these narrowings (W1, W2). `--workflow` takes the name of an
+  installed workflow and never a path: a value with a `/` is refused by the CLI and again by the
+  controller (`propose refused: --workflow takes the name of an installed workflow, not a path`).
+  `--ledger`, `--plugin-root` and `--paper` are made absolute from the caller's working directory,
+  and the controller refuses a relative path again. `propose` has no `--replace`, no `--yes` and no
+  `--dry-run`: given `--replace` the CLI exits 2 (clap's unexpected-argument error). A request on the
+  socket whose inputs carry `replace` is refused with `propose refused:
+  replacing a run is the operator's; use pulse-factory arm --replace`.
+- **The caller.** The controller finds the calling chat by the ancestry of the caller, never by the
+  marker. In this order:
+  1. a caller with `PF_SEAT_TOKEN`, or a tracked seat on its chain, is refused (it is a seat), and so
+     is a failed `/proc` read;
+  2. a live chat process on the chain gives the session. A `PULSE_FACTORY_CHAT` that names another
+     session is refused;
+  3. no chat process on the chain, and the caller holds `PULSE_FACTORY_CHAT`: refused, `propose
+     refused: the caller holds PULSE_FACTORY_CHAT but runs under no live chat process; the marker
+     never names the caller`. This covers a child that the chat detached;
+  4. neither: refused, `propose refused: the caller runs under no chat session; propose posts a
+     start card into the calling chat, and an operator on this host starts a run with pulse-factory
+     arm`.
+
+  `propose` runs only through the peer-aware path of the socket: with no peer it is refused, and it
+  is not on the device allowlist.
+- **The snapshot and the plan.** The controller draws the proposal ID (`sp-` and 16 hex digits),
+  copies the pinned files of `<share dir>/workflows/<name>` to `<state dir>/proposals/<sp-…>/package`
+  and pins the copy. It then builds the plan in its own process from the snapshot, with the check
+  that `arm --dry-run` makes (`plan_check`, plugins, the forge facts, an earlier run). A refusal from
+  any step is `propose refused: <cause>`, with `arm`'s cause; it posts no card and leaves no
+  snapshot. A removed project is refused (`propose refused: project P-n is removed`).
+- **The bound** (W19). The controller counts the session's calls in the last minute before it builds
+  anything. Over `chat.propose_per_min` (see `settings`) the call is refused: `propose refused:
+  propose_rate: S-1 made <n> proposals in the last minute (chat.propose_per_min = <k>, from
+  <scope>)`.
+- **The card.** `plan_sha256` is the SHA-256 of the plan, its summary and the snapshot's content
+  hash. A card is a `start_card` item of the chat, with the summary, the parameters, the ledger and
+  the plugin roots. A second `propose` from the same chat posts a new card and withdraws the first
+  (`start_result` `withdrawn`, "superseded by sp-…"). A card is also withdrawn when the session ends,
+  on `halt` (`proposals_withdrawn`) and at a controller start. Proposals live in memory: a restart
+  keeps no proposal, and a card whose proposal already has a `run_project` admission is answered
+  `armed` with its run.
+- **The answer.** JSON: `{"schema_version": 1, "replayed", "proposal", "session", "project_id",
+  "plan_sha256", "summary"}`. The text form prints the summary lines that `arm` prints, then
+  `proposal: sp-… posted to chat session S-1; nothing is armed until the operator confirms it on a
+  paired device`. A retry sends the same `--command-id`: the controller answers the first proposal
+  with `replayed: true` and posts no second card. After a restart a replay answers `proposal: null`
+  with a note.
+- **The ledger.** Every call writes one line of `<state dir>/controller.ledger`. An admitted call:
+  `propose S-1 proposal=sp-… project=P-1 spine=<spine> workflow=<name> items=<n|unknown>
+  most_launches=<n|unknown> plan=<plan_sha256> command=<id>`. A refusal, the caller's included, is
+  one refused admission under a command ID that the controller makes, `propose-refused-<16 hex>`,
+  so the caller's own ID stays unused: `propose refused caller=<seat-token|seat:<pid>|chat:<S-n>|
+  chat:invalid|unknown> reason="…" command=propose-refused-<hex>`. A `propose_rate` refusal
+  coalesces as `settings` refusals do: the first writes its line, and one more line at the close of
+  the window carries `refused=<n>`.
+- **Exit codes.** 0 is a posted card. A refusal prints `pulse-factory: propose refused: <cause>` on
+  stderr and exits 1. `PF_SEAT_TOKEN` set is refused by the CLI.
 
 ## `status`
 
@@ -138,7 +243,9 @@ pulse-factory status [<run>] [--json]
 The default run is the latest. It prints the run, `env`, state, any halt or degraded reason, the
 notes of the last tick, each unit with its stage, status and park reason, each session with unit,
 stage, role, model, runtime, status, tokens by kind and cost, and the run's total. Cost is whole
-micro-dollars, shown as dollars. An unknown run exits 1 and names it.
+micro-dollars, shown as dollars. An unknown run exits 1 and names it. `status --json` and the
+controller's `runs` list carry `project_id` (`r1.s4.w2`): the project of the chat that proposed the
+run, or null for a run that the CLI armed.
 
 ## `halt`
 
@@ -156,6 +263,10 @@ reopens one, with a new confirm. With no run at all `halt` still stops the chats
 `"run": null`. The JSON gains `"chats_stopped": ["S-1", …]`, and the text form names the stopped
 chats.
 
+`halt` first withdraws every open proposal (`start_result` `withdrawn`, "halted"), and only then
+stops the chats, so the end of a stopped chat finds no proposal to withdraw. The JSON gains
+`"proposals_withdrawn": ["sp-…", …]`.
+
 ## `requests`
 
 ```
@@ -168,7 +279,10 @@ opened and the reason. `--run` narrows to one run; an unknown run exits 1 and na
 answered and withdrawn requests, each marked with its status. With nothing open it prints
 `no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
 `requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
-`opened_at`, `answered_at` and `reason`). It needs no claim.
+`opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
+`merge_ack`), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
+null), `revoked` and `claimed_at`; null when none). The new fields join the old ones: none is
+removed and `schema_version` stays 1. The API serves the same JSON (`api.md`). It needs no claim.
 
 ## `show`
 
@@ -179,8 +293,8 @@ pulse-factory show <R-n> [--json]
 Prints every field of one request: the body, the answer if there is one, and the verbs that answer
 it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
 holds and the text of a `stop` request. The JSON adds `body`, `answer`,
-`answer_generation` and `verbs` to the fields of `requests`. An unknown ID exits 1 and names it. It
-needs no claim.
+`answer_generation` to the fields of `requests` (`verbs` and a `merge_ack`'s `pr`, `base` and
+`head_sha` are in them already). An unknown ID exits 1 and names it. It needs no claim.
 
 ## `claim`
 
@@ -195,8 +309,12 @@ and the path, never the token. The default holder is `<user>@<host>:<process>`. 
 the latest that has not ended.
 
 - **Refusals** (exit 1, nothing recorded): `PF_SEAT_TOKEN` set; a caller that is, or descends from, a
-  seat; a `/proc` read that fails; no random bytes (`no token can be made`); no run that takes a
-  claim.
+  seat or a chat process (`claim refused: the caller is, or descends from, chat process <pid>`), or
+  that holds `PULSE_FACTORY_CHAT` in its environment; a `/proc` read that fails; no random bytes
+  (`no token can be made`); no run that takes a claim; a holder label that starts with `device `
+  (`the holder label "device …" is kept for paired devices`).
+- A paired device takes the claim only by acting with a confirm code (`requests.md`, "The claim").
+  There is no `claim` verb on the API.
 - The JSON holds `schema_version`, `generation`, `holder`, `run` and `token_file`.
 
 ## `answer`
@@ -211,7 +329,10 @@ never run. `--rev` must be the request's current revision.
 
 - **Refusals** (exit 1, nothing recorded): the refusals of `claim`; a token file that is missing or
   empty (the message names the path); a token that matches no claim; a fenced token
-  (`claim <old> was fenced by claim <new>`); an unknown request; a request that is not open; another
+  (`claim <old> was fenced by claim <new>`); a token that a paired device fenced (the message ends
+  `the claim moved to device D-n (<name>) at <time>; claim again with pulse-factory claim`); a call
+  with `code` and no token (`confirm codes are for paired devices; on this host use pulse-factory
+  claim`); an unknown request; a request that is not open; another
   revision (the message names the current one); a changed pinned file (the message names it).
 - When the workflow declares an `on_answer` hook for the request, it runs first (`workflow-file.md`,
   "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
@@ -231,7 +352,8 @@ ledger line `answer <R-n>@<rev> by claim <generation>: clear <unit> --to <stage>
 is the one the unit parked in. The next tick launches it. A halted run accepts the clear and
 launches nothing.
 
-- **Refusals** (exit 1, nothing recorded): those of `answer`; a unit that is not parked or has no
+- **Refusals** (exit 1, nothing recorded): those of `answer`, the refusal that names `the claim
+  moved to device D-n` included; a unit that is not parked or has no
   open request; a `--to` that is not a stage of the unit's track; a `merge_ack` request (the
   message names `ack`).
 - The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation` and
@@ -258,7 +380,7 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
    back to the merge, which opens a new `merge_ack`.
 
 - **Refusals** (exit 1): those of `claim`; a token file that is missing or empty; a token that
-  matches no claim; a fenced token; an unknown request; a request of another kind (the message
+  matches no claim; a fenced token, or one that a device fenced (`the claim moved to device D-n`); an unknown request; a request of another kind (the message
   names the kind: `ack` answers only a `merge_ack` request); a request that is not open; another
   revision (the message names the current one); a halted or ended run; a moved head or any cause in
   step 2; a changed pinned file. A refusal after the request is known writes the ledger line
@@ -469,7 +591,9 @@ stream (`api.md`).
   is the `ChatSessionRecord` of `api.md` (usage, `last_turn_at`, `cache_ttl_seconds`, the context
   gauge, `pending_options`, `process` with its holders).
 - **`items`.** The stored items after `--after` (default 0), at most 500. The text form prints one
-  line each: the `seq`, the kind and a one-line summary.
+  line each: the `seq`, the kind and a one-line summary. A `start_card` prints `start <spine>
+  proposal=<id> items=<n> most_launches=<n>`, and a `start_result` prints `<outcome> answers <seq>
+  run=<run>`.
 - **The JSON of the others.** `send`, `answer`, `interrupt` and `set` answer `{"schema_version": 1,
   "replayed": …, "session": <ChatSessionRecord>, "note": …}`, where `note` appears only when an
   admitted command could not act. `start` and `end` answer the session shape of `project`'s chat
@@ -494,10 +618,141 @@ stream (`api.md`).
   because the runtime has no transcript to resume (operator ruling on PR #41, class C1). End the
   session and start a new one. The mark is in memory: after a controller restart the next `send` tries the
   resume again and marks it again.
+- **The cap on self-started turns.** A turn the chat starts on its own (a background task finished,
+  cause `task`, or a controller notice, cause `notice`) counts. The operator's next message, and any
+  operator turn, sets the count to 0. With the cap `chat.self_turn_cap` of N (see `settings`; default
+  3, `0` is off), N such turns run whole after each operator message, and the controller cuts the
+  next one as it starts: it interrupts the turn, stops the process and its background tasks, closes
+  each pending request as `lost`, writes one `chat.ledger` line `stop session=S-1
+  reason=self_turn_cap self_turns=<cap+1> cap=<cap> from=<scope>`, adds a `notice` item with the code
+  `self_turn_cap` and sets the session `needs_you`. The interrupted turn's late `turn_result` is still
+  stored and keeps the state. The operator's next `send` finds no process, opens one with `--resume`
+  and starts the count at 0; the state becomes `working`. `halt` still stops a live process
+  mid-turn (`reason=halt`, the session `idle`) and leaves a session that the cap holds `needs_you`.
+  A controller restart settles every live session to `idle`, so the `needs_you` of a cap stop does
+  not survive a restart (its notice item does).
 - **Who may call.** A caller with `PF_SEAT_TOKEN` is refused every state-changing `session` verb. The
   controller checks the caller again: it refuses a caller that is, or descends from, a seat **or a
   live chat process**, so an Orchestrator cannot drive its own chat or another one. A paired device
   acts as the operator over the API (`api.md`), on the allowlist.
+
+## `settings`
+
+```
+pulse-factory settings get [<key>] [--project <P-n>] [--agent <id>] [--json]
+pulse-factory settings set <key> <value> [--project <P-n>] [--agent <id>] [--command-id <id>] [--json]
+pulse-factory settings unset <key> [--project <P-n>] [--agent <id>] [--command-id <id>] [--json]
+```
+
+A setting is one value of one key at one scope, in the store's `settings` table (ADR-0003,
+ADR-0016). The operator sets how a chat behaves with no restart. A key is read for a context: a
+project, an agent, both or neither. The settings are not the controller's environment (see "The chat
+settings" in the common rules).
+
+- **The scopes.** The server default, one project, one agent, or one agent in one project. A context
+  reads them most specific first, in the words
+  "project and agent, project, agent, server, then the built-in": the pair `(project, agent)`, then the project for every agent, then the agent for every
+  project, then the server default, then the binary's own value. A project value is the operator's
+  choice for that project and every agent in it, so it sits above an agent value. A context with no
+  project skips the two project scopes, and one with no agent skips the two agent scopes.
+- **The keys.** Exactly three in this release. Any other key is refused: `unknown setting <key>; the
+  settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min`. The confirm code, the caller checks and the
+  claim are authority floors, not settings, and never become keys.
+
+  | Key | Value | Built-in | Merge | A change applies |
+  |---|---|---|---|---|
+  | `chat.self_turn_cap` | a JSON integer, 0 to 100; `0` is off | `3` | `override` | at the next turn the chat starts on its own, with no relaunch |
+  | `chat.deny_commands` | a JSON array of 0 to 32 command patterns, no duplicates | the fifteen patterns below | `override` | at the chat's next launch (`chat.ledger` `open`, `deny=`, `deny_from=`) |
+  | `chat.propose_per_min` | a JSON integer, 0 to 60; `0` is off | `4` | `override` | at the next `propose`, with no relaunch |
+
+  `chat.propose_per_min` bounds the plans one chat session builds in a minute (see `propose`). It
+  is read for the session's project and agent, and every `propose` call counts as a build, a refused
+  one too.
+
+  A pattern is words, and `*` stands for any text. It is 1 to 100 characters of letters, digits,
+  space, `.`, `_`, `/`, `:`, `=`, `@`, `+`, `-` and `*`, starts with a letter or a digit, has no
+  trailing space and no two spaces in a row, and holds `*` only as a whole word or as the last
+  character of a word. It holds no `:*` anywhere: Claude Code reads a rule that ends `:*` as its
+  prefix form, which would deny every call. The built-in list, in order: `git push -f*`,
+  `git push * -f*`, `git push --force*`, `git push * --force*`, `git push * +*`,
+  `git push --delete`, `git push * --delete`, `git push -d`, `git push * -d`, `git branch -D`,
+  `git branch * -D`, `gh pr merge`, `gh -R * pr merge`, `gh --repo * pr merge` and
+  `gh --repo=* pr merge`. The list is a speed bump, not a boundary (`chat-adapter.md`).
+- **The merge mode.** Each key declares how the rows of its scope chain combine. Both keys are
+  `override` now: the first row on the chain wins whole, and every other stored row on the chain is
+  masked. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
+  migration, because the store keeps every scope's row as it is. A stored value that this binary
+  cannot read (a hand edit) is skipped with one stderr line, and the next scope decides. A stored key
+  that this binary does not know is ignored. There is no cache: a change applies at the next read.
+- **`get`.** With no key, one record for each key; with a key, that one. `--project` and `--agent`
+  name the context, and must be a live project and a known agent. The text form is one line for each
+  key, `chat.self_turn_cap 3 (built-in)` or `chat.deny_commands ["cargo publish"] (project P-1)`,
+  then one indented line for each value the winner masked, such as `  masks agent:orchestrator
+  ["npm publish"]`. The JSON is `SettingsView`: `{"schema_version": 1, "project_id", "agent_id",
+  "settings": [SettingRecord…]}`. A `SettingRecord` is `{key, value, from, built_in, merge, applies,
+  layers, masked}`: `from` is `{kind, project_id, agent_id}` with `kind` one of `server`, `project`,
+  `agent`, `project_agent` or `built_in`; `merge` is `override`; `applies` is `next_turn` or
+  `next_launch`; `layers` is every stored row on the chain, most specific first (`scope`, `value`,
+  `set_by`, `set_at`); `masked` is the layers the resolved value hides. `get` is a read and is open to
+  every caller, a chat included.
+- **`set` and `unset`.** `<value>` is JSON text (`5`, `'["gh pr merge"]'`); text that is not JSON is
+  refused by the CLI before any call. A value that starts with `-` is taken as it is, so the
+  controller refuses `-1` with the rule. With neither `--project` nor `--agent` the scope is the
+  server. `set` replaces the row at that scope and key. `unset` deletes it, so the next scope or
+  the built-in applies. The text answer names the scope and when it applies:
+  `chat.deny_commands set at project P-1; it applies at the chat's next launch`. The JSON is
+  `SettingChanged`: `{"schema_version": 1, "replayed", "key", "scope", "value", "resolved":
+  SettingRecord}`, with `value` null after an unset.
+- **Commands.** Each `set` and `unset` is one controller command under `@controller`, kind
+  `setting_set` or `setting_unset`, with a command ID (`--command-id`, else random) and one
+  `controller.ledger` line, admitted or refused. The content is the canonical JSON of the key, the
+  scope and the value: who called is not content, so the same ID and content from the CLI and from a
+  device replays. A replay returns the first record with `replayed` true and writes no line; the same
+  ID with other content is a conflict that names the ID. The lines:
+  - `setting_set <key> admitted scope=<scope> value=<json> by=<cli|D-n> command=<id>`;
+  - `setting_unset <key> admitted scope=<scope> by=<cli|D-n> command=<id>`;
+  - the usual `setting_set refused reason=… command=<id>` for a refusal.
+
+  `<scope>` is `server`, `project:P-1`, `agent:orchestrator` or `project:P-1/agent:orchestrator`. The
+  stored row's `set_by` is `cli` or the device ID. A refusal is one refused admission and one line,
+  and changes no row: an unknown key; a value that fails the rule of its key (`-1`, `101`, `"3"` and
+  `3.5` for the cap; a pattern with `:*`, more than 32 entries or a duplicate for the list); an
+  unknown or removed project; an unknown agent; an `unset` of a value that is not set (`no value of
+  <key> is set at <scope>`). A stopped controller ledger refuses both writes, and the reads still
+  work.
+- **Who may call.** `get` is open. `set` and `unset` are the operator's: the CLI, and a paired device
+  over the API (`api.md`, `by=D-<n>`). The CLI does not refuse them under `PF_SEAT_TOKEN`: they always
+  reach the controller, whose caller check refuses a caller that is, or descends from, a seat or a
+  live chat process. A refused caller is audited, with a bound, so it gets no unbounded durable
+  writes. The controller reads the caller's environment once and names the caller: `seat-token`
+  for any caller with `PF_SEAT_TOKEN`; else, for a caller that holds `PULSE_FACTORY_CHAT`, `chat:<S-n>`
+  when the value is `S-` and digits (at most 20 characters) and `chat:invalid` for any other value
+  (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
+  written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
+  `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
+  (`chat.self_turn_cap`, `chat.deny_commands`, `chat.propose_per_min`, or `other` for an unknown key
+  or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
+  minute holds the audit:
+  - the window's first refusal commits one refused admission under a command ID that the controller
+    makes, `caller-refused-<32 hex>`, so the caller's own ID is never used up, and writes its line at
+    once: `setting_set refused caller=chat:S-1 bucket=chat.self_turn_cap refused=1 reason="…"
+    command=caller-refused-<hex>`;
+  - later refusals in the window write nothing, and the controller counts them;
+  - at the tick after the window, or at the caller's next refusal after it, a window that counted any
+    commits one more refused admission and line: `… refused=<n> window=<start UTC>..<end UTC>
+    reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
+    refusals after the first.
+
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, eight
+  across the four buckets, whatever it sends. A crash or a restart loses the count of an open
+  window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
+  prints one stderr line for each window, in place of the ledger line.
+- **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
+  it runs. The chat runs as the operator's user, so a process it starts can evade the check:
+  `env -u PF_SEAT_TOKEN`, a double fork that leaves the ancestor chain, a rewrite of its own `/proc`
+  environment, or a direct write to the store file. "A chat cannot raise its own cap" holds only for a
+  chat that does not evade the check. This is a known limit; its owner is the Release 2
+  authority-rules spine.
 
 ## `chat-runtime`
 
@@ -559,10 +814,11 @@ allowlist"). They launch nothing and change no run, so `halt` does not apply to 
   <reason>`): `pair` while the API is off (the message names `PF_API_LISTEN`) or while it failed to
   start (the message gives the cause); `revoke` of an unknown device or one that is already revoked,
   and of an ID of more than 64 characters; `pair` and `revoke` with `PF_SEAT_TOKEN` set, and a caller
-  that the controller finds to be, or to descend from, a seat. An invalid command ID is refused
+  that the controller finds to be, or to descend from, a seat or a chat process, or to hold
+  `PULSE_FACTORY_CHAT`. An invalid command ID is refused
   before any command is admitted.
 - **Ledger lines.** The redeem of a code is the command `device_pair`:
-  `device_pair D-1 admitted name=<name> peer=<address>`. A revoke is
+  `device_pair D-1 admitted name=<name> peer=<address>`. A revoke also voids the device's live confirm codes. A revoke is
   `device_revoke D-1 admitted command=<id>`, or `device_revoke refused reason="<reason>"
   command=<id>`. A line names the device, its name and the peer, and never the code or the token.
 

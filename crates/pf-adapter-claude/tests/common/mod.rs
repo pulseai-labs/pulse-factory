@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+pub mod propose_rule;
+
 /// The fixtures directory of the crate.
 pub fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures")
@@ -148,6 +150,7 @@ pub fn spec(cwd: &Path) -> ChatOpen {
         permission_mode: "bypassPermissions".into(),
         env: BTreeMap::new(),
         options: BTreeMap::new(),
+        deny_commands: Vec::new(),
     }
 }
 

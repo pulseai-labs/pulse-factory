@@ -11,10 +11,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use pf_engine::claim::{check_claim_in, claim_of_hash, sha256_hex};
+use pf_api::types::{ClaimRecord, RequestDetail, RequestList, RequestSummary};
+use pf_engine::claim::{check_claim_in, claim_of_hash, holder_device, sha256_hex};
 use pf_engine::merge::blocked_by;
 use pf_engine::port::agent::SessionRef;
-use pf_engine::port::store::{RequestKind, RequestRow, RequestStatus, Store};
+use pf_engine::port::store::{ClaimRow, DeviceRow, RequestKind, RequestRow, RequestStatus, Store};
 use pf_ipc::{Peer, Response};
 use serde_json::{Value, json};
 
@@ -76,6 +77,39 @@ fn environment_has_seat_token(environ: &[u8]) -> bool {
         .any(|entry| entry.starts_with(b"PF_SEAT_TOKEN="))
 }
 
+/// The name of the variable the controller puts in the environment of every chat it opens. Its value
+/// is the session ID. A child that a chat detaches from its process tree keeps the chat's
+/// environment, so the variable marks it where the ancestry walk cannot. It is a speed bump against
+/// a cooperating or accidental chat, not a boundary (`docs/contracts/requests.md`, "The caller
+/// check").
+pub const CHAT_MARKER: &str = "PULSE_FACTORY_CHAT";
+
+/// The session a process runs under, when its environment text holds the chat marker.
+pub(super) fn environment_chat_marker(environ: &[u8]) -> Option<String> {
+    let prefix = format!("{CHAT_MARKER}=");
+    environ.split(|b| *b == 0).find_map(|entry| {
+        entry
+            .strip_prefix(prefix.as_bytes())
+            .map(|v| String::from_utf8_lossy(v).into_owned())
+    })
+}
+
+/// A marker value that names a session: `S-` and digits, at most 20 characters in all.
+pub(super) fn marker_session(value: &str) -> Option<&str> {
+    let digits = value.strip_prefix("S-")?;
+    (value.len() <= 20 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(value)
+}
+
+/// The key that names a caller by its chat marker: `chat:<S-n>`, or `chat:invalid` for any other
+/// value. Neither the ledger nor a refusal text ever holds the raw value, which the caller chose.
+pub(super) fn chat_marker_key(value: &str) -> String {
+    match marker_session(value) {
+        Some(session) => format!("chat:{session}"),
+        None => "chat:invalid".to_string(),
+    }
+}
+
 impl Controller {
     /// The processes of the seats the controller launched and still tracks: the sessions with an
     /// open row, whose adapter says which process they run.
@@ -98,13 +132,11 @@ impl Controller {
         pids
     }
 
-    /// Refuse a caller that is, or descends from, a seat (ADR-0005). Every failed read refuses.
-    pub(super) fn check_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
-        self.check_caller_among(verb, peer, &HashSet::new())
-    }
-
-    /// The same check, and a caller that is, or descends from, one of the live chat processes
-    /// is refused too (ADR-0005, Q2 rule 2): a chat cannot drive its own chat or another one.
+    /// Refuse a caller that is, or descends from, a seat (ADR-0005), or that is, or descends from,
+    /// one of the live chat processes (Q2 rule 2): a chat cannot drive its own chat or another one,
+    /// and it cannot claim, answer, clear, ack, arm, pair or revoke. Every failed read refuses. So is
+    /// a caller whose environment holds the chat marker, which a child detached from the chat
+    /// keeps (`r1.s4.w1`, R10).
     pub(super) fn check_chat_caller(&self, verb: &str, peer: Peer) -> Result<(), String> {
         let chats: HashSet<u32> = self
             .live_chats()
@@ -137,6 +169,16 @@ impl Controller {
                 "PF_SEAT_TOKEN is in the caller's environment, so it is a seat".to_string(),
             ));
         }
+        if let Some(value) = environment_chat_marker(&environ) {
+            return Err(refuse(match marker_session(&value) {
+                Some(session) => format!(
+                    "{CHAT_MARKER} is in the caller's environment, so it runs under chat session {session}"
+                ),
+                None => format!(
+                    "{CHAT_MARKER} is in the caller's environment with a value that names no session (chat:invalid), so it runs under a chat"
+                ),
+            }));
+        }
         let seats = self.tracked_seat_pids();
         let mut current = pid;
         for _ in 0..MAX_ANCESTORS {
@@ -161,6 +203,83 @@ impl Controller {
         )))
     }
 
+    /// Which chat session a `propose` caller runs under (`r1.s4.w2`, W16). The refusal is the cause
+    /// alone: `propose` puts `propose refused:` before it. The walk of the caller's
+    /// ancestors finds a live chat process, and that is the only way a caller names a session:
+    /// `PULSE_FACTORY_CHAT` never identifies a caller, it only refuses. In this order:
+    /// 1. a seat, by token or by a tracked seat on the chain, is refused, and so is a failed read;
+    /// 2. a live chat process on the chain names the session, unless the marker names another one;
+    /// 3. no chat on the chain but the marker held (a child the chat detached) is refused;
+    /// 4. neither is refused.
+    pub(super) fn identify_chat_caller(&self, peer: Peer) -> Result<String, String> {
+        let refuse = |why: String| why;
+        let pid = peer.pid.ok_or_else(|| {
+            refuse("the controller cannot tell which process called, so it refuses".to_string())
+        })?;
+        let proc_root = &self.cfg.proc_root;
+        let environ_path = proc_root.join(pid.to_string()).join("environ");
+        let environ = std::fs::read(&environ_path).map_err(|e| {
+            refuse(format!(
+                "cannot read {} ({e}), so the controller cannot tell the caller is not a seat",
+                environ_path.display()
+            ))
+        })?;
+        if environment_has_seat_token(&environ) {
+            return Err(refuse(
+                "PF_SEAT_TOKEN is in the caller's environment, so it is a seat".to_string(),
+            ));
+        }
+        let marker = environment_chat_marker(&environ);
+        let seats = self.tracked_seat_pids();
+        let chats: Vec<(u32, String)> = self
+            .live_chats()
+            .iter()
+            .filter_map(|l| l.port.process_id(&l.chat).map(|p| (p, l.session.clone())))
+            .collect();
+        let mut found: Option<(u32, String)> = None;
+        let mut current = pid;
+        let mut reached_top = false;
+        for _ in 0..MAX_ANCESTORS {
+            if seats.contains(&current) {
+                return Err(refuse(format!(
+                    "the caller is, or descends from, seat process {current}, so it is a seat"
+                )));
+            }
+            if let Some((p, session)) = chats.iter().find(|(p, _)| *p == current) {
+                found = Some((*p, session.clone()));
+                break;
+            }
+            let parent = parent_of(proc_root, current).map_err(refuse)?;
+            if parent <= 1 {
+                reached_top = true;
+                break;
+            }
+            current = parent;
+        }
+        match (found, marker) {
+            (Some((chat_pid, session)), Some(value)) => {
+                if marker_session(&value) == Some(session.as_str()) {
+                    Ok(session)
+                } else {
+                    Err(refuse(format!(
+                        "the chat marker names {}, but the caller runs under chat process {chat_pid} of {session}",
+                        marker_session(&value).unwrap_or("chat:invalid")
+                    )))
+                }
+            }
+            (Some((_, session)), None) => Ok(session),
+            (None, _) if !reached_top => Err(refuse(format!(
+                "the caller's parent chain is longer than {MAX_ANCESTORS} processes, so the controller cannot clear it"
+            ))),
+            (None, Some(_)) => Err(refuse(format!(
+                "the caller holds {CHAT_MARKER} but runs under no live chat process; the marker never names the caller"
+            ))),
+            (None, None) => Err(refuse(
+                "the caller runs under no chat session; propose posts a start card into the calling chat, and an operator on this host starts a run with pulse-factory arm".to_string(),
+            )),
+        }
+    }
+
     /// The generation of the claim that owns the token the request carries. A fenced or unknown
     /// token is refused, and the refusal never repeats the token.
     fn claim_generation(&self, args: &Value) -> Result<u64, String> {
@@ -169,7 +288,17 @@ impl Controller {
         let claims = self.store.claims().map_err(|e| e.to_string())?;
         let owner = claim_of_hash(&claims, &hash)
             .ok_or("the claim token matches no claim: claim again with `pulse-factory claim`")?;
-        check_claim_in(&claims, owner.generation)?;
+        check_claim_in(&claims, owner.generation).map_err(|why| {
+            // A paired device took the claim: say so, so the operator knows where it went.
+            let current = claims.iter().find(|c| c.fenced_at.is_none());
+            match current {
+                Some(c) if holder_device(&c.holder).is_some() => format!(
+                    "{why}: the claim moved to {} at {}; claim again with pulse-factory claim",
+                    c.holder, c.claimed_at
+                ),
+                _ => why,
+            }
+        })?;
         Ok(owner.generation)
     }
 
@@ -194,12 +323,18 @@ impl Controller {
     // ------------------------------------------------------------------ claim
 
     pub(super) fn verb_claim(&self, args: &Value, peer: Peer) -> Response {
-        if let Err(why) = self.check_caller("claim", peer) {
+        if let Err(why) = self.check_chat_caller("claim", peer) {
             return err(why);
         }
         let holder = text(args, "holder").unwrap_or_default();
         if holder.trim().is_empty() {
             return err("claim refused: the claim needs a holder label");
+        }
+        // A label that reads as a paired device is the controller's to make (`r1.s4.w1`, R9).
+        // Check the form the engine stores: `Engine::claim` flattens the label with
+        // `one_line_reason`, which drops control characters, so a raw check can be bypassed.
+        if pf_engine::status::one_line_reason(holder).starts_with("device ") {
+            return err("claim refused: the holder label \"device …\" is kept for paired devices");
         }
         let handle = match self.claim_run(text(args, "run")) {
             Ok(h) => h,
@@ -230,7 +365,7 @@ impl Controller {
     // ------------------------------------------------------------------ answer and clear
 
     pub(super) fn verb_answer(&self, args: &Value, peer: Peer) -> Response {
-        if let Err(why) = self.check_caller("answer", peer) {
+        if let Err(why) = self.check_chat_caller("answer", peer) {
             return err(why);
         }
         let (Some(id), Some(rev), Some(body)) = (
@@ -280,7 +415,7 @@ impl Controller {
     }
 
     pub(super) fn verb_clear(&self, args: &Value, peer: Peer) -> Response {
-        if let Err(why) = self.check_caller("clear", peer) {
+        if let Err(why) = self.check_chat_caller("clear", peer) {
             return err(why);
         }
         let (Some(run), Some(unit)) = (text(args, "run"), text(args, "unit")) else {
@@ -337,7 +472,7 @@ impl Controller {
     /// head SHA pinned (ADR-0005). It takes the claim as `answer` does: the same token, the same
     /// caller check and the same refusals. The engine reads the PR again before it merges.
     pub(super) fn verb_ack(&self, args: &Value, peer: Peer) -> Response {
-        if let Err(why) = self.check_caller("ack", peer) {
+        if let Err(why) = self.check_chat_caller("ack", peer) {
             return err(why);
         }
         let (Some(id), Some(rev)) = (
@@ -408,52 +543,105 @@ impl Controller {
         }
     }
 
-    fn request_json(&self, handle: &RunHandle, r: &RequestRow) -> Value {
-        json!({
-            "id": r.id,
-            "revision": r.revision,
-            "kind": r.kind.as_str(),
-            "status": r.status.as_str(),
-            "run": r.run_id,
-            "unit": r.unit_id,
-            "stage": r.stage,
-            "blocks": self.blocks(handle, r),
-            "opened_at": r.opened_at,
-            "answered_at": r.answered_at,
-            "reason": r.reason,
-        })
+    /// The row of `requests` and of the stream: the fields of the CLI's JSON, the verbs that answer the
+    /// request, and for a `merge_ack` its PR, base and head SHA.
+    pub(super) fn request_summary_of(&self, handle: &RunHandle, r: &RequestRow) -> RequestSummary {
+        let body = |key: &str| -> Option<String> {
+            (r.kind == RequestKind::MergeAck)
+                .then(|| serde_json::from_str::<Value>(&r.body).ok())
+                .flatten()
+                .and_then(|b| b.get(key).and_then(Value::as_str).map(str::to_string))
+        };
+        RequestSummary {
+            id: r.id.clone(),
+            revision: r.revision,
+            kind: r.kind.as_str().to_string(),
+            status: r.status.as_str().to_string(),
+            run: r.run_id.clone(),
+            unit: r.unit_id.clone(),
+            stage: r.stage.clone(),
+            blocks: self.blocks(handle, r),
+            opened_at: r.opened_at.clone(),
+            answered_at: r.answered_at.clone(),
+            reason: r.reason.clone(),
+            verbs: verbs_of(r).into_iter().map(str::to_string).collect(),
+            pr: body("pr"),
+            base: body("base"),
+            head_sha: body("head_sha"),
+        }
     }
 
-    pub(super) fn verb_requests(&self, args: &Value) -> Response {
-        let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
-        let handles = match text(args, "run") {
-            Some(id) => match self.find(Some(id)) {
-                Ok(h) => vec![h],
-                Err(why) => return err(why),
-            },
+    /// The claim as a device sees it: no token, the device it belongs to, and whether that device is gone.
+    pub(super) fn claim_record(&self, claim: &ClaimRow, devices: &[DeviceRow]) -> ClaimRecord {
+        let device = holder_device(&claim.holder).map(str::to_string);
+        let revoked = device
+            .as_deref()
+            .is_some_and(|id| devices.iter().any(|d| d.id == id && d.revoked_at.is_some()));
+        ClaimRecord {
+            generation: claim.generation,
+            holder: claim.holder.clone(),
+            device,
+            revoked,
+            claimed_at: claim.claimed_at.clone(),
+        }
+    }
+
+    /// The current claim, or `None` when no claim was ever made.
+    pub(super) fn current_claim_record(&self) -> Result<Option<ClaimRecord>, String> {
+        let claims = self.store.claims().map_err(|e| e.to_string())?;
+        let devices = self.store.devices().map_err(|e| e.to_string())?;
+        Ok(claims
+            .iter()
+            .filter(|c| c.fenced_at.is_none())
+            .max_by_key(|c| c.generation)
+            .map(|c| self.claim_record(c, &devices)))
+    }
+
+    /// Every request of every run (or of the one named), as summaries, newest last.
+    pub(super) fn request_summaries(
+        &self,
+        run: Option<&str>,
+        all: bool,
+    ) -> Result<Vec<RequestSummary>, String> {
+        let handles = match run {
+            Some(id) => vec![self.find(Some(id))?],
             None => self.handles(),
         };
-        let mut found: Vec<(u64, Value)> = Vec::new();
+        let mut found: Vec<(u64, RequestSummary)> = Vec::new();
         for handle in &handles {
-            let rows = match self.store.requests(&handle.info.run_id) {
-                Ok(rows) => rows,
-                Err(e) => return err(e.to_string()),
-            };
+            let rows = self
+                .store
+                .requests(&handle.info.run_id)
+                .map_err(|e| e.to_string())?;
             for r in rows
                 .iter()
                 .filter(|r| all || r.status == RequestStatus::Open)
             {
-                found.push((request_number(&r.id), self.request_json(handle, r)));
+                found.push((request_number(&r.id), self.request_summary_of(handle, r)));
             }
         }
         // Newest last.
         found.sort_by_key(|(n, _)| *n);
-        let requests: Vec<Value> = found.into_iter().map(|(_, v)| v).collect();
-        Response::ok(json!({
-            "schema_version": SCHEMA_VERSION,
-            "open": requests.iter().filter(|r| r["status"] == "open").count(),
-            "requests": requests,
-        }))
+        Ok(found.into_iter().map(|(_, v)| v).collect())
+    }
+
+    pub(super) fn verb_requests(&self, args: &Value) -> Response {
+        let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+        let requests = match self.request_summaries(text(args, "run"), all) {
+            Ok(r) => r,
+            Err(why) => return err(why),
+        };
+        let claim = match self.current_claim_record() {
+            Ok(c) => c,
+            Err(why) => return err(why),
+        };
+        let list = RequestList {
+            schema_version: SCHEMA_VERSION,
+            open: requests.iter().filter(|r| r.status == "open").count() as u64,
+            requests,
+            claim,
+        };
+        Response::ok(serde_json::to_value(list).unwrap_or(Value::Null))
     }
 
     pub(super) fn verb_show(&self, args: &Value) -> Response {
@@ -470,28 +658,25 @@ impl Controller {
             Err(why) => return err(why),
         };
         let parse = |t: &str| serde_json::from_str::<Value>(t).unwrap_or(Value::Null);
-        // The verbs that answer it: a unit's request takes `answer` and `clear`. A `merge_ack`
-        // request takes `ack` and no other verb.
-        let verbs: Vec<&str> = match (request.status, &request.unit_id) {
-            (RequestStatus::Open, _) if request.kind == RequestKind::MergeAck => vec!["ack"],
-            (RequestStatus::Open, Some(_)) => vec!["answer", "clear"],
-            (RequestStatus::Open, None) => vec!["answer"],
-            _ => Vec::new(),
+        let detail = RequestDetail {
+            schema_version: SCHEMA_VERSION,
+            summary: self.request_summary_of(&handle, &request),
+            body: parse(&request.body),
+            answer: request.answer.as_deref().map_or(Value::Null, parse),
+            answer_generation: request.answer_generation,
         };
-        let mut shown = self.request_json(&handle, &request);
-        let fields = shown.as_object_mut().expect("a request is an object");
-        fields.insert("body".to_string(), parse(&request.body));
-        fields.insert(
-            "answer".to_string(),
-            request.answer.as_deref().map_or(Value::Null, parse),
-        );
-        fields.insert(
-            "answer_generation".to_string(),
-            json!(request.answer_generation),
-        );
-        fields.insert("verbs".to_string(), json!(verbs));
-        fields.insert("schema_version".to_string(), json!(SCHEMA_VERSION));
-        Response::ok(shown)
+        Response::ok(serde_json::to_value(detail).unwrap_or(Value::Null))
+    }
+}
+
+/// The verbs that answer a request: a unit's request takes `answer` and `clear`; a `merge_ack`
+/// request takes `ack` and no other verb; a run-level request takes `answer`; a closed one takes none.
+pub(super) fn verbs_of(request: &RequestRow) -> Vec<&'static str> {
+    match (request.status, &request.unit_id) {
+        (RequestStatus::Open, _) if request.kind == RequestKind::MergeAck => vec!["ack"],
+        (RequestStatus::Open, Some(_)) => vec!["answer", "clear"],
+        (RequestStatus::Open, None) => vec!["answer"],
+        _ => Vec::new(),
     }
 }
 

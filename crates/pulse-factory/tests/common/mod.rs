@@ -5,6 +5,8 @@
 pub mod chat;
 pub mod ctl;
 pub mod rig;
+pub mod spine;
+pub mod start;
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;

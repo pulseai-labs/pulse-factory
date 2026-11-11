@@ -28,6 +28,8 @@ pub(super) fn kind_of(body: &wire::ChatItemBody) -> ChatItemKind {
         B::QuestionAnswer { .. } => ChatItemKind::QuestionAnswer,
         B::BackgroundTask { .. } => ChatItemKind::BackgroundTask,
         B::TurnResult { .. } => ChatItemKind::TurnResult,
+        B::StartCard { .. } => ChatItemKind::StartCard,
+        B::StartResult { .. } => ChatItemKind::StartResult,
         B::Notice { .. } | B::Redacted { .. } | B::Unknown { .. } => ChatItemKind::Notice,
     }
 }

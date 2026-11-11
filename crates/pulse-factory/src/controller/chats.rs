@@ -74,6 +74,8 @@ pub struct ChatEnv {
     pub server_name: String,
     /// `PF_CHAT_REGISTRY`, default [`DEFAULT_REGISTRY`].
     pub registry: String,
+    /// `PF_CONFIRM_TTL`, whole seconds: it can only shorten the default of 120 seconds (`r1.s4.w1`).
+    pub confirm_ttl: std::time::Duration,
 }
 
 /// The key of an agent in `PF_AGENT_ENV_<AGENT>`: the ID upper-cased, each other character `_`.
@@ -126,6 +128,21 @@ pub fn parse_chat_env(
             }
         },
     };
+    let default_ttl = super::DEFAULT_CONFIRM_TTL;
+    let confirm_ttl = match get("PF_CONFIRM_TTL") {
+        None => default_ttl,
+        Some(text) => match text.parse::<u64>() {
+            Ok(n) if (1..=default_ttl.as_secs()).contains(&n) => std::time::Duration::from_secs(n),
+            _ => {
+                warnings.push(format!(
+                    "pulse-factory: PF_CONFIRM_TTL={text:?} is not a number of seconds from 1 to {}; the confirm code lives {} seconds",
+                    default_ttl.as_secs(),
+                    default_ttl.as_secs()
+                ));
+                default_ttl
+            }
+        },
+    };
     let mut agent_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (name, value) in vars {
         let Some(key) = name.strip_prefix("PF_AGENT_ENV_") else {
@@ -134,6 +151,10 @@ pub fn parse_chat_env(
         let mut pairs = BTreeMap::new();
         for pair in value.split_whitespace() {
             match pair.split_once('=') {
+                // The controller sets the marker itself, last; a setting cannot name it.
+                Some((n, _)) if n == super::requests::CHAT_MARKER => warnings.push(format!(
+                    "pulse-factory: {name} names {n}, which the controller sets itself; it is skipped"
+                )),
                 Some((n, v)) if !n.is_empty() => {
                     pairs.insert(n.to_string(), v.to_string());
                 }
@@ -171,6 +192,7 @@ pub fn parse_chat_env(
             agent_env,
             server_name,
             registry,
+            confirm_ttl,
         },
         warnings,
     )
@@ -243,11 +265,20 @@ pub(super) struct LiveInner {
     /// The runtime options the process runs with now.
     pub applied: BTreeMap<String, String>,
     pub state: ChatSessionState,
+    /// The turns this process started on its own (a background task finished) since the operator's
+    /// last message. 0 at each open (ADR-0016, ADR-0015's cap).
+    pub self_turns: u64,
+    /// Why the process was stopped at the self-started turn cap. A held process is `needs_you`
+    /// until the operator's next message reopens the session.
+    pub held: Option<String>,
 }
 
 /// One live chat process.
 pub(super) struct LiveChat {
     pub session: String,
+    /// The session's project and agent, which scope its settings.
+    pub project: String,
+    pub agent: String,
     pub chat: ChatId,
     pub port: Arc<dyn ChatPort>,
     pub opened_at: SystemTime,
@@ -325,6 +356,10 @@ pub(super) struct Chats {
     /// The branch of each session's worktree as the last live read saw it.
     pub branches: Mutex<BTreeMap<String, (Option<String>, bool)>>,
     pub frames: broadcast::Sender<wire::ChatFrame>,
+    /// The request frames: a second wire type on the same stream (`r1.s4.w1`).
+    pub request_frames: broadcast::Sender<wire::RequestFrame>,
+    /// What the controller last sent of the requests and the claim.
+    pub request_watch: Mutex<super::request_frames::RequestWatch>,
     /// Open streams: the device and the channel that ends the stream.
     pub streams: Mutex<Vec<(String, mpsc::UnboundedSender<StreamEnd>)>>,
     pub ledger: ChatLedger,
@@ -340,6 +375,8 @@ impl Chats {
             meta: Mutex::new(BTreeMap::new()),
             branches: Mutex::new(BTreeMap::new()),
             frames: broadcast::channel(FRAME_CAPACITY).0,
+            request_frames: broadcast::channel(FRAME_CAPACITY).0,
+            request_watch: Mutex::new(Default::default()),
             streams: Mutex::new(Vec::new()),
             ledger: ChatLedger::new(state_dir.join(CHAT_LEDGER_FILE)),
         }
@@ -585,7 +622,9 @@ impl Controller {
     pub(super) fn sync_state(&self, live: &LiveChat) {
         let state = {
             let inner = lock(&live.inner);
-            if !inner.requests.is_empty() {
+            // A process held at the self-started turn cap waits for the operator, whatever its
+            // interrupted turn reports late.
+            if inner.held.is_some() || !inner.requests.is_empty() {
                 ChatSessionState::NeedsYou
             } else if inner.turn_since.is_some() {
                 ChatSessionState::Working
@@ -680,6 +719,9 @@ impl Controller {
                 env.insert(name.clone(), value.clone());
             }
         }
+        // Last, so neither the agent row nor the setting can remove or replace it. A child the chat
+        // detaches keeps the chat's environment, and the caller check reads the marker there.
+        env.insert(super::requests::CHAT_MARKER.to_string(), row.id.clone());
         // Only a session that has had a message has a conversation to resume. The runtime writes
         // no transcript before the first message, so a resume of a session with none would fail
         // as "context lost" (operator ruling on PR #41, class C1). A session with no message
@@ -690,6 +732,9 @@ impl Controller {
             }
             _ => None,
         };
+        // The deny list in force at this open: a change applies at the next launch (ADR-0016).
+        let (deny_commands, deny_from) = self.deny_commands(&row.project_id, &row.agent_id);
+        let deny_count = deny_commands.len();
         let spec = ChatOpen {
             cwd: worktree.path.clone(),
             resume,
@@ -706,6 +751,7 @@ impl Controller {
             permission_mode: row.permission_mode.clone(),
             env,
             options: options.clone(),
+            deny_commands,
         };
         let resuming = spec.resume.is_some();
         let opened = port.open(&spec).map_err(|e| match e {
@@ -717,6 +763,8 @@ impl Controller {
         let now_t = SystemTime::now();
         let live = Arc::new(LiveChat {
             session: row.id.clone(),
+            project: row.project_id.clone(),
+            agent: row.agent_id.clone(),
             chat: opened.chat.clone(),
             port: port.clone(),
             opened_at: now_t,
@@ -733,6 +781,8 @@ impl Controller {
                 context: None,
                 applied: options,
                 state: ChatSessionState::Idle,
+                self_turns: 0,
+                held: None,
             }),
         });
         if row.runtime_session_ref.as_deref() != Some(opened.session.0.as_str()) {
@@ -743,13 +793,14 @@ impl Controller {
         lock(&self.chats.lost).remove(&row.id);
         lock(&self.chats.live).insert(row.id.clone(), live.clone());
         self.chats.ledger.append(&format!(
-            "open session={} runtime={} version={} qualified={} resume={} pid={}",
+            "open session={} runtime={} version={} qualified={} resume={} pid={} deny={deny_count} deny_from={}",
             field(&row.id),
             field(&row.runtime),
             field(&opened.runtime_version),
             opened.qualified,
             if resuming { "yes" } else { "no" },
             pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+            field(&deny_from),
         ));
         self.spawn_pump(live.clone(), opened.events);
         self.sync_state(&live);
@@ -802,6 +853,12 @@ impl Controller {
     /// Stop a process and its group, take it out of the table and write its `stop` line. The
     /// caller writes the items and the frame that belong to the reason.
     pub(super) fn stop_chat(&self, live: &Arc<LiveChat>, reason: &str) {
+        self.stop_chat_with(live, reason, "");
+    }
+
+    /// [`Controller::stop_chat`], and `detail` (a text that starts with a space) after the reason
+    /// in the `stop` line.
+    fn stop_chat_with(&self, live: &Arc<LiveChat>, reason: &str, detail: &str) {
         live.stopping.store(true, Ordering::SeqCst);
         if let Err(e) = live.port.stop(&live.chat) {
             eprintln!(
@@ -819,7 +876,7 @@ impl Controller {
             }
         }
         self.chats.ledger.append(&format!(
-            "stop session={} reason={reason}",
+            "stop session={} reason={reason}{detail}",
             field(&live.session)
         ));
         // The requests stay in the set: `close_pending` reads them to close this process's own
@@ -923,8 +980,21 @@ impl Controller {
         let session = live.session.as_str();
         let mut result = EventResult::default();
         match event {
-            ChatEvent::TurnStarted { .. } => {
-                lock(&live.inner).turn_since = Some(SystemTime::now());
+            ChatEvent::TurnStarted { cause } => {
+                let self_started = cause != TurnCause::Operator;
+                {
+                    let mut inner = lock(&live.inner);
+                    inner.turn_since = Some(SystemTime::now());
+                    // An operator's turn resets the count. A turn nobody asked for counts.
+                    inner.self_turns = if self_started {
+                        inner.self_turns + 1
+                    } else {
+                        0
+                    };
+                }
+                if self_started {
+                    self.cut_at_self_turn_cap(live);
+                }
             }
             ChatEvent::TextDelta { text } => {
                 self.emit(wire::ChatFrame::Delta {
@@ -1212,6 +1282,47 @@ impl Controller {
         result
     }
 
+    /// The self-started turn cap (ADR-0015, ADR-0016). A turn the chat started on its own counts.
+    /// When the cap is not 0 and the count passes it, that turn is cut as it starts: the controller
+    /// interrupts it and stops the process and its background tasks, and holds the session at
+    /// `needs_you` with the reason. The next operator message reopens it with resume. The cap is
+    /// resolved here, at each self-started turn, so a change applies with no relaunch. The caller
+    /// holds the session's `io` lock, as `halt_chats` does.
+    fn cut_at_self_turn_cap(&self, live: &Arc<LiveChat>) {
+        let (cap, from) = self.self_turn_cap(&live.project, &live.agent);
+        let turns = lock(&live.inner).self_turns;
+        if cap == 0 || turns <= cap {
+            return;
+        }
+        if let Err(e) = live.port.interrupt(&live.chat) {
+            eprintln!(
+                "pulse-factory: chat session {} did not interrupt cleanly at the cap: {e}",
+                live.session
+            );
+        }
+        // The stop ends the process group, so its background tasks end with it (ADR-0014, case 16).
+        self.stop_chat_with(
+            live,
+            "self_turn_cap",
+            &format!(" self_turns={turns} cap={cap} from={}", field(&from)),
+        );
+        self.close_pending(live, "stopped at the self-started turn cap");
+        {
+            let mut inner = lock(&live.inner);
+            inner.turn_since = None;
+            inner.tasks.clear();
+            inner.held = Some("stopped at the self-started turn cap".to_string());
+        }
+        self.notice(
+            &live.session,
+            "self_turn_cap",
+            &format!(
+                "this chat ran {cap} turns on its own since your last message, and the cap is {cap} ({from}); \
+                 Pulse Factory stopped it as it started one more, with its background tasks; your next message resumes it"
+            ),
+        );
+    }
+
     /// When a finished task leaves the process with no holder, the idle clock starts.
     fn note_idle_if_free(&self, live: &LiveChat) {
         if live.holds().is_empty() {
@@ -1311,6 +1422,8 @@ impl Controller {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| StreamRefusal::BadRequest("the controller has no runtime".to_string()))?;
         let rx = self.chats.frames.subscribe();
+        // Subscribed before `hello` is built, so a change that lands meanwhile is not lost.
+        let rrx = self.chats.request_frames.subscribe();
         let (end_tx, end_rx) = mpsc::unbounded_channel();
         {
             let mut streams = lock(&self.chats.streams);
@@ -1337,6 +1450,7 @@ impl Controller {
             session.map(str::to_string),
             after,
             rx,
+            rrx,
             end_rx,
             tx,
         ));
@@ -1405,6 +1519,7 @@ async fn forward(
     session: Option<String>,
     after: u64,
     mut rx: broadcast::Receiver<wire::ChatFrame>,
+    mut rrx: broadcast::Receiver<wire::RequestFrame>,
     mut end: mpsc::UnboundedReceiver<StreamEnd>,
     tx: mpsc::Sender<StreamEvent>,
 ) {
@@ -1426,6 +1541,24 @@ async fn forward(
         }
         Ok(Err(why)) => {
             eprintln!("pulse-factory: the stream's hello cannot be built: {why}");
+            return;
+        }
+        Err(_) => return,
+    }
+    // The open requests and the claim, after `hello` and before the stored items (`r1.s4.w1`).
+    let requests = {
+        let c = controller.clone();
+        tokio::task::spawn_blocking(move || c.requests_frame()).await
+    };
+    match requests {
+        Ok(Ok(frame)) => {
+            let text = serde_json::to_string(&frame).unwrap_or_default();
+            if tx.send(StreamEvent::Frame(text)).await.is_err() {
+                return;
+            }
+        }
+        Ok(Err(why)) => {
+            eprintln!("pulse-factory: the stream's requests frame cannot be built: {why}");
             return;
         }
         Err(_) => return,
@@ -1496,6 +1629,22 @@ async fn forward(
                         _ => false,
                     };
                     if wanted && tx.send(frame_text(&frame)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Lagged { after_seq: last })).await;
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Shutdown)).await;
+                    return;
+                }
+            },
+            received = rrx.recv() => match received {
+                Ok(frame) => {
+                    let text = serde_json::to_string(&frame).unwrap_or_default();
+                    if tx.send(StreamEvent::Frame(text)).await.is_err() {
                         return;
                     }
                 }

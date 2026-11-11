@@ -350,3 +350,173 @@ fn an_unknown_message_kind_gives_no_event_and_no_failure() {
         assert!(feed(&mut d, msg).is_empty());
     }
 }
+
+/// `r1.s4.w4`, case 19: every `Bash` call of the recording that ran one of the four commands got an
+/// error result, and the recording starts with the two self-started turns that d21 replays.
+///
+/// What the recording does not show (ADR-0014's amendment, case 19): the results of
+/// `git branch -D pf-probe` and `git push -f origin main` carry the text of the recording host's own
+/// `PreToolUse` hook, not the text of a deny rule, so they do not show the rule; the model made no
+/// `Bash` call for `git push origin main --force` or for the compound command. The one result that
+/// carries the rule's own text is `gh -R … pr merge 1`. A second run needs a new grant.
+#[test]
+fn the_deny_rules_recording_gives_every_bash_call_of_the_four_commands_an_error_and_starts_with_two_task_turns()
+ {
+    let f = load_fixture("deny_rules");
+    assert_eq!(f.header["pf_fixture"]["case"], "deny_rules");
+    assert_eq!(f.header["pf_fixture"]["cli_version"], "2.1.319");
+    let (events, _) = decode_recording("2.1.319", "", &f.body);
+    check_order(&events).unwrap();
+    let causes: Vec<TurnCause> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::TurnStarted { cause } => Some(*cause),
+            _ => None,
+        })
+        .collect();
+    assert!(causes.len() >= 3, "{causes:?}");
+    assert_eq!(
+        causes[..3],
+        [TurnCause::Operator, TurnCause::Task, TurnCause::Task],
+        "the first three turns"
+    );
+    let host: Vec<&Value> = f
+        .body
+        .iter()
+        .filter(|(to, _)| to == "host")
+        .map(|(_, m)| m)
+        .collect();
+    let blocks: Vec<&Value> = host
+        .iter()
+        .flat_map(|m| m["message"]["content"].as_array().into_iter().flatten())
+        .collect();
+    let mut ran = 0;
+    for command in [
+        "git branch -D pf-probe",
+        "git push -f origin main",
+        "git push origin main --force",
+        "gh -R pulseai-labs/pf-probe pr merge 1",
+    ] {
+        for b in &blocks {
+            if !(b["type"] == "tool_use"
+                && b["name"] == "Bash"
+                && b["input"]["command"].as_str() == Some(command))
+            {
+                continue;
+            }
+            ran += 1;
+            let result = blocks
+                .iter()
+                .find(|r| r["type"] == "tool_result" && r["tool_use_id"] == b["id"])
+                .unwrap_or_else(|| panic!("no tool_result for `{command}`"));
+            assert_eq!(
+                result["is_error"], true,
+                "`{command}` was not refused: {result}"
+            );
+        }
+    }
+    assert!(ran >= 3, "the recording holds {ran} of the four Bash calls");
+}
+
+/// The start recording (`r1.s4.w2`, case 20; hand-authored until the operator's run replaces it):
+/// one turn that runs `pulse-factory propose s1 …` through `Bash` and never `pulse-factory arm`. The
+/// rule that judges a call is the one case 20 applies to the stub's argv records.
+#[test]
+fn the_start_proposal_recording_holds_a_bash_proposal_of_s1_and_no_arm() {
+    let f = load_fixture("start_proposal");
+    assert_eq!(f.header["pf_fixture"]["case"], "start_proposal");
+    assert_eq!(f.header["pf_fixture"]["cli_version"], "2.1.319");
+    let (events, _) = decode_recording("2.1.319", "", &f.body);
+    check_order(&events).unwrap();
+    let blocks: Vec<&Value> = f
+        .body
+        .iter()
+        .filter(|(to, _)| to == "host")
+        .flat_map(|(_, m)| m["message"]["content"].as_array().into_iter().flatten())
+        .collect();
+    let (mut proposals, mut arms) = (0, 0);
+    for b in &blocks {
+        if b["type"] == "tool_use" && b["name"] == "Bash" {
+            let (p, a) = propose_rule::judge_bash(b["input"]["command"].as_str().unwrap(), "s1");
+            proposals += p;
+            arms += a;
+        }
+    }
+    assert!(proposals >= 1, "no Bash call proposes s1: {blocks:?}");
+    assert_eq!(arms, 0, "a Bash call arms");
+    // The words of the recorded call, so a change of the recording shows here.
+    let command = blocks
+        .iter()
+        .find(|b| b["type"] == "tool_use" && b["name"] == "Bash")
+        .and_then(|b| b["input"]["command"].as_str())
+        .unwrap();
+    assert!(
+        command.contains("pulse-factory propose"),
+        "the recorded command: {command}"
+    );
+    // One operator turn and one result.
+    let n = names(&events);
+    assert_eq!(n.iter().filter(|x| **x == "TurnResult").count(), 1, "{n:?}");
+}
+
+#[test]
+fn the_matching_rule_reads_flags_values_quotes_prefixes_and_operators() {
+    use propose_rule::*;
+    let words = |s: &str| simple_commands(s).remove(0);
+    // A flag's value is not a positional, in either spelling and in any order.
+    assert!(is_proposal_of(
+        &words("pulse-factory propose s1 --workflow w --ledger /l"),
+        "s1"
+    ));
+    assert!(is_proposal_of(
+        &words("pulse-factory propose --workflow w --ledger=/l s1 --json"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("pulse-factory propose s2 --workflow s1"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("pulse-factory propose s2 --param s1"),
+        "s1"
+    ));
+    assert!(is_proposal_of(
+        &words("pulse-factory propose s2 --param=x=1 s1"),
+        "s1"
+    ));
+    // A boolean flag takes no value: `--json s1` leaves `s1` a positional.
+    assert!(is_proposal_of(
+        &words("pulse-factory propose --json s1"),
+        "s1"
+    ));
+    // The program's basename, quotes, and `env` / `VAR=value` prefixes.
+    assert!(is_proposal_of(
+        &words("env PF=1 FOO='a b' /usr/local/bin/pulse-factory propose \"s1\""),
+        "s1"
+    ));
+    assert!(!is_proposal_of(
+        &words("echo pulse-factory propose s1"),
+        "s1"
+    ));
+    assert!(!is_proposal_of(&words("pulse-factory-x propose s1"), "s1"));
+    // `arm` is judged by the first argument only.
+    assert!(is_arm(&words("pulse-factory arm s1 --yes")));
+    assert!(!is_arm(&words("pulse-factory propose s1 --param arm=1")));
+    // Operators split a command; quoted operators do not.
+    let all = simple_commands("cd x && pulse-factory propose s1 | tee o; echo 'a; b' || true\nls");
+    assert_eq!(all.len(), 6, "{all:?}");
+    assert_eq!(all[3], ["echo", "a; b"]);
+    assert_eq!(
+        judge_bash("cd x && pulse-factory propose s1 --json | jq .", "s1"),
+        (1, 0)
+    );
+    assert_eq!(
+        judge_bash("pulse-factory propose s1; pulse-factory arm s1", "s1"),
+        (1, 1)
+    );
+    // A stub's records: NUL-terminated words, one call a line.
+    let calls = stub_calls("pulse-factory\0propose\0s1\0--json\0\npulse-factory\0arm\0s1\0\n");
+    assert_eq!(calls.len(), 2);
+    assert!(is_proposal_of(&calls[0], "s1"));
+    assert!(is_arm(&calls[1]));
+}

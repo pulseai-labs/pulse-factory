@@ -11,14 +11,20 @@ pub mod chat_view;
 pub mod chats;
 pub mod client;
 pub mod commands;
+pub mod confirm;
+pub mod device_acts;
 pub mod devices;
 pub mod driver;
 pub mod files;
 pub mod ports;
 pub mod projects;
+pub mod proposals;
+pub mod request_frames;
 pub mod requests;
+pub mod run_list;
 pub mod seat;
 pub mod sessions;
+pub mod settings;
 pub mod status;
 pub mod worktrees;
 
@@ -92,6 +98,18 @@ pub struct Config {
     /// True when the chat runs the managed copy, so a runtime list can say whether the copy is
     /// there.
     pub chat_managed: bool,
+    /// The window in which the refusals of one caller and one settings key coalesce into one
+    /// more ledger line: 60 seconds (ADR-0016). A test sets a short time.
+    pub refusal_window: Duration,
+    /// How long a confirm code works: 120 seconds. `PF_CONFIRM_TTL` can only shorten it. A test sets a
+    /// short time.
+    pub confirm_ttl: Duration,
+    /// How long a used, voided or expired confirm code stays in the table as a tombstone, past its
+    /// expiry: 10 minutes. A test sets a short time.
+    pub confirm_tombstone: Duration,
+    /// The faults a test injects into the start card's arm (`r1.s4.w2`), as `random_device` is a
+    /// seam: none by default.
+    pub start_faults: proposals::StartFaults,
 }
 
 impl Config {
@@ -117,6 +135,10 @@ impl Config {
             chat_agent_env: BTreeMap::new(),
             server_name: "server".to_string(),
             chat_managed: false,
+            refusal_window: settings::DEFAULT_REFUSAL_WINDOW,
+            confirm_ttl: DEFAULT_CONFIRM_TTL,
+            confirm_tombstone: DEFAULT_CONFIRM_TOMBSTONE,
+            start_faults: proposals::StartFaults::default(),
         }
     }
 
@@ -127,8 +149,15 @@ impl Config {
         self.chat_agent_env = env.agent_env.clone();
         self.server_name = env.server_name.clone();
         self.chat_registry = Some(env.registry.clone());
+        self.confirm_ttl = env.confirm_ttl;
     }
 }
+
+/// How long a confirm code works: 2 minutes.
+pub const DEFAULT_CONFIRM_TTL: Duration = Duration::from_secs(120);
+
+/// How long a confirm code stays as a tombstone past its expiry: 10 minutes.
+pub const DEFAULT_CONFIRM_TOMBSTONE: Duration = Duration::from_secs(600);
 
 /// How long a device may be idle: 30 days.
 pub const DEFAULT_DEVICE_IDLE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -158,8 +187,14 @@ pub struct Controller {
     controller_ledger: Mutex<commands::ControllerLedger>,
     /// The network API: its key, its state and the one live pairing code.
     api: api::ApiRuntime,
+    /// The confirm codes of the paired devices, in memory only (`r1.s4.w1`).
+    confirm: confirm::ConfirmCodes,
     /// The chat processes, their pumps, `chat.ledger` and the stream's frames (`r1.s3.w3`).
     chats: chats::Chats,
+    /// The open windows of refused settings callers (ADR-0016).
+    settings_refusals: settings::Refusals,
+    /// The start proposals, in memory only (`r1.s4.w2`).
+    proposals: proposals::Proposals,
     /// This controller, for the threads that outlive a call.
     me: Weak<Controller>,
 }
@@ -197,13 +232,19 @@ impl Controller {
             claim_lock: Mutex::new(()),
             controller_ledger: Mutex::new(controller_ledger),
             api,
+            confirm: confirm::ConfirmCodes::default(),
             chats,
+            settings_refusals: settings::Refusals::default(),
+            proposals: proposals::Proposals::default(),
             me: me.clone(),
         });
         // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
         // session is set to wait for `--resume`, as the restart ended its process.
         controller.backfill_project_kinds();
         controller.settle_live_chat_sessions();
+        // A restart withdraws every open proposal (ADR-0007): the snapshots go, and each card that
+        // has no result gets one.
+        controller.recover_start_cards();
         controller.check_managed_copy();
         let mut found: Vec<RunJson> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(files::runs_dir(&controller.cfg.state_dir)) {
@@ -222,6 +263,7 @@ impl Controller {
                 Err(why) => eprintln!("pulse-factory: run {} is not loaded: {why}", info.run_id),
             }
         }
+        controller.prime_request_watch();
         Ok(controller)
     }
 
@@ -414,14 +456,28 @@ impl Controller {
                     .map_or("active", |r| r.state.as_str())
                     .to_string(),
                 running_sessions: self.running_sessions(h),
+                project_id: self.run_project_of(&h.info.run_id),
             })
             .collect()
+    }
+
+    /// The project a run belongs to, read from the store: none for a CLI arm.
+    pub(super) fn run_project_of(&self, run_id: &str) -> Option<String> {
+        self.store
+            .run(run_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.project_id)
     }
 
     /// Run one tick of every driven run. A panic in one run's tick stops that tick only.
     pub fn tick_all(&self) {
         // A chat process idle for the window is released. Nothing here opens one.
         self.sweep_chats();
+        // A window of refused settings writes that has ended gets its closing line.
+        self.close_refusal_windows();
+        // A start card whose result did not land is appended again.
+        self.retry_start_results();
         for handle in self.handles() {
             if !handle.driven.load(Ordering::SeqCst) {
                 continue;
@@ -435,6 +491,7 @@ impl Controller {
                 );
             }
         }
+        self.publish_request_frames();
     }
 
     // ------------------------------------------------------------------ arm
@@ -442,33 +499,63 @@ impl Controller {
     /// Pin, record and start a run. On any failure the new directory is removed and a replaced
     /// run stays as it was.
     pub fn arm(&self, plan: ArmPlan) -> Result<String, String> {
+        self.arm_with(plan, None, &|| Ok(())).map_err(|f| f.why)
+    }
+
+    /// [`Controller::arm`], with a hook for the device arm (`r1.s4.w2`). `admit` runs under the
+    /// run registry's mutex, after `check_earlier` and the ledger check pass and before the run
+    /// directory exists, so of two arms on the same inputs exactly one admits. `proposal` names the
+    /// start card a plan came from, for the `run_project` admission.
+    pub(super) fn arm_with(
+        &self,
+        plan: ArmPlan,
+        proposal: Option<&str>,
+        admit: &dyn Fn() -> Result<(), String>,
+    ) -> Result<String, ArmFailure> {
+        let before = |why: String| ArmFailure {
+            why,
+            stage: ArmStage::Before,
+        };
+        let after = |why: String| ArmFailure {
+            why,
+            stage: ArmStage::After,
+        };
         // One arm at a time, and none beside a start-up.
         let mut registry = lock(&self.runs);
         if !valid_spine(&plan.spine) {
-            return Err(format!(
+            return Err(before(format!(
                 "spine name {:?} must match [A-Za-z0-9._-]+",
                 plan.spine
-            ));
+            )));
         }
         let infos: Vec<RunInfo> =
             { drop_guard_infos(&registry, &self.store, |h| self.running_sessions(h)) };
-        check_earlier(&infos, plan.replace.as_deref()).map_err(strip_prefix)?;
+        check_earlier(&infos, plan.replace.as_deref())
+            .map_err(strip_prefix)
+            .map_err(before)?;
 
-        ledger_is_writable(&plan.ledger)?;
+        ledger_is_writable(&plan.ledger).map_err(before)?;
+
+        // The device arm commits its admission here, inside the critical section.
+        admit().map_err(|why| ArmFailure {
+            why,
+            stage: ArmStage::AdmitFailed,
+        })?;
 
         // A run ID that the store knows is never reused. A store that cannot answer counts as
         // knowing it.
         let (run_id, dir) = files::create_run_dir(&self.cfg.state_dir, &plan.spine, &|id| {
             self.store.run(id).map_or(true, |row| row.is_some())
-        })?;
-        match self.arm_into(&plan, &run_id, &dir, &registry) {
+        })
+        .map_err(after)?;
+        match self.arm_into(&plan, &run_id, &dir, &registry, proposal) {
             Ok(handle) => {
                 registry.push(handle);
                 Ok(run_id)
             }
             Err(why) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                Err(why)
+                Err(after(why))
             }
         }
     }
@@ -479,6 +566,7 @@ impl Controller {
         run_id: &str,
         dir: &Path,
         registry: &[Arc<RunHandle>],
+        proposal: Option<&str>,
     ) -> Result<Arc<RunHandle>, String> {
         for sub in ["queue", "out", "package", "plugins"] {
             std::fs::create_dir_all(dir.join(sub))
@@ -494,6 +582,12 @@ impl Controller {
         let package = Package::load(&dir.join("package")).map_err(|e| e.to_string())?;
         let package_pin =
             pin::pin_package(&package).map_err(|e| format!("cannot pin the package: {e}"))?;
+        // A plan built from a proposal's snapshot arms only the package the card showed.
+        if let Some(expected) = &plan.expect_package
+            && package_pin.content != *expected
+        {
+            return Err(PACKAGE_MOVED.to_string());
+        }
 
         // The ports resolve each plugin; the copy is what the seats launch from.
         let spec = RunSpec {
@@ -567,7 +661,7 @@ impl Controller {
             ),
         };
         let handle = self.build_run(dir, info.clone(), Some(run_ports))?;
-        if let Err(why) = self.finish_arm(plan, run_id, dir, registry, &info, &handle) {
+        if let Err(why) = self.finish_arm(plan, run_id, dir, registry, &info, &handle, proposal) {
             // Start-up committed the run to the store, which outlives the directory that `arm`
             // removes. End the run, so no open run is left without a directory. An engine that
             // degraded cannot end it: the ID stays taken, and no later arm reuses it.
@@ -579,6 +673,7 @@ impl Controller {
 
     /// The steps of an arm after the new run started. A failure here leaves the replaced run as
     /// it was: it ends last, after everything that can fail has passed.
+    #[allow(clippy::too_many_arguments)]
     fn finish_arm(
         &self,
         plan: &ArmPlan,
@@ -587,6 +682,7 @@ impl Controller {
         registry: &[Arc<RunHandle>],
         info: &RunJson,
         handle: &RunHandle,
+        proposal: Option<&str>,
     ) -> Result<(), String> {
         if !handle.driven.load(Ordering::SeqCst) {
             return Err("the new run did not start up".to_string());
@@ -600,6 +696,11 @@ impl Controller {
             ),
             None => None,
         };
+        // A run armed from a start card records its project, in an admission under `@controller`,
+        // before `run.json` is written: an arm whose link fails fails whole (W8).
+        if let Some(project) = &plan.project_id {
+            self.link_run_project(run_id, project, proposal)?;
+        }
         files::write_json(&dir.join("run.json"), info)?;
         // The replaced run ends after the new run's pins, start-up and record succeeded.
         if let Some(old) = old {
@@ -612,6 +713,26 @@ impl Controller {
         Ok(())
     }
 }
+
+/// How far an arm got before it failed.
+pub(super) enum ArmStage {
+    /// Nothing was admitted: an earlier run, a bad spine, a ledger that cannot be written.
+    Before,
+    /// The device arm's own admission failed to commit.
+    AdmitFailed,
+    /// The admission is committed: the run directory, the start-up or the project link failed.
+    After,
+}
+
+/// An arm that failed, with the cause and how far it got.
+pub(super) struct ArmFailure {
+    pub why: String,
+    pub stage: ArmStage,
+}
+
+/// The cause when the copy of a proposal's package differs from the package its card showed.
+pub(super) const PACKAGE_MOVED: &str =
+    "the package copy differs from the package the start card showed";
 
 /// The ledger can be appended to. The check runs before start-up commits anything, so a ledger
 /// that cannot be written leaves no run in the store.
@@ -654,21 +775,25 @@ fn drop_guard_infos(
                 .map_or("active", |r| r.state.as_str())
                 .to_string(),
             running_sessions: running(h),
+            project_id: store
+                .run(&h.info.run_id)
+                .ok()
+                .flatten()
+                .and_then(|r| r.project_id),
         })
         .collect()
 }
+
+/// The refusal of a confirm code on the socket.
+const SOCKET_CODE_REFUSAL: &str =
+    "{verb} refused: confirm codes are for paired devices; on this host use pulse-factory claim";
 
 impl Handler for Controller {
     fn handle(&self, request: Request) -> Response {
         match request.verb.as_str() {
             "runs" => Response::ok(json!({ "runs": self.run_infos() })),
-            "arm" => match serde_json::from_value::<ArmPlan>(request.args) {
-                Ok(plan) => match self.arm(plan) {
-                    Ok(id) => Response::ok(json!({ "run_id": id })),
-                    Err(why) => Response::err(why),
-                },
-                Err(e) => Response::err(format!("the plan is not readable: {e}")),
-            },
+            // The Needs you page's read of the runs (`r1.s4.w3`): device auth only, read-only.
+            "run_list" => self.verb_run_list(),
             "hook" => Response::ok(self.seats.answer(&request.args)),
             "status" => self.verb_status(&request.args),
             "halt" => self.verb_halt(&request.args),
@@ -686,32 +811,79 @@ impl Handler for Controller {
             "session_redact" => self.verb_session_redact(&request.args),
             "session_list" => self.verb_session_list(&request.args),
             "session_items" => self.verb_session_items(&request.args),
+            "settings_get" => self.verb_settings_get(&request.args),
             "device_list" => self.verb_device_list(),
             "api_status" => self.verb_api_status(),
+            // A confirm code is for a paired device, on the API (`r1.s4.w1`).
+            "confirm_code" => Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "confirm_code")),
             // These change who acts and what runs. They need to know who calls.
-            "claim" | "answer" | "clear" | "ack" | "device_pair" | "device_revoke" => {
-                Response::err(format!(
-                    "{} refused: the controller cannot tell which process called",
-                    request.verb
-                ))
-            }
+            "arm" | "propose" | "claim" | "answer" | "clear" | "ack" | "device_pair"
+            | "device_revoke" | "settings_set" | "settings_unset" => Response::err(format!(
+                "{} refused: the controller cannot tell which process called",
+                request.verb
+            )),
             other => Response::err(format!("unknown verb {other:?}")),
         }
     }
 
     fn handle_from(&self, request: Request, peer: Peer) -> Response {
+        let verb = request.verb.clone();
+        let response = self.dispatch_from(request, peer);
+        // The verbs that change a request or the claim tell the open streams at once.
+        if matches!(verb.as_str(), "claim" | "answer" | "clear" | "ack") {
+            self.publish_request_frames();
+        }
+        response
+    }
+}
+
+impl Controller {
+    fn dispatch_from(&self, request: Request, peer: Peer) -> Response {
+        // A confirm code is for a paired device: the socket takes a claim token and nothing else.
+        if matches!(request.verb.as_str(), "answer" | "clear" | "ack")
+            && request.args.get("code").is_some()
+            && request.args.get("token").is_none()
+        {
+            return Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", &request.verb));
+        }
         match request.verb.as_str() {
             "claim" => self.verb_claim(&request.args, peer),
             "answer" => self.verb_answer(&request.args, peer),
             "clear" => self.verb_clear(&request.args, peer),
             "ack" => self.verb_ack(&request.args, peer),
-            // A seat cannot pair a device or revoke one (ADR-0005).
-            "device_pair" => match self.check_caller("device_pair", peer) {
+            // Neither can a chat, or a process below one (ADR-0005; `r1.s4.w1`).
+            "device_pair" => match self.check_chat_caller("device_pair", peer) {
                 Ok(()) => self.verb_device_pair(),
                 Err(why) => Response::err(why),
             },
-            "device_revoke" => match self.check_caller("device_revoke", peer) {
+            "device_revoke" => match self.check_chat_caller("device_revoke", peer) {
                 Ok(()) => self.verb_device_revoke(&request.args),
+                Err(why) => Response::err(why),
+            },
+            // A seat cannot change a setting, and neither can a chat. The refusal is audited, with a
+            // bound (ADR-0016).
+            verb @ ("settings_set" | "settings_unset") => {
+                self.settings_write_from(verb, &request.args, peer)
+            }
+            // The Orchestrator proposes: the controller builds the plan and posts a start card
+            // into the chat that called (`r1.s4.w2`). Nothing is armed.
+            "propose" => self.verb_propose(&request.args, peer),
+            // A confirm code is for a paired device, on the API: an `arm` over the socket that
+            // carries a code and no plan is refused.
+            "arm"
+                if request.args.get("code").is_some()
+                    && request.args.get("workflow_dir").is_none() =>
+            {
+                Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "arm"))
+            }
+            "arm" => match self.check_chat_caller("arm", peer) {
+                Ok(()) => match serde_json::from_value::<ArmPlan>(request.args) {
+                    Ok(plan) => match self.arm(plan) {
+                        Ok(id) => Response::ok(json!({ "run_id": id })),
+                        Err(why) => Response::err(why),
+                    },
+                    Err(e) => Response::err(format!("the plan is not readable: {e}")),
+                },
                 Err(why) => Response::err(why),
             },
             // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).
@@ -742,21 +914,24 @@ impl Controller {
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // The kill switch stops every live chat process first (Q2 rule 3).
+        // The kill switch withdraws every open proposal first, so a stale card cannot start a run
+        // after it and the stopped chats find nothing open (W10). It stops every live chat
+        // process next (Q2 rule 3).
+        let proposals_withdrawn = self.withdraw_open_proposals(None, "halted");
         let chats_stopped = self.halt_chat_json();
         let handle = match self.find(run) {
             Ok(h) => h,
             // With no run at all, `halt` still stopped the chats.
             Err(_) if run.is_none() && lock(&self.runs).is_empty() => {
                 return Response::ok(
-                    json!({ "schema_version": 1, "run": null, "halted": false, "already_halted": false, "chats_stopped": chats_stopped }),
+                    json!({ "schema_version": 1, "run": null, "halted": false, "already_halted": false, "chats_stopped": chats_stopped, "proposals_withdrawn": proposals_withdrawn }),
                 );
             }
             Err(why) => return Response::err(why),
         };
         match handle.engine.halt(reason) {
             Ok(_) => Response::ok(
-                json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": false, "chats_stopped": chats_stopped }),
+                json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": false, "chats_stopped": chats_stopped, "proposals_withdrawn": proposals_withdrawn }),
             ),
             // The first reason stays.
             Err(pf_engine::EngineError::Conflict { .. }) => {
@@ -768,7 +943,7 @@ impl Controller {
                     .and_then(|r| r.halted_reason)
                     .unwrap_or_default();
                 Response::ok(
-                    json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": true, "reason": first, "chats_stopped": chats_stopped }),
+                    json!({ "schema_version": 1, "run": handle.info.run_id, "halted": true, "already_halted": true, "reason": first, "chats_stopped": chats_stopped, "proposals_withdrawn": proposals_withdrawn }),
                 )
             }
             Err(e) => Response::err(e.to_string()),

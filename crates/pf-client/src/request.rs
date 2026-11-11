@@ -4,7 +4,9 @@
 //! This function is where the client enforces it: a verb that is not on the list is a `bad_request`
 //! here, before any connection.
 
-use serde_json::Value;
+// The desktop shell's one `verb` command takes its arguments as this type (`r1.s4.w3`, W5), so the
+// shell needs no `serde_json` dependency of its own.
+pub use serde_json::Value;
 
 use crate::error::{ClientError, ErrorKind};
 
