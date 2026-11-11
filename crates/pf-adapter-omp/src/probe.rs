@@ -15,8 +15,9 @@ use crate::OmpAdapter;
 /// The most real sessions, in total.
 pub const LIMIT: u32 = 20;
 
-/// The model every probe uses.
-pub const PROBE_MODEL: &str = "zai/glm-5.3-flash";
+/// The model every probe uses. It was `zai/glm-5.3-flash` until the Z.AI quota ended; since
+/// 2026-11-11 it is the model the shipped `ossify-spine` roles run (operator ruling G10).
+pub const PROBE_MODEL: &str = "ollama-daemon/deepseek-v4.1-flash:1017-cloud";
 
 /// The counter file: `~/.local/state/pulse-factory/probe-sessions`. `HOME` decides where.
 pub fn counter_path() -> PathBuf {

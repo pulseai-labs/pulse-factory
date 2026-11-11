@@ -1,7 +1,8 @@
 //! The OMP version the adapter qualifies (ADR-0011).
 
-/// The versions the spike qualified.
-pub const QUALIFIED_VERSIONS: [&str; 1] = ["18.11.3"];
+/// The qualified versions: 18.11.3 by the spike and the probes of 2026-11-01, 18.16.0 by the probes
+/// of 2026-11-11 (ADR-0011, "Qualified versions").
+pub const QUALIFIED_VERSIONS: [&str; 2] = ["18.11.3", "18.16.0"];
 
 /// Read a version such as `18.11.3` from `omp --version` output (`omp/18.11.3` or `omp v18.11.3`).
 pub fn parse_version(text: &str) -> Option<String> {
@@ -53,6 +54,12 @@ mod tests {
         assert_eq!(parse_version("omp/18.11.3\n").as_deref(), Some("18.11.3"));
         assert_eq!(parse_version("omp v18.11.3").as_deref(), Some("18.11.3"));
         assert_eq!(parse_version("no version"), None);
+    }
+
+    #[test]
+    fn both_qualified_versions_are_listed() {
+        assert!(QUALIFIED_VERSIONS.contains(&"18.11.3"));
+        assert!(QUALIFIED_VERSIONS.contains(&"18.16.0"));
     }
 
     #[test]
