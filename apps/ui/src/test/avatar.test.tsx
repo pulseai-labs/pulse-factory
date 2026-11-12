@@ -105,12 +105,23 @@ describe("the four built-in agents", () => {
 });
 
 describe("the avatar's sizes, states and custom form", () => {
-  it.each([16, 20, 28, 40] as const)("is %i px square", (size) => {
+  it.each([16, 20, 22, 24, 26, 28, 40, 64] as const)("is %i px square", (size) => {
     const { container } = render(<Avatar agent="plain" size={size} />);
     const root = container.firstElementChild as HTMLElement;
     expect(root.style.width).toBe(`${size}px`);
     expect(root.style.height).toBe(`${size}px`);
     expect(root.className.includes("ui-avatar-sm")).toBe(size <= 18);
+  });
+
+  it.each([22, 24, 26, 64] as const)("at %i px the 40×40 view box scales and the geometry stays (Approach 11)", (size) => {
+    const at40 = render(<Avatar agent="orchestrator" size={40} />);
+    const reference = at40.container.querySelector("svg")?.innerHTML;
+    at40.unmount();
+    const { container } = render(<Avatar agent="orchestrator" size={size} />);
+    const svg = container.querySelector("svg") as SVGElement;
+    expect(svg.getAttribute("viewBox")).toBe("0 0 40 40");
+    expect(svg.getAttribute("width")).toBe("100%");
+    expect(svg.innerHTML).toBe(reference);
   });
 
   it("needs_you adds the amber badge and idle does not", () => {

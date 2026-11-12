@@ -51,8 +51,10 @@ test("pair, add a project, revoke the device, and see 3c", async ({ page }) => {
   await page.getByLabel("Device name").fill("d12 browser");
   await page.getByRole("button", { name: "Pair" }).click();
 
-  // 2. The success state shows the address. "Open Pulse Factory" shows Projects with an empty list.
-  await expect(page.getByRole("heading", { name: /^Connected to 127\.0\.0\.1:\d+$/ })).toBeVisible();
+  // 2. The success state names the server and shows the address. "Open Pulse Factory" shows Projects with an empty list.
+  await expect(page.getByRole("heading", { name: /^Connected to .+/ })).toBeVisible();
+  const serverName = ((await page.locator("dt:has-text('Server') + dd").textContent()) ?? "").trim();
+  await expect(page.locator("dt:has-text('Address') + dd")).toHaveText(/^127\.0\.0\.1:\d+$/);
   await expect(page.getByText("d12 browser")).toBeVisible();
   await page.getByRole("button", { name: "Open Pulse Factory" }).click();
   await expect(page.getByRole("navigation")).toBeVisible();
@@ -70,7 +72,7 @@ test("pair, add a project, revoke the device, and see 3c", async ({ page }) => {
     await shot(page, "2c-projects.png");
 
     // The server menu (3b).
-    await page.getByRole("region", { name: "Sidebar" }).getByRole("button", { name: /127\.0\.0\.1:\d+/ }).click();
+    await page.getByRole("banner").getByRole("button", { name: serverName }).click();
     await expect(page.getByRole("dialog", { name: "Server menu" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Disconnect this Mac" })).toBeVisible();
     await shot(page, "3b-server-menu.png");

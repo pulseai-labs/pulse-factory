@@ -1,4 +1,7 @@
-// The pair screen (3a). One field for the code, a device-name field and the command to run on the server.
+// The pair screen (11j, over 3a). The title bar holds only the server chip ("No server", no menu) and New tab
+// as a function not built yet. A centred card: the command to run on the server with its Copy button, one
+// field for the code and the device name (O3: no address field, the code carries it). After a pairing the
+// chip names the server with the green dot, and the card says "Connected to <name>".
 import { useState, type FormEvent } from "react";
 import { addressFromCode, hasCodePrefix, normalizeCode } from "../pair-code";
 import {
@@ -7,7 +10,7 @@ import {
   type PairedServer,
   type Transport,
 } from "../transport/types";
-import { Button, Eyebrow, Input } from "../ui";
+import { Button, Icon, Input, NotBuilt } from "../ui";
 
 export interface Notice {
   address: string;
@@ -90,34 +93,82 @@ export function Pair(props: {
     }
   }
 
+  const [copied, setCopied] = useState(false);
+  const serverName = paired ? (paired.server?.name ?? paired.address) : null;
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText("pulse-factory device pair");
+      setCopied(true);
+    } catch {
+      // No clipboard: the command is on screen to copy by hand.
+    }
+  }
+
   return (
     <div className="app app-pair">
-      <header className="titlebar" role="banner">
-        <span className="titlebar-server">
-          <span className="dot dot-off" aria-hidden="true" />
-          No server
+      <header className="titlebar" role="banner" data-tauri-drag-region>
+        <span className="tb-chip tb-chip-static" title={paired ? undefined : "Pair a server"}>
+          <span className={`tb-dot ${paired ? "tb-dot-up" : "tb-dot-off"}`} aria-hidden="true" />
+          {serverName ?? "No server"}
+          <span className="tb-chip-caret" aria-hidden="true">
+            <Icon name="chevrons-up-down" size={12} />
+          </span>
         </span>
+        <span className="tb-divider" aria-hidden="true" />
+        <div className="tb-strip">
+          <NotBuilt as="button" compact icon="plus" label="New tab" />
+        </div>
+        <div className="tb-spacer" data-tauri-drag-region />
       </header>
       <main className="pair-main">
-        {paired ? (
+        {paired && serverName ? (
           <section className="pair-card" aria-labelledby="pair-done">
-            <Eyebrow>Paired</Eyebrow>
-            <h1 id="pair-done">Connected to {paired.address}</h1>
-            <p className="muted">This Mac is paired. You only do this once.</p>
-            <dl className="facts">
-              <dt>Address</dt>
-              <dd className="mono">{paired.address}</dd>
-              <dt>This device</dt>
-              <dd>{paired.device.name}</dd>
+            <div className="pair-head">
+              <span className="pair-tile" aria-hidden="true">
+                <Icon name="check" size={18} />
+              </span>
+              {/* The heading names the address, not the server's name. The journey lines d19 and d23 (`e2e/chat.spec.ts`,
+                  `e2e/start-card.spec.ts`, `e2e/needs-you.spec.ts`; round-3 owners, AC-13 forbids this item to edit them)
+                  find it as `Connected to 127.0.0.1:<port>`. The canvas (11j) says "Connected to <name>": once those specs
+                  read the name, this line takes `serverName`. The name shows in the lede, the Server fact and the chip. */}
+              <h1 id="pair-done">Connected to {paired.address}</h1>
+              <p className="pair-lede">{`This Mac is paired and trusts ${serverName}’s key. You only do this once.`}</p>
+            </div>
+            <dl className="pair-facts">
+              <div className="pair-fact">
+                <dt>Server</dt>
+                <dd>
+                  <span className="tb-dot tb-dot-up" aria-hidden="true" />
+                  {serverName}
+                </dd>
+              </div>
+              <div className="pair-fact">
+                <dt>Address</dt>
+                <dd className="mono">{paired.address}</dd>
+              </div>
+              <div className="pair-fact">
+                <dt>This device</dt>
+                <dd>{paired.device.name}</dd>
+              </div>
             </dl>
-            <Button onClick={() => onPaired(paired)}>
-              Open Pulse Factory
-            </Button>
+            <div className="pair-actions">
+              <NotBuilt as="button" label="Pair another code" />
+              <span className="pair-actions-gap" />
+              <Button variant="primary" size="lg" onClick={() => onPaired(paired)}>
+                Open Pulse Factory
+              </Button>
+            </div>
           </section>
         ) : (
           <section className="pair-card" aria-labelledby="pair-title">
-            <h1 id="pair-title">Connect to your server</h1>
-            <p className="muted">Pulse Factory runs on your Linux machine. Pair this Mac with it once.</p>
+            <div className="pair-head">
+              <span className="pair-tile" aria-hidden="true">
+                <Icon name="activity" size={18} />
+              </span>
+              <h1 id="pair-title">Connect to your server</h1>
+              <p className="pair-lede">Pulse Factory runs on your Linux machine. Pair this Mac with it once.</p>
+            </div>
             {notice ? (
               <div className="notice" role="status">
                 <p>This Mac is disconnected from {notice.address}.</p>
@@ -128,44 +179,60 @@ export function Pair(props: {
               </div>
             ) : null}
             <form onSubmit={submit} noValidate>
-              <div className="step-label">
-                <span className="step-n">1 ·</span> On the server, run
-              </div>
-              <div className="command">
-                <span className="prompt" aria-hidden="true">
-                  $
+              <div className="pair-field">
+                <span className="step-label">
+                  <span className="step-n">1 ·</span> On the server, run
                 </span>
-                <code>pulse-factory device pair</code>
+                <div className="command">
+                  <span className="prompt" aria-hidden="true">
+                    $
+                  </span>
+                  <code>pulse-factory device pair</code>
+                  <button className="command-copy" type="button" title="Copy command" aria-label="Copy command" onClick={() => void copy()}>
+                    <Icon name={copied ? "check" : "copy"} size={13} />
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <p className="hint">
+                  It prints one code that starts with <code>pf1-</code>. The code carries the server’s address and the key this Mac will trust.
+                </p>
               </div>
-              <p className="hint">It prints one pairing code. The code works once, for 10 minutes.</p>
 
-              <div className="step-label">
-                <span className="step-n">2 ·</span> <label htmlFor="pf-code">Pairing code</label>
+              <div className="pair-field">
+                <label className="step-label" htmlFor="pf-code">
+                  <span className="step-n">2 ·</span> Paste the code
+                </label>
+                <Input
+                  mono
+                  id="pf-code"
+                  aria-label="Pairing code"
+                  type="text"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  placeholder="pf1-…"
+                  value={code}
+                  disabled={busy}
+                  onChange={(e) => setCode(e.target.value)}
+                />
               </div>
-              <Input
-                mono
-                id="pf-code"
-                type="text"
-                autoComplete="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                placeholder="pf1-…"
-                value={code}
-                disabled={busy}
-                onChange={(e) => setCode(e.target.value)}
-              />
 
-              <div className="step-label">
-                <span className="step-n">3 ·</span> <label htmlFor="pf-name">Device name</label>
+              <div className="pair-field">
+                <label className="step-label" htmlFor="pf-name">
+                  <span className="step-n">3 ·</span> Name this Mac
+                </label>
+                <Input
+                  id="pf-name"
+                  aria-label="Device name"
+                  type="text"
+                  autoComplete="off"
+                  placeholder="MacBook"
+                  value={name}
+                  disabled={busy}
+                  onChange={(e) => setName(e.target.value)}
+                />
+                <p className="hint">Shown on answers you give from this Mac, like “MacBook · 14:08”.</p>
               </div>
-              <Input
-                id="pf-name"
-                type="text"
-                autoComplete="off"
-                value={name}
-                disabled={busy}
-                onChange={(e) => setName(e.target.value)}
-              />
 
               {problem ? (
                 <div className="problem" role="alert">

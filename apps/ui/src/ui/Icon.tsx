@@ -1,15 +1,16 @@
 // The icon set, in the Lucide idiom of the design system: 24×24 view box, stroke 2, round caps and
-// joins, `currentColor`. The names are the canvas's. `folder` stays in the set because the Projects rail
-// shows it until `r1.s5.w2` swaps it for `layers`, and `arrow-left` and `bell` are two icons the app
-// shows that the canvas list does not name. The shapes are inline (icon-nodes.ts): no package, no fetch.
+// joins, `currentColor`. The names are the canvas's. `folder` and `bell` stay in the set for later
+// screens, and `arrow-left` is one the app shows that the canvas list does not name. `r1.s5.w2` adds the
+// five names that frames 11a to 11l use (`more`, `trash`, `square`, `minus`, `alert`) and the sizes 11 and
+// 12, so no later item edits this file. The shapes are inline (icon-nodes.ts): no package, no fetch.
 import { createElement } from "react";
 import { ICON_NODES } from "./icon-nodes";
 
 export const ICON_NAMES = Object.keys(ICON_NODES) as ReadonlyArray<keyof typeof ICON_NODES>;
 export type IconName = keyof typeof ICON_NODES;
 
-/** The sizes the canvas draws an icon at, 13 to 18 px. */
-export type IconSize = 13 | 14 | 15 | 16 | 17 | 18;
+/** The sizes the canvas draws an icon at: 11 and 12 px (the branch line, the tab's close), then 13 to 18 px. */
+export type IconSize = 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18;
 
 export function Icon(props: { name: IconName; size?: IconSize }) {
   const { name, size = 16 } = props;

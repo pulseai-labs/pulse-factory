@@ -27,6 +27,8 @@ const CANVAS_ICONS = [
   "chevron-left", "chevron-right", "chevrons-up-down", "circle-dot", "clock", "copy", "git-branch",
   "layers", "lock", "pause", "play", "plus", "refresh", "search", "settings", "sliders", "sparkles",
   "upload", "x", "zap",
+  // Round 2 adds the five names that frames 11a to 11l use and w1's set lacked (Approach 11).
+  "more", "trash", "square", "minus", "alert",
 ];
 // The three icons the app shows at 41a6b79 that the canvas list lacks.
 const APP_ICONS = ["arrow-left", "bell", "folder"];
@@ -266,6 +268,25 @@ describe("Icon", () => {
     expect(svgs[1]?.getAttribute("width")).toBe("13");
     expect(svgs[1]?.getAttribute("height")).toBe("13");
   });
+
+  it("takes the sizes 11 and 12 that the R1 frames draw (Approach 11)", () => {
+    const { container } = render(
+      <>
+        <Icon name="git-branch" size={11} />
+        <Icon name="x" size={12} />
+      </>,
+    );
+    const svgs = container.querySelectorAll("svg");
+    expect(svgs[0]?.getAttribute("width")).toBe("11");
+    expect(svgs[0]?.getAttribute("height")).toBe("11");
+    expect(svgs[1]?.getAttribute("width")).toBe("12");
+  });
+
+  it.each(["more", "trash", "square", "minus", "alert"] as const)("draws the new icon %s", (name) => {
+    const { container } = render(<Icon name={name} />);
+    expect(container.querySelector("svg")?.getAttribute("data-icon")).toBe(name);
+    expect(container.querySelector("svg")?.childElementCount).toBeGreaterThan(0);
+  });
 });
 
 describe("the components are plain", () => {
@@ -273,7 +294,7 @@ describe("the components are plain", () => {
   const files = readdirSync(dir).filter((f) => /\.(ts|tsx)$/.test(f));
 
   it("the directory holds one file per component and an index", () => {
-    for (const name of ["Button", "IconButton", "Input", "Select", "Chip", "StatePill", "StateDot", "CountBadge", "Card", "Eyebrow", "Icon", "Avatar"]) {
+    for (const name of ["Button", "IconButton", "Input", "Select", "Chip", "StatePill", "StateDot", "CountBadge", "Card", "Eyebrow", "Icon", "Avatar", "NotBuilt"]) {
       expect(files, name).toContain(`${name}.tsx`);
     }
     expect(files).toContain("index.ts");

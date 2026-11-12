@@ -1,49 +1,29 @@
-// The shell (2a to 2c): a title bar with the page title, the history arrows and the tab strip, a slim
-// rail with Projects, Agents and Needs you (top) and Settings (bottom), and on the Projects, Agents and
-// chat pages a left sidebar. Needs you and Settings are focused pages with no sidebar. The rail shows no
-// other section: later spines add them (Q5, A9). The Needs you badge counts the open requests that the
-// one stream's frames brought, with no call (r1.s4.w3).
+// The shell (11a): it composes the parts in `src/shell/` (the title bar, the rail, the sidebar, the dock)
+// around the page on screen, and it keeps the page state: the history, the open chats as tabs, and the
+// open state of the sidebar and the dock. The Needs you and Settings pages are focused pages: no sidebar,
+// no dock, no tab strip. The Needs you badge counts the open requests that the one stream's frames
+// brought, with no call (r1.s4.w3).
 //
-// An open chat is a tab. No tab exists until a chat opens. The sidebar lists each project's live
-// sessions; a click opens (or focuses) that chat's tab. The sidebar's open state is the only thing
-// the UI keeps in localStorage.
-import { useCallback, useEffect, useState } from "react";
+// An open chat is a tab. No tab exists until a chat opens. The sidebar and the Projects page open (or
+// focus) a chat's tab. Two things stay in localStorage, per device: the sidebar's open state
+// (`pf.sidebar`) and the dock's (`pf.dock`). Round-3 screens open a page or a chat only through
+// `useNavigation()` (`shell/navigation.ts`), which this component provides.
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Banner } from "../components/Banner";
-import { StreamLine } from "../components/StreamLine";
-import { ServerMenu } from "../components/ServerMenu";
-import { branchText } from "../components/chat-format";
-import { agentName, stateLabel, useChat } from "../state/chat";
-import { Chip, CountBadge, Icon, IconButton, StateDot } from "../ui";
+import { useChat } from "../state/chat";
 import { useConnection } from "../state/connection";
-import { useRequests } from "../state/requests";
+import { Dock, readDock, writeDock } from "../shell/Dock";
+import { back, canBack, canForward, closeTab, currentPage, forward, initialHistory, push, type Page } from "../shell/history";
+import { Navigation, type NavigationApi } from "../shell/navigation";
+import { Rail } from "../shell/Rail";
+import { Sidebar, type Grouping } from "../shell/Sidebar";
+import { TitleBar } from "../shell/TitleBar";
 import { Agents } from "./Agents";
 import { Chat } from "./Chat";
 import { NeedsYou } from "./NeedsYou";
 import { Projects } from "./Projects";
 import { Settings } from "./Settings";
 
-type Page =
-  | { kind: "projects" }
-  | { kind: "agents" }
-  | { kind: "needs_you" }
-  | { kind: "settings" }
-  | { kind: "chat"; session: string };
-
-const PROJECTS: Page = { kind: "projects" };
-const AGENTS: Page = { kind: "agents" };
-const NEEDS_YOU: Page = { kind: "needs_you" };
-const SETTINGS: Page = { kind: "settings" };
-
-function sameChat(page: Page | undefined, session: string): boolean {
-  return page?.kind === "chat" && page.session === session;
-}
-
-function samePage(a: Page | undefined, b: Page): boolean {
-  if (!a || a.kind !== b.kind) return false;
-  return a.kind === "chat" && b.kind === "chat" ? a.session === b.session : true;
-}
-
-// The sidebar's open state is the only thing the UI keeps in localStorage.
 const SIDEBAR_KEY = "pf.sidebar";
 
 function readSidebar(): boolean {
@@ -54,77 +34,16 @@ function readSidebar(): boolean {
   }
 }
 
-function Sidebar(props: { onOpen: (session: string) => void; current: string | null }) {
-  const { projects } = useConnection();
-  const chat = useChat();
-  return (
-    <section className="sidebar" aria-label="Sidebar">
-      <ServerMenu />
-      <div className="sidebar-head">Projects</div>
-      {projects === null ? null : projects.length === 0 ? (
-        <p className="sidebar-empty">No projects yet</p>
-      ) : (
-        <ul className="sidebar-list">
-          {projects.map((p) => {
-            const sessions = chat.live.filter((s) => s.project_id === p.id);
-            return (
-              <li key={p.id} className="sidebar-project">
-                <div className="sidebar-project-row" title={p.root}>
-                  <span className="sidebar-icon" aria-hidden="true">
-                    <Icon name="folder" />
-                  </span>
-                  <span className="sidebar-name">{p.name}</span>
-                </div>
-                {sessions.length === 0 ? null : (
-                  <ul className="session-rows" aria-label={`Sessions of ${p.name}`}>
-                    {sessions.map((s) => {
-                      const agent = agentName(chat.list, s.agent_id);
-                      const unqualified = s.process !== null && !s.process.qualified;
-                      const branch = branchText(s, projects);
-                      return (
-                        <li key={s.id}>
-                          <button
-                            className={`session-row${props.current === s.id ? " session-row-on" : ""}`}
-                            type="button"
-                            aria-label={`${agent} session in ${p.name}: ${stateLabel(s.state)}, ${branch}${unqualified ? ", unqualified" : ""}`}
-                            onClick={() => props.onOpen(s.id)}
-                          >
-                            <span className="session-agent">{agent}</span>
-                            <span className={`session-state session-${s.state}`}>
-                              <StateDot state={s.state} />
-                              {stateLabel(s.state)}
-                            </span>
-                            <span className="session-branch mono">{branch}</span>
-                            {unqualified ? <Chip tone="amber">unqualified</Chip> : null}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {chat.following === null ? <StreamLine /> : null}
-    </section>
-  );
-}
-
 export function Shell() {
   const chat = useChat();
-  const requests = useRequests();
+  const { link } = useConnection();
   const { follow } = chat;
-  const [history, setHistory] = useState<{ entries: Page[]; index: number }>({
-    entries: [PROJECTS],
-    index: 0,
-  });
+  const [history, setHistory] = useState(initialHistory);
   const [tabs, setTabs] = useState<string[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebar);
-  const page: Page = history.entries[history.index] ?? PROJECTS;
-  const canBack = history.index > 0;
-  const canForward = history.index < history.entries.length - 1;
+  const [dockOpen, setDockOpen] = useState(readDock);
+  const [grouping, setGrouping] = useState<Grouping>("project");
+  const page: Page = currentPage(history);
   const chatOnScreen = page.kind === "chat" ? page.session : null;
 
   useEffect(() => {
@@ -140,12 +59,7 @@ export function Shell() {
     follow(chatOnScreen);
   }, [chatOnScreen, follow]);
 
-  const go = useCallback((next: Page) => {
-    setHistory((h) => {
-      if (samePage(h.entries[h.index], next)) return h;
-      return { entries: [...h.entries.slice(0, h.index + 1), next], index: h.index + 1 };
-    });
-  }, []);
+  const go = useCallback((next: Page) => setHistory((h) => push(h, next)), []);
 
   const openChat = useCallback(
     (session: string) => {
@@ -156,21 +70,30 @@ export function Shell() {
   );
 
   // Closing a tab removes its pages from the history. The tab on screen goes back to the page before it.
-  const closeTab = useCallback((session: string) => {
+  const closeChat = useCallback((session: string) => {
     setTabs((t) => t.filter((id) => id !== session));
-    setHistory((h) => {
-      const keep = (p: Page | undefined) => !sameChat(p, session);
-      const entries = h.entries.filter(keep);
-      const keptBefore = h.entries.slice(0, h.index).filter(keep).length;
-      const onScreen = sameChat(h.entries[h.index], session);
-      const index = onScreen ? Math.max(0, keptBefore - 1) : keptBefore;
-      return { entries, index: Math.min(index, entries.length - 1) };
-    });
+    setHistory((h) => closeTab(h, session));
   }, []);
 
   const toggleSidebar = useCallback(() => setSidebarOpen((o) => !o), []);
+  // The dock's state is written when the operator changes it, not on mount: a device that never opened the dock
+  // keeps no `pf.dock` (the d19 journey asserts that `pf.sidebar` is the only key after a chat).
+  const toggleDock = useCallback(
+    () =>
+      setDockOpen((o) => {
+        writeDock(!o);
+        return !o;
+      }),
+    [],
+  );
 
-  const hasSidebar = page.kind !== "settings" && page.kind !== "needs_you";
+  const navigation = useMemo<NavigationApi>(
+    () => ({ openPage: (name) => go({ kind: name }), openSession: openChat }),
+    [go, openChat],
+  );
+
+  const focused = page.kind === "settings" || page.kind === "needs_you";
+  const hasSidebar = !focused;
 
   // ⌘B toggles the sidebar on a page that has one.
   useEffect(() => {
@@ -184,129 +107,48 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [hasSidebar, toggleSidebar]);
 
-  const showSidebar = hasSidebar && sidebarOpen;
-  const tip = (name: string, here: boolean) =>
-    here ? `${name}: click or press ⌘B to ${sidebarOpen ? "hide" : "show"} the sidebar` : name;
-
-  const tabName = (session: string) => {
-    const record = chat.records[session];
-    return `${record ? agentName(chat.list, record.agent_id) : "Orchestrator"} · ${record ? record.project_name : session}`;
-  };
-
-  const title =
-    page.kind === "projects"
-      ? "Projects"
-      : page.kind === "agents"
-        ? "Agents"
-        : page.kind === "needs_you"
-          ? "Needs you"
-          : page.kind === "settings"
-            ? "Settings"
-            : "Chat";
-
   return (
-    <div className="app">
-      <header className="titlebar" role="banner">
-        <IconButton
-          icon="arrow-left"
-          title="Back"
-          disabled={!canBack}
-          onClick={() => setHistory((h) => ({ ...h, index: Math.max(0, h.index - 1) }))}
+    <Navigation.Provider value={navigation}>
+      <div className={`app${link.state === "down" ? " app-down" : ""}`}>
+        <TitleBar
+          page={page}
+          tabs={tabs}
+          hasSidebar={hasSidebar}
+          sidebarOpen={sidebarOpen}
+          focused={focused}
+          dockOpen={dockOpen}
+          canBack={canBack(history)}
+          canForward={canForward(history)}
+          onBack={() => setHistory(back)}
+          onForward={() => setHistory(forward)}
+          onToggleSidebar={toggleSidebar}
+          onToggleDock={toggleDock}
+          onOpenTab={openChat}
+          onCloseTab={closeChat}
+          onNewTab={() => go({ kind: "projects" })}
         />
-        <IconButton
-          icon="arrow-right"
-          title="Forward"
-          disabled={!canForward}
-          onClick={() => setHistory((h) => ({ ...h, index: Math.min(h.entries.length - 1, h.index + 1) }))}
-        />
-        <h1 className="titlebar-title">{title}</h1>
-        {tabs.length > 0 ? (
-          <div className="tabs" role="tablist" aria-label="Open chats">
-            {tabs.map((session) => (
-              <div className={`tab-wrap${chatOnScreen === session ? " tab-on" : ""}`} key={session}>
-                <button
-                  className="tab"
-                  type="button"
-                  role="tab"
-                  aria-selected={chatOnScreen === session}
-                  onClick={() => go({ kind: "chat", session })}
-                >
-                  {tabName(session)}
-                </button>
-                <button
-                  className="tab-close"
-                  type="button"
-                  aria-label={`Close ${tabName(session)}`}
-                  onClick={() => closeTab(session)}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </header>
-      <Banner />
-      <div className="body">
-        <nav className="rail" aria-label="Sections">
-          <button
-            className={`rail-btn${page.kind === "projects" ? " rail-btn-on" : ""}`}
-            type="button"
-            aria-label="Projects"
-            aria-current={page.kind === "projects" ? "page" : undefined}
-            title={tip("Projects", page.kind === "projects")}
-            onClick={() => (page.kind === "projects" ? toggleSidebar() : go(PROJECTS))}
-          >
-            <Icon name="folder" size={18} />
-          </button>
-          <button
-            className={`rail-btn${page.kind === "agents" || page.kind === "chat" ? " rail-btn-on" : ""}`}
-            type="button"
-            aria-label="Agents"
-            aria-current={page.kind === "agents" ? "page" : undefined}
-            title={tip("Agents", page.kind === "agents")}
-            onClick={() => (page.kind === "agents" ? toggleSidebar() : go(AGENTS))}
-          >
-            <Icon name="bot" size={18} />
-          </button>
-          <button
-            className={`rail-btn${page.kind === "needs_you" ? " rail-btn-on" : ""}`}
-            type="button"
-            aria-label="Needs you"
-            aria-current={page.kind === "needs_you" ? "page" : undefined}
-            title="Needs you"
-            onClick={() => go(NEEDS_YOU)}
-          >
-            <Icon name="bell" size={18} />
-            <CountBadge count={requests.open.length} title={`${requests.open.length} open`} />
-          </button>
-          <span className="rail-spacer" />
-          <button
-            className={`rail-btn${page.kind === "settings" ? " rail-btn-on" : ""}`}
-            type="button"
-            aria-label="Settings"
-            aria-current={page.kind === "settings" ? "page" : undefined}
-            title="Settings"
-            onClick={() => go(SETTINGS)}
-          >
-            <Icon name="settings" size={18} />
-          </button>
-        </nav>
-        {showSidebar ? <Sidebar onOpen={openChat} current={chatOnScreen} /> : null}
-        <main className="main">
-          {page.kind === "projects" ? (
-            <Projects />
-          ) : page.kind === "agents" ? (
-            <Agents onOpen={openChat} />
-          ) : page.kind === "needs_you" ? (
-            <NeedsYou />
-          ) : page.kind === "settings" ? (
-            <Settings />
-          ) : (
-            <Chat key={page.session} sessionId={page.session} />
-          )}
-        </main>
+        <Banner />
+        <div className="body">
+          <Rail page={page} sidebarOpen={sidebarOpen} onOpenPage={(name) => go({ kind: name })} onToggleSidebar={toggleSidebar} />
+          {hasSidebar && sidebarOpen ? (
+            <Sidebar page={page} current={chatOnScreen} grouping={grouping} onGrouping={setGrouping} onOpen={openChat} />
+          ) : null}
+          <main className="main">
+            {page.kind === "projects" ? (
+              <Projects />
+            ) : page.kind === "agents" ? (
+              <Agents onOpen={openChat} />
+            ) : page.kind === "needs_you" ? (
+              <NeedsYou />
+            ) : page.kind === "settings" ? (
+              <Settings />
+            ) : (
+              <Chat key={page.session} sessionId={page.session} />
+            )}
+          </main>
+          {!focused && dockOpen ? <Dock /> : null}
+        </div>
       </div>
-    </div>
+    </Navigation.Provider>
   );
 }

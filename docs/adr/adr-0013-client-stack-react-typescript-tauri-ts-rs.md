@@ -8,7 +8,9 @@
   the chat screens, behind the unchanged `Transport`. 2026-11-10, at `r1.s4.w3`: the Needs you page and the
   Settings rows, behind the `Transport` with ten more methods and one more stream event, and one `verb`
   Tauri command. 2026-11-12, at `r1.s5.w1`: the app tokens, the shared components, the 9a avatar and the
-  screenshot line d25.
+  screenshot line d25. 2026-11-12, at `r1.s5.w2`: the shell, its parts, `NotBuilt`, the dock, the Projects
+  page, the pair card, the server menu and the not-connected banner, and the layout of d25 for round 3.
+  The round-3 items (`r1.s5.w3`, `w4`, `w5`) fill their own amendment sections at the end of this file.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk,
@@ -443,3 +445,96 @@ Checked on draco-desk on 2026-11-12 with the item's verification commands (each 
   above stays unclaimed until the operator's ack at the close of `r1.s5`.
 - The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only. The d24 walk
   on the MacBook, and the operator's look, check WebKit.
+
+## Amendment, 2026-11-12 (`r1.s5.w2`)
+
+This item is round 2 of `r1.s5`. It gives the Mac app the shell of the approved R1 Screens (11a) and
+restyles the screens in its frame: Projects (11e), the pair card (11j), the server menu (11h) and the
+not-connected banner (11i). It also fixes the names and the file layout that round 3 builds on. It changes
+no Rust, no transport, no verb and no `client-api-auth` behaviour.
+
+- **The shell parts, in `apps/ui/src/shell/`.** `TitleBar`, `Rail`, `Sidebar`, `AgentsSidebar`, `Dock`,
+  `DockRequests`, `Column`, `history.ts`, `navigation.ts`, `useStartSession.ts` and `shell.css`.
+  `screens/Shell.tsx` composes them and keeps the page state. The title bar is one `banner` row: the server
+  chip, the sidebar toggle, Back, Forward, the page title, the chat tabs, New tab and the need-you pill. Its
+  left padding is `var(--titlebar-inset, 0px)` and its empty parts carry `data-tauri-drag-region`, so a
+  later change in `apps/desktop/**` can make room for the traffic lights. `history.ts` holds the page
+  history as pure functions. `navigation.ts` is the seam for round 3: a screen opens a page or a chat only
+  through `useNavigation()`, so no round-3 item edits `Shell.tsx` or `shell/**` for it. `Column` is the
+  centred page column (`--column-max`, 1180 px).
+- **`NotBuilt` and the 11l rule.** `ui/NotBuilt.tsx` draws every function that Release 1 does not build, in
+  one of six forms (item, button, rail, segment, field, row), dimmed and with a dashed "Later release" tag
+  (the rail's compact tag reads "Later"). Each form is `aria-disabled`, takes no focus, opens nothing and
+  makes no call. The tag names **no release number**: the canvas decided that releases are not numbered.
+  `Button variant="locked"` stays in `ui/` but no screen of this item uses it.
+- **The dock's key.** The pill opens a 328 px dock on the Projects, Agents and chat pages. Its open state is
+  kept per device in `localStorage` under `pf.dock` (`open` or `closed`, read in a `try`) and it starts
+  closed. `pf.sidebar` and `pf.dock` are the only two keys the UI keeps. In this item the dock lists the open
+  requests read-only, each with an "Open" button for the Needs you page; `r1.s5.w4` puts the Needs you
+  cards there.
+- **The shell's `runList`.** The sidebar's Workflow runs group reads `runList` once each time the sidebar
+  mounts and once when the link comes back. It is the one added call. No timer and no focus handler make
+  it. The call lists of the unit tests gain it, and the no-polling tests still hold.
+- **The banner on a `reconnecting` stream.** The 3c banner takes the 11i form for every kind, and it also
+  shows while the chat stream is `reconnecting` (read only, no change in `state/**`). Before this item only
+  the sidebar's stream line said so. The `unreachable` title names the server by its name, else its
+  address. The add-a-project form is disabled while the link is down.
+- **d25 for round 3.** The fixtures moved into one module for each area, `e2e/screens/fixtures/{shell,chat,
+  needs-you,agents,settings,projects}.ts`, with no value changed; `fixtures.ts` re-exports them. Each module
+  exports `verbs`, and `server.ts` merges the six tables (a verb in two modules fails at start, naming
+  it). `server.ts` also exports `overlay(patch)` for a per-test change of an answer, cleared after each
+  test. `screens.spec.ts` has one `test.describe` block for each area (shell, chat, needs-you, agents,
+  settings, projects), so each round-3 item edits only its own block and its own module. The number of
+  screens is not written in `ui-screens.sh` any more: the script counts the `test(` calls and checks the
+  snapshot folder against that count. The number is twelve after this item.
+- **The rendering contract gains one launch flag.** `e2e/screens/contract.ts` now names
+  `chromiumArgs: ["--disable-partial-raster"]`, and `screens.spec.ts` passes it to the browser. With the
+  shell's many small icons, Chromium's partial raster left two different anti-aliasing states on icon
+  edges, picked at each page load, so the line failed in about half of the runs. With the flag every paint is
+  a whole-tile paint and the render depends on the content only. The tolerance does not change
+  (`{maxDiffPixels: 0, threshold: 0.05}`).
+- **The R1 ruling on Back and Forward.** They stay, right after the sidebar toggle and before the divider,
+  although no R1 frame draws them. The design session draws that place on the shell frames. If the drawn
+  place differs, the app follows the canvas.
+- **The unit tests.** Existing tests changed only a selector, a copy the canvas changes, or a call list
+  that gains the shell's `runList`. No test lost an assertion or a step. The d12 spec changed three lines
+  and kept every step.
+- **Still unclaimed.** The claim "the screens match the canvas pixel for pixel" stays unclaimed until the
+  operator's ack at the close of `r1.s5`.
+
+### Verified claims (r1.s5.w2)
+Checked on draco-desk on 2026-11-12 with the item's verification commands (each through
+`oss verify_step`, exit 0):
+- The whole UI suite passes (24 files, 636 tests) and `tsc` is clean. `shell-parts.test.tsx` names the claims
+  above: the title bar's order, the rail, the sidebar, the dock and `pf.dock`, the banner on `reconnecting`,
+  the server menu's confirm, each `NotBuilt` form and New session's two paths.
+- `scripts/demo/ui-screens.sh` prints `ui-screens: ok (12 screens, 5 s)`. Three runs in a row pass, and 25
+  plain Playwright runs in a row pass. A copy of the built CSS with `--sidebar-w` set to `296px` fails the
+  line and names `sidebar-by-state`.
+- The three journey lines still pass against the real controller, API and bridge: d12 (`ui-pair.sh`, with the
+  three replaced lines), d19 (`ui-chat.sh`) and d23 (`ui-needs-you.sh`). The d19 and d23 specs are unchanged.
+- The `client-api-auth` control tests still pass, and `adr_claims` passes after this edit.
+- No file the item must not edit changed (AC-13).
+
+### Unverified claims (r1.s5.w2)
+- The 12 screenshots show the shell and the screens as built. A person has not yet compared them with frames
+  11a, 11e, 11h, 11i and 11j (AC-15). The claim "the screens match the canvas pixel for pixel" stays unclaimed.
+- The pair success card's heading reads "Connected to <address>", not "Connected to <name>" (11j). The journey
+  lines d19 and d23 find that heading by its address and the spec forbids this item to edit them. The name
+  shows in the lede, the Server fact and the chip. The heading takes the name once those specs read it.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+
+
+## Amendment (`r1.s5.w3`)
+
+Filled by `r1.s5.w3` when it lands.
+
+
+## Amendment (`r1.s5.w4`)
+
+Filled by `r1.s5.w4` when it lands.
+
+
+## Amendment (`r1.s5.w5`)
+
+Filled by `r1.s5.w5` when it lands.

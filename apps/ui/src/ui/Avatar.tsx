@@ -76,8 +76,19 @@ export interface CustomAgent {
   head: HeadId;
 }
 
-/** The sizes the canvas draws an avatar at: 16 (tabs), 20, 28 (rows) and 40. */
-export type AvatarSize = 16 | 20 | 28 | 40;
+/**
+ * The sizes the canvas draws an avatar at: 16 (tabs), 20, 22, 24 (sidebar rows), 26, 28 (cards), 40 and
+ * 64 (the 11g identity band). The 11a to 11l markup draws 22 px boxes 47 times and one 64 px box.
+ */
+export type AvatarSize = 16 | 20 | 22 | 24 | 26 | 28 | 40 | 64;
+
+/**
+ * The look of the agent with this ID. The four built-in IDs (`orchestrator`, `autopilot`,
+ * `research_partner`, `plain`) have their own head and colour; any other ID draws as `plain`.
+ */
+export function agentLook(agentId: string): BuiltInAgent {
+  return agentId in BUILT_IN_AGENTS ? (agentId as BuiltInAgent) : "plain";
+}
 
 export interface AvatarProps {
   agent: BuiltInAgent | CustomAgent;

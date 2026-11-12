@@ -12,6 +12,7 @@ const appTokens = read(join(STYLES, "app-tokens.css"));
 const CHECKED: Array<[name: string, text: string]> = [
   ["app.css", read(join(STYLES, "app.css"))],
   ["ui.css", read(join(__dirname, "..", "ui", "ui.css"))],
+  ["shell.css", read(join(__dirname, "..", "shell", "shell.css"))],
 ];
 
 const stripComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -82,6 +83,14 @@ describe("app-tokens.css names the app's own values", () => {
     ["--avatar-red", "var(--red-400)"],
     ["--avatar-mint", "var(--mint-400)"],
     ["--avatar-gray", "var(--gray-9)"],
+    // The shell's layout tokens (`r1.s5.w2`, Approach 13).
+    ["--titlebar-h", "42px"],
+    ["--rail-w", "56px"],
+    ["--sidebar-w", "288px"],
+    ["--dock-w", "328px"],
+    ["--rail-btn", "38px"],
+    ["--tab-h", "30px"],
+    ["--column-max", "1180px"],
   ];
 
   it.each(REQUIRED)("%s is %s", (name, value) => {
@@ -175,9 +184,9 @@ describe("the eyebrow", () => {
 });
 
 describe("main.tsx loads the styles in order", () => {
-  it("tokens, app tokens, the components, then the app", () => {
+  it("tokens, app tokens, the components, the app, then the shell", () => {
     const main = read(join(__dirname, "..", "main.tsx"));
-    const order = ["./styles/tokens.css", "./styles/app-tokens.css", "./ui/ui.css", "./styles/app.css"].map((p) => main.indexOf(`"${p}"`));
+    const order = ["./styles/tokens.css", "./styles/app-tokens.css", "./ui/ui.css", "./styles/app.css", "./shell/shell.css"].map((p) => main.indexOf(`"${p}"`));
     for (const i of order) expect(i).toBeGreaterThan(-1);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });

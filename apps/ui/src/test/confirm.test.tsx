@@ -196,6 +196,8 @@ describe("the second click", () => {
   it("sends answer with the typed text, the code and a new command ID, and shows the claim it took", async () => {
     const fake = seeded();
     const user = await open(fake);
+    // The shell's sidebar read the run list once on Projects, and the page once: the count before the answer.
+    const runsBefore = fake.count("runList");
     await typeAnswer(user, "sqlite");
     await user.click(card("R-1").getByRole("button", { name: "Send answer" }));
     await dialog().findByText("sqlite");
@@ -210,7 +212,8 @@ describe("the second click", () => {
     // The claim line follows the act: this device holds it now.
     expect(screen.getByText("device D-1, generation 4")).toBeTruthy();
     // An answer reads no run list: only an ack does.
-    expect(fake.count("runList")).toBe(1);
+    expect(runsBefore).toBe(2);
+    expect(fake.count("runList")).toBe(runsBefore);
     expectNoCode();
   });
 

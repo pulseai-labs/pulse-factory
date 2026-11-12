@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# d25: the ten screens of the Mac app, each compared with a committed screenshot, in one headless
-# Chromium launch, on fixed test data, under a fixed rendering contract.
+# d25: the screens of the Mac app, each compared with a committed screenshot, in one headless Chromium
+# launch, on fixed test data, under a fixed rendering contract. The number of screens is the number of
+# `test(` calls in apps/ui/e2e/screens.spec.ts; this script writes no count of its own.
 #
 #   PF_UI_DIR=apps/ui/dist scripts/demo/ui-screens.sh
 #
@@ -11,8 +12,9 @@
 # It starts no controller and no bridge. The Playwright worker starts the fixture server
 # (apps/ui/e2e/screens/server.ts): a Node http server on 127.0.0.1 that serves the bundle with the bridge's
 # Content-Security-Policy and answers the bridge protocol from fixed test data. The spec is
-# apps/ui/e2e/screens.spec.ts and the screenshots are in apps/ui/e2e/screens.spec.ts-snapshots/. The run
-# reaches no address beyond 127.0.0.1 and removes its temp directory on exit.
+# apps/ui/e2e/screens.spec.ts and the screenshots are in apps/ui/e2e/screens.spec.ts-snapshots/. A compare
+# run also checks that the folder holds exactly one `-linux.png` file for each test, and names the missing
+# or extra file. The run reaches no address beyond 127.0.0.1 and removes its temp directory on exit.
 #
 # `PF_SHOTS_DIR` names a directory that keeps the diff images of a failed run. `PF_SCREENS_UPDATE=1` writes
 # the screenshots from the bundle instead of comparing them, prints how many it wrote and exits 3, so an
@@ -49,9 +51,24 @@ cleanup() {
 trap cleanup EXIT
 
 export PF_UI_DIR PF_E2E_OUT="$tmp/playwright-output"
-screens=10
+spec="$root/apps/ui/e2e/screens.spec.ts"
+snaps="$root/apps/ui/e2e/screens.spec.ts-snapshots"
+# One screen is one `test(` call. The screenshot a test takes is named by the first word of its title, which
+# is also the file name: `test("2a-chat: ...")` takes `2a-chat.png`, kept as `2a-chat-linux.png`.
+screens="$(grep -cE '^[[:space:]]*test\(' "$spec" || true)"
+[ "${screens:-0}" -gt 0 ] || fail "no test( call in $spec"
 update=()
 if [ "${PF_SCREENS_UPDATE:-}" = "1" ]; then update=(--update-snapshots=all); fi
+
+# In a compare run the snapshot folder must hold one file per test, no more and no fewer.
+if [ -z "${update[*]:-}" ]; then
+  want="$(grep -E '^[[:space:]]*test\(' "$spec" | sed -E 's/^[[:space:]]*test\("([^":]+)[":].*$/\1-linux.png/' | sort)"
+  have="$(cd "$snaps" 2>/dev/null && ls -1 -- *-linux.png 2>/dev/null | sort || true)"
+  missing="$(comm -23 <(echo "$want") <(echo "$have"))"
+  extra="$(comm -13 <(echo "$want") <(echo "$have"))"
+  [ -z "$missing" ] || fail "screenshot missing from screens.spec.ts-snapshots/: $(echo "$missing" | tr '\n' ' ')"
+  [ -z "$extra" ] || fail "screenshot with no test in screens.spec.ts-snapshots/: $(echo "$extra" | tr '\n' ' ')"
+fi
 
 log="$tmp/playwright.log"
 if ! npm --prefix "$root/apps" run e2e --workspace ui -- e2e/screens.spec.ts ${update[@]+"${update[@]}"} > "$log" 2>&1; then

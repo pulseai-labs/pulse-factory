@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "../App";
-import { ADDRESS, FakeTransport, makeCode } from "./fake-transport";
+import { ADDRESS, FakeTransport, SERVER, makeCode } from "./fake-transport";
 
 function setup(fake: FakeTransport) {
   const user = userEvent.setup();
@@ -77,6 +77,22 @@ describe("the pair screen (3a)", () => {
     expect(await screen.findByRole("navigation")).toBeTruthy();
     expect(within(screen.getByRole("banner")).getByText("Projects")).toBeTruthy();
     expect(fake.count("projectList")).toBe(1);
+  });
+
+  it("names the address in the heading and the server's name in the lede, the Server fact and the chip", async () => {
+    const fake = new FakeTransport({ server: null });
+    const plain = fake.pair.bind(fake);
+    fake.pair = async (code, deviceName) => ({ ...(await plain(code, deviceName)), server: { ...SERVER, name: "draco-desk" } });
+    const user = setup(fake);
+    await fillAndPair(user, makeCode(ADDRESS), "d12 browser");
+
+    // d19 and d23 find the heading as `Connected to <address>` (see Pair.tsx).
+    expect(await screen.findByRole("heading", { name: `Connected to ${ADDRESS}` })).toBeTruthy();
+    expect(screen.getByText("This Mac is paired and trusts draco-desk’s key. You only do this once.")).toBeTruthy();
+    expect(screen.getByText("Server").nextElementSibling?.textContent).toBe("draco-desk");
+    expect(screen.getByText("Address").nextElementSibling?.textContent).toBe(ADDRESS);
+    // The title-bar chip shows the name (the `[KL]` fix); on this screen it is not a button.
+    expect(within(screen.getByRole("banner")).getByText("draco-desk")).toBeTruthy();
   });
 
   it("holds the device-name rule: 1 to 64 characters", async () => {

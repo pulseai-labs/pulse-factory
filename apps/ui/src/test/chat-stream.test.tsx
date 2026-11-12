@@ -59,7 +59,7 @@ describe("one stream at a time", () => {
   it("moves the stream when another chat is on screen, one stream open each time", async () => {
     const fake = seeded({ sessions: [alpha(), beta()] });
     const user = await bootChat(fake, "S-1", [notice(3)]);
-    await user.click(sidebar().getByRole("button", { name: /session in beta/ }));
+    await user.click(sidebar().getByRole("button", { name: /session in beta:/ }));
     await waitFor(() => expect(fake.current()?.options).toEqual({ session: "S-2", after: 0 }));
     expect(fake.open()).toHaveLength(1);
     await user.click(screen.getByRole("tab", { name: "Orchestrator · alpha" }));
@@ -83,7 +83,8 @@ describe("one stream at a time", () => {
     await bootChat(fake);
     // The first chat reads the session list once, for the runtimes of the composer.
     await waitFor(() => expect(fake.count("sessionList")).toBe(1));
-    expect(fake.calls.filter((c) => c !== "openStream")).toEqual(["paired", "projectList", "sessionList"]);
+    // And the shell's sidebar reads the run list once when it mounts (Approach 7).
+    expect(fake.calls.filter((c) => c !== "openStream")).toEqual(["paired", "runList", "projectList", "sessionList"]);
   });
 });
 
@@ -98,11 +99,14 @@ describe("what the stream's events do", () => {
     expect(main().getByText("Reconnecting… the server is stopping")).toBeTruthy();
     expect(fake.count("openStream")).toBe(opens);
     expect(fake.calls).toHaveLength(calls);
-    expect(screen.queryByText(/Not connected/)).toBeNull();
+    // 11i (Approach 7): the banner shows as soon as the stream is `reconnecting`, with no call of its own.
+    expect(screen.getByText(`Not connected to ${ADDRESS}`)).toBeTruthy();
+    expect(screen.getByText("Your sessions and runs keep going on the server. Reconnecting…")).toBeTruthy();
 
-    // The next frame ends the notice.
+    // The next frame ends the notice and the banner.
     await push(fake, frames.hello(fake.sessions, "S-1"));
     expect(screen.queryByText(/Reconnecting/)).toBeNull();
+    expect(screen.queryByText(/Not connected/)).toBeNull();
   });
 
   it("`unreachable`: shows the banner, reopens only when the link is up, with the last seq", async () => {
@@ -219,7 +223,7 @@ describe("what the stream's events do", () => {
     const fake = seeded({ sessions: [alpha(), beta()] });
     const user = await bootChat(fake);
     await emit(fake, closed("server", "boom"));
-    await user.click(sidebar().getByRole("button", { name: /session in beta/ }));
+    await user.click(sidebar().getByRole("button", { name: /session in beta:/ }));
     await waitFor(() => expect(fake.current()?.options).toEqual({ session: "S-2", after: 0 }));
   });
 });
@@ -228,16 +232,17 @@ describe("the sidebar rows follow the hello and session frames", () => {
   it("shows each project's live sessions with the agent, the state, the branch and the mark", async () => {
     const fake = seeded({ sessions: [alpha({ branch: "feature-x", state: "needs_you" }), beta({ state: "working" })] });
     await boot(fake);
-    expect(sidebar().queryByRole("button", { name: /session in/ })).toBeNull();
+    expect(sidebar().queryByRole("button", { name: /session in [^:]+:/ })).toBeNull();
     await push(fake, frames.hello(fake.sessions));
 
-    const rows = sidebar().getAllByRole("button", { name: /session in/ });
+    const rows = sidebar().getAllByRole("button", { name: /session in [^:]+:/ });
     expect(rows).toHaveLength(2);
     const first = within(rows[0] as HTMLElement);
     expect(first.getByText("Orchestrator")).toBeTruthy();
-    expect(first.getByText("Needs you")).toBeTruthy();
+    // 11a: the state is the title of the row's 7 px dot.
+    expect(first.getByTitle("Needs you")).toBeTruthy();
     expect(first.getByText("feature-x")).toBeTruthy();
-    expect(within(rows[1] as HTMLElement).getByText("Working")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByTitle("Working")).toBeTruthy();
     // Each row sits under its own project.
     const alphaList = sidebar().getByRole("list", { name: "Sessions of alpha" });
     expect(within(alphaList).getAllByRole("button")).toHaveLength(1);
@@ -247,26 +252,26 @@ describe("the sidebar rows follow the hello and session frames", () => {
     const fake = seeded({ sessions: [alpha()] });
     await boot(fake);
     await push(fake, frames.hello(fake.sessions));
-    expect(sidebar().getByText("Idle")).toBeTruthy();
+    expect(sidebar().getByTitle("Idle")).toBeTruthy();
 
     await push(fake, frames.session(alpha({ state: "working", updated_at: "2026-11-09T10:01:00Z" })));
-    expect(sidebar().getByText("Working")).toBeTruthy();
-    expect(sidebar().queryByText("Idle")).toBeNull();
+    expect(sidebar().getByTitle("Working")).toBeTruthy();
+    expect(sidebar().queryByTitle("Idle")).toBeNull();
 
     await push(fake, frames.session(beta()));
-    expect(sidebar().getAllByRole("button", { name: /session in/ })).toHaveLength(2);
+    expect(sidebar().getAllByRole("button", { name: /session in [^:]+:/ })).toHaveLength(2);
   });
 
   it("removes a session that ended from the rows", async () => {
     const fake = seeded({ sessions: [alpha(), beta()] });
     await boot(fake);
     await push(fake, frames.hello(fake.sessions));
-    expect(sidebar().getAllByRole("button", { name: /session in/ })).toHaveLength(2);
+    expect(sidebar().getAllByRole("button", { name: /session in [^:]+:/ })).toHaveLength(2);
 
     await push(fake, frames.session(beta({ ended_at: "2026-11-09T11:00:00Z", updated_at: "2026-11-09T11:00:00Z" })));
-    const rows = sidebar().getAllByRole("button", { name: /session in/ });
+    const rows = sidebar().getAllByRole("button", { name: /session in [^:]+:/ });
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.getAttribute("aria-label")).toMatch(/session in alpha/);
+    expect(rows[0]?.getAttribute("aria-label")).toMatch(/session in alpha:/);
   });
 
   it("treats a session that is missing from a new hello as ended", async () => {
@@ -274,21 +279,21 @@ describe("the sidebar rows follow the hello and session frames", () => {
     await boot(fake);
     await push(fake, frames.hello(fake.sessions));
     await push(fake, frames.hello([alpha()]));
-    expect(sidebar().getAllByRole("button", { name: /session in/ })).toHaveLength(1);
+    expect(sidebar().getAllByRole("button", { name: /session in [^:]+:/ })).toHaveLength(1);
   });
 
   it("opens a chat from a row, and focuses its tab when it is already open", async () => {
     const fake = seeded();
     const user = await bootChat(fake);
     await user.click(rail().getByRole("button", { name: "Projects" }));
-    await user.click(sidebar().getByRole("button", { name: /session in alpha/ }));
+    await user.click(sidebar().getByRole("button", { name: /session in alpha:/ }));
     expect(screen.getAllByRole("tab")).toHaveLength(1);
     expect(screen.getByRole("tab", { name: "Orchestrator · alpha" }).getAttribute("aria-selected")).toBe("true");
   });
 });
 
 describe("the UI keeps nothing but the sidebar's state", () => {
-  it("holds only pf.sidebar in localStorage after a chat was used, and nothing in sessionStorage", async () => {
+  it("holds only pf.sidebar in localStorage after a chat was used (pf.dock only once the dock is changed), and nothing in sessionStorage", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [
       frames.item(item("S-1", 1, { kind: "approval_request", request_id: "r", tool: "Bash", input: null, reason: null })),
@@ -331,7 +336,7 @@ describe("a chat page makes no call by itself", () => {
     await bootChatFake(fake);
     await push(fake, frames.item(item("S-1", 1, { kind: "approval_request", request_id: "r", tool: "Bash", input: null, reason: null })));
     const calls = [...fake.calls];
-    expect(calls).toEqual(["paired", "projectList", "openStream", "sessionList", "openStream"]);
+    expect(calls).toEqual(["paired", "runList", "projectList", "openStream", "sessionList", "openStream"]);
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
 
     await wiggle();

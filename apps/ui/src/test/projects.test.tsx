@@ -25,6 +25,13 @@ async function submitAdd(user: ReturnType<typeof userEvent.setup>, root: string,
   await user.click(screen.getByRole("button", { name: "Add project" }));
 }
 
+// An `unreachable` add takes the link down (11i), and the add form is disabled while it is down (Approach 7).
+// The operator brings it back with "Retry now" in the banner, then submits again.
+async function bringLinkBack(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Retry now" }));
+  await waitFor(() => expect((screen.getByLabelText("Project root") as HTMLInputElement).disabled).toBe(false));
+}
+
 describe("the Projects page (2c)", () => {
   it("shows the live projects in the list and in the sidebar", async () => {
     const fake = new FakeTransport({ projects: [project(1, "alpha"), project(2, "beta")] });
@@ -33,7 +40,10 @@ describe("the Projects page (2c)", () => {
     expect(main().getByText("/home/dev/beta")).toBeTruthy();
     expect(sidebar().getByText("alpha")).toBeTruthy();
     expect(sidebar().getByText("beta")).toBeTruthy();
-    expect(main().getByText("2 projects on 100.90.203.21:7443")).toBeTruthy();
+    // 11e: no subtitle while the link is up. One block per project, each with its New session button.
+    expect(main().queryByText(/projects on /)).toBeNull();
+    expect(main().getByRole("button", { name: "New session in alpha" })).toBeTruthy();
+    expect(main().getByRole("button", { name: "New session in beta" })).toBeTruthy();
   });
 
   it("says so when there is no project", async () => {
@@ -52,7 +62,8 @@ describe("the Projects page (2c)", () => {
     expect(fake.addArgs).toHaveLength(1);
     expect(fake.addArgs[0]).toMatchObject({ root: "/home/dev/shiny", name: "Shiny" });
     expect(fake.addArgs[0]?.command_id).toMatch(/^[0-9a-f-]{16,}$/);
-    expect(fake.calls).toEqual(["paired", "projectList", "openStream", "projectAdd", "projectList"]);
+    // The shell's sidebar reads the run list once when it mounts (Approach 7).
+    expect(fake.calls).toEqual(["paired", "runList", "projectList", "openStream", "projectAdd", "projectList"]);
     // The form is empty again.
     expect((screen.getByLabelText("Project root") as HTMLInputElement).value).toBe("");
   });
@@ -75,6 +86,7 @@ describe("the Projects page (2c)", () => {
     expect(fake.addArgs).toHaveLength(1);
     expect((screen.getByLabelText("Project root") as HTMLInputElement).value).toBe("/home/dev/again");
 
+    await bringLinkBack(user);
     await user.click(screen.getByRole("button", { name: "Add project" }));
     expect(await main().findByText("Again")).toBeTruthy();
     expect(fake.addArgs).toHaveLength(2);
@@ -92,6 +104,7 @@ describe("the Projects page (2c)", () => {
     const user = await open(fake);
     await submitAdd(user, "/home/dev/one");
     await screen.findByText("the server did not answer");
+    await bringLinkBack(user);
     await submitAdd(user, "/home/dev/two");
     await main().findByText("two");
     expect(fake.addArgs[1]?.command_id).not.toBe(fake.addArgs[0]?.command_id);
