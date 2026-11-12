@@ -7,7 +7,7 @@ import { ChatProvider } from "./state/chat";
 import { ConnectionProvider } from "./state/connection";
 import { RequestsProvider } from "./state/requests";
 import type { PairedServer, Transport } from "./transport/types";
-import { Button } from "./ui";
+import { Button, Icon } from "./ui";
 
 type View =
   | { name: "loading" }
@@ -49,12 +49,19 @@ export function App(props: { transport: Transport }) {
       return (
         <div className="app app-pair">
           <main className="pair-main">
-            <section className="pair-card">
-              <h1>Pulse Factory cannot start</h1>
-              <p className="problem-title" role="alert">
-                {view.message}
-              </p>
+            <section className="pair-card" aria-labelledby="start-error">
+              <div className="pair-head">
+                <span className="pair-tile pair-tile-red" aria-hidden="true">
+                  <Icon name="alert" size={18} />
+                </span>
+                <h1 id="start-error">Pulse Factory cannot start</h1>
+                <p className="problem-title" role="alert">
+                  {view.message}
+                </p>
+              </div>
               <Button
+                variant="primary"
+                size="xl"
                 onClick={() => {
                   setView({ name: "loading" });
                   setAttempt((n) => n + 1);

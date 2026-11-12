@@ -1,9 +1,89 @@
-// The Projects page (2c): the live projects from `projectList()` and the "Add project" form.
+// The Projects page (11e): the live projects from `projectList()`, each as a block with its live sessions as
+// cards, and today's "Add project" form below them (`w5` replaces the form). The page sits in the centred
+// `Column` of the shell. "New session" opens the project's Orchestrator chat, or starts one
+// (`shell/useStartSession.ts`).
+import type { ChatSessionRecord, ProjectRecord } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { branchText } from "../components/chat-format";
 import { newCommandId } from "../components/command-id";
+import { costLabel } from "../components/cost";
 import { clock } from "../components/format";
+import { Column } from "../shell/Column";
+import { useNavigation } from "../shell/navigation";
+import { GroupSwitch, STATE_GROUPS, groupOf, type Grouping } from "../shell/Sidebar";
+import { useStartSession } from "../shell/useStartSession";
+import { agentName, stateLabel, useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
-import { Button, Input } from "../ui";
+import { Avatar, Button, CountBadge, Icon, Input, StatePill, agentLook } from "../ui";
+
+function SessionCard(props: { session: ChatSessionRecord; projects: ProjectRecord[]; byState: boolean }) {
+  const { session: s, projects, byState } = props;
+  const chat = useChat();
+  const { openSession } = useNavigation();
+  const agent = agentName(chat.list, s.agent_id);
+  const branch = branchText(s, projects);
+  return (
+    <li>
+      <button className="pj-card" type="button" aria-label={`Open ${agent} session in ${s.project_name}`} onClick={() => openSession(s.id)}>
+        <span className="pj-card-top">
+          <Avatar agent={agentLook(s.agent_id)} size={28} />
+          <span className="pj-card-agent">{agent}</span>
+          <StatePill state={s.state}>{stateLabel(s.state)}</StatePill>
+        </span>
+        <span className="pj-card-line mono">
+          <Icon name="git-branch" size={11} />
+          <span className="pj-card-branch">{byState ? `${s.project_name} · ${branch}` : branch}</span>
+          <span className="pj-card-cost">{costLabel(s.usage, s.cache_ttl_seconds)}</span>
+        </span>
+      </button>
+    </li>
+  );
+}
+
+function ProjectBlock(props: { project: ProjectRecord; projects: ProjectRecord[]; start: ReturnType<typeof useStartSession> }) {
+  const { project: p, projects, start } = props;
+  const chat = useChat();
+  const sessions = chat.live.filter((s) => s.project_id === p.id);
+  const needs = sessions.filter((s) => s.state === "needs_you").length;
+  const error = start.errorOf(p.id);
+  return (
+    <div className="pj-block">
+      <div className="pj-block-head">
+        <span className="pj-chevron">
+          <Icon name="chevron-down" size={14} />
+        </span>
+        <h3 className="pj-name">{p.name}</h3>
+        <CountBadge count={needs} title={`${needs} need you`} />
+        <span className="pj-root mono">{p.root}</span>
+        <span className="pj-spacer" />
+        <Button
+          variant="ghost"
+          size="sm"
+          icon="plus"
+          aria-label={`New session in ${p.name}`}
+          disabled={start.busy === p.id}
+          onClick={() => void start.start(p.id)}
+        >
+          New session
+        </Button>
+      </div>
+      {error ? (
+        <p className="pj-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {sessions.length === 0 ? (
+        <p className="pj-quiet">No live session</p>
+      ) : (
+        <ul className="pj-cards" aria-label={`Live sessions of ${p.name}`}>
+          {sessions.map((s) => (
+            <SessionCard key={s.id} session={s} projects={projects} byState={false} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function Projects() {
   const { call, setProjects, epoch, projects, projectsAt, link, server } = useConnection();
@@ -12,6 +92,9 @@ export function Projects() {
   const [name, setName] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [grouping, setGrouping] = useState<Grouping>("project");
+  const chat = useChat();
+  const start = useStartSession();
   // The command ID of an add that ended with `unreachable`: a retry of the same submit reuses it,
   // so the server admits the add once (A7).
   const pending = useRef<{ root: string; name: string; id: string } | null>(null);
@@ -72,77 +155,89 @@ export function Projects() {
     }
   }
 
-  const count = projects?.length ?? 0;
+  const down = link.state === "down";
+  const serverName = server.server?.name ?? server.address;
   return (
-    <section className="page" aria-labelledby="projects-title">
-      <div className="page-head">
-        <h2 id="projects-title">Projects</h2>
-        <p className="muted">
-          {projects === null
-            ? `Projects on ${server.address}`
-            : `${count} ${count === 1 ? "project" : "projects"} on ${server.address}`}
-        </p>
-        {link.state === "down" && projectsAt !== null ? (
-          <p className="stale">{`As of ${clock(projectsAt)}`}</p>
-        ) : null}
-      </div>
+    <section aria-labelledby="projects-title">
+      <Column>
+        <div className="pj-head">
+          <div className="pj-head-text">
+            <h2 id="projects-title" className="pj-title">
+              Projects
+            </h2>
+            {down && projectsAt !== null ? (
+              <p className="stale">{`As of ${clock(projectsAt)}, when ${serverName} was last reachable`}</p>
+            ) : null}
+          </div>
+          <GroupSwitch value={grouping} onChange={setGrouping} />
+        </div>
 
-      {pageError ? (
-        <p className="page-error" role="alert">
-          <span>{pageError}</span>
-          <Button onClick={() => void load()}>
-            Retry now
-          </Button>
-        </p>
-      ) : null}
-
-      {projects === null ? (
-        <p className="muted">Loading…</p>
-      ) : projects.length === 0 ? (
-        <p className="empty">No projects yet. Add one below.</p>
-      ) : (
-        <ul className="project-list">
-          {projects.map((p) => (
-            <li key={p.id}>
-              <span className="project-name">{p.name}</span>
-              <span className="project-root mono">{p.root}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <form className="add-form" onSubmit={submit} noValidate aria-label="Add project">
-        <h3>Add project</h3>
-        <label htmlFor="pf-root">Project root</label>
-        <Input
-          mono
-          id="pf-root"
-          type="text"
-          autoComplete="off"
-          spellCheck={false}
-          placeholder="/home/you/code/project"
-          value={root}
-          disabled={busy}
-          onChange={(e) => setRoot(e.target.value)}
-        />
-        <label htmlFor="pf-project-name">Name (optional)</label>
-        <Input
-          id="pf-project-name"
-          type="text"
-          autoComplete="off"
-          value={name}
-          disabled={busy}
-          onChange={(e) => setName(e.target.value)}
-        />
-        {formError ? (
-          <p className="problem-title" role="alert">
-            {formError}
+        {pageError ? (
+          <p className="page-error" role="alert">
+            <span>{pageError}</span>
+            <Button onClick={() => void load()}>Retry now</Button>
           </p>
         ) : null}
-        <Button type="submit" disabled={busy}>
-          Add project
-        </Button>
-      </form>
+
+        {projects === null ? (
+          <p className="muted">Loading…</p>
+        ) : projects.length === 0 ? (
+          <p className="empty">No projects yet. Add one below.</p>
+        ) : grouping === "project" ? (
+          projects.map((p) => <ProjectBlock key={p.id} project={p} projects={projects} start={start} />)
+        ) : (
+          <div className="pj-groups">
+            {STATE_GROUPS.map((g) => ({ ...g, rows: chat.live.filter((s) => groupOf(s.state) === g.id) }))
+              .filter((g) => g.rows.length > 0)
+              .map((g) => (
+                <div className="pj-group" key={g.id}>
+                  <div className="pj-group-head">
+                    <h3 className="pj-group-name">{g.name}</h3>
+                    <span className="pj-group-count">{g.rows.length}</span>
+                  </div>
+                  <ul className="pj-cards" aria-label={`${g.name} sessions`}>
+                    {g.rows.map((s) => (
+                      <SessionCard key={s.id} session={s} projects={projects} byState />
+                    ))}
+                  </ul>
+                </div>
+              ))}
+          </div>
+        )}
+
+        <form className="add-form" onSubmit={submit} noValidate aria-label="Add project">
+          <h3>Add project</h3>
+          <label htmlFor="pf-root">Project root</label>
+          <Input
+            mono
+            id="pf-root"
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="/home/you/code/project"
+            value={root}
+            disabled={busy || down}
+            onChange={(e) => setRoot(e.target.value)}
+          />
+          <label htmlFor="pf-project-name">Name (optional)</label>
+          <Input
+            id="pf-project-name"
+            type="text"
+            autoComplete="off"
+            value={name}
+            disabled={busy || down}
+            onChange={(e) => setName(e.target.value)}
+          />
+          {formError ? (
+            <p className="problem-title" role="alert">
+              {formError}
+            </p>
+          ) : null}
+          <Button type="submit" disabled={busy || down}>
+            Add project
+          </Button>
+        </form>
+      </Column>
     </section>
   );
 }

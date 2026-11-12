@@ -6,6 +6,7 @@ import "./styles/tokens.css";
 import "./styles/app-tokens.css";
 import "./ui/ui.css";
 import "./styles/app.css";
+import "./shell/shell.css";
 import { isTauri } from "@tauri-apps/api/core";
 import { createBridgeTransport } from "./transport/bridge";
 import { createTauriTransport } from "./transport/tauri";

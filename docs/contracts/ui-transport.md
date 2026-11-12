@@ -151,7 +151,7 @@ secret.
 
 | Kind | Screen |
 |---|---|
-| `unreachable` | 3c banner "Not connected to <address>"; retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. |
+| `unreachable` | 3c banner "Not connected to <name>" (the server's name, else <address>); retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. The banner also shows while the chat stream is `reconnecting` (title "Not connected to <name>", body "Reconnecting…", and "Retry now" calls the stream's `reconnect()`): the UI reads that state and sets no timer for it. |
 | `unauthorized` | 3c banner "This device is no longer paired with <address>." and "Pair again". No timer. |
 | `key_changed` | 3c banner `server key changed: re-pair` and "Pair again". No timer. |
 | `rate_limited` | 3c banner with the server's text and "Retry now". No timer. |
@@ -172,8 +172,8 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
 - When a chat is on screen, the stream **follows that chat**: the UI closes the current stream and opens
   `openStream({session, after})`, where `after` is the highest `seq` it holds for that session (0 the first
   time). When no chat is on screen, it goes back to the overview. Each switch is an operator action.
-- `reconnecting` shows "Reconnecting…" with its reason on the open chat and does nothing else: `pf-client`
-  retries. `closed` by kind:
+- `reconnecting` shows "Reconnecting…" with its reason on the open chat, and the 3c banner (`r1.s5.w2`, the
+  `unreachable` row above); it calls nothing and sets no timer: `pf-client` retries. `closed` by kind:
   - `unreachable` (the local leg dropped, or the bridge or the app's Rust side is gone) and `rate_limited`:
     the same 3c banner and `status()` retry as a failed call. When the link comes back, the UI opens the
     stream again with the last `seq` it holds. No new timer: the only retry timer is the connection's.
@@ -184,7 +184,19 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
   when the Agents page or the first chat opens, after `session_start`, and once when the link comes back,
   and the cache-warm display ticks once a minute on the chat that is on screen and calls nothing.
 - A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
-  chat's items replay from `after=0`. The UI keeps no chat state in storage (`pf.sidebar` is its only key).
+  chat's items replay from `after=0`. The UI keeps no chat state in storage. It keeps two keys in
+  `localStorage`, both per device and both a fold state: `pf.sidebar` and `pf.dock` (`r1.s5.w2`, see below).
+
+**The shell (`r1.s5.w2`).** The shell's sidebar holds the Workflow runs group, one row for each run of
+`runList`. The sidebar calls `runList` **once each time it mounts** and **once when the link comes back**
+(`epoch`). It mounts on the Projects, Agents and chat pages and unmounts on the focused pages (Needs you and
+Settings), so a visit to Needs you and back reads the list again. No timer and no focus handler make this call.
+A failed call leaves the group as it was, and a disconnect shows the banner. The need-you pill and the dock
+read the requests state, which the stream feeds: they make no call. The dock's open state is kept per device
+in `localStorage` under `pf.dock` (`open` or `closed`, read in a `try`, closed by default), as `pf.sidebar`
+keeps the sidebar's. These are the only two keys; there is still no chat state in storage. While the link is
+down the add-a-project form is disabled, and the Projects page shows "As of <time>, when <name> was last
+reachable" over the list it holds.
 
 **Needs you and the request frames (`r1.s4.w3`).** The controller sends the request frames on **every**
 stream, the overview included, so the UI needs no stream of its own for them: the one stream the app holds
@@ -413,6 +425,12 @@ Tauri's IPC only, so the webview opens no network connection.
   `crates/pulse-factory/tests/client_chat.rs`: the client, a drop and a reconnect, a revoke and the
   bridge against a real controller with `FakeChat`.
 - `scripts/demo/ui-pair.sh` (d12): the whole journey in headless Chromium against the built binary.
+- `apps/ui/src/test/shell-parts.test.tsx` and `history.test.ts` (Vitest, the fake transport, `r1.s5.w2`): the
+  title bar, the rail, the sidebar (By project, By state, the search, the Workflow runs rows), the dock and
+  `pf.dock`, `DockRequests`, the banner on `reconnecting`, the server menu and its confirm, each `NotBuilt`
+  form, New session's two paths, the page history and the navigation seam. `shell.test.tsx`,
+  `projects.test.tsx`, `disconnected.test.tsx` and `no-polling.test.tsx` carry the shell's one `runList` in
+  their call lists.
 - `apps/ui/src/test/{agents,chat,composer,cards,chat-stream}.test.tsx` (Vitest, the fake transport,
   `r1.s3.w5`): the Agents page, the chat screen and its items, the composer's controls, the gauge, the
   cache timer and the cost in wu, the approval and question cards, and the stream rule above, including the
@@ -433,11 +451,12 @@ Tauri's IPC only, so the webview opens no network connection.
   Chromium through `pf-client-bridge`, against the real controller on the paper env. Its journey is
   `apps/ui/e2e/needs-you.spec.ts`; `PF_D23_START=cli` starts the run with the CLI, and the default
   `card` starts it from the start card of `r1.s4.w2`.
-- `scripts/demo/ui-screens.sh` (d25, `r1.s5.w1`): the ten screens of the Mac app in headless Chromium, each
+- `scripts/demo/ui-screens.sh` (d25, `r1.s5.w1`; twelve screens after `r1.s5.w2`, counted from the `test(`
+  calls of the spec): the screens of the Mac app in headless Chromium, each
   compared with a committed screenshot (`apps/ui/e2e/screens.spec.ts-snapshots/`). Its spec is
   `apps/ui/e2e/screens.spec.ts`, which reads the bridge protocol's routes above from a fixture server of its
   own (`apps/ui/e2e/screens/server.ts`): a Node http server on `127.0.0.1` that serves the built bundle with
   the bridge's Content-Security-Policy and answers `GET /bridge/paired`, `POST /bridge/status`,
   `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
-  fixtures.ts`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
+  fixtures.ts`, which re-exports one module for each area under `fixtures/`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
   real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.

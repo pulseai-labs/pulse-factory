@@ -51,7 +51,7 @@ export async function bootChat(fake: FakeTransport, id = "S-1", items: ChatFrame
   const record = fake.sessions.find((s) => s.id === id);
   if (!record) throw new Error(`no session ${id} on the fake`);
   const sidebar = within(screen.getByRole("region", { name: "Sidebar" }));
-  await user.click(await sidebar.findByRole("button", { name: new RegExp(`session in ${record.project_name}`) }));
+  await user.click(await sidebar.findByRole("button", { name: new RegExp(`session in ${record.project_name}:`) }));
   await waitFor(() => expect(fake.current()?.options.session).toBe(id));
   await push(fake, frames.hello(fake.sessions, id), ...items);
   return user;
@@ -74,7 +74,7 @@ export async function bootChatFake(fake: FakeTransport, id = "S-1"): Promise<voi
   const record = fake.sessions.find((s) => s.id === id);
   if (!record) throw new Error(`no session ${id} on the fake`);
   const sidebar = within(screen.getByRole("region", { name: "Sidebar" }));
-  fireEvent.click(sidebar.getByRole("button", { name: new RegExp(`session in ${record.project_name}`) }));
+  fireEvent.click(sidebar.getByRole("button", { name: new RegExp(`session in ${record.project_name}:`) }));
   await advance(0);
   await push(fake, frames.hello(fake.sessions, id));
   await advance(0);

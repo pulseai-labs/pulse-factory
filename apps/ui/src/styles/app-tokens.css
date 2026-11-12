@@ -41,6 +41,34 @@
   --amber-border: rgba(255, 176, 32, 0.28); /* the border of a card that needs you: 3f Needs you, 11d */
   --amber-fg: #1a1205;                      /* the count on an amber fill: 2a Chat (rail), 11d */
 
+  /* The shell's layout (`r1.s5.w2`). The canvas draws it in 11a; tokens.css holds the older sizes of the same
+     names (a 38 px title bar, a 232 px sidebar), and this file is imported after it, so these win. */
+  --titlebar-h: 42px;   /* the title bar: 11a */
+  --rail-w: 56px;       /* the rail: 11a */
+  --sidebar-w: 288px;   /* the sidebar: 11a */
+  --dock-w: 328px;      /* the dock (Needs you and Files): 11a */
+  --rail-btn: 38px;     /* the rail's buttons: 11a */
+  --tab-h: 30px;        /* the page title and the chat tabs in the title bar: 11a */
+  --column-max: 1180px; /* the centred page column of the Projects page: 11e */
+  --titlebar-inset: 0px; /* room for the window's traffic lights at the title bar's left; apps/desktop sets it, 11a draws them */
+
+  /* Type sizes the design system has no step for, beside --text-ui, --text-meta and --text-tag. */
+  --text-page: 24px;       /* the page title ("Projects"): 11e */
+  --text-project: 15px;    /* a project's name in its block: 11e */
+  --text-name: 13.5px;     /* the server's name in the server menu, and the pair card's copy: 11h, 11j */
+  --text-pair-title: 20px; /* "Connect to your server": 11j */
+  --text-micro: 8.5px;     /* the rail's compact "Later" tag: 11l */
+
+  /* Radii the design system has no step for. */
+  --radius-rail: 7px;  /* the rail's buttons and the server tile: 11a, 11h */
+  --radius-tile: 9px;  /* the pair card's icon tile: 11j */
+
+  /* Colours the design system has no token for, beside --amber-border and --amber-fg. */
+  --amber-pill-border: rgba(255, 176, 32, 0.45); /* the need-you pill's border while the dock is open: 11a (pillBd) */
+  --amber-pill-rule: rgba(255, 176, 32, 0.3);    /* the rule inside the need-you pill: 11a */
+  --red-border: rgba(255, 77, 99, 0.28);          /* the border of the disconnect confirm: 11h */
+  --on-red: #ffffff;                              /* the label of the red-filled Disconnect: 11h */
+
   /* The agent avatar (9a, Agent Avatars): the four built-in agents' colours, and the parts of the head
      that are not a design-system colour. Violet, red and mint are the design system's accents; gray is
      its tertiary step. */

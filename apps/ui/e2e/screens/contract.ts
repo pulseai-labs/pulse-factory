@@ -5,9 +5,10 @@
 //
 // What is fixed: the viewport (the artboards' 1440×900), the pixel ratio, the locale, the time zone, the
 // colour scheme, reduced motion, the clock (installed before the page loads and paused at one time), the
-// animations and the caret, the bundled faces (loaded and checked by name) and the network (every request to
-// an origin other than the fixture server is refused and recorded). Headless Chromium is not the Mac's
-// WebKit: d25 holds the bundle's rendering in Chromium only.
+// animations and the caret, the bundled faces (loaded and checked by name), the raster mode (partial raster
+// off, see `chromiumArgs`) and the network (every request to an origin other than the fixture server is
+// refused and recorded). Headless Chromium is not the Mac's WebKit: d25 holds the bundle's rendering in
+// Chromium only.
 import type { Page } from "@playwright/test";
 
 export const CONTRACT = {
@@ -22,6 +23,15 @@ export const CONTRACT = {
   clockAt: "2026-11-08T14:47:00Z",
   /** The faces the bundle ships (`@fontsource-variable/geist` and `geist-mono`). */
   faces: ["Geist Variable", "Geist Mono Variable"],
+  /**
+   * Chromium's partial raster repaints only the invalidated part of a tile over the old pixels. A page that
+   * painted its icons in two steps (the rail, before the request count arrived) kept slightly different
+   * anti-aliasing on their edges than a page that painted them once: two states, picked at each page load
+   * (16 pixels of a 1440×900 screen, a few pixels per icon, in about half of the runs). With the flag, every
+   * paint is a whole-tile paint and the render depends on the page's content only. It is a rendering
+   * contract, not a tolerance: it changes what is drawn, not what is accepted.
+   */
+  chromiumArgs: ["--disable-partial-raster"],
   /** The one tolerance of every screenshot. It is never raised to make a run pass. */
   tolerance: { maxDiffPixels: 0, threshold: 0.05 },
 } as const;

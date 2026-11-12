@@ -132,7 +132,7 @@ describe("a change applies to that chat only (P2, P3)", () => {
 
     // The other chat opens from its sidebar row and shows its own effort.
     const sidebar = within(screen.getByRole("region", { name: "Sidebar" }));
-    await user.click(sidebar.getByRole("button", { name: /session in beta/ }));
+    await user.click(sidebar.getByRole("button", { name: /session in beta:/ }));
     await waitFor(() => expect(fake.current()?.options.session).toBe("S-2"));
     await push(fake, frames.hello(fake.sessions, "S-2"));
     await waitFor(() => expect(main().getByLabelText("Project").textContent).toBe("beta"));
@@ -207,7 +207,7 @@ describe("the cache-warm timer, under fake timers", () => {
     render(<App transport={fake} />);
     await advance(0);
     await push(fake, frames.hello(fake.sessions));
-    fireEvent.click(within(screen.getByRole("region", { name: "Sidebar" })).getByRole("button", { name: /session in alpha/ }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Sidebar" })).getByRole("button", { name: /session in alpha:/ }));
     await advance(0);
     await push(fake, frames.hello(fake.sessions, "S-1"));
     await advance(0);

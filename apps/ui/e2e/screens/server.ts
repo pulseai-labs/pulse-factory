@@ -1,6 +1,6 @@
 // The fixture server of d25: a Node `http` server on 127.0.0.1 that serves the built bundle (`PF_UI_DIR`)
 // with the bridge's Content-Security-Policy and answers the bridge protocol of
-// docs/contracts/ui-transport.md from `fixtures.ts`. It is test data for a rendering check: it stands in
+// docs/contracts/ui-transport.md from `fixtures.ts` and the modules under `fixtures/`. It is test data for a rendering check: it stands in
 // for the bridge's answers, and the journey lines d12, d19 and d23 keep the real controller, API and
 // bridge. Its fake-ledger entry is `ui-screens-fixture-server` (channel `fake`).
 //
@@ -10,7 +10,19 @@ import fs from "node:fs";
 import http from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
-import { DETAILS, PAIRED, PROJECTS, REQUEST_LIST, RUNS, SESSION_LIST, SETTINGS, STATUS, UNREACHABLE_MESSAGE, streamEvents } from "./fixtures";
+import {
+  PAIRED,
+  STATUS,
+  UNREACHABLE_MESSAGE,
+  agentsVerbs,
+  chatVerbs,
+  needsYouVerbs,
+  projectsVerbs,
+  settingsVerbs,
+  shellVerbs,
+  streamEvents,
+} from "./fixtures";
+import type { Verbs } from "./fixtures/verbs";
 
 /** `paired`: every screen. `unpaired`: `paired` answers null (3a). `unreachable`: every call after `paired` fails (3c). */
 export type Mode = "paired" | "unpaired" | "unreachable";
@@ -40,20 +52,62 @@ const TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-/** The answers of the verbs the ten screens call. A verb that is not here is `bad_request`. */
-const VERBS: Record<string, (args: unknown) => unknown> = {
-  project_list: () => PROJECTS,
-  session_list: () => SESSION_LIST,
-  requests: () => REQUEST_LIST,
-  run_list: () => RUNS,
-  settings_get: () => SETTINGS,
-  show: (args) => {
-    const id = typeof args === "object" && args !== null ? (args as { id?: unknown }).id : undefined;
-    const detail = typeof id === "string" ? DETAILS[id] : undefined;
-    if (detail === undefined) throw new Error(`show: no fixture for request ${String(id)}`);
-    return detail;
-  },
-};
+/**
+ * The verb table: the six fixture modules' `verbs`, merged. A verb that two modules answer fails at start,
+ * naming it and both modules. A verb that is not in the table is `bad_request` (unless a test overlays it).
+ */
+function mergeVerbs(tables: Array<[module: string, verbs: Verbs]>): Verbs {
+  const merged: Verbs = {};
+  const owner = new Map<string, string>();
+  for (const [module, table] of tables) {
+    for (const [verb, answer] of Object.entries(table)) {
+      const first = owner.get(verb);
+      if (first !== undefined) throw new Error(`the verb "${verb}" is answered by two fixture modules: ${first} and ${module}`);
+      owner.set(verb, module);
+      merged[verb] = answer;
+    }
+  }
+  return merged;
+}
+
+const VERBS: Verbs = mergeVerbs([
+  ["shell", shellVerbs],
+  ["chat", chatVerbs],
+  ["needs-you", needsYouVerbs],
+  ["agents", agentsVerbs],
+  ["settings", settingsVerbs],
+  ["projects", projectsVerbs],
+]);
+
+/**
+ * A per-test change of the fixture answers: a verb name to a new answer, or to a function of the base answer
+ * (`(base, args) => answer`; an answer is JSON, so a function is never an answer). A test calls it before it
+ * loads the page, for example one more request in `requests`, a session in `working`, or a run with a
+ * `project_id`. It holds for that test only: the spec clears it in `afterEach` with `clearOverlay`. A
+ * round-3 item changes another module's value only through this, inside its own `describe` block.
+ */
+export type Overlay = Record<string, unknown>;
+
+let overlays: Overlay = {};
+
+export function overlay(patch: Overlay): void {
+  overlays = { ...overlays, ...patch };
+}
+
+export function clearOverlay(): void {
+  overlays = {};
+}
+
+/** The answer of a verb: the table's (none when absent), then the overlay's. `undefined` means no fixture. */
+function answerOf(verb: string, args: unknown): { found: boolean; value?: unknown } {
+  const base = VERBS[verb];
+  const patch = Object.hasOwn(overlays, verb) ? overlays[verb] : undefined;
+  const has = base !== undefined || Object.hasOwn(overlays, verb);
+  if (!has) return { found: false };
+  const baseValue = base === undefined ? undefined : base(args);
+  if (!Object.hasOwn(overlays, verb)) return { found: true, value: baseValue };
+  return { found: true, value: typeof patch === "function" ? (patch as (base: unknown, args: unknown) => unknown)(baseValue, args) : patch };
+}
 
 function readBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve) => {
@@ -107,13 +161,13 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
     if (method === "POST" && verb !== undefined) {
       const args = await readBody(req);
       if (mode === "unreachable") return unreachable(res);
-      const answer = VERBS[verb];
-      if (answer === undefined) {
-        unexpected.push(`${route}`);
-        return fail(res, "bad_request", `d25 has no fixture for the verb ${verb}`);
-      }
       try {
-        return ok(res, answer(args));
+        const answer = answerOf(verb, args);
+        if (!answer.found) {
+          unexpected.push(`${route}`);
+          return fail(res, "bad_request", `d25 has no fixture for the verb ${verb}`);
+        }
+        return ok(res, answer.value);
       } catch (e) {
         unexpected.push(`${route} (${e instanceof Error ? e.message : String(e)})`);
         return fail(res, "bad_request", e instanceof Error ? e.message : "no fixture");

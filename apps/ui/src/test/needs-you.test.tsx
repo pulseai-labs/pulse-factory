@@ -85,10 +85,12 @@ describe("Needs you: what it calls", () => {
     await screen.findByRole("article", { name: "Request R-2" });
     await waitFor(() => expect(fake.count("show")).toBe(1));
     const before = fake.calls.length;
+    // The shell's sidebar read the run list once on Projects, and the page read it once: two calls so far.
+    expect(fake.count("runList")).toBe(2);
 
     await user.click(main().getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(fake.count("requests")).toBe(2));
-    await waitFor(() => expect(fake.count("runList")).toBe(2));
+    await waitFor(() => expect(fake.count("runList")).toBe(3));
     expect(since(fake, before).slice().sort()).toEqual(["requests", "runList"]);
   });
 });
@@ -417,10 +419,12 @@ describe("Needs you: no timer, no focus handler", () => {
     fake.seedRequests([requestSummary("R-1")]);
     render(<App transport={fake} />);
     await advance(0);
+    // The shell's sidebar reads the run list once when it mounts on Projects (Approach 7).
+    expect(fake.count("runList")).toBe(1);
     fireEvent.click(rail().getByRole("button", { name: "Needs you" }));
     await advance(0);
     expect(fake.count("requests")).toBe(1);
-    expect(fake.count("runList")).toBe(1);
+    expect(fake.count("runList")).toBe(2);
 
     // Refresh meets a dead link: the 3c banner shows and its retry calls only `status`.
     fake.fail("requests", "unreachable", "no answer", 1);
@@ -430,13 +434,13 @@ describe("Needs you: no timer, no focus handler", () => {
     await advance(0);
     expect(screen.getByText(/Not connected to/)).toBeTruthy();
     expect(fake.count("requests")).toBe(2);
-    expect(fake.count("runList")).toBe(2);
+    expect(fake.count("runList")).toBe(3);
 
     fake.heal();
     await advance(60_000);
     expect(screen.queryByText(/Not connected to/)).toBeNull();
     expect(fake.count("requests")).toBe(3);
-    expect(fake.count("runList")).toBe(3);
+    expect(fake.count("runList")).toBe(4);
 
     const calls = [...fake.calls];
     await advance(60 * 60_000);

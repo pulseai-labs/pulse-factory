@@ -42,12 +42,12 @@ const rowOf = (name: string) => {
 };
 
 describe("the Agents page (6a)", () => {
-  it("puts Agents between Projects and Needs you on the rail, with nothing else", async () => {
+  it("puts Agents after Needs you on the rail, with Settings last and nothing else a button", async () => {
     await open(seeded());
     const names = within(screen.getByRole("navigation"))
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
-    expect(names).toEqual(["Projects", "Agents", "Needs you", "Settings"]);
+    expect(names).toEqual(["Projects", "Needs you", "Agents", "Settings"]);
   });
 
   it("shows the Orchestrator's defaults from the server's agent list, read only", async () => {
@@ -179,7 +179,8 @@ describe("the Agents page makes no call by itself", () => {
     });
     expect(within(screen.getByRole("main")).getByRole("heading", { name: "Agents" })).toBeTruthy();
     const settled = [...fake.calls];
-    expect(settled).toEqual(["paired", "projectList", "openStream", "projectList", "sessionList"]);
+    // The shell's sidebar read the run list once when it mounted on Projects.
+    expect(settled).toEqual(["paired", "runList", "projectList", "openStream", "projectList", "sessionList"]);
 
     for (let i = 0; i < 2; i++) {
       await act(async () => {
