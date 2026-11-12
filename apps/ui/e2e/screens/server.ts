@@ -98,15 +98,26 @@ export function clearOverlay(): void {
   overlays = {};
 }
 
-/** The answer of a verb: the table's (none when absent), then the overlay's. `undefined` means no fixture. */
+/**
+ * The answer of a verb: the overlay's when the test set one, else the table's (none when absent).
+ * A plain patch is the answer and the table is not asked. A function patch receives the table's answer,
+ * or `undefined` when the verb has no table entry or the entry has no answer for these args (it throws),
+ * so a test can add what the table does not know, such as the detail of a request that only it opens.
+ */
 function answerOf(verb: string, args: unknown): { found: boolean; value?: unknown } {
   const base = VERBS[verb];
-  const patch = Object.hasOwn(overlays, verb) ? overlays[verb] : undefined;
-  const has = base !== undefined || Object.hasOwn(overlays, verb);
-  if (!has) return { found: false };
-  const baseValue = base === undefined ? undefined : base(args);
-  if (!Object.hasOwn(overlays, verb)) return { found: true, value: baseValue };
-  return { found: true, value: typeof patch === "function" ? (patch as (base: unknown, args: unknown) => unknown)(baseValue, args) : patch };
+  if (!Object.hasOwn(overlays, verb)) return base === undefined ? { found: false } : { found: true, value: base(args) };
+  const patch = overlays[verb];
+  if (typeof patch !== "function") return { found: true, value: patch };
+  let baseValue: unknown;
+  if (base !== undefined) {
+    try {
+      baseValue = base(args);
+    } catch {
+      baseValue = undefined;
+    }
+  }
+  return { found: true, value: (patch as (base: unknown, args: unknown) => unknown)(baseValue, args) };
 }
 
 function readBody(req: http.IncomingMessage): Promise<unknown> {
