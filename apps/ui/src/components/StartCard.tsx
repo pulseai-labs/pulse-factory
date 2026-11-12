@@ -9,6 +9,7 @@ import { useState } from "react";
 import { asTransportError, useConnection } from "../state/connection";
 import { timeText } from "./chat-format";
 import { useCommandId } from "./command-id";
+import { Button } from "../ui";
 
 type Card = Extract<ChatItemBody, { kind: "start_card" }>;
 type Result = Extract<ChatItemBody, { kind: "start_result" }>;
@@ -164,15 +165,14 @@ export function StartCard(props: { card: Card; result: Result | null; readOnly: 
 
       {result === null && !readOnly ? (
         <div className="card-actions">
-          <button
-            className="btn btn-primary"
-            type="button"
+          <Button
+            variant="primary"
             data-testid="start-confirm"
             disabled={busy || sent || held !== null}
             onClick={() => void confirm()}
           >
             Confirm start
-          </button>
+          </Button>
         </div>
       ) : null}
 
@@ -190,12 +190,12 @@ export function StartCard(props: { card: Card; result: Result | null; readOnly: 
           <p className="muted">{`Confirmed by device ${held.device}.`}</p>
           {held.expiresAt !== null ? <p className="muted">{`This confirmation expires at ${timeText(held.expiresAt)}.`}</p> : null}
           <div className="card-actions">
-            <button className="btn btn-primary" type="button" data-testid="start-arm" disabled={busy} onClick={() => void arm()}>
+            <Button data-testid="start-arm" disabled={busy} onClick={() => void arm()}>
               Arm the run
-            </button>
-            <button className="btn" type="button" disabled={busy} onClick={cancel}>
+            </Button>
+            <Button disabled={busy} onClick={cancel}>
               Cancel
-            </button>
+            </Button>
           </div>
           {problem ? (
             <p className="problem-title" role="alert">

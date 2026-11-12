@@ -10,10 +10,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Banner } from "../components/Banner";
 import { StreamLine } from "../components/StreamLine";
-import { ArrowLeftIcon, ArrowRightIcon, BellIcon, BotIcon, FolderIcon, GearIcon } from "../components/Icons";
 import { ServerMenu } from "../components/ServerMenu";
 import { branchText } from "../components/chat-format";
 import { agentName, stateLabel, useChat } from "../state/chat";
+import { Chip, CountBadge, Icon, IconButton, StateDot } from "../ui";
 import { useConnection } from "../state/connection";
 import { useRequests } from "../state/requests";
 import { Agents } from "./Agents";
@@ -71,7 +71,7 @@ function Sidebar(props: { onOpen: (session: string) => void; current: string | n
               <li key={p.id} className="sidebar-project">
                 <div className="sidebar-project-row" title={p.root}>
                   <span className="sidebar-icon" aria-hidden="true">
-                    <FolderIcon />
+                    <Icon name="folder" />
                   </span>
                   <span className="sidebar-name">{p.name}</span>
                 </div>
@@ -90,9 +90,12 @@ function Sidebar(props: { onOpen: (session: string) => void; current: string | n
                             onClick={() => props.onOpen(s.id)}
                           >
                             <span className="session-agent">{agent}</span>
-                            <span className={`session-state session-${s.state}`}>{stateLabel(s.state)}</span>
+                            <span className={`session-state session-${s.state}`}>
+                              <StateDot state={s.state} />
+                              {stateLabel(s.state)}
+                            </span>
                             <span className="session-branch mono">{branch}</span>
-                            {unqualified ? <span className="chip chip-warn">unqualified</span> : null}
+                            {unqualified ? <Chip tone="amber">unqualified</Chip> : null}
                           </button>
                         </li>
                       );
@@ -204,24 +207,18 @@ export function Shell() {
   return (
     <div className="app">
       <header className="titlebar" role="banner">
-        <button
-          className="icon-btn"
-          type="button"
-          aria-label="Back"
+        <IconButton
+          icon="arrow-left"
+          title="Back"
           disabled={!canBack}
           onClick={() => setHistory((h) => ({ ...h, index: Math.max(0, h.index - 1) }))}
-        >
-          <ArrowLeftIcon />
-        </button>
-        <button
-          className="icon-btn"
-          type="button"
-          aria-label="Forward"
+        />
+        <IconButton
+          icon="arrow-right"
+          title="Forward"
           disabled={!canForward}
           onClick={() => setHistory((h) => ({ ...h, index: Math.min(h.entries.length - 1, h.index + 1) }))}
-        >
-          <ArrowRightIcon />
-        </button>
+        />
         <h1 className="titlebar-title">{title}</h1>
         {tabs.length > 0 ? (
           <div className="tabs" role="tablist" aria-label="Open chats">
@@ -260,7 +257,7 @@ export function Shell() {
             title={tip("Projects", page.kind === "projects")}
             onClick={() => (page.kind === "projects" ? toggleSidebar() : go(PROJECTS))}
           >
-            <FolderIcon />
+            <Icon name="folder" size={18} />
           </button>
           <button
             className={`rail-btn${page.kind === "agents" || page.kind === "chat" ? " rail-btn-on" : ""}`}
@@ -270,7 +267,7 @@ export function Shell() {
             title={tip("Agents", page.kind === "agents")}
             onClick={() => (page.kind === "agents" ? toggleSidebar() : go(AGENTS))}
           >
-            <BotIcon />
+            <Icon name="bot" size={18} />
           </button>
           <button
             className={`rail-btn${page.kind === "needs_you" ? " rail-btn-on" : ""}`}
@@ -280,12 +277,8 @@ export function Shell() {
             title="Needs you"
             onClick={() => go(NEEDS_YOU)}
           >
-            <BellIcon />
-            {requests.open.length > 0 ? (
-              <span className="rail-badge" title={`${requests.open.length} open`}>
-                {requests.open.length}
-              </span>
-            ) : null}
+            <Icon name="bell" size={18} />
+            <CountBadge count={requests.open.length} title={`${requests.open.length} open`} />
           </button>
           <span className="rail-spacer" />
           <button
@@ -296,7 +289,7 @@ export function Shell() {
             title="Settings"
             onClick={() => go(SETTINGS)}
           >
-            <GearIcon />
+            <Icon name="settings" size={18} />
           </button>
         </nav>
         {showSidebar ? <Sidebar onOpen={openChat} current={chatOnScreen} /> : null}

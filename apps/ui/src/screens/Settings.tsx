@@ -19,6 +19,7 @@ import { useCommandId } from "../components/command-id";
 import { ServerSection } from "../components/ServerSection";
 import { agentName, useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
+import { Button, Input, Select } from "../ui";
 
 /** The project and the agent a read or a write names. `null` is "all". */
 interface Context {
@@ -191,9 +192,9 @@ function SettingRow(props: {
       ) : null}
       <label htmlFor={fieldId}>New value</label>
       {isNumber ? (
-        <input
+        <Input
+          mono
           id={fieldId}
-          className="input mono"
           type="number"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -201,29 +202,29 @@ function SettingRow(props: {
       ) : (
         <textarea
           id={fieldId}
-          className="input mono"
+          className="field-area mono"
           rows={3}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
         />
       )}
       <div className="card-actions">
-        <button className="btn btn-primary" type="button" disabled={busy} onClick={set}>
+        <Button disabled={busy} onClick={set}>
           Set at this scope
-        </button>
+        </Button>
         {atThisScope ? (
-          <button className="btn" type="button" disabled={busy} onClick={() => void act({ op: "unset" })}>
+          <Button disabled={busy} onClick={() => void act({ op: "unset" })}>
             Unset at this scope
-          </button>
+          </Button>
         ) : null}
       </div>
       {message !== null ? (
         <p className="row-message" role="alert">
           <span>{message}</span>
           {retry !== null ? (
-            <button className="btn" type="button" disabled={busy} onClick={() => void act(retry)}>
+            <Button disabled={busy} onClick={() => void act(retry)}>
               Retry
-            </button>
+            </Button>
           ) : null}
         </p>
       ) : null}
@@ -298,9 +299,8 @@ function ChatPolicies() {
       <h3 id="settings-chat-policies">Chat policies</h3>
       <div className="card-actions">
         <label htmlFor={projectId}>Project</label>
-        <select
+        <Select
           id={projectId}
-          className="select"
           value={ctx.project ?? ""}
           onChange={(e) => choose({ ...ctx, project: e.target.value === "" ? null : e.target.value })}
         >
@@ -310,11 +310,10 @@ function ChatPolicies() {
               {p.name}
             </option>
           ))}
-        </select>
+        </Select>
         <label htmlFor={agentId}>Agent</label>
-        <select
+        <Select
           id={agentId}
-          className="select"
           value={ctx.agent ?? ""}
           onChange={(e) => choose({ ...ctx, agent: e.target.value === "" ? null : e.target.value })}
         >
@@ -324,15 +323,15 @@ function ChatPolicies() {
               {a.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <p className="muted">{`Scope: ${words(scopeOfContext(ctx))}`}</p>
       {error !== null ? (
         <p className="page-error" role="alert">
           <span>{error}</span>
-          <button className="btn" type="button" onClick={() => void load()}>
+          <Button onClick={() => void load()}>
             Retry now
-          </button>
+          </Button>
         </p>
       ) : null}
       {rows === null ? (
@@ -385,9 +384,9 @@ export function Settings() {
       {pageError ? (
         <p className="page-error" role="alert">
           <span>{pageError}</span>
-          <button className="btn" type="button" onClick={() => void load()}>
+          <Button onClick={() => void load()}>
             Retry now
-          </button>
+          </Button>
         </p>
       ) : null}
       <section className="settings-block" aria-labelledby="settings-server">

@@ -12,6 +12,7 @@ import { useCommandId } from "../components/command-id";
 import { costLabel, dollarsTitle } from "../components/cost";
 import { agentName, stateLabel, useChat } from "../state/chat";
 import { asTransportError, useConnection } from "../state/connection";
+import { Button, Chip, StatePill } from "../ui";
 
 export function Chat(props: { sessionId: string }) {
   const { sessionId } = props;
@@ -86,17 +87,17 @@ export function Chat(props: { sessionId: string }) {
   const endControls = confirmEnd ? (
     <span className="confirm" role="group" aria-label="Confirm end">
       <span>End this session?</span>
-      <button className="btn btn-danger" type="button" onClick={() => void end()}>
+      <Button variant="danger" onClick={() => void end()}>
         Yes, end it
-      </button>
-      <button className="btn" type="button" onClick={() => setConfirmEnd(false)}>
+      </Button>
+      <Button onClick={() => setConfirmEnd(false)}>
         Keep it
-      </button>
+      </Button>
     </span>
   ) : (
-    <button className="btn" type="button" onClick={() => setConfirmEnd(true)}>
+    <Button onClick={() => setConfirmEnd(true)}>
       End session
-    </button>
+    </Button>
   );
 
   return (
@@ -121,13 +122,13 @@ export function Chat(props: { sessionId: string }) {
         <span className="head-value mono" role="group" aria-label="Branch">
           {branchText(record, projects)}
         </span>
-        <span className={`chip session-${record.state}`} role="group" aria-label="State">
+        <StatePill state={record.state} role="group" aria-label="State">
           {stateLabel(record.state)}
-        </span>
+        </StatePill>
         {unqualified ? (
-          <span className="chip chip-warn" title="This chat runs an override binary, not the qualified Claude Code version.">
+          <Chip tone="amber" title="This chat runs an override binary, not the qualified Claude Code version.">
             unqualified
-          </span>
+          </Chip>
         ) : null}
         <span className="head-spacer" />
         <span className="head-value" role="group" aria-label="Cost" title={dollarsTitle(record.usage)}>
@@ -147,9 +148,9 @@ export function Chat(props: { sessionId: string }) {
         <p className="chat-note chat-lost" role="status">
           {`Context lost: ${lost}. End this session and start a new one.`}
           {confirmEnd ? null : (
-            <button className="btn" type="button" onClick={() => setConfirmEnd(true)}>
+            <Button onClick={() => setConfirmEnd(true)}>
               End session
-            </button>
+            </Button>
           )}
         </p>
       ) : null}

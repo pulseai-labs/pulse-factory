@@ -7,7 +7,8 @@
   interface, one bridge route and nine Tauri commands. 2026-11-09, at `r1.s3.w5`: the Agents rail item and
   the chat screens, behind the unchanged `Transport`. 2026-11-10, at `r1.s4.w3`: the Needs you page and the
   Settings rows, behind the `Transport` with ten more methods and one more stream event, and one `verb`
-  Tauri command.
+  Tauri command. 2026-11-12, at `r1.s5.w1`: the app tokens, the shared components, the 9a avatar and the
+  screenshot line d25.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk,
@@ -367,3 +368,78 @@ Checked on draco-desk on 2026-11-10 with the item's verification commands (each 
 - The `verb` command compiles and the page runs in the Mac app's webview. The item PR's `macos-app` job
   compiles `main.rs`, and the d24 walk on the MacBook checks the page and the dialog there.
 - The look of the page, the dialog and the rows. `r1.s5` compares them with the canvas.
+
+## Amendment, 2026-11-12 (`r1.s5.w1`)
+
+The spine `r1.s5` restyles every screen Release 1 built to the approved canvas (pin `1794491284-3f16`).
+This item is its first round. It gives round 2 the tokens, the shared components and the screenshot
+line. It moves no element and no function.
+
+- **App tokens, and one rule for the styles.** `apps/ui/src/styles/app-tokens.css` is new and loads
+  after `tokens.css`. It holds the two font stacks (`--font-sans`, `--font-mono`, the bundled Geist
+  faces first) and one named token for each value the artboards use that the design system does not name
+  (the text sizes, the button radii and heights, the pill and chip heights, the dot, the amber border,
+  the avatar colours). Each token names its artboard. `tokens.css` keeps the canvas values byte for
+  byte; only its header changed. `app.css` and `ui.css` name no raw colour, font size or radius. A `px`
+  is allowed for a layout length only. `src/test/styles.test.ts` enforces this and excludes the token
+  files by name.
+- **Shared components in `apps/ui/src/ui/`.** `Button`, `IconButton`, `Input`, `Select`, `Chip`,
+  `StatePill`, `StateDot`, `CountBadge`, `Card`, `Eyebrow`, `Icon` and `Avatar`, exported by `index.ts`.
+  The screens import from `ui` only. The components fetch nothing and set no timer, storage key or log
+  call. `components/Icons.tsx` is removed and every icon comes from `Icon`. The screens swap their old
+  elements one for one.
+- **Icons: Lucide paths (ISC), inline, no package.** `Icon` draws from `icon-nodes.ts`, a closed set of
+  Lucide's SVG paths. No npm dependency was added, changed or removed. The licence texts are in
+  `apps/ui/public/licenses/` and `apps/ui/public/THIRD-PARTY-NOTICES.md` names Geist, Geist Mono (SIL
+  OFL 1.1) and Lucide (ISC, with the MIT text for the Feather-derived icons). Vite copies `public/`
+  into `dist/`, so the Tauri app ships the notices. The built CSS and HTML still name no `http` URL.
+- **The 9a avatar.** `Avatar` ports the 9a geometry (the eight heads, the eye, the socket and the four
+  colours). `src/test/avatar.test.tsx` compares each path and eye with the values in the canvas file.
+  No screen shows an avatar yet: round 2 places it. It has no animation.
+- **d25: the screenshot line (`scripts/demo/ui-screens.sh`).** It renders ten screens in headless
+  Chromium 1248 from the built bundle and compares each with a committed screenshot
+  (`apps/ui/e2e/screens.spec.ts-snapshots/`, Playwright's `-linux` suffix). It runs on draco-desk only.
+  It builds nothing and downloads no browser. `PF_SCREENS_UPDATE=1` rewrites the screenshots and exits
+  3, so an update run never counts as a pass.
+- **The fixture server is test data.** `e2e/screens/server.ts` serves the bundle and the bridge's
+  routes from `e2e/screens/fixtures.ts`, so each run sees the same IDs, times, costs and SHAs. It is a
+  recorded fake: the fake-ledger boundary is `ui-screens-fixture-server`, expiry `r2`. d25 claims
+  rendering only. The journey lines d12, d19 and d23 keep the real controller, API and bridge.
+- **The rendering contract and the fixed tolerance.** `e2e/screens/contract.ts` fixes the viewport
+  (1440×900, scale 1), the locale, the time zone, the dark scheme, reduced motion, a paused clock at
+  `2026-11-08T14:47:00Z`, no animation, no transition, no caret, the two Geist faces loaded, and no
+  request outside the fixture server. The tolerance is `{maxDiffPixels: 0, threshold: 0.05}`. Nobody
+  raises it to make a run pass.
+- **Known limit.** d25 renders in Chromium. The Mac app runs WebKit, which draws text and shadows a
+  little differently. The WebKit limit stands.
+
+### Verified claims (r1.s5.w1)
+Checked on draco-desk on 2026-11-12 with the item's verification commands (each through
+`oss verify_step`, exit 0):
+- The new unit tests pass: `ui-components.test.tsx` (59 tests), `styles.test.ts` (48) and
+  `avatar.test.tsx` (39). The whole UI suite passes (21 files, 515 tests) and `tsc` is clean. The tests
+  name the claims above: the icon set, the component sizes and tones, no raw colour, font size or
+  radius in `app.css` or `ui.css`, and each head's path and eye. A mutation of one eye value made
+  `avatar.test.tsx` fail; the file was then restored.
+- `scripts/demo/ui-screens.sh` prints `ui-screens: ok (10 screens, 5 s)` on the built bundle. Three
+  runs in a row pass. A copy of the built CSS with `--text-base` set to `14px` fails the line: Playwright
+  reports about 85,000 different pixels on the first screen. The line's wall time (4 to 6 s) is far
+  inside the 60 s bound.
+- The built `dist/` holds `THIRD-PARTY-NOTICES.md` and `licenses/`, and its CSS and HTML name no `http`
+  URL.
+- No file the item must not edit changed (`crates`, `apps/desktop`, `apps/api-client`, the transport and
+  state sources, the install scripts, the other demo scripts, `apps/package.json` and its lock, and the
+  `apps/ui` dependency lists).
+- The `client-api-auth` control tests still pass: `pf-client`, `pf-api` and `pulse-factory`, 18 test
+  files named by the spec.
+- After the restyle, the three journey lines still pass against the real controller, API and bridge
+  in headless Chromium: `scripts/demo/ui-pair.sh` (d12), `scripts/demo/ui-chat.sh` (d19) and
+  `scripts/demo/ui-needs-you.sh` (d23). The only edit to their specs is the selector
+  `.rail-badge`, now `.ui-count`, in `e2e/needs-you.spec.ts`; no step and no expectation changed.
+
+### Unverified claims (r1.s5.w1)
+- The screenshots show the screens after the one-for-one swaps and the new tokens. They do not yet
+  match the canvas. The claim "the screens match the canvas pixel for pixel" in the Unverified claims
+  above stays unclaimed until the operator's ack at the close of `r1.s5`.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only. The d24 walk
+  on the MacBook, and the operator's look, check WebKit.

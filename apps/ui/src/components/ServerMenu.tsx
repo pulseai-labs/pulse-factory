@@ -2,7 +2,7 @@
 // spine builds the server row and "Disconnect this Mac"; the rest has no verb on the allowlist yet.
 import { useEffect, useRef, useState } from "react";
 import { useConnection } from "../state/connection";
-import { ChevronsIcon } from "./Icons";
+import { Icon } from "../ui";
 import { ServerSection } from "./ServerSection";
 
 export function ServerMenu() {
@@ -40,7 +40,7 @@ export function ServerMenu() {
         <span className={`dot ${up ? "dot-on" : "dot-off"}`} aria-hidden="true" />
         <span className="server-button-name">{conn.server.address}</span>
         <span className="muted" aria-hidden="true">
-          <ChevronsIcon />
+          <Icon name="chevrons-up-down" size={14} />
         </span>
       </button>
       {open ? (

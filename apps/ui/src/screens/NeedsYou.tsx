@@ -15,6 +15,7 @@ import { ConfirmDialog, type DialogKind } from "../components/ConfirmDialog";
 import { clock } from "../components/format";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
 import { answeredRecently, bodyKey, useRequests } from "../state/requests";
+import { Button, Chip } from "../ui";
 
 /** The last read of one thing: when it worked, and the line of its failure. */
 interface ReadState {
@@ -57,9 +58,9 @@ function ReadError(props: { read: ReadState; onRefresh(): void }) {
     <>
       <p className="page-error" role="alert">
         <span>{read.error}</span>
-        <button className="btn" type="button" onClick={props.onRefresh}>
+        <Button onClick={props.onRefresh}>
           Refresh
-        </button>
+        </Button>
       </p>
       {read.at !== null ? <p className="muted">{`Last read at ${clock(read.at)}`}</p> : null}
     </>
@@ -126,7 +127,7 @@ function RequestCard(props: {
             <ul className="question-options" aria-label={`Gaps of ${request.id}`}>
               {gaps.map((g, i) => (
                 <li key={i}>
-                  <span>{g.section}</span> <span>{g.question}</span> <span className="chip">{g.severity}</span>
+                  <span>{g.section}</span> <span>{g.question}</span> <Chip>{g.severity}</Chip>
                 </li>
               ))}
             </ul>
@@ -134,15 +135,15 @@ function RequestCard(props: {
           {props.bodyError !== null ? (
             <p className="page-error" role="alert">
               <span>{props.bodyError}</span>
-              <button className="btn" type="button" onClick={props.onRefresh}>
+              <Button onClick={props.onRefresh}>
                 Refresh
-              </button>
+              </Button>
             </p>
           ) : null}
           <label className="composer-label">
             Your answer
             <textarea
-              className="input"
+              className="field-area"
               value={text}
               readOnly={props.locked}
               rows={3}
@@ -150,27 +151,25 @@ function RequestCard(props: {
             />
           </label>
           <div className="card-actions">
-            <button
-              className="btn btn-primary"
-              type="button"
+            <Button
               disabled={text.trim() === "" || props.busy}
               onClick={() => props.onOpenDialog({ kind: "answer", request, text })}
             >
               Send answer
-            </button>
+            </Button>
           </div>
         </>
       ) : null}
       {takesAck ? (
         <div className="card-actions">
-          <button
-            className="btn btn-primary"
-            type="button"
+          <Button
+            variant="primary"
+            size="lg"
             disabled={props.busy}
             onClick={() => props.onOpenDialog({ kind: "merge", request, text: "" })}
           >
             Confirm merge
-          </button>
+          </Button>
         </div>
       ) : null}
     </article>
@@ -343,9 +342,9 @@ export function NeedsYou() {
       <div className="page-head">
         <h2 id="needs-you-title">Needs you</h2>
         <span className="muted">{`${open.length} open`}</span>
-        <button className="btn" type="button" onClick={refresh}>
+        <Button onClick={refresh}>
           Refresh
-        </button>
+        </Button>
       </div>
       <dl className="facts">
         <dt>The claim</dt>

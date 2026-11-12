@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { newCommandId } from "../components/command-id";
 import { clock } from "../components/format";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
+import { Button, Input } from "../ui";
 
 export function Projects() {
   const { call, setProjects, epoch, projects, projectsAt, link, server } = useConnection();
@@ -89,9 +90,9 @@ export function Projects() {
       {pageError ? (
         <p className="page-error" role="alert">
           <span>{pageError}</span>
-          <button className="btn" type="button" onClick={() => void load()}>
+          <Button onClick={() => void load()}>
             Retry now
-          </button>
+          </Button>
         </p>
       ) : null}
 
@@ -113,9 +114,9 @@ export function Projects() {
       <form className="add-form" onSubmit={submit} noValidate aria-label="Add project">
         <h3>Add project</h3>
         <label htmlFor="pf-root">Project root</label>
-        <input
+        <Input
+          mono
           id="pf-root"
-          className="input mono"
           type="text"
           autoComplete="off"
           spellCheck={false}
@@ -125,9 +126,8 @@ export function Projects() {
           onChange={(e) => setRoot(e.target.value)}
         />
         <label htmlFor="pf-project-name">Name (optional)</label>
-        <input
+        <Input
           id="pf-project-name"
-          className="input"
           type="text"
           autoComplete="off"
           value={name}
@@ -139,9 +139,9 @@ export function Projects() {
             {formError}
           </p>
         ) : null}
-        <button className="btn btn-primary" type="submit" disabled={busy}>
+        <Button type="submit" disabled={busy}>
           Add project
-        </button>
+        </Button>
       </form>
     </section>
   );

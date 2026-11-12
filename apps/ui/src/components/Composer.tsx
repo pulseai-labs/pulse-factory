@@ -10,6 +10,7 @@ import { asTransportError, useConnection } from "../state/connection";
 import { useChat } from "../state/chat";
 import { parseTime } from "./chat-format";
 import { newCommandId, useCommandId } from "./command-id";
+import { Button, Select } from "../ui";
 
 /** The session's value of an option, never the agent's. A pending option shows what was chosen. */
 function optionValue(record: ChatSessionRecord, option: ChatOptionRecord): string {
@@ -106,9 +107,8 @@ function Controls(props: { record: ChatSessionRecord; options: ChatOptionRecord[
         return (
           <span className="control" key={option.id}>
             <label htmlFor={id}>{option.label}</label>
-            <select
+            <Select
               id={id}
-              className="select"
               value={value}
               disabled={ended || busy === option.id}
               onChange={(e) => void change(option, e.target.value)}
@@ -118,7 +118,7 @@ function Controls(props: { record: ChatSessionRecord; options: ChatOptionRecord[
                   {v}
                 </option>
               ))}
-            </select>
+            </Select>
             {option.id in record.pending_options ? (
               <span className="hint">applies when the chat restarts</span>
             ) : null}
@@ -234,23 +234,22 @@ export function Composer(props: { record: ChatSessionRecord; agentName: string }
         {cache ? <span className="muted">{cache}</span> : null}
         <span className="composer-spacer" />
         {record.state === "working" && !ended ? (
-          <button className="btn" type="button" onClick={() => void interrupt()}>
+          <Button onClick={() => void interrupt()}>
             Interrupt
-          </button>
+          </Button>
         ) : null}
         {error?.retry ? (
-          <button className="btn" type="button" disabled={busy} onClick={() => void send()}>
+          <Button disabled={busy} onClick={() => void send()}>
             Retry
-          </button>
+          </Button>
         ) : null}
-        <button
-          className="btn btn-primary"
-          type="button"
+        <Button
+          variant="primary"
           disabled={readOnly || busy || draft.trim() === ""}
           onClick={() => void send()}
         >
           Send
-        </button>
+        </Button>
       </div>
       {error ? (
         <p className="problem-title" role="alert">

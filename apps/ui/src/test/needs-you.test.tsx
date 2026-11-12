@@ -229,18 +229,18 @@ describe("Needs you: the stream's frames", () => {
     const fake = new FakeTransport();
     await boot(fake);
     const button = rail().getByRole("button", { name: "Needs you" });
-    expect(button.querySelector(".rail-badge")).toBeNull();
+    expect(button.querySelector(".ui-count")).toBeNull();
 
     await frame(fake, requestFrames.requests([requestSummary("R-1"), mergeAck("R-2"), closed("R-3")]));
 
-    const badge = button.querySelector(".rail-badge") as HTMLElement;
+    const badge = button.querySelector(".ui-count") as HTMLElement;
     expect(badge.textContent).toBe("2");
     expect(badge.getAttribute("title")).toBe("2 open");
     expect(fake.count("requests")).toBe(0);
     expect(fake.count("show")).toBe(0);
 
     await frame(fake, requestFrames.request(closed("R-1")));
-    expect((button.querySelector(".rail-badge") as HTMLElement).textContent).toBe("1");
+    expect((button.querySelector(".ui-count") as HTMLElement).textContent).toBe("1");
   });
 
   it("follows claim frames in the claim line", async () => {

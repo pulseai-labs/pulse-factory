@@ -12,6 +12,7 @@ import { asTransportError, isDownKind, useConnection } from "../state/connection
 import { TransportError } from "../transport/types";
 import { newCommandId } from "./command-id";
 import { sha256Hex } from "./sha256";
+import { Button } from "../ui";
 
 export type DialogKind = "merge" | "answer";
 
@@ -188,12 +189,12 @@ export function ConfirmDialog(props: {
         <>
           <p role="alert">{phase.message}</p>
           <div className="card-actions">
-            <button className="btn" type="button" onClick={() => void ask()}>
+            <Button onClick={() => void ask()}>
               Retry
-            </button>
-            <button className="btn" type="button" onClick={onClose}>
+            </Button>
+            <Button onClick={onClose}>
               Cancel
-            </button>
+            </Button>
           </div>
         </>
       ) : null}
@@ -231,29 +232,27 @@ export function ConfirmDialog(props: {
       ) : null}
       {phase.name === "ready" || phase.name === "spending" ? (
         <div className="card-actions">
-          <button
-            className="btn btn-primary"
-            type="button"
+          <Button
             disabled={phase.name === "spending"}
             onClick={() => void spend(phase.issued, phase.code)}
           >
             {kind === "merge" ? "Merge" : "Send"}
-          </button>
-          <button className="btn" type="button" disabled={phase.name === "spending"} onClick={onClose}>
+          </Button>
+          <Button disabled={phase.name === "spending"} onClick={onClose}>
             Cancel
-          </button>
+          </Button>
         </div>
       ) : null}
       {phase.name === "spend_unreachable" ? (
         <>
           <p role="alert">{phase.message}</p>
           <div className="card-actions">
-            <button className="btn btn-primary" type="button" onClick={() => void spend(phase.issued, phase.code)}>
+            <Button onClick={() => void spend(phase.issued, phase.code)}>
               Retry
-            </button>
-            <button className="btn" type="button" onClick={onClose}>
+            </Button>
+            <Button onClick={onClose}>
               Cancel
-            </button>
+            </Button>
           </div>
         </>
       ) : null}
@@ -261,9 +260,9 @@ export function ConfirmDialog(props: {
         <>
           <p role="alert">{phase.message}</p>
           <div className="card-actions">
-            <button className="btn" type="button" onClick={onClose}>
+            <Button onClick={onClose}>
               Close
-            </button>
+            </Button>
           </div>
         </>
       ) : null}
