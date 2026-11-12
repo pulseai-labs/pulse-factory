@@ -133,8 +133,9 @@ when the controller stops.
 
 The Mac app is a Tauri 2 shell over the same UI bundle. Its Rust side makes the pinned TLS call and
 keeps the device token in the macOS Keychain (ADR-0012, ADR-0013). GitHub's `macos-latest` runner
-builds it for Apple silicon (`aarch64-apple-darwin`) and signs it ad hoc. The signature has no Apple
-identity, so the app is not notarized (`macos-signing` waits for Release 2). Do these steps on the
+builds it for Apple silicon (`aarch64-apple-darwin`) and signs it ad hoc. On the MacBook you sign it
+again with your own Apple Development identity (step 4), so the Keychain stops asking at each build. It
+is still not notarized (`macos-signing` waits for Release 2). Do these steps on the
 MacBook unless a step says draco-desk.
 
 Before you start, on draco-desk:
@@ -175,11 +176,26 @@ On the MacBook, with `gh` logged in:
    ```bash
    xattr -dr com.apple.quarantine "/Applications/Pulse Factory.app"
    ```
-4. Open `Pulse Factory` from `/Applications`. It shows the pair screen (3a).
-5. On draco-desk, over ssh, make a pairing code: `pulse-factory device pair`. Paste the code into the
+4. Sign the app with your Apple Development identity, from a checkout of this repo on the MacBook:
+
+   ```bash
+   PF_SIGNING_IDENTITY="Apple Development" scripts/sign-mac-app.sh
+   ```
+
+   The ad-hoc signature changes with every build, and macOS keys the Keychain item that holds the
+   device token to it, so an ad-hoc build asks for your login password at each new build. A signature
+   from an Apple-issued identity keys the item to your team ID instead. The script refuses an identity
+   with no team ID, such as a self-signed one. The first launch of the first build signed this way asks
+   once: type the password and press "Always Allow". Later builds open with no prompt. A free Apple
+   Development certificate is enough (Xcode: Settings > Accounts > Manage Certificates), and
+   `security find-identity -v -p codesigning` lists the ones you have. Do this again after every new
+   download. The app stays unnotarized: Developer ID signing and notarization are still the
+   `macos-signing` deferral.
+5. Open `Pulse Factory` from `/Applications`. It shows the pair screen (3a).
+6. On draco-desk, over ssh, make a pairing code: `pulse-factory device pair`. Paste the code into the
    pair screen and give the device a name. The app checks the key's SPKI hash against the code before
    it sends the code, then keeps the token in the login Keychain (service `pulse-factory.device-token`).
-6. On draco-desk, check the pairing: `pulse-factory device list` shows exactly one row for the
+7. On draco-desk, check the pairing: `pulse-factory device list` shows exactly one row for the
    MacBook. Add a project in the app and see it listed.
 
 If the app shows `server key changed: re-pair`, the controller's key is not the one the app pinned.
