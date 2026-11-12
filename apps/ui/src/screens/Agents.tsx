@@ -8,6 +8,7 @@ import { useCommandId } from "../components/command-id";
 import { costLabel } from "../components/cost";
 import { asTransportError, useConnection } from "../state/connection";
 import { stateLabel, useChat } from "../state/chat";
+import { Button, StatePill } from "../ui";
 
 function Defaults(props: { agent: AgentRecord }) {
   const { agent } = props;
@@ -79,19 +80,19 @@ function ProjectRow(props: {
       <span className="project-name">{project.name}</span>
       {session ? (
         <>
-          <span className="chip">{stateLabel(session.state)}</span>
+          <StatePill state={session.state}>{stateLabel(session.state)}</StatePill>
           <span className="mono muted">{branchText(session, projects)}</span>
           <span className="muted">{costLabel(session.usage, session.cache_ttl_seconds)}</span>
-          <button className="btn" type="button" onClick={() => onOpen(session.id)}>
+          <Button onClick={() => onOpen(session.id)}>
             Open
-          </button>
+          </Button>
         </>
       ) : (
         <>
           <span className="muted">No live session</span>
-          <button className="btn btn-primary" type="button" disabled={busy} onClick={() => void start()}>
+          <Button disabled={busy} onClick={() => void start()}>
             Start session
-          </button>
+          </Button>
         </>
       )}
       {error ? (
@@ -166,14 +167,12 @@ export function Agents(props: { onOpen: (session: string) => void }) {
             <ul className="agent-list" aria-label="Agent list">
               {agents.map((a) => (
                 <li key={a.id}>
-                  <button
-                    className="btn"
-                    type="button"
+                  <Button
                     aria-pressed={a.id === agent.id}
                     onClick={() => setSelected(a.id)}
                   >
                     {a.name}
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ul>

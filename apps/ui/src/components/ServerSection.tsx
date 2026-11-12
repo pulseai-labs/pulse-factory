@@ -1,6 +1,7 @@
 // The server's row and "Disconnect this Mac". The server menu (3b) and the Settings page show it.
 import { useState } from "react";
 import { useConnection } from "../state/connection";
+import { Button } from "../ui";
 
 export function ServerSection() {
   const conn = useConnection();
@@ -30,9 +31,9 @@ export function ServerSection() {
           <div className="server-meta">{`${state} · ${ms} · ${conn.server.address}`}</div>
         </div>
       </div>
-      <button className="btn btn-danger" type="button" disabled={busy} onClick={() => void disconnect()}>
+      <Button variant="danger" disabled={busy} onClick={() => void disconnect()}>
         Disconnect this Mac
-      </button>
+      </Button>
       {error ? (
         <p className="problem-title" role="alert">
           {error}

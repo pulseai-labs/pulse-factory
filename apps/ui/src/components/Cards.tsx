@@ -5,6 +5,7 @@ import type { ChatAnswerArg, ChatItemBody, ChatItemRecord, QuestionRecord } from
 import { useState } from "react";
 import { timeText } from "./chat-format";
 import { ToolText } from "./ToolText";
+import { Button, Chip, Input } from "../ui";
 
 /**
  * Sends one answer for the request at `seq`. It resolves to the text to show on the card (a
@@ -92,24 +93,19 @@ export function ApprovalCard(props: {
         <>
           <p className="muted">{`Needs you since ${timeText(request.created_at)}`}</p>
           <div className="card-actions">
-            <button
-              className="btn btn-primary"
-              type="button"
+            <Button
               disabled={answering.busy || answering.sent}
               onClick={() => void answering.answer({ type: "allow" })}
             >
               Allow
-            </button>
-            <button
-              className="btn"
-              type="button"
+            </Button>
+            <Button
               disabled={answering.busy || answering.sent}
               onClick={() => void answering.answer({ type: "deny", value: { message: denial.trim() } })}
             >
               Deny
-            </button>
-            <input
-              className="input"
+            </Button>
+            <Input
               type="text"
               aria-label="Message for a denial"
               placeholder="Optional message for a denial"
@@ -185,7 +181,7 @@ export function QuestionCard(props: {
       {questions.map((q, i) => (
         <fieldset key={q.text} className="question" disabled={outcome !== null || readOnly || answering.busy || answering.sent}>
           <legend>
-            {q.header ? <span className="chip">{q.header}</span> : null}
+            {q.header ? <Chip>{q.header}</Chip> : null}
             <span className="entry-text">{q.text}</span>
           </legend>
           {outcome ? (
@@ -214,8 +210,7 @@ export function QuestionCard(props: {
                   </li>
                 ))}
               </ol>
-              <input
-                className="input"
+              <Input
                 type="text"
                 aria-label="Other answer"
                 placeholder="Or type a different answer"
@@ -232,14 +227,12 @@ export function QuestionCard(props: {
         <>
           <p className="muted">{`Needs you since ${timeText(request.created_at)}`}</p>
           <div className="card-actions">
-            <button
-              className="btn btn-primary"
-              type="button"
+            <Button
               disabled={!complete || answering.busy || answering.sent}
               onClick={submit}
             >
               Answer
-            </button>
+            </Button>
           </div>
           {answering.sent ? <p className="muted">Answer sent. Waiting for the agent.</p> : null}
           {answering.message ? (

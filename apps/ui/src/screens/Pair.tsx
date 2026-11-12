@@ -7,6 +7,7 @@ import {
   type PairedServer,
   type Transport,
 } from "../transport/types";
+import { Button, Eyebrow, Input } from "../ui";
 
 export interface Notice {
   address: string;
@@ -100,7 +101,7 @@ export function Pair(props: {
       <main className="pair-main">
         {paired ? (
           <section className="pair-card" aria-labelledby="pair-done">
-            <p className="eyebrow">Paired</p>
+            <Eyebrow>Paired</Eyebrow>
             <h1 id="pair-done">Connected to {paired.address}</h1>
             <p className="muted">This Mac is paired. You only do this once.</p>
             <dl className="facts">
@@ -109,9 +110,9 @@ export function Pair(props: {
               <dt>This device</dt>
               <dd>{paired.device.name}</dd>
             </dl>
-            <button className="btn btn-primary" type="button" onClick={() => onPaired(paired)}>
+            <Button onClick={() => onPaired(paired)}>
               Open Pulse Factory
-            </button>
+            </Button>
           </section>
         ) : (
           <section className="pair-card" aria-labelledby="pair-title">
@@ -141,9 +142,9 @@ export function Pair(props: {
               <div className="step-label">
                 <span className="step-n">2 ·</span> <label htmlFor="pf-code">Pairing code</label>
               </div>
-              <input
+              <Input
+                mono
                 id="pf-code"
-                className="input mono"
                 type="text"
                 autoComplete="off"
                 autoCapitalize="off"
@@ -157,9 +158,8 @@ export function Pair(props: {
               <div className="step-label">
                 <span className="step-n">3 ·</span> <label htmlFor="pf-name">Device name</label>
               </div>
-              <input
+              <Input
                 id="pf-name"
-                className="input"
                 type="text"
                 autoComplete="off"
                 value={name}
@@ -174,9 +174,9 @@ export function Pair(props: {
                 </div>
               ) : null}
 
-              <button className="btn btn-primary" type="submit" disabled={busy}>
+              <Button variant="primary" size="xl" type="submit" disabled={busy}>
                 {busy ? "Pairing…" : "Pair"}
-              </button>
+              </Button>
             </form>
           </section>
         )}

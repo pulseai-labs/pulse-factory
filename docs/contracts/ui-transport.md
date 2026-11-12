@@ -433,3 +433,11 @@ Tauri's IPC only, so the webview opens no network connection.
   Chromium through `pf-client-bridge`, against the real controller on the paper env. Its journey is
   `apps/ui/e2e/needs-you.spec.ts`; `PF_D23_START=cli` starts the run with the CLI, and the default
   `card` starts it from the start card of `r1.s4.w2`.
+- `scripts/demo/ui-screens.sh` (d25, `r1.s5.w1`): the ten screens of the Mac app in headless Chromium, each
+  compared with a committed screenshot (`apps/ui/e2e/screens.spec.ts-snapshots/`). Its spec is
+  `apps/ui/e2e/screens.spec.ts`, which reads the bridge protocol's routes above from a fixture server of its
+  own (`apps/ui/e2e/screens/server.ts`): a Node http server on `127.0.0.1` that serves the built bundle with
+  the bridge's Content-Security-Policy and answers `GET /bridge/paired`, `POST /bridge/status`,
+  `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
+  fixtures.ts`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
+  real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.

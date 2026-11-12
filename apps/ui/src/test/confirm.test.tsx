@@ -496,7 +496,7 @@ describe("a frame that closes the request while its spend is in flight", () => {
     await user.click(rail().getByRole("button", { name: "Projects" }));
 
     // The act's answer applies to the shared state with no read: the rail's count drops from 2 to 1.
-    const badge = () => rail().getByRole("button", { name: "Needs you" }).querySelector(".rail-badge");
+    const badge = () => rail().getByRole("button", { name: "Needs you" }).querySelector(".ui-count");
     expect(badge()?.textContent).toBe("2");
     await act(async () => release());
     await waitFor(() => expect(badge()?.textContent).toBe("1"));

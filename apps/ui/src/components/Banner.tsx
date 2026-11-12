@@ -3,6 +3,7 @@
 import { KEY_CHANGED_MESSAGE } from "../transport/types";
 import { useConnection } from "../state/connection";
 import { clock } from "./format";
+import { Button } from "../ui";
 
 export function Banner() {
   const conn = useConnection();
@@ -23,9 +24,9 @@ export function Banner() {
             </p>
           </div>
           {reached ? <span className="banner-meta">{`last reached ${reached}`}</span> : null}
-          <button className="btn" type="button" onClick={conn.retryNow}>
+          <Button size="sm" onClick={conn.retryNow}>
             Retry now
-          </button>
+          </Button>
         </div>
       );
     }
@@ -35,9 +36,9 @@ export function Banner() {
           <div className="banner-text">
             <p className="banner-title">{`This device is no longer paired with ${address}.`}</p>
           </div>
-          <button className="btn" type="button" onClick={conn.pairAgain}>
+          <Button size="sm" onClick={conn.pairAgain}>
             Pair again
-          </button>
+          </Button>
         </div>
       );
     case "key_changed":
@@ -46,9 +47,9 @@ export function Banner() {
           <div className="banner-text">
             <p className="banner-title">{KEY_CHANGED_MESSAGE}</p>
           </div>
-          <button className="btn" type="button" onClick={conn.pairAgain}>
+          <Button size="sm" onClick={conn.pairAgain}>
             Pair again
-          </button>
+          </Button>
         </div>
       );
     case "rate_limited":
@@ -57,9 +58,9 @@ export function Banner() {
           <div className="banner-text">
             <p className="banner-title">{link.message}</p>
           </div>
-          <button className="btn" type="button" onClick={conn.retryNow}>
+          <Button size="sm" onClick={conn.retryNow}>
             Retry now
-          </button>
+          </Button>
         </div>
       );
   }

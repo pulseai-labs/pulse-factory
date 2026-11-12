@@ -2,6 +2,7 @@
 // `pf-client` waits to try again, and, after a refusal or a server error, the text and Reconnect.
 // A link failure shows the 3c banner instead (`state/chat.tsx`).
 import { useChat } from "../state/chat";
+import { Button } from "../ui";
 
 export function StreamLine() {
   const { status, reconnect } = useChat();
@@ -16,9 +17,9 @@ export function StreamLine() {
     return (
       <p className="stream-line stream-error" role="alert">
         <span>{status.message}</span>
-        <button className="btn" type="button" onClick={reconnect}>
+        <Button onClick={reconnect}>
           Reconnect
-        </button>
+        </Button>
       </p>
     );
   }

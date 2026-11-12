@@ -114,7 +114,7 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   const stopText = fieldOf(stopId, "stop_text");
   expect(stopText.length).toBeGreaterThan(0);
   await expect(stopCard.getByTestId("stop-text")).toHaveText(stopText);
-  await expect(rail("Needs you").locator(".rail-badge")).toHaveText("1");
+  await expect(rail("Needs you").locator(".ui-count")).toHaveText("1");
 
   // 3. Type the answer, Send answer: the dialog shows the text and that no one holds the claim (this journey
   //    takes no CLI claim, and the card journey's device arm moves none); Send: the card leaves Open requests,

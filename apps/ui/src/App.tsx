@@ -7,6 +7,7 @@ import { ChatProvider } from "./state/chat";
 import { ConnectionProvider } from "./state/connection";
 import { RequestsProvider } from "./state/requests";
 import type { PairedServer, Transport } from "./transport/types";
+import { Button } from "./ui";
 
 type View =
   | { name: "loading" }
@@ -53,16 +54,14 @@ export function App(props: { transport: Transport }) {
               <p className="problem-title" role="alert">
                 {view.message}
               </p>
-              <button
-                className="btn"
-                type="button"
+              <Button
                 onClick={() => {
                   setView({ name: "loading" });
                   setAttempt((n) => n + 1);
                 }}
               >
                 Try again
-              </button>
+              </Button>
             </section>
           </main>
         </div>

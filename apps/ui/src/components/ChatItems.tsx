@@ -4,6 +4,7 @@
 import type { ChatItemRecord, QuestionRecord, ToolTextRecord } from "@pulse-factory/api-client";
 import { durationText, timeText } from "./chat-format";
 import { ApprovalCard, QuestionCard, type AnswerFn } from "./Cards";
+import { Chip } from "../ui";
 import { StartCard } from "./StartCard";
 import { ToolText } from "./ToolText";
 
@@ -20,8 +21,8 @@ function ToolEntry(props: { tool: string; input: ToolTextRecord | null; output: 
     <Entry label="Tool call" kind="tool">
       <div className="tool-head">
         <strong>{props.tool}</strong>
-        {props.running ? <span className="chip">running</span> : null}
-        {props.isError ? <span className="chip chip-err">error</span> : null}
+        {props.running ? <Chip>running</Chip> : null}
+        {props.isError ? <Chip tone="red">error</Chip> : null}
       </div>
       <ToolText label="Input" value={props.input} />
       <ToolText label="Output" value={props.output} />
