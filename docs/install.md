@@ -185,8 +185,11 @@ On the MacBook, with `gh` logged in:
    The ad-hoc signature changes with every build, and macOS keys the Keychain item that holds the
    device token to it, so an ad-hoc build asks for your login password at each new build. A signature
    from an Apple-issued identity keys the item to your team ID instead. The script refuses an identity
-   with no team ID, such as a self-signed one. The first launch of the first build signed this way asks
-   once: type the password and press "Always Allow". Later builds open with no prompt. A free Apple
+   that Apple did not issue, such as a self-signed one, before it changes the app. If the Keychain
+   already holds a token from an ad-hoc build, the first launch of the first build signed this way asks
+   once: type the password and press "Always Allow". A new pairing asks nothing. Later builds open with
+   no prompt. When more than one identity matches the name, pass the full name or the SHA-1 hash that
+   `security find-identity` prints. A free Apple
    Development certificate is enough (Xcode: Settings > Accounts > Manage Certificates), and
    `security find-identity -v -p codesigning` lists the ones you have. Do this again after every new
    download. The app stays unnotarized: Developer ID signing and notarization are still the
