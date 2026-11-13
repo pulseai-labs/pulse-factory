@@ -29,6 +29,10 @@ use tauri::{Manager, State};
 
 type Device = Transport<KeychainStore>;
 
+/// The width of the traffic lights, with the space before and after them: `--titlebar-inset` (11a).
+const TITLEBAR_INSET_SCRIPT: &str =
+    "document.documentElement.style.setProperty('--titlebar-inset', '78px');";
+
 #[tauri::command]
 async fn paired(device: State<'_, Device>) -> Result<Option<PairedServer>, ClientError> {
     device.paired().await
@@ -162,8 +166,16 @@ fn main() {
         // A page that starts to load is a reload: the old page's channels are gone, so no stream
         // stays open behind a channel that nobody reads.
         .on_page_load(|webview, payload| {
-            if payload.event() == tauri::webview::PageLoadEvent::Started {
-                webview.state::<Streams>().close_all();
+            match payload.event() {
+                tauri::webview::PageLoadEvent::Started => {
+                    webview.state::<Streams>().close_all();
+                }
+                // The window's title bar is an overlay (`titleBarStyle: "Overlay"`): the page runs under
+                // the traffic lights. The title bar's left padding reads `--titlebar-inset`, so the page
+                // makes room for them here, in the desktop app only. The browser bundle never sets it.
+                tauri::webview::PageLoadEvent::Finished => {
+                    let _ = webview.eval(TITLEBAR_INSET_SCRIPT);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
