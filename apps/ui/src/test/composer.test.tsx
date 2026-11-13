@@ -175,9 +175,9 @@ describe("a change applies to that chat only (P2, P3)", () => {
 
     // The agent's default is untouched.
     await user.click(within(screen.getByRole("navigation")).getByRole("button", { name: "Agents" }));
-    const defaults = await within(screen.getByRole("main")).findByRole("list", { name: "Defaults" });
-    expect(within(defaults).getByText("high")).toBeTruthy();
-    expect(within(defaults).queryByText("medium")).toBeNull();
+    const effort = await within(screen.getByRole("main")).findByRole("group", { name: "Reasoning effort" });
+    expect(within(effort).getByText("High")).toBeTruthy();
+    expect(within(effort).queryByText("Medium")).toBeNull();
     expect(fake.agents[0]?.effort).toBe("high");
   });
 

@@ -601,7 +601,7 @@ describe("the chat header (11a)", () => {
   it("the gear opens the Agents page", async () => {
     const user = await bootChat(seeded());
     await user.click(main().getByRole("button", { name: "Agent settings" }));
-    expect(await main().findByRole("heading", { name: "Agents", level: 2 })).toBeTruthy();
+    expect(await main().findByRole("region", { name: "Agent" })).toBeTruthy();
   });
 });
 

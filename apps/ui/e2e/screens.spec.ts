@@ -13,7 +13,8 @@
 // rendering check). The journey lines d12, d19 and d23 keep the real controller, API and bridge.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { CONTRACT, openUnderContract, settle, type Recorder } from "./screens/contract";
-import type { SessionList } from "@pulse-factory/api-client";
+import type { RequestList, SessionList } from "@pulse-factory/api-client";
+import { PARKED } from "./screens/fixtures/needs-you";
 import { clearOverlay, overlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
 
 test.use({
@@ -169,18 +170,35 @@ test.describe("chat", () => {
 
 test.describe("needs-you", () => {
   test("3f-needs-you: Needs you", async ({ page }) => {
+    // The parked item is this test's alone: one more open request would change the rail's count on every other
+    // screen. It comes through the overlay (its `show` answer is in `fixtures/needs-you.ts`).
+    overlay({
+      requests: (base: unknown) => {
+        const list = base as RequestList;
+        return { ...list, open: list.open + 1, requests: [...list.requests, PARKED] };
+      },
+    });
+    // The page is a column of five cards and the answered rows: a taller window shows all of them in one
+    // screenshot. Only the height changes; the width and the pixel ratio stay as the contract fixes them.
+    await page.setViewportSize({ width: CONTRACT.viewport.width, height: 1720 });
     await open(page);
     await rail(page, "Needs you").click();
     await expect(page.getByRole("heading", { name: "Needs you", level: 2 })).toBeVisible();
-    await expect(page.getByLabel("Run r0-s19-1")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Confirm merge" })).toBeVisible();
-    await compare(page, "3f-needs-you.png", page.getByRole("button", { name: "Send answer" }));
+    const main = page.getByRole("main");
+    // The merge card, the run question, the parked item and the chat question, then the answered rows.
+    await expect(main.getByTestId("merge-sha")).toBeVisible();
+    await expect(main.getByTestId("stop-text")).toBeVisible();
+    await expect(main.getByRole("button", { name: "Resume w3" })).toBeVisible();
+    await expect(main.getByRole("button", { name: "Open session" })).toBeVisible();
+    await expect(main.getByRole("list", { name: "Answered today" }).getByText("CLI · claim session C-2").first()).toBeVisible();
+    await compare(page, "3f-needs-you.png", main.getByRole("button", { name: "Approve merge" }));
   });
 
   test("dock-needs-you: the dock, open on Projects", async ({ page }) => {
     await open(page, "paired", { dock: true });
     const dock = page.getByRole("complementary", { name: "Needs you" });
     await expect(dock.getByRole("button", { name: "Open" }).first()).toBeVisible();
+    await expect(dock.getByTestId("merge-sha")).toBeVisible();
     await compare(page, "dock-needs-you.png", dock.getByText("all projects"), dock);
   });
 });
@@ -189,17 +207,21 @@ test.describe("agents", () => {
   test("6a-agents: Agents", async ({ page }) => {
     await open(page);
     await rail(page, "Agents").click();
-    await expect(page.getByRole("heading", { name: "Agents", level: 2 })).toBeVisible();
-    await expect(page.getByRole("list", { name: "Sessions by project" }).getByText("Needs you")).toBeVisible();
-    await compare(page, "6a-agents.png", page.getByRole("list", { name: "Sessions by project" }).getByText("Working"));
+    await expect(page.getByRole("heading", { name: "Orchestrator", level: 2 })).toBeVisible();
+    const sessions = page.getByRole("list", { name: "Sessions by project" });
+    await expect(sessions.getByText("Waiting for your answer")).toBeVisible();
+    await compare(page, "6a-agents.png", sessions.getByText("Working"));
   });
 });
 
 test.describe("settings", () => {
   test("settings: Settings", async ({ page }) => {
+    // The page holds the server block and three policy blocks: a taller window shows all of them.
+    await page.setViewportSize({ width: CONTRACT.viewport.width, height: 1480 });
     await open(page);
     await rail(page, "Settings").click();
     await expect(page.getByText("chat.self_turn_cap")).toBeVisible();
+    await expect(page.getByRole("region", { name: "Chat policies" })).toBeVisible();
     await compare(page, "settings.png", page.getByText("Server version"));
   });
 });

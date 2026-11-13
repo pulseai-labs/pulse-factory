@@ -1,23 +1,31 @@
-// The Needs you page (3f, functional; the look is r1.s5's): every open request across the runs with the
-// spine merge approval on top, the current claim, the runs with their state, and the requests answered
-// in the last day. The operator answers a stop-rule or gap question with a typed answer, or confirms the
-// spine merge, each in two clicks through the confirm dialog.
+// The Needs you page (11d, r1.s5.w4): one centred column of cards, the spine merge first and then the
+// questions, and "Answered today" under them. Each act is one press (Approve merge, Send, Resume): behind
+// the press the app asks for a fresh confirm code and spends it at once (`needs-you/useConfirmedAct.ts`),
+// so the `client-api-auth` control stays and the confirm panel is gone (G1). The line that named the claim and
+// the list of runs left the page: the claim shows only in Answered today, and the runs are in the sidebar.
 //
-// When this page calls (docs/contracts/ui-transport.md, W9): when it opens, `requests {all: true}`,
-// `runList` and one `show` for each open request that takes `answer`; when the link comes back, the same
-// once; on Refresh, `requests` and `runList`; after an `ack`, `runList` once. While it is on screen, a
-// request frame that brings an open request that takes `answer` at a revision it holds no body for
-// costs one `show`. Nothing else: no timer, no interval, no focus handler, and no stream of its own:
-// the frames come from the one stream the app holds (W1).
-import type { RequestActed, RequestSummary } from "@pulse-factory/api-client";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ConfirmDialog, type DialogKind } from "../components/ConfirmDialog";
+// When this page calls (docs/contracts/ui-transport.md, W9): when it opens, `requests {all: true}`, `runList`
+// (for the cards' spine names only), one `show` for each open request of every kind and one `show` for each
+// answered row it holds no detail for; when the link comes back, the same once; on Refresh, the same; a press
+// makes exactly two calls (`confirmCode` and the act); Hold and Show make none. While it is on screen, a
+// request frame for an open request at a revision it holds no body for costs one `show`. Nothing else: no
+// timer, no interval, no focus handler, and no stream of its own: the frames come from the one stream the
+// app holds (W1).
+//
+// `NeedsYouDock` is the same cards in the dock's 328 px width. `shell/DockRequests.tsx` renders it.
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clock } from "../components/format";
+import { AnsweredRow } from "../needs-you/AnsweredRow";
+import { OpenList, chatQuestions } from "../needs-you/OpenList";
+import { useNeedsYou } from "../needs-you/useNeedsYou";
+import { useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
-import { answeredRecently, bodyKey, useRequests } from "../state/requests";
-import { Button, Chip } from "../ui";
+import { useRequests } from "../state/requests";
+import { Column } from "../shell/Column";
+import { Button, IconButton } from "../ui";
+import "../styles/needs-you.css";
 
-/** The last read of one thing: when it worked, and the line of its failure. */
+/** The last read of `requests`: when it worked, and the line of its failure. */
 interface ReadState {
   at: number | null;
   error: string | null;
@@ -25,181 +33,13 @@ interface ReadState {
 
 const NEVER: ReadState = { at: null, error: null };
 
-interface Gap {
-  section: string;
-  question: string;
-  severity: string;
-}
-
-/** The question of a `stop` or `gaps` request, from its body: the text is data and renders as text only. */
-function questionOf(body: unknown): { stop: string | null; gaps: Gap[] } {
-  if (typeof body !== "object" || body === null) return { stop: null, gaps: [] };
-  const b = body as Record<string, unknown>;
-  const stop = typeof b.stop_text === "string" ? b.stop_text : null;
-  const gaps: Gap[] = [];
-  if (Array.isArray(b.gaps)) {
-    for (const g of b.gaps) {
-      if (typeof g !== "object" || g === null) continue;
-      const r = g as Record<string, unknown>;
-      gaps.push({
-        section: typeof r.section === "string" ? r.section : "",
-        question: typeof r.question === "string" ? r.question : "",
-        severity: typeof r.severity === "string" ? r.severity : "",
-      });
-    }
-  }
-  return { stop, gaps };
-}
-
-function ReadError(props: { read: ReadState; onRefresh(): void }) {
-  const { read } = props;
-  if (read.error === null) return null;
-  return (
-    <>
-      <p className="page-error" role="alert">
-        <span>{read.error}</span>
-        <Button onClick={props.onRefresh}>
-          Refresh
-        </Button>
-      </p>
-      {read.at !== null ? <p className="muted">{`Last read at ${clock(read.at)}`}</p> : null}
-    </>
-  );
-}
-
-interface Frozen {
-  kind: DialogKind;
-  request: RequestSummary;
-  text: string;
-}
-
-function RequestCard(props: {
-  request: RequestSummary;
-  body: unknown;
-  bodyError: string | null;
-  /** The page's one dialog is open for this request: its answer text is locked. */
-  locked: boolean;
-  /** Any dialog is open: no other act starts. */
-  busy: boolean;
-  onRefresh(): void;
-  onOpenDialog(frozen: Frozen): void;
-}) {
-  const { request } = props;
-  const [text, setText] = useState("");
-  const takesAnswer = request.verbs.includes("answer");
-  const takesAck = request.verbs.includes("ack");
-  const { stop, gaps } = questionOf(props.body);
-
-  return (
-    <article className="entry-card" aria-label={`Request ${request.id}`}>
-      <dl className="facts">
-        <dt>Kind</dt>
-        <dd>{request.kind}</dd>
-        <dt>Run</dt>
-        <dd>{request.run}</dd>
-        <dt>Unit</dt>
-        <dd>{request.unit ?? "none"}</dd>
-        <dt>Stage</dt>
-        <dd>{request.stage}</dd>
-        <dt>Reason</dt>
-        <dd>{request.reason}</dd>
-        <dt>Opened</dt>
-        <dd className="mono">{request.opened_at}</dd>
-        {request.kind === "merge_ack" ? (
-          <>
-            <dt>PR</dt>
-            <dd className="mono">{request.pr ?? ""}</dd>
-            <dt>Base</dt>
-            <dd className="mono">{request.base ?? ""}</dd>
-            <dt>Head SHA</dt>
-            <dd className="mono">{request.head_sha ?? ""}</dd>
-          </>
-        ) : null}
-      </dl>
-      {takesAnswer ? (
-        <>
-          {stop !== null ? (
-            <p className="question" data-testid="stop-text">
-              {stop}
-            </p>
-          ) : null}
-          {gaps.length > 0 ? (
-            <ul className="question-options" aria-label={`Gaps of ${request.id}`}>
-              {gaps.map((g, i) => (
-                <li key={i}>
-                  <span>{g.section}</span> <span>{g.question}</span> <Chip>{g.severity}</Chip>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {props.bodyError !== null ? (
-            <p className="page-error" role="alert">
-              <span>{props.bodyError}</span>
-              <Button onClick={props.onRefresh}>
-                Refresh
-              </Button>
-            </p>
-          ) : null}
-          <label className="composer-label">
-            Your answer
-            <textarea
-              className="field-area"
-              value={text}
-              readOnly={props.locked}
-              rows={3}
-              onChange={(e) => setText(e.target.value)}
-            />
-          </label>
-          <div className="card-actions">
-            <Button
-              disabled={text.trim() === "" || props.busy}
-              onClick={() => props.onOpenDialog({ kind: "answer", request, text })}
-            >
-              Send answer
-            </Button>
-          </div>
-        </>
-      ) : null}
-      {takesAck ? (
-        <div className="card-actions">
-          <Button
-            variant="primary"
-            size="lg"
-            disabled={props.busy}
-            onClick={() => props.onOpenDialog({ kind: "merge", request, text: "" })}
-          >
-            Confirm merge
-          </Button>
-        </div>
-      ) : null}
-    </article>
-  );
-}
-
-function runState(run: { state: string; halted_reason: string | null; end_reason: string | null; waiting: string | null }): string {
-  if (run.state === "ended") return `Done: ${run.end_reason ?? ""}`;
-  if (run.halted_reason !== null) return `Halted: ${run.halted_reason}`;
-  // The run's own text, from its workflow: the app never spells it (C12).
-  if (run.waiting !== null) return `Waiting on you: ${run.waiting}`;
-  return "Running";
-}
-
 export function NeedsYou() {
-  const { call, epoch, link } = useConnection();
-  const { state, open, apply } = useRequests();
-  const [requestsRead, setRequestsRead] = useState<ReadState>(NEVER);
-  const [runsRead, setRunsRead] = useState<ReadState>(NEVER);
-  const [bodyErrors, setBodyErrors] = useState<Record<string, string>>({});
-  // What this page's own acts did, by request ID: the outcome, or that it was done before.
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  // A bump asks the body effect to try again after a Refresh.
-  const [bodyTick, setBodyTick] = useState(0);
-  // The one dialog of the page. It lives here, not in a card: a request frame can close the request while
-  // its spend is in flight (the controller pushes the frame once the act is admitted, before an ack's
-  // merge answers), and the card then leaves Open requests. The dialog stays until its answer arrives.
-  const [dialog, setDialog] = useState<Frozen | null>(null);
-  const closeDialog = useCallback(() => setDialog(null), []);
-  const requested = useRef(new Set<string>());
+  const { call, epoch, link, server, projects } = useConnection();
+  const { apply } = useRequests();
+  const chat = useChat();
+  const ny = useNeedsYou();
+  const { retry } = ny.bodies;
+  const [read, setRead] = useState<ReadState>(NEVER);
   const live = useRef(true);
 
   useEffect(() => {
@@ -212,55 +52,27 @@ export function NeedsYou() {
   const readRequests = useCallback(async () => {
     try {
       const list = await call((t) => t.requests({ all: true }));
-      if (!live.current) return null;
+      if (!live.current) return;
       apply({ type: "read", list });
-      setRequestsRead({ at: Date.now(), error: null });
-      return list;
+      setRead({ at: Date.now(), error: null });
     } catch (e) {
       const err = asTransportError(e);
       // A disconnect shows the 3c banner. Any other failure is one error line for the sections it feeds.
-      if (live.current && !isDownKind(err.kind)) setRequestsRead((r) => ({ at: r.at, error: err.message }));
-      return null;
+      if (live.current && !isDownKind(err.kind)) setRead((r) => ({ at: r.at, error: err.message }));
     }
   }, [call, apply]);
 
+  // The run list feeds the cards' spine names only. A failed read leaves the names as run IDs.
   const readRuns = useCallback(async () => {
     try {
       const runs = await call((t) => t.runList());
-      if (!live.current) return;
-      apply({ type: "runs", runs });
-      setRunsRead({ at: Date.now(), error: null });
-    } catch (e) {
-      const err = asTransportError(e);
-      if (live.current && !isDownKind(err.kind)) setRunsRead((r) => ({ at: r.at, error: err.message }));
+      if (live.current) apply({ type: "runs", runs });
+    } catch {
+      // The names fall back to the run IDs; the 3c banner shows a disconnect.
     }
   }, [call, apply]);
 
-  const loadBody = useCallback(
-    async (request: RequestSummary) => {
-      const key = bodyKey(request.id, request.revision);
-      if (requested.current.has(key)) return;
-      requested.current.add(key);
-      try {
-        const detail = await call((t) => t.show({ id: request.id }));
-        if (!live.current) return;
-        apply({ type: "body", detail });
-        setBodyErrors((m) => {
-          if (!(request.id in m)) return m;
-          const rest = { ...m };
-          delete rest[request.id];
-          return rest;
-        });
-      } catch (e) {
-        requested.current.delete(key);
-        const err = asTransportError(e);
-        if (live.current && !isDownKind(err.kind)) setBodyErrors((m) => ({ ...m, [request.id]: err.message }));
-      }
-    },
-    [call, apply],
-  );
-
-  // On opening the page: the requests, the runs, and (below) a body for each open request that takes `answer`.
+  // On opening the page: the requests and the runs, and (in `useNeedsYou`) a body for each card.
   useEffect(() => {
     void readRequests();
     void readRuns();
@@ -276,168 +88,93 @@ export function NeedsYou() {
     lastEpoch.current = epoch;
     void readRequests();
     void readRuns();
-  }, [epoch, link.state, readRequests, readRuns]);
-
-  // A body for each open request that takes `answer`, at the revision it has now: at open, and when a
-  // frame brings a new one. A failed `show` is tried again on Refresh.
-  useEffect(() => {
-    for (const r of open) {
-      if (r.verbs.includes("answer") && !state.bodies[bodyKey(r.id, r.revision)]) void loadBody(r);
-    }
-  }, [open, state.bodies, loadBody, bodyTick]);
+    retry();
+  }, [epoch, link.state, readRequests, readRuns, retry]);
 
   const refresh = useCallback(() => {
-    for (const key of [...requested.current]) {
-      if (!state.bodies[key]) requested.current.delete(key);
-    }
-    setBodyErrors({});
-    setBodyTick((n) => n + 1);
+    retry();
     void readRequests();
     void readRuns();
-  }, [readRequests, readRuns, state.bodies]);
+  }, [retry, readRequests, readRuns]);
 
-  const note = useCallback((id: string, text: string) => setNotes((n) => ({ ...n, [id]: text })), []);
-
-  const onActed = useCallback(
-    (request: RequestSummary, acted: RequestActed) => {
-      apply({ type: "acted", acted });
-      if (acted.verb === "ack") {
-        note(
-          request.id,
-          acted.merged === true
-            ? `Merged at ${acted.head_sha ?? ""}${acted.outcome ? ` (${acted.outcome})` : ""}`
-            : `Not merged: ${acted.outcome ?? "the merge did not land"}`,
-        );
-        void readRuns();
-      } else {
-        note(request.id, `Answered under claim ${acted.generation ?? ""}`);
-      }
-    },
-    [apply, note, readRuns],
-  );
-
-  // A replay acts on nothing and says nothing of its outcome: read the request as the server has it.
-  const onReplayed = useCallback(
-    (request: RequestSummary, acted: RequestActed) => {
-      void (async () => {
-        const list = await readRequests();
-        const row = list?.requests.find((r) => r.id === request.id);
-        if (row && row.status !== "open") note(request.id, `Done before: ${row.status} at ${row.answered_at ?? ""}`);
-        if (acted.verb === "ack") await readRuns();
-      })();
-    },
-    [readRequests, readRuns, note],
-  );
-
-  const onSubjectMoved = useCallback(() => {
-    void readRequests();
-  }, [readRequests]);
-
-  const answered = answeredRecently(state, Date.now());
-  const claim = state.claim;
-  const runs = state.runs?.runs ?? [];
+  const chats = useMemo(() => chatQuestions(chat.live), [chat.live]);
+  const empty = ny.open.length === 0 && chats.length === 0;
 
   return (
-    <section className="page" aria-labelledby="needs-you-title">
-      <div className="page-head">
-        <h2 id="needs-you-title">Needs you</h2>
-        <span className="muted">{`${open.length} open`}</span>
-        <Button onClick={refresh}>
-          Refresh
-        </Button>
-      </div>
-      <dl className="facts">
-        <dt>The claim</dt>
-        <dd>
-          {claim === null
-            ? "No claim"
-            : `${claim.holder}, generation ${claim.generation}${claim.revoked ? ", revoked" : ""}`}
-        </dd>
-      </dl>
+    <Column max={820}>
+      <section className="ny-page" aria-labelledby="needs-you-title">
+        <div className="ny-title-row">
+          <div className="ny-title-block">
+            <h2 id="needs-you-title" className="ny-title">
+              Needs you
+            </h2>
+            <p className="ny-subtitle">
+              Every open question across your projects. Answer here, in the session, on your phone or from the CLI.
+            </p>
+          </div>
+          <IconButton icon="refresh" title="Refresh" onClick={refresh} />
+        </div>
 
-      <section className="settings-block" aria-labelledby="ny-open">
-        <h3 id="ny-open">Open requests</h3>
-        <ReadError read={requestsRead} onRefresh={refresh} />
-        {open.length === 0 ? (
-          <p className="empty">{state.loaded ? "Nothing needs you." : "Reading the requests."}</p>
-        ) : (
-          <ul className="project-list" aria-label="Open requests">
-            {open.map((r) => {
-              const detail = state.bodies[bodyKey(r.id, r.revision)];
-              return (
-                <li key={r.id}>
-                  <RequestCard
-                    request={r}
-                    body={detail?.body}
-                    bodyError={bodyErrors[r.id] ?? null}
-                    locked={dialog?.request.id === r.id}
-                    busy={dialog !== null}
-                    onRefresh={refresh}
-                    onOpenDialog={setDialog}
-                  />
-                  {notes[r.id] ? <p className="card-outcome">{notes[r.id]}</p> : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
+        <section className="ny-block" aria-labelledby="ny-open">
+          <div className="ny-block-head">
+            <h3 id="ny-open">Open</h3>
+            <span className="ny-count" data-testid="open-count">
+              {ny.open.length}
+            </span>
+          </div>
+          {read.error !== null ? (
+            <>
+              <p className="ny-read-error" role="alert">
+                <span>{read.error}</span>
+                <Button size="sm" onClick={refresh}>
+                  Refresh
+                </Button>
+              </p>
+              {read.at !== null ? <p className="ny-quiet">{`Last read at ${clock(read.at)}`}</p> : null}
+            </>
+          ) : null}
+          {empty ? (
+            <p className="ny-empty">{ny.state.loaded ? "Nothing needs you." : "Reading the requests."}</p>
+          ) : (
+            <OpenList ny={ny} compact={false} chats={{ sessions: chats, list: chat.list, projects }} />
+          )}
+        </section>
 
-      <section className="settings-block" aria-labelledby="ny-runs">
-        <h3 id="ny-runs">Runs</h3>
-        <ReadError read={runsRead} onRefresh={refresh} />
-        {runs.length === 0 ? (
-          <p className="empty">{state.runs === null ? "Reading the runs." : "No runs."}</p>
-        ) : (
-          <ul className="project-list" aria-label="Runs">
-            {runs.map((run) => (
-              <li key={run.id}>
-                <article className="entry-card" aria-label={`Run ${run.id}`}>
-                  <dl className="facts">
-                    <dt>Spine</dt>
-                    <dd>{run.spine}</dd>
-                    <dt>State</dt>
-                    <dd>{runState(run)}</dd>
-                  </dl>
-                </article>
-              </li>
-            ))}
-          </ul>
-        )}
+        <section className="ny-block" aria-labelledby="ny-answered">
+          <div className="ny-block-head">
+            <h3 id="ny-answered">Answered today</h3>
+            <span className="ny-count" data-testid="answered-count">
+              {ny.answered.length}
+            </span>
+          </div>
+          {ny.answered.length === 0 ? (
+            <p className="ny-empty">Nothing answered in the last day.</p>
+          ) : (
+            <ul className="ny-answered" aria-label="Answered today">
+              {ny.answered.map((r) => (
+                <AnsweredRow
+                  key={r.id}
+                  request={r}
+                  body={ny.bodyFor(r.id)}
+                  detail={ny.bodies.detailOf(r)}
+                  done={ny.acts.done[r.id]}
+                  notice={ny.acts.notices[r.id]}
+                  spine={ny.spineOf(r.run)}
+                  claim={ny.state.claim}
+                  device={server.device}
+                />
+              ))}
+            </ul>
+          )}
+        </section>
       </section>
-
-      <section className="settings-block" aria-labelledby="ny-answered">
-        <h3 id="ny-answered">Answered</h3>
-        {answered.length === 0 ? (
-          <p className="empty">Nothing answered in the last day.</p>
-        ) : (
-          <ul className="project-list" aria-label="Answered">
-            {answered.map((r) => (
-              <li key={r.id}>
-                <span>{r.kind}</span> <strong>{r.id}</strong> <span>{r.run}</span> <span>{r.status}</span>{" "}
-                <span className="mono">{r.answered_at ?? ""}</span>
-                {notes[r.id] ? (
-                  <>
-                    {" "}
-                    <span className="card-outcome">{notes[r.id]}</span>
-                  </>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      {dialog ? (
-        <ConfirmDialog
-          kind={dialog.kind}
-          request={dialog.request}
-          text={dialog.text}
-          onActed={(acted) => onActed(dialog.request, acted)}
-          onReplayed={(acted) => onReplayed(dialog.request, acted)}
-          onSubjectMoved={onSubjectMoved}
-          onClose={closeDialog}
-        />
-      ) : null}
-    </section>
+    </Column>
   );
+}
+
+/** The open cards in the dock's 328 px width: the same hooks and Hold, no reads of its own. */
+export function NeedsYouDock() {
+  const ny = useNeedsYou();
+  if (ny.open.length === 0) return <p className="dock-empty">Nothing needs you.</p>;
+  return <OpenList ny={ny} compact />;
 }
