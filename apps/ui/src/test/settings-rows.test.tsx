@@ -168,6 +168,33 @@ describe("the Chat policies section", () => {
     expect(within(chain("chat.propose_per_min")).getAllByText("inherits")).toHaveLength(2);
   });
 
+  it("reads and writes nothing at a level that has no project or agent to name, and says why", async () => {
+    const fake = new FakeTransport({ projects: [] });
+    const user = await open(fake);
+    expect(fake.settingsGetArgs).toEqual([{}]);
+
+    await user.click(level("A project"));
+    expect(level("A project").getAttribute("aria-pressed")).toBe("true");
+    expect(section().getByText("No projects yet.")).toBeTruthy();
+    // The server's blocks are not shown under the project pill, so no edit can reach the server layer from it.
+    expect(section().queryByRole("group", { name: /^Setting / })).toBeNull();
+    expect(section().queryByText("the whole server")).toBeNull();
+
+    await user.click(level("An agent in a project"));
+    expect(section().getByText("No agents yet.")).toBeTruthy();
+    expect(section().queryByRole("group", { name: /^Setting / })).toBeNull();
+    expect(section().queryByRole("button", { name: "Remove this override" })).toBeNull();
+
+    expect(fake.settingsGetArgs).toEqual([{}]);
+    expect(fake.count("settingsSet")).toBe(0);
+    expect(fake.count("settingsUnset")).toBe(0);
+
+    // The server pill brings the server's blocks back, with a read.
+    await user.click(level("The whole server"));
+    await screen.findByRole("group", { name: "Setting chat.self_turn_cap" });
+    expect(fake.settingsGetArgs).toEqual([{}, {}]);
+  });
+
   it("shows no block of an earlier scope as the new scope's while the new read is out", async () => {
     const fake = seeded();
     fake.settingLayers["chat.self_turn_cap"] = [{ scope: ALPHA, value: 2, set_by: "D-1", set_at: AT }];

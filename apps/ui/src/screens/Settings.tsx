@@ -329,6 +329,12 @@ function Pill(props: { on: boolean; onClick(): void; children: string; avatar?: 
   );
 }
 
+/** What the page says while the chosen level has no target to name: not read yet, none, or one to pick. */
+function waiting(count: number | null, noun: "project" | "agent"): string {
+  if (count === null) return `Reading the ${noun}s.`;
+  return count === 0 ? `No ${noun}s yet.` : `Choose ${noun === "agent" ? "an" : "a"} ${noun}.`;
+}
+
 function ChatPolicies() {
   const { call, epoch, projects } = useConnection();
   const { list, ensureList } = useChat();
@@ -349,8 +355,17 @@ function ChatPolicies() {
     };
   }, []);
 
+  // A level needs its target: "A project" a project, "An agent in a project" an agent. Without one, the
+  // context is a wider scope than the pill the operator pressed, so nothing is read or written.
+  const ready = level === "server" || (level === "project" && ctx.project !== null) || (level === "agent" && ctx.agent !== null);
+
   const load = useCallback(async () => {
     const n = (seq.current += 1);
+    if (!ready) {
+      setRows(null);
+      setError(null);
+      return;
+    }
     try {
       const view = await call((t) => t.settingsGet(contextArgs(ctx)));
       if (!live.current || n !== seq.current) return;
@@ -362,7 +377,7 @@ function ChatPolicies() {
       // A disconnect shows the 3c banner; any other failure is one error line.
       if (!isDownKind(err.kind)) setError(err.message);
     }
-  }, [call, ctx]);
+  }, [call, ctx, ready]);
 
   // On opening the page, on a scope change (the context changes `load`), and once when the link comes
   // back. Never on a timer.
@@ -376,6 +391,10 @@ function ChatPolicies() {
   }, [ensureList]);
 
   const agents = list?.agents ?? [];
+  // "A project" starts on the first project once the list is there.
+  useEffect(() => {
+    if (level === "project" && ctx.project === null && projects !== null && projects.length > 0) setCtx((c) => ({ ...c, project: projects[0]?.id ?? null }));
+  }, [level, ctx.project, projects]);
   // "An agent in a project" starts on the first agent once the list is there.
   useEffect(() => {
     if (level === "agent" && ctx.agent === null && agents.length > 0) setCtx((c) => ({ ...c, agent: agents[0]?.id ?? null }));
@@ -461,10 +480,12 @@ function ChatPolicies() {
             ))}
           </div>
         ) : null}
-        <p className="st-applies-to">
-          <Icon name="sliders" size={14} />
-          Changes below apply to <b>{scopeLabel}</b>
-        </p>
+        {ready ? (
+          <p className="st-applies-to">
+            <Icon name="sliders" size={14} />
+            Changes below apply to <b>{scopeLabel}</b>
+          </p>
+        ) : null}
       </div>
       {error !== null ? (
         <p className="page-error" role="alert">
@@ -472,7 +493,9 @@ function ChatPolicies() {
           <Button onClick={() => void load()}>Retry now</Button>
         </p>
       ) : null}
-      {rows === null ? (
+      {!ready ? (
+        <p className="st-empty">{level === "project" ? waiting(projects === null ? null : projects.length, "project") : waiting(list === null ? null : agents.length, "agent")}</p>
+      ) : rows === null ? (
         error === null ? (
           <p className="st-empty">Reading the settings.</p>
         ) : null
