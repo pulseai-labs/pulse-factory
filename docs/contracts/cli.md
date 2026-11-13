@@ -397,9 +397,9 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
 ## `project`
 
 ```
-pulse-factory project add <root> [--name <name>] [--command-id <id>] [--json]
+pulse-factory project add <root> [--name <name>] [--git-init] [--command-id <id>] [--json]
 pulse-factory project list [--json]
-pulse-factory project remove <id> [--command-id <id>] [--json]
+pulse-factory project remove <id> [--end-sessions] [--command-id <id>] [--json]
 ```
 
 A project is an ID, a name, one root, a kind and a remote key (ADR-0015). The verbs launch nothing
@@ -413,7 +413,8 @@ command ID and one line of the controller ledger (see Common rules).
   project holds its root alone: a second `add` of the same root is refused until the first is
   removed.
 - **The kind.** `add` looks inside the root once and stores its kind. The kind never changes. After
-  a `git init` in a `folder` project, remove the project and add it again.
+  a `git init` in a `folder` project, remove the project and add it again, or add the folder with
+  `--git-init`.
   - `git`: the root is the main worktree of a git repository.
   - `folder`: the root is a plain folder, or a subdirectory of a repository. Its git operations
     would reach outside it, so it is a folder.
@@ -463,19 +464,32 @@ command ID and one line of the controller ledger (see Common rules).
   exits 1 and names the command ID. A refused command is stored too: its replay is the same
   refusal.
 - **`add`** prints `project P-1 added: <name> (<root>)`.
+- **`--git-init`** (`r1.s5.w5`) runs `git init` in the root before the project is added. The root must be a
+  folder under the server's home folder (the controller's `$HOME`) that is not a repository and is not inside
+  one. Each is refused with its cause before any change on disk, and so is a name or a root that a live
+  project holds. The project's kind is `git` from its first row. The ledger line gains `git_init=true`.
+  A replay of the command ID runs no second `git init`.
 - **`list`** prints one line per live project in creation order, `P-1  <name>  <root>`, or
   `no projects`. A project with no kind ends its line with `  (no kind: <cause>)`. It needs no claim
   and is open to a seat.
 - **`remove`** prints `project P-1 removed: <name> (<root>)`. It is refused while the project has a
   live chat session (`project P-1 has a live chat session S-2; end it first`). It marks the project's
   live worktree rows removed in the same command.
+- **`--end-sessions`** (`r1.s5.w5`) ends the project's live chat sessions first, in session order, each
+  through the code of `session end` with the command ID `<command-id>:end:<S-n>`, then removes the
+  project. The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
+  its derived IDs is refused before any end.
+- **The run refusal** (`r1.s5.w5`), for `remove` with or without `--end-sessions`: a project with an active
+  run is not removed, and no session is ended (`project P-1 has an active run <run>; remove it after the
+  run ends`, naming every such run).
 - **JSON.** `add` and `remove` print `{"schema_version": 1, "replayed": <bool>, "project": {"id",
   "name", "root", "created_at", "removed_at", "kind", "remote_key", "kind_error"}}`, where
   `removed_at` is null for a live project, `kind` is `"git"` or `"folder"`, `remote_key` is a string
   or null, and `kind_error` is always null in the answer of `add` and `remove`. `kind` is null only
   for a project that the backfill could not detect. `list` gives such a project's cause from a fresh
   detection in `kind_error`, and `kind_error` is null in `list` for any other project. A new field
-  does not raise `schema_version`.
+  does not raise `schema_version`. `remove --end-sessions` adds `"ended": ["S-2", …]` (the sessions it
+  ended) to the answer.
   `list` prints `{"schema_version": 1, "projects": [...]}` with the live projects only, in creation
   order. The controller verbs are `project_add`, `project_list` and `project_remove`.
 - **Refusals** (exit 1, nothing on stdout, the reason on stderr, one admission and one ledger

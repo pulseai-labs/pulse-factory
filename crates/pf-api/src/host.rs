@@ -40,6 +40,9 @@ pub const ALLOWLIST: &[&str] = &[
     // `r1.s4.w3`: every run the controller holds, for the Needs you page. A read: no admission, no
     // run units or costs.
     "run_list",
+    // `r1.s5.w5`: the folders inside the server's home folder, for the app's Add a project picker. A
+    // read, confined to the home folder (ADR-0012, `docs/contracts/api.md`).
+    "folder_list",
 ];
 
 /// The words a device verb gives for a refusal, a closed list (`r1.s4.w1`, R7). The controller puts one

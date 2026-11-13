@@ -1,6 +1,6 @@
 //! AC-3 of `r1.s4.w3`: `run_list` on the router over a fake host, with no TLS. It is one allowlist
 //! entry, it needs a live device token, and it reaches the host's `call` with its arguments. The
-//! verbs that `router.rs` keeps off are still off, and `RunSummary` has exactly its eight fields.
+//! verbs that `router.rs` keeps off are still off, and `RunSummary` has exactly its nine fields.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
@@ -159,7 +159,7 @@ async fn every_verb_router_rs_keeps_off_is_still_off() {
 }
 
 #[test]
-fn a_run_summary_has_exactly_its_eight_fields_and_the_args_are_empty() {
+fn a_run_summary_has_exactly_its_nine_fields_and_the_args_are_empty() {
     let summary = RunSummary {
         id: "R-1".into(),
         spine: "s".into(),
@@ -169,6 +169,7 @@ fn a_run_summary_has_exactly_its_eight_fields_and_the_args_are_empty() {
         end_reason: Some("done".into()),
         open_requests: 0,
         waiting: None,
+        project_id: None,
     };
     let value = serde_json::to_value(&summary).unwrap();
     let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
@@ -180,6 +181,7 @@ fn a_run_summary_has_exactly_its_eight_fields_and_the_args_are_empty() {
             "halted_reason",
             "id",
             "open_requests",
+            "project_id",
             "spine",
             "state",
             "waiting",

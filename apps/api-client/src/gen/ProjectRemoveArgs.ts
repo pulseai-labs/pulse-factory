@@ -3,4 +3,9 @@
 /**
  * The arguments of `project_remove`.
  */
-export type ProjectRemoveArgs = { id: string, command_id: string, };
+export type ProjectRemoveArgs = { id: string, 
+/**
+ * End the project's live chat sessions first (`r1.s5.w5`). The default is false: a live session
+ * then refuses the remove, as the store's rule says.
+ */
+end_sessions?: boolean | null, command_id: string, };

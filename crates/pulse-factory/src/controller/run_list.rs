@@ -2,7 +2,7 @@
 //!
 //! It is a read. It takes no lock of the driver, writes no `controller.ledger` line, admits nothing
 //! and touches no row of the store; the request ledger's one `api.ledger` line is its only trace.
-//! A run shows eight fields and no unit, session or cost (`pf_api::types::RunSummary`).
+//! A run shows nine fields and no unit, session or cost (`pf_api::types::RunSummary`).
 
 use pf_api::types::{RunList, RunSummary, SCHEMA_VERSION};
 use pf_engine::admission::{CommandBody, body_of_content};
@@ -50,6 +50,7 @@ impl Controller {
             .iter()
             .filter(|r| r.status == RequestStatus::Open)
             .count() as u64;
+        let project_id = row.as_ref().and_then(|r| r.project_id.clone());
         RunSummary {
             id: id.clone(),
             spine: handle.info.spine.clone(),
@@ -59,6 +60,7 @@ impl Controller {
             end_reason,
             open_requests,
             waiting: handle.driver.waiting(),
+            project_id,
         }
     }
 }

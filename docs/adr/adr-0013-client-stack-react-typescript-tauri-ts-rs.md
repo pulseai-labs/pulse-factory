@@ -537,4 +537,36 @@ Filled by `r1.s5.w4` when it lands.
 
 ## Amendment (`r1.s5.w5`)
 
-Filled by `r1.s5.w5` when it lands.
+This item is round 3 of `r1.s5`. It builds the two functions that Projects (11e) and the dialog of 11f left
+for it: Add a project and Remove project. It adds two typed methods to the `Transport`, no Tauri command and
+no change in `apps/desktop`.
+
+- **Add a project is a dialog** (`components/AddProject.tsx`, `styles/add-project.css`, 700 px wide). The host,
+  then how: Browse folder lists the folders of the server's home folder through `transport.folderList`, marks
+  the git folders with their branch and the folders that are projects, and names the project after the
+  folder. It calls `folder_list` once when it opens and once for each navigation, sets no timer and never
+  polls. A plain folder outside a repository gets a tip and an unticked box for `git init`. Clone from URL,
+  Create new project and Other hosts are `NotBuilt`.
+- **Remove project is a confirm inside the project's block** (`components/RemoveProject.tsx`), not a modal and
+  not `ConfirmDialog`: it takes no confirm code. It reads `run_list` once when it opens, lists the live sessions
+  from the chat state, and locks its action while a run of the project is active (`RunSummary.project_id`).
+  The action calls `transport.projectRemove` with `end_sessions: true`. The page keeps one notice line in the
+  place of a block that it removed.
+- **The transport seam.** `folderList(args?)` and `projectRemove(args)` join the `Transport` interface. Each is
+  one `verb<T>(...)` call in `tauri.ts` and in `bridge.ts`, because both verbs are on the allowlist that
+  `pf-client`'s `Transport::verb` checks. `git_init` rides on the generated `ProjectAddArgs`. The
+  fake transport records both calls. `apps/api-client/src/index.ts` exports the three new generated types.
+- **The stylesheet** `add-project.css` is imported by `AddProject.tsx` (`main.tsx` is not this item's file). The
+  bundle therefore places it before `ui.css` and `shell.css`, so each of its overrides carries a second class.
+  It joins the token-only check and defines no token.
+- **Two screenshots join d25, and three change.** `11e-remove-confirm` (the confirm in `pulse-factory`'s block,
+  a workflow running, the action locked) and `11f-add-project` (the dialog, `scratch` picked, the `git init`
+  tip) are new. `2c-projects`, `3b-server-menu` and `3c-disconnected` change because the Projects page behind
+  them gains the header button and the remove buttons. The other screenshots are byte for byte as before.
+  d12 now adds a folder with `git init`, removes the project and adds it again, against a controller whose
+  home folder is a temp directory.
+
+### Unverified claims (`r1.s5.w5`)
+- The two new screenshots show the dialog and the confirm as built. A person has not yet compared them with
+  frames 11e and 11f (AC-16 of this item). The differences the build leaves are in the item's report.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.

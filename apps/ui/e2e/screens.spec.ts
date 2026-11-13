@@ -11,9 +11,10 @@
 //
 // The fixture server stands in for the bridge's answers (`e2e/screens/server.ts`, test data for a
 // rendering check). The journey lines d12, d19 and d23 keep the real controller, API and bridge.
+import type { RunList } from "@pulse-factory/api-client";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { CONTRACT, openUnderContract, settle, type Recorder } from "./screens/contract";
-import { clearOverlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
+import { clearOverlay, overlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
 
 test.use({
   viewport: CONTRACT.viewport,
@@ -171,6 +172,32 @@ test.describe("projects", () => {
   test("2c-projects: Projects", async ({ page }) => {
     // The app opens on Projects, and a click on its rail item would toggle the sidebar.
     await open(page);
+    await expect(page.getByRole("main").getByRole("button", { name: "Add a project" })).toBeVisible();
+    await expect(page.getByRole("main").getByRole("button", { name: "Remove pilot-fourseat" })).toBeVisible();
     await compare(page, "2c-projects.png", page.getByRole("main").getByText("pilot-fourseat", { exact: true }));
+  });
+
+  test("11e-remove-confirm: the confirm in pulse-factory's block, a workflow running", async ({ page }) => {
+    // The active run r0-s19-1 belongs to pulse-factory: the confirm names it and locks Remove project.
+    overlay({
+      run_list: (base: unknown) => {
+        const list = base as RunList;
+        return { ...list, runs: list.runs.map((r) => (r.id === "r0-s19-1" ? { ...r, project_id: "P-1" } : r)) };
+      },
+    });
+    await open(page);
+    await page.getByRole("main").getByRole("button", { name: "Remove pulse-factory" }).click();
+    const confirm = page.getByRole("alertdialog", { name: "Remove pulse-factory" });
+    await expect(confirm.getByRole("heading", { name: "pulse-factory has a workflow running" })).toBeVisible();
+    await compare(page, "11e-remove-confirm.png", confirm.getByRole("button", { name: "Remove project" }));
+  });
+
+  test("11f-add-project: the Add a project dialog, scratch picked", async ({ page }) => {
+    await open(page);
+    await page.getByRole("main").getByRole("button", { name: "Add a project" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add a project" });
+    await dialog.getByRole("button", { name: /^scratch/ }).click();
+    await expect(dialog.getByText("Tip: make it a git repository")).toBeVisible();
+    await compare(page, "11f-add-project.png", dialog.getByRole("button", { name: "Add project" }));
   });
 });

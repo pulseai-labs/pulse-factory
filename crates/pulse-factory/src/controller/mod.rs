@@ -16,6 +16,7 @@ pub mod device_acts;
 pub mod devices;
 pub mod driver;
 pub mod files;
+pub mod folders;
 pub mod ports;
 pub mod projects;
 pub mod proposals;
@@ -76,6 +77,11 @@ pub struct Config {
     /// Variables added to every git call, after the controller's own `GIT_*` variables are removed.
     /// Empty. A test sets one, such as `GIT_TEST_ASSUME_DIFFERENT_OWNER=1`.
     pub git_env: Vec<(String, String)>,
+    /// The server's home folder (`r1.s5.w5`, O4). `controller::run` sets it from `$HOME`, made
+    /// canonical. `folder_list` lists only inside it, and `project_add` with `git_init` runs `git init`
+    /// only inside it. `None`, a missing path or a path that is not a directory: both refuse with "the
+    /// server has no home folder". A test sets it, as it sets `git_env`.
+    pub home: Option<PathBuf>,
     /// The chat runtimes of this server, by runtime ID (`r1.s3.w3`). `controller::run` puts one
     /// `ClaudeChat` under `claude-code`. A test puts a `FakeChat`, or a `ClaudeChat` over the
     /// replay, under the same ID. An agent whose runtime has no entry is refused at its start.
@@ -126,6 +132,7 @@ impl Config {
             api_retry: api::DEFAULT_RETRY,
             device_idle: DEFAULT_DEVICE_IDLE,
             git_env: Vec::new(),
+            home: None,
             chat_runtimes: BTreeMap::new(),
             chat_idle: chats::DEFAULT_IDLE,
             chat_max_live: chats::DEFAULT_MAX_LIVE,
@@ -802,6 +809,8 @@ impl Handler for Controller {
             "project_add" => self.verb_project_add(&request.args),
             "project_list" => self.verb_project_list(),
             "project_remove" => self.verb_project_remove(&request.args),
+            // The Add a project picker's read of the home folder (`r1.s5.w5`).
+            "folder_list" => self.verb_folder_list(&request.args),
             "session_start" => self.verb_session_start(&request.args),
             "session_send" => self.verb_session_send(&request.args),
             "session_answer" => self.verb_session_answer(&request.args),
@@ -975,6 +984,10 @@ pub fn run(args: &ControllerArgs) -> i32 {
             .and_then(std::fs::canonicalize)
             .unwrap_or_else(|_| PathBuf::from("pulse-factory")),
     );
+    // The home folder: `folder_list` and `git init` on add stay inside it (`r1.s5.w5`).
+    cfg.home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| std::fs::canonicalize(h).ok());
     // The flag wins over the environment variable. Neither set: the API is off.
     cfg.api_listen = args
         .api_listen

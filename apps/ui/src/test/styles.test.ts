@@ -13,6 +13,7 @@ const CHECKED: Array<[name: string, text: string]> = [
   ["app.css", read(join(STYLES, "app.css"))],
   ["ui.css", read(join(__dirname, "..", "ui", "ui.css"))],
   ["shell.css", read(join(__dirname, "..", "shell", "shell.css"))],
+  ["add-project.css", read(join(STYLES, "add-project.css"))],
 ];
 
 const stripComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");

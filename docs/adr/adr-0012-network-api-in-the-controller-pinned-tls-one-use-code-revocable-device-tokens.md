@@ -12,6 +12,8 @@
   known limit.
 - **Amended:** 2026-11-10, at `r1.s4.w3`: `run_list` on the allowlist, the client's `request_frame`
   event and its `refusal` word, and the `verb` command of the Mac app.
+- **Amended:** 2026-11-13, at `r1.s5.w5`: `folder_list` on the allowlist, its confinement to the server's
+  home folder, and its one `api.ledger` line. Two verbs that exist gain an optional argument each.
 
 ## Context
 - Release 1's first exit criterion: the operator installs the MacBook app, pairs it with draco-desk
@@ -464,3 +466,35 @@ that adds a verb amends this ADR.
   call. A later item's verb needs no edit in `apps/desktop`. `pf-client` re-exports `serde_json::Value`
   for it, so the desktop's manifest and lock do not change.
 - **No other change.** No route, no admission, no store change and no new frame.
+
+## The folder list (`r1.s5.w5`)
+
+Amendment, 2026-11-13. This item amends the allowlist rule again, as its own text asks: a later spine
+that adds a verb amends this ADR. The Mac app's Add a project picker needs to see the folders of the
+server. A device had no read of the server's disk.
+
+- **One verb joins the allowlist: `folder_list`.** `FolderListArgs { path? }` answers a `FolderList`: the
+  folders of one path, with each folder's git mark and branch, and the live project whose root it is. The
+  list is sorted by name and holds at most 500 entries.
+- **It is confined to the home folder.** The controller's home folder is its `$HOME`, made canonical at
+  start. The verb makes the requested path canonical first, so `..` and a symlink are resolved before the
+  check, and the canonical path must be the home folder or lie under it. Otherwise it is refused with
+  no listing. A symlink inside the home folder whose target leaves it is not listed. A path outside the
+  home folder gets the same refusal whether it exists or not, so the verb is no oracle for the rest of the
+  disk. One limit: a path lexically inside the home folder that does not resolve (a dangling symlink)
+  answers that it does not exist, so a symlink already inside the home folder shows whether its target
+  resolves; the verb only reads and cannot make one. A server with no home folder refuses.
+- **It opens no file.** It reads directory entries and metadata, and runs git against a folder that has a
+  `.git`. A file, a FIFO, a socket and a broken link are skipped, so none can stop or slow a listing. No
+  file content, remote URL or token reaches the answer, a ledger or stderr.
+- **Its controls.** Device auth only (the router's token check; a revoked device is 401 at once; the peer
+  guard counts a failure), read-only (no admission, no `controller.ledger` line, no store write), and one
+  `api.ledger` line for each call, with the device, the verb and the outcome. It takes no confirm code,
+  because it binds no act. It has no CLI form: the CLI user has a shell.
+- **Two optional arguments on verbs that exist.** `project_add` gains `git_init` and `project_remove`
+  gains `end_sessions`. Both verbs were on the allowlist already. Each keeps the admitted path of a
+  state-changing command, with its `controller.ledger` line. `end_sessions` makes each session it ends write
+  its own `chat_session_end` line. ADR-0015 holds their rules.
+- **`RunSummary` gains `project_id`** (the ninth field), so a device can tell that a run belongs to a
+  project before it asks to remove the project. It is the project of the chat that proposed the run.
+- **No other change.** No route, no confirm code and no store change.
