@@ -196,6 +196,45 @@ fn with_end_sessions_the_remove_ends_every_live_session_and_removes_the_project(
 }
 
 #[test]
+fn a_seat_caller_cannot_end_sessions_through_project_remove() {
+    // A caller whose environment holds the seat token reaches the controller over the socket.
+    let proc_dir = tempfile::tempdir().unwrap();
+    fake_proc(proc_dir.path(), b"PF_SEAT_TOKEN=x\0", 1);
+    let root = proc_dir.path().to_path_buf();
+    let rec = Rec::new(strict_fake());
+    let live = start_with(rec.clone(), move |cfg| cfg.proc_root = root);
+    // The CLI child would not pass a fake `/proc` that names only the test process, so the project
+    // and its session are made through the controller's own call.
+    let repo_root = repo(&live, "alpha");
+    let added = live.controller.handle(Request::new(
+        "project_add",
+        json!({"root": repo_root.display().to_string(), "name": null, "command_id": "add-1"}),
+    ));
+    let project = ok(added)["project"]["id"].as_str().unwrap().to_string();
+    let started = live.controller.handle(Request::new(
+        "session_start",
+        json!({"project_id": project, "command_id": "start-1"}),
+    ));
+    let session = ok(started)["session"]["id"].as_str().unwrap().to_string();
+
+    let args = json!({"id": project, "command_id": "rm-seat", "end_sessions": true});
+    let why = refused(pf_ipc::call(&live.sb.state, "project_remove", args).unwrap());
+    assert!(why.contains("PF_SEAT_TOKEN"), "{why}");
+    assert!(!is_ended(&live, &session));
+    assert!(project_is_live(&live, &project));
+    assert_eq!(rec.stop_count(), 0);
+    assert!(end_lines(&live, "rm-seat").is_empty());
+
+    // Without the field the caller check is not in the way: the store's rule answers as before.
+    let args = json!({"id": project, "command_id": "rm-seat-2"});
+    let why = refused(pf_ipc::call(&live.sb.state, "project_remove", args).unwrap());
+    assert_eq!(
+        why,
+        format!("project {project} has a live chat session {session}; end it first")
+    );
+}
+
+#[test]
 fn without_the_field_a_live_session_refuses_the_remove_as_before_and_ends_nothing() {
     let (rec, live) = rec_live();
     let (project, session) = started(&live, "alpha");

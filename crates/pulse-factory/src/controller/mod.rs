@@ -903,6 +903,17 @@ impl Controller {
                     Err(why) => Response::err(why),
                 }
             }
+            // `project_remove` with `end_sessions` ends chat sessions, so a seat or a chat cannot
+            // call it that way (ADR-0005, Q2 rule 2). Without the field it ends nothing, and the
+            // verb is as it was.
+            "project_remove"
+                if request.args.get("end_sessions").and_then(Value::as_bool) == Some(true) =>
+            {
+                match self.check_chat_caller("project_remove", peer) {
+                    Ok(()) => self.handle(request),
+                    Err(why) => Response::err(why),
+                }
+            }
             _ => self.handle(request),
         }
     }

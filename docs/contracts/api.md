@@ -354,7 +354,9 @@ second merge.
   one that breaks it refuses the whole remove. Then the project is removed as before, and the store's rule
   stays as the last guard. A replay of the command ID replays each end and the remove; nothing runs twice. The
   answer is a `ProjectChanged` with `ended`, the sessions this call ended (an empty list when none was live;
-  absent when the call had no `end_sessions`). **Known limit:** when one session cannot be ended, the remove
+  absent when the call had no `end_sessions`). On the socket, a `project_remove` with `end_sessions: true` is
+  refused for a caller that is, or descends from, a seat or a live chat process, as `session_end` is
+  (ADR-0005, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
   is refused and the sessions before it stay ended. There is no archive.
 - **`arm`** (`r1.s4.w2`): a `DeviceArmArgs`, `{"proposal","plan_sha256","code","command_id"}`. The
   answer is an `ArmActed`: `schema_version`, `replayed`, `device`, `proposal`, `run_id` and

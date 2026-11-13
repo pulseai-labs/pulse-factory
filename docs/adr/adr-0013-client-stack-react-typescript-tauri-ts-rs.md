@@ -598,6 +598,12 @@ no transport or state file.
   - The Agents page lists the agents the server lists. Autopilot, Research partner and Plain, agent create and
     edit, Add skill, phone notifications and a permission change are `NotBuilt` or absent.
   - The merge's demo-walk gate is not built (G4: no workflow sets it yet).
+  - **The Settings page follows the frame 11k in layout, not in the text of its blocks.** The page names no
+    key (W11), so each block's title is the key made readable ("Deny commands", "Propose per min"), not the
+    frame's title ("Commands a chat may not run", "Turns a chat may start by itself"). The list block says
+    "N entries apply here", where the frame has one sentence per rule. The number blocks have no sentence
+    or unit text ("turns, then it waits for you", "per minute"), and `propose_per_min` comes before
+    `self_turn_cap`, the reverse of the frame. A title and a sentence per key would put keys in the page.
 - **The screenshots** `3f-needs-you`, `6a-agents`, `settings` and `dock-needs-you` are this item's. The
   parked item in `3f-needs-you` comes through the `overlay` of d25, so the rail's count on the other screens
   does not change.
