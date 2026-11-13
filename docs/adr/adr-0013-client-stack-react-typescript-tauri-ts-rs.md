@@ -525,9 +525,45 @@ Checked on draco-desk on 2026-11-12 with the item's verification commands (each 
 - The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
 
 
-## Amendment (`r1.s5.w3`)
+## Amendment, 2026-11-13 (`r1.s5.w3`)
 
-Filled by `r1.s5.w3` when it lands.
+This item is round 3 of `r1.s5`. It gives the Orchestrator chat and the start card the look and the behaviour
+of R1 Screens 11a, 11b and 11c. It changes no Rust, no transport, no verb and no `client-api-auth` behaviour.
+Three decisions amend this ADR:
+
+- **The chat renders Markdown through an in-house renderer.** `apps/ui/src/components/markdown.tsx` turns a
+  reply into React elements from text nodes: paragraphs, `**bold**`, `*italic*`, inline code, fenced code
+  blocks, `-` and `1.` lists, and headings as bold lines. It adds **no dependency**, it has **no HTML
+  pass-through** (no `dangerouslySetInnerHTML`; HTML in a reply shows as literal text), and it draws **no live
+  link**: a link shows as its text with the URL in `title`. The live delta of a turn in progress stays plain
+  text until its item is held.
+- **The start card has one press.** **Start workflow** asks the server for the one-use confirm code for this
+  proposal and this plan (`confirm_code`) and, at once, arms the run with it (`arm`). The code lives in the
+  component's state only and never leaves it: it is never shown, stored, logged or put in a URL. After
+  `unreachable` on `arm` the code and the command ID stay for the next press; any refusal drops the code and
+  the next press asks for a new one. The force of the `client-api-auth` confirm does not change: a fresh code
+  for each press, spent once, for this card and this plan, and a second use fails. The card names who started
+  the run and when.
+- **The window centres and has size limits.** `apps/desktop/src-tauri/tauri.conf.json` opens the window at
+  1440×860 with `"center": true`, `"minWidth": 1024` and `"minHeight": 640`, so a 14-inch MacBook's visible
+  frame holds it. The title bar is an overlay (`"titleBarStyle": "Overlay"`): `main.rs` sets
+  `--titlebar-inset` from the page-load event in the desktop app only, and the browser bundle never sets it.
+- **The pixel claim.** The claim "the screens match the canvas pixel for pixel" stays unclaimed until the
+  operator's ack at the close of `r1.s5`.
+
+### Verified claims (r1.s5.w3)
+Checked on draco-desk on 2026-11-13 with the item's verification commands (see the item's report):
+- The Markdown tests show each construct, and that `<script>`, `<img onerror>`, `<b>` and a `javascript:`
+  link render as literal text with no element of that kind and no anchor.
+- The unit tests show that one press calls `confirmCode` and then `arm` once each with the issued code, that
+  the code never reaches the DOM, and the retry and refusal rules above.
+- d25 holds the screenshots `2a-chat`, `2b-chat-sidebar-closed`, `6b-start-card` and `11b-end-session`.
+
+### Unverified claims (r1.s5.w3)
+- A person has not yet compared the four screenshots with frames 11a, 11b and 11c (AC-15).
+- The window stays on screen after a start, and the title bar is one row with the traffic lights clear of the
+  server chip (AC-16, on the MacBook). The cause of the window leaving the screen is read from the config and the
+  walks, not seen live.
 
 
 ## Amendment (`r1.s5.w4`)

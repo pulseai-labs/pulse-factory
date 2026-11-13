@@ -767,6 +767,8 @@ describe("landmarks (Approach 15)", () => {
     const onChat = screen
       .getAllByRole("button")
       .filter((b) => /projects|settings/i.test(b.getAttribute("aria-label") ?? b.textContent ?? ""))
+      // The chat header's gear (11a, `r1.s5.w3`) is named "Agent settings": it opens Agents, not Settings.
+      .filter((b) => b.getAttribute("aria-label") !== "Agent settings")
       .filter((b) => !screen.getByRole("navigation").contains(b));
     expect(onChat.map(labelOf)).toEqual([]);
   });

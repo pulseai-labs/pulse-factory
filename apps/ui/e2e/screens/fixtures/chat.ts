@@ -19,8 +19,8 @@ export const S2: ChatSessionRecord = chatSession("S-2", {
   branch: "spine/r1.s5",
   state: "needs_you",
   model: "claude-opus-5-5",
-  effort: "high",
-  permission_mode: "bypass",
+  effort: "xhigh",
+  permission_mode: "manual",
   usage: USAGE,
   last_turn_at: "2026-11-08T14:41:00Z",
   cache_ttl_seconds: 3600,
@@ -58,7 +58,10 @@ const SUMMARY: ArmSummary = {
   caps: { model_sessions: 24, cold_builds: 2, seeds: [{ id: "w1", max: 2 }], relaunch: "once", loops: [{ track: "main", from: "review", to: "fix", max: 3 }] },
   plugins: [{ name: "ossify", version: "1.39.0" }],
   most_launches: 18,
-  merges: [{ track: "main", base: "main", sentence: "the spine merges on the operator's ack" }],
+  merges: [
+    { track: "main", base: "spine/r1.s5", sentence: "item PRs merge into spine/r1.s5 on green checks with no ack" },
+    { track: "main", base: "main", sentence: "the main PR merges into main only on the claim's ack" },
+  ],
   base_pushes: [{ track: "main", stage: "plan", dir: "/home/dev/pulse-factory", branch: "spine/r1.s5" }],
   replaces: null,
   paper: "paper-spine-d25",
@@ -67,36 +70,81 @@ const SUMMARY: ArmSummary = {
 };
 
 const text = (value: string) => ({ text: value, bytes: value.length, truncated: false });
+const input = (fields: Record<string, string>) => text(JSON.stringify(fields));
 
-/** The items of S-2, in `seq` order. The question at 4 is answered by the item at 5. */
+const FIRST_QUESTION = "Which screens come first?";
+
+/**
+ * The items of S-2, in `seq` order (11a): an interrupted turn, the idle release, a turn with two tool calls
+ * and a Markdown reply with inline code, a single-select question that is answered (at 10), the start card,
+ * and a single-select question that is open. The turn that holds the card has its result at 13.
+ */
 const BODIES: Array<[body: ChatItemBody, at: string, answers?: number]> = [
-  [{ kind: "operator_message", text: "Plan r1.s5 with me: every screen of the Mac app should match the approved canvas." }, "2026-11-08T14:30:00Z"],
+  [{ kind: "operator_message", text: "Scan every frame of the canvas and list the screens the Mac app has." }, "2026-11-08T13:10:00Z"],
   [
     {
-      kind: "assistant_text",
-      text: "I read the canvas and the gap walk.\n\n**Round 1** gives the tokens and the shared components.\n- Round 2 restyles the screens.\n- `d25` holds the screenshots.\n\nOne question before I plan it.",
+      kind: "tool_call",
+      call_id: "call-0",
+      tool: "Glob",
+      input: input({ pattern: "canvas/**/*.html" }),
+      output: text("canvas/r1-screens.dc.html"),
+      is_error: false,
+      finished: true,
     },
-    "2026-11-08T14:31:00Z",
+    "2026-11-08T13:11:00Z",
   ],
+  [
+    {
+      kind: "turn_result",
+      cause: "interrupt",
+      usage: { input_tokens: 4000, output_tokens: 300, cache_read_tokens: 0, cache_write_tokens: 0, cost_micros: 21000 },
+      is_error: true,
+      stop: "interrupted",
+      duration_ms: 54_000,
+      cache_ttl_seconds: 3600,
+    },
+    "2026-11-08T13:12:00Z",
+  ],
+  [{ kind: "notice", code: "idle_release", text: "The chat process was released after 30 idle minutes." }, "2026-11-08T13:42:00Z"],
+  [{ kind: "operator_message", text: "Plan r1.s5 with me: every screen of the Mac app should match the approved canvas." }, "2026-11-08T14:02:00Z"],
   [
     {
       kind: "tool_call",
       call_id: "call-1",
       tool: "Read",
-      input: text("docs/specs/r1/r1.s5/SPINE.md"),
+      input: input({ file_path: "docs/specs/r1/r1.s5/SPINE.md" }),
       output: text("# r1.s5: the MacBook app's screens match the approved canvas\n\nClass: bone. Release: r1."),
       is_error: false,
       finished: true,
     },
-    "2026-11-08T14:32:00Z",
+    "2026-11-08T14:03:00Z",
+  ],
+  [
+    {
+      kind: "tool_call",
+      call_id: "call-2",
+      tool: "Grep",
+      input: input({ pattern: "\"screens\" in docs/specs/r1" }),
+      output: text("14 hits"),
+      is_error: false,
+      finished: true,
+    },
+    "2026-11-08T14:03:30Z",
+  ],
+  [
+    {
+      kind: "assistant_text",
+      text: "I read the canvas and the gap walk.\n\nBoth changes touch `apps/ui`. **Round 1** gives the tokens and the shared components.\n- Round 2 restyles the shell.\n- Round 3 restyles the chat, Needs you and Projects.\n\nOne question before I plan it.",
+    },
+    "2026-11-08T14:04:00Z",
   ],
   [
     {
       kind: "question_request",
-      request_id: "Q-1",
+      request_id: "Q-30",
       items: [
         {
-          text: "Which screens come first?",
+          text: FIRST_QUESTION,
           header: "Order",
           options: [
             { label: "Chat first", description: "The screen the operator uses most." },
@@ -106,9 +154,9 @@ const BODIES: Array<[body: ChatItemBody, at: string, answers?: number]> = [
         },
       ],
     },
-    "2026-11-08T14:33:00Z",
+    "2026-11-08T14:05:00Z",
   ],
-  [{ kind: "question_answer", outcome: "answered", reason: null, answers: { "Which screens come first?": "Chat first" } }, "2026-11-08T14:34:00Z", 4],
+  [{ kind: "question_answer", outcome: "answered", reason: null, answers: { [FIRST_QUESTION]: "Chat first" } }, "2026-11-08T14:08:00Z", 9],
   [{ kind: "assistant_text", text: "Chat first, then Projects. Here is the plan to arm." }, "2026-11-08T14:36:00Z"],
   [
     {
@@ -123,6 +171,36 @@ const BODIES: Array<[body: ChatItemBody, at: string, answers?: number]> = [
       plugin_roots: [],
     },
     "2026-11-08T14:41:00Z",
+  ],
+  [
+    {
+      kind: "turn_result",
+      cause: "result",
+      usage: { input_tokens: 90000, output_tokens: 9000, cache_read_tokens: 800000, cache_write_tokens: 40000, cost_micros: 2100000 },
+      is_error: false,
+      stop: "end_turn",
+      duration_ms: 72_000,
+      cache_ttl_seconds: 3600,
+    },
+    "2026-11-08T14:41:30Z",
+  ],
+  [
+    {
+      kind: "question_request",
+      request_id: "Q-31",
+      items: [
+        {
+          text: "The store schema spine and the agents spine both want Release 1. Which goes first?",
+          header: "",
+          options: [
+            { label: "Store schema first", description: "The agents spine waits one round and builds on the new sessions table." },
+            { label: "Agents first", description: "The store schema spine rebases onto agent_id when it starts." },
+          ],
+          multi_select: false,
+        },
+      ],
+    },
+    "2026-11-08T14:44:00Z",
   ],
 ];
 

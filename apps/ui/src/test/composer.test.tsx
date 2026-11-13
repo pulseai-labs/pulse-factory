@@ -19,8 +19,35 @@ describe("the controls come from the runtime's declaration (P2)", () => {
     expect(select("Model").tagName).toBe("SELECT");
     expect(select("Effort")).toBeTruthy();
     expect(select("Permission mode")).toBeTruthy();
-    expect(select("Artifacts")).toBeTruthy();
+    // `artifacts` has the values `on` and `off`: a switch, not a pop-up.
+    const artifacts = screen.getByRole("switch", { name: "Artifacts" }) as HTMLInputElement;
+    expect(artifacts.type).toBe("checkbox");
     expect(Array.from(select("Effort").options).map((o) => o.value)).toEqual(["low", "medium", "high", "max"]);
+  });
+
+  it("shows the display name of a value and keeps the raw value (G3)", async () => {
+    const fake = seeded({ sessions: [alpha({ model: "claude-opus-5-5", effort: "high", permission_mode: "manual" })] });
+    fake.runtimes = [
+      claudeRuntime(),
+    ];
+    const runtime = fake.runtimes[0];
+    if (runtime) {
+      const model = runtime.options.find((o) => o.id === "model");
+      if (model) model.values = ["claude-opus-5-5", "claude-sonnet-5-5"];
+      const effort = runtime.options.find((o) => o.id === "effort");
+      if (effort) effort.values = ["low", "medium", "high", "xhigh", "max"];
+      const mode = runtime.options.find((o) => o.id === "permission_mode");
+      if (mode) mode.values = ["manual", "acceptEdits", "plan"];
+    }
+    await bootChat(fake);
+    await main().findByLabelText("Model");
+    const texts = (label: string) => Array.from(select(label).options).map((o) => [o.value, o.textContent]);
+    expect(texts("Model")).toEqual([["claude-opus-5-5", "Opus 5.5"], ["claude-sonnet-5-5", "Sonnet 5.5"]]);
+    expect(texts("Effort")).toContainEqual(["xhigh", "XHigh"]);
+    expect(texts("Permission mode")).toEqual([["manual", "Ask before edits"], ["acceptEdits", "Edit automatically"], ["plan", "Plan mode"]]);
+    // The select's value is the raw one, and its accessible label stays the option's label.
+    expect(select("Model").value).toBe("claude-opus-5-5");
+    expect(select("Permission mode").value).toBe("manual");
   });
 
   it("shows an extra option that the runtime declares", async () => {
@@ -56,7 +83,7 @@ describe("the controls come from the runtime's declaration (P2)", () => {
     expect(select("Effort").value).toBe("low");
     expect(select("Model").value).toBe("other-model");
     expect(select("Permission mode").value).toBe("manual");
-    expect(select("Artifacts").value).toBe("on");
+    expect((screen.getByRole("switch", { name: "Artifacts" }) as HTMLInputElement).checked).toBe(true);
   });
 
   it("shows a free option's current value even when it is not among the values", async () => {
@@ -98,14 +125,16 @@ describe("a change applies to that chat only (P2, P3)", () => {
     const fake = seeded();
     const user = await bootChat(fake);
     await main().findByLabelText("Artifacts");
+    const artifacts = () => screen.getByRole("switch", { name: "Artifacts" }) as HTMLInputElement;
+    expect(artifacts().checked).toBe(false);
     expect(screen.queryByText("applies when the chat restarts")).toBeNull();
-    await user.selectOptions(select("Artifacts"), "on");
+    await user.click(artifacts());
 
     await waitFor(() => expect(fake.setArgs).toHaveLength(1));
     expect(fake.setArgs[0]).toEqual({ session_id: "S-1", options: { artifacts: "on" }, command_id: expect.any(String) });
     // `artifacts` is not live: it waits in `pending_options`.
     expect(await main().findByText("applies when the chat restarts")).toBeTruthy();
-    expect(select("Artifacts").value).toBe("on");
+    expect(artifacts().checked).toBe(true);
   });
 
   it("shows the note of an answer inline, and the server's text for a refusal", async () => {
@@ -164,11 +193,16 @@ describe("a change applies to that chat only (P2, P3)", () => {
   });
 });
 
-describe("the context gauge", () => {
-  it("shows round(100 · used / max) percent", async () => {
+describe("the context ring", () => {
+  const arc = () => screen.getByLabelText("Context gauge").querySelector(".ring-arc") as SVGCircleElement | null;
+
+  it("shows round(100 · used / max) percent with a ring at that share", async () => {
     const fake = seeded({ sessions: [alpha({ context: { used_tokens: 620, max_tokens: 1000 } })] });
     await bootChat(fake);
     expect(screen.getByLabelText("Context gauge").textContent).toBe("62%");
+    const [drawn, whole] = (arc()?.getAttribute("stroke-dasharray") ?? "").split(" ").map(Number);
+    expect((drawn ?? 0) / (whole ?? 1)).toBeCloseTo(0.62, 2);
+    expect(screen.getByLabelText("Context gauge").getAttribute("title")).toBe("Context: 620 of 1000 tokens");
   });
 
   it("rounds to the nearest percent", async () => {
@@ -177,14 +211,52 @@ describe("the context gauge", () => {
     expect(screen.getByLabelText("Context gauge").textContent).toBe("33%");
   });
 
-  it("shows a dash when the context is not known", async () => {
+  it("shows a dash and no arc when the context is not known", async () => {
     await bootChat(seeded({ sessions: [alpha({ context: null })] }));
     expect(screen.getByLabelText("Context gauge").textContent).toBe("—");
+    expect(arc()).toBeNull();
   });
 
   it("shows a dash for a window of zero", async () => {
     await bootChat(seeded({ sessions: [alpha({ context: { used_tokens: 5, max_tokens: 0 } })] }));
     expect(screen.getByLabelText("Context gauge").textContent).toBe("—");
+  });
+});
+
+describe("Send, Stop and the compact box (11a)", () => {
+  it("shows a text-less Send arrow while the agent is idle, disabled until there is text", async () => {
+    const user = await bootChat(seeded());
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+    expect(send.textContent).toBe("");
+    expect(send.querySelector("svg")).not.toBeNull();
+    expect(send.disabled).toBe(true);
+    await user.type(screen.getByRole("textbox", { name: "Message Orchestrator" }), "hi");
+    expect(send.disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("shows Stop in Send's place while the state is working, and Stop calls sessionInterrupt", async () => {
+    const fake = seeded({ sessions: [alpha({ state: "working" })] });
+    const user = await bootChat(fake);
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(fake.interruptArgs).toHaveLength(1));
+    expect(fake.count("sessionSend")).toBe(0);
+  });
+
+  it("keeps the textbox's name `Message <agent>` with the label visually hidden, and the hint beside the box", async () => {
+    await bootChat(seeded({ sessions: [alpha({ state: "working" })] }));
+    expect(screen.getByRole("textbox", { name: "Message Orchestrator" })).toBeTruthy();
+    expect(document.querySelector("label.ui-sr-only")?.textContent).toBe("Message Orchestrator");
+    expect(await main().findByText("steers the running turn")).toBeTruthy();
+  });
+
+  it("shows the ended panel with Start session instead of the box", async () => {
+    const fake = seeded();
+    await bootChat(fake);
+    await push(fake, frames.session(alpha({ ended_at: "2026-11-09T11:00:00Z", updated_at: "2026-11-09T11:00:00Z" })));
+    expect(main().getByText("This session has ended.")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Chat controls" })).toBeNull();
   });
 });
 

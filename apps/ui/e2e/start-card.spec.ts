@@ -1,4 +1,4 @@
-// The start card's journey (r1.s4.w2, Approach 13a) in headless Chromium, through `pf-client-bridge`,
+// The start card's journey (r1.s4.w2, Approach 13a; r1.s5.w3, Approach 8: the one-press card) in headless Chromium, through `pf-client-bridge`,
 // against the real controller, the real Claude Code adapter and `pf-claude-replay` (the chat's wrapper of
 // `scripts/demo/start-env.sh`). `scripts/demo/ui-start.sh` sets the environment and starts everything;
 // w3's d23 runs this file on the merged tree. It holds exactly one `test(`.
@@ -8,6 +8,10 @@
 import type { ChatItemRecord, SessionList } from "@pulse-factory/api-client";
 import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { modelName } from "../src/ui/display-names";
 
 test.setTimeout(120_000);
 
@@ -17,7 +21,8 @@ function need(name: string): string {
   return value;
 }
 
-const FACTS = [
+/** The thirteen groups of the old card (G2): none is on the card any more. */
+const OLD_GROUPS = [
   "Spine",
   "Project",
   "Items",
@@ -29,23 +34,29 @@ const FACTS = [
   "Merges",
   "Base pushes",
   "Forge",
-  "Paper env",
   "Ledger",
   "Parameters",
 ];
 
-test("start a spine from the Orchestrator chat: card, cancel, arm, reload", async ({ page }) => {
+test("start a spine from the Orchestrator chat: card, one press, outcome, reload", async ({ page }) => {
   const base = need("PF_BRIDGE_URL");
   const origin = new URL(base).origin;
   const code = need("PF_CODE");
   const bin = need("PF_BIN");
   need("PF_STATE_DIR");
   need("PF_E2E_OUT");
+  const stateDir = need("PF_STATE_DIR");
   const project = need("PF_D23_PROJECT");
 
   const requests: string[] = [];
   const consoleText: string[] = [];
-  page.on("request", (r) => requests.push(r.url()));
+  /** Every POST to a bridge verb, in order: the verb and its body (kept in memory only). */
+  const posted: Array<{ verb: string; body: string | null }> = [];
+  page.on("request", (r) => {
+    requests.push(r.url());
+    const verb = /\/bridge\/verbs\/([a-z_]+)$/.exec(new URL(r.url()).pathname)?.[1];
+    if (r.method() === "POST" && verb) posted.push({ verb, body: r.postData() });
+  });
   page.on("console", (m) => consoleText.push(m.text()));
   page.on("pageerror", (e) => consoleText.push(String(e)));
 
@@ -105,8 +116,9 @@ test("start a spine from the Orchestrator chat: card, cancel, arm, reload", asyn
   await messageBox().fill("start the spine s1 of this project");
   await page.getByRole("button", { name: "Send" }).click();
 
-  // 4. The card, with every fact group the plan has (a group with no value is left out: the paper
-  //    spine has no plugin and no base push). `Most launches` is the card item's own number.
+  // 4. The card, with the groups the plan has: Limits, Most sessions, the merge line, the work items and who
+  //    runs it (a group with no value is left out), and Paper env (the paper spine has one). The thirteen
+  //    groups of the old card are gone. `Most sessions` is the card item's own number.
   await expect(card()).toBeVisible({ timeout: 60_000 });
   await expect(card()).toHaveAttribute("data-proposal", /^sp-[0-9a-f]{16}$/);
   const session = mySession();
@@ -115,62 +127,88 @@ test("start a spine from the Orchestrator chat: card, cancel, arm, reload", asyn
   if (!item || item.body.kind !== "start_card") throw new Error(`${session.id} holds no start_card item`);
   const plan = item.body.summary;
   const present: Record<string, boolean> = {
-    Spine: plan.spine !== "",
-    Project: item.body.project_name !== "",
-    Items: plan.items !== null,
-    Workflow: true,
-    Roles: plan.roles.length > 0,
-    Caps: true,
-    Plugins: plan.plugins.length > 0,
-    "Most launches": plan.most_launches !== null,
-    Merges: plan.merges.length > 0,
-    "Base pushes": plan.base_pushes.length > 0,
-    Forge: plan.forge_repo !== "",
+    Limits: true,
+    "Most sessions": plan.most_launches !== null,
+    "Merge line": plan.merges.length > 0,
+    "Work items": plan.items !== null,
+    "Who runs it": plan.roles.length > 0,
     "Paper env": plan.paper !== null && plan.paper !== "",
-    Ledger: item.body.ledger !== "",
-    Parameters: Object.keys(item.body.params).length > 0,
   };
-  for (const name of FACTS) {
-    await expect(card().getByRole("group", { name, exact: true }), name).toHaveCount(present[name] ? 1 : 0);
+  for (const [name, here] of Object.entries(present)) {
+    await expect(card().getByRole("group", { name, exact: true }), name).toHaveCount(here ? 1 : 0);
   }
-  for (const name of ["Spine", "Roles", "Caps", "Merges", "Most launches", "Paper env", "Ledger", "Parameters"]) {
-    expect(present[name], `the paper spine's card has a ${name} fact`).toBe(true);
+  for (const name of ["Limits", "Most sessions", "Merge line", "Who runs it", "Paper env"]) {
+    expect(present[name], `the paper spine's card has a ${name} group`).toBe(true);
   }
   expect(plan.most_launches).not.toBeNull();
-  await expect(card().getByRole("group", { name: "Most launches", exact: true }).locator("p")).toHaveText(
-    String(plan.most_launches),
-  );
+  await expect(card().getByRole("group", { name: "Most sessions", exact: true })).toContainText(String(plan.most_launches));
+  const who = card().getByRole("group", { name: "Who runs it", exact: true });
+  await expect(who.getByRole("listitem")).toHaveCount(plan.roles.length);
+  // The rows come in the plan's order: row i names role i and the display name of its model.
+  for (const [i, role] of plan.roles.entries()) {
+    await expect(who.getByRole("listitem").nth(i).locator(".role-name")).toHaveText(role.name);
+    await expect(who.getByRole("listitem").nth(i)).toContainText(modelName(role.model));
+  }
+  for (const merge of plan.merges) {
+    await expect(card().getByRole("group", { name: "Merge line", exact: true })).toContainText(merge.sentence);
+  }
+  for (const name of OLD_GROUPS) {
+    await expect(card().getByRole("group", { name, exact: true }), name).toHaveCount(0);
+  }
 
-  // 5. Confirm start, then Cancel: nothing is armed.
+  // 5. Before any press: the card says nothing launches until the operator starts it, shows no dialog and
+  //    none of the old two buttons, CLI and Change something are disabled with the Later release tag, and
+  //    nothing is armed.
   const before = statusRun();
-  await card().getByRole("button", { name: "Confirm start" }).click();
-  const dialog = page.getByTestId("start-dialog");
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Cancel" }).click();
-  await expect(dialog).toHaveCount(0);
+  await expect(card().getByText("Nothing launches until you start it.")).toBeVisible();
+  await expect(page.getByTestId("start-dialog")).toHaveCount(0);
+  await expect(card().getByRole("button", { name: /confirm start|arm the run/i })).toHaveCount(0);
+  for (const label of ["CLI", "Change something"]) {
+    const later = card().locator("[data-not-built]").filter({ hasText: label });
+    await expect(later, label).toHaveAttribute("aria-disabled", "true");
+    await expect(later, label).toContainText("Later release");
+  }
   expect(statusRun()).toEqual(before);
 
-  // 6. Confirm start, then Arm the run.
-  await card().getByRole("button", { name: "Confirm start" }).click();
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Arm the run" }).click();
+  // 6. One press on Start workflow: the page asks for the confirm code once and then arms once.
+  const mark = posted.length;
+  await card().getByTestId("start-workflow").click();
+  await expect(outcome()).toBeVisible({ timeout: 30_000 });
+  const asked = posted.slice(mark).filter((r) => r.verb === "confirm_code" || r.verb === "arm");
+  expect(asked.map((r) => r.verb)).toEqual(["confirm_code", "arm"]);
+  const armBody = asked[1]?.body ?? null;
+  if (armBody === null) throw new Error("the page sent no body with its arm call");
 
-  // 7. The outcome names the run and the device, and `status` names the same run in the project.
-  await expect(outcome()).toHaveText(/^Armed: run \S+ from D-\d+$/, { timeout: 30_000 });
-  const armed = /^Armed: run (\S+) from (D-\d+)$/.exec((await outcome().textContent()) ?? "");
-  if (!armed) throw new Error("the outcome did not name a run and a device");
+  // 7. The outcome says Started, names the run and the device, and `status` names the same run in the
+  //    project. Start workflow is gone. The ledger holds one confirm_code line and one ok arm line of that
+  //    device. The spent code: the captured arm call, posted again with a new command ID, is refused.
+  await expect(outcome()).toContainText("Started", { timeout: 30_000 });
+  const run = await outcome().getAttribute("data-run");
+  const device = await outcome().getAttribute("data-device");
+  if (!run) throw new Error("the outcome names no run");
+  expect(device).toMatch(/^D-\d+$/);
   const now = statusRun();
-  expect(now?.run).toBe(armed[1]);
+  expect(now?.run).toBe(run);
   expect(now?.project_id).toBe(session.project_id);
-  await expect(card().getByRole("button", { name: "Confirm start" })).toHaveCount(0);
+  await expect(card().getByTestId("start-workflow")).toHaveCount(0);
+  const apiLines = fs.readFileSync(path.join(stateDir, "api.ledger"), "utf8").split("\n");
+  expect(apiLines.filter((l) => l.includes(`verb=confirm_code device=${device} `))).toHaveLength(1);
+  expect(apiLines.filter((l) => l.includes(`verb=arm device=${device} `) && l.includes("outcome=ok"))).toHaveLength(1);
+  const replay = await page.request.post(`${origin}/bridge/verbs/arm`, {
+    data: { ...(JSON.parse(armBody) as Record<string, unknown>), command_id: randomUUID() },
+  });
+  expect(((await replay.json()) as { ok: boolean }).ok).toBe(false);
+  expect(statusRun()?.run).toBe(run);
 
-  // 8. A reload shows the card armed, with no Confirm start.
+  // 8. After a reload the card shows the same Started outcome, and no Start workflow.
   await page.reload();
   await expect(nav).toBeVisible();
   await sidebarRow().first().click();
   await expect(card()).toBeVisible();
-  await expect(outcome()).toHaveText(`Armed: run ${armed[1]} from ${armed[2]}`);
-  await expect(card().getByRole("button", { name: "Confirm start" })).toHaveCount(0);
+  await expect(outcome()).toContainText("Started");
+  await expect(outcome()).toHaveAttribute("data-run", run);
+  await expect(outcome()).toHaveAttribute("data-device", device ?? "");
+  await expect(card().getByTestId("start-workflow")).toHaveCount(0);
 
   // 9. Every request went to the bridge's origin, and no confirm code or pairing code is anywhere the
   //    page keeps or logs: not in the console, a URL, the DOM or the page's storage.
