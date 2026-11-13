@@ -103,7 +103,7 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await rail("Agents").click();
   const main = page.getByRole("main");
   await expect(main.getByRole("heading", { name: "Orchestrator" })).toBeVisible();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("high", { exact: true })).toBeVisible();
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("High", { exact: true })).toBeVisible();
   for (const project of ["alpha", "beta"]) {
     await expect(projectRow(project).getByRole("button", { name: "Start session" })).toBeVisible();
   }
@@ -182,8 +182,8 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await expect(fact("Project")).toHaveText("alpha");
   await expect(control("Effort")).toHaveValue("high");
   await rail("Agents").click();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("high", { exact: true })).toBeVisible();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("medium", { exact: true })).toHaveCount(0);
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("High", { exact: true })).toBeVisible();
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("Medium", { exact: true })).toHaveCount(0);
   const after = sessionList();
   expect(after.sessions.find((s) => s.id === "S-1")?.effort).toBe("high");
   expect(after.sessions.find((s) => s.id === "S-2")?.effort).toBe("medium");

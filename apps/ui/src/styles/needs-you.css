@@ -1,0 +1,107 @@
+/* The Needs you page and the dock's cards (11d, `r1.s5.w4`). It uses the design-system tokens (tokens.css) and the
+   app tokens (app-tokens.css) and nothing else: no raw colour, font size or radius (page-styles.test.ts). Where
+   the artboard draws a size no token names (the question's 17 px and 14.5 px), the nearest token step is used:
+   the report lists it as an accepted difference. A length (a width, a gap, a border width) may be in px. */
+
+/* The page: 820 px column (the `Column` sets the width), a 28 px gap. */
+.column:has(> .ny-page) { padding-top: var(--space-8); }
+.ny-page { display: flex; flex-direction: column; gap: var(--space-7); }
+.ny-title-row { display: flex; align-items: flex-end; gap: var(--space-4); }
+.ny-title-block { flex: 1; display: flex; flex-direction: column; gap: var(--space-2); }
+.ny-title { margin: 0; font-size: var(--text-page); font-weight: var(--weight-semibold); line-height: 1; letter-spacing: -0.02em; }
+.ny-subtitle { margin: 0; color: var(--text-tertiary); font-size: var(--text-base); line-height: var(--leading-snug); }
+.ny-block { display: flex; flex-direction: column; gap: var(--space-3); }
+.ny-block-head { display: flex; align-items: center; gap: var(--space-2); }
+.ny-block-head h3 { margin: 0; font-size: var(--text-base); font-weight: var(--weight-semibold); line-height: 1; }
+.ny-count { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--text-sm); font-weight: var(--weight-medium); line-height: 1; }
+.ny-empty { margin: 0; padding: var(--space-6); border: 1px dashed var(--border-default); border-radius: var(--radius-lg); color: var(--text-tertiary); text-align: center; }
+.ny-read-error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--red-600); border-radius: var(--radius-md); background: var(--neg-soft); color: var(--red-300); }
+
+/* The list of cards. */
+.ny-list { display: flex; flex-direction: column; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.ny-list-compact { padding: 0 var(--space-3) var(--space-3); gap: var(--space-2-5); }
+
+/* A card: raised, a subtle border, an 8 px radius, a small shadow. */
+.ny-card { overflow: hidden; border: var(--hairline); border-radius: var(--radius-lg); background: var(--bg-raised); box-shadow: var(--shadow-sm); }
+.ny-main { display: flex; flex-direction: column; gap: var(--space-3); padding: 14px var(--space-4); }
+.ny-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.ny-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: var(--radius-md); }
+.ny-icon-mint { background: var(--mint-tint); color: var(--accent); }
+.ny-icon-run { border: 1px solid var(--border-default); color: var(--blue-400); }
+.ny-eyebrow { font-size: var(--text-tag); font-weight: var(--weight-semibold); line-height: 1; letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--accent); }
+.ny-name { font-size: var(--text-base); font-weight: var(--weight-semibold); line-height: 1; white-space: nowrap; }
+.ny-where { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: var(--text-base); line-height: 1; }
+.ny-spacer { flex: 1; }
+.ny-age { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--text-meta); line-height: 1; white-space: nowrap; }
+.ny-pill { display: inline-flex; align-items: center; height: var(--pill-h); padding: 0 var(--space-2); border-radius: var(--radius-full); background: var(--bg-elevated); color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-meta); font-weight: var(--weight-medium); line-height: 1; }
+.ny-question { margin: 0; font-size: var(--text-md); font-weight: var(--weight-medium); line-height: var(--leading-normal); text-wrap: pretty; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ny-question-merge { font-size: var(--text-lg); font-weight: var(--weight-semibold); line-height: var(--leading-snug); letter-spacing: var(--tracking-tight); white-space: normal; }
+.ny-quiet { margin: 0; color: var(--text-tertiary); font: var(--font-ui); overflow-wrap: anywhere; }
+
+/* The fact grid of a question card: a 72 px label column. */
+.ny-facts { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 5px var(--space-3); margin: 0; font: var(--font-ui); }
+.ny-fact { display: contents; }
+.ny-facts dt { color: var(--text-tertiary); }
+.ny-facts dd { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+
+/* Gaps of a gaps request. */
+.ny-gaps { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; font: var(--font-ui); }
+.ny-gaps li { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-2); }
+.ny-gap-section { color: var(--text-tertiary); font-family: var(--font-mono); }
+.ny-gap-question { color: var(--text-secondary); }
+
+/* The merge card's From and Into box, with the violet-to-mint line. */
+.ny-fromto { position: relative; display: flex; flex-direction: column; gap: 14px; padding: 14px; border-radius: var(--radius-lg); background: var(--bg-inset); }
+.ny-line { position: absolute; left: 19px; top: 26px; width: 2px; height: 40px; background: linear-gradient(var(--violet-400), var(--mint-400)); }
+.ny-row { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.ny-node { position: relative; z-index: 1; flex: none; width: 12px; height: 12px; border-radius: var(--radius-full); }
+.ny-node-from { border: 2px solid var(--violet-400); background: var(--bg-raised); }
+.ny-node-into { border: 2px solid var(--mint-400); background: var(--mint-400); }
+.ny-row-label { flex: none; width: 34px; color: var(--text-tertiary); font-size: var(--text-meta); line-height: 1; }
+.ny-branch { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-base); font-weight: var(--weight-medium); line-height: 1.2; }
+.ny-sha { flex: none; display: flex; align-items: center; height: var(--pill-h); padding: 0 7px; border-radius: var(--radius-sm); background: var(--violet-tint); color: var(--violet-300); font-family: var(--font-mono); font-size: var(--text-meta); font-weight: var(--weight-medium); line-height: 1; }
+.ny-holding { display: flex; align-items: center; gap: var(--space-2-5); padding: var(--space-2-5) var(--space-3); border-radius: var(--radius-lg); background: var(--amber-tint); }
+.ny-holding-icon { display: inline-flex; color: var(--amber-400); }
+.ny-holding-label { color: var(--amber-300); font-size: var(--text-sm); line-height: 1; }
+.ny-holding-what { font-size: var(--text-base); font-weight: var(--weight-medium); line-height: 1.2; overflow-wrap: anywhere; }
+
+/* A card's footer: a border above, the buttons, and for a question the field. */
+.ny-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: var(--hairline); }
+.ny-foot-surface { padding: var(--space-3) var(--space-4); background: var(--bg-surface); }
+.ny-foot-col { flex-direction: column; align-items: stretch; gap: var(--space-2-5); padding-bottom: 14px; }
+.ny-foot-row { display: flex; align-items: center; gap: var(--space-2); }
+.ny-foot-line { margin: 0; color: var(--text-secondary); font: var(--font-ui); }
+.ny-field { width: 100%; box-sizing: border-box; resize: vertical; padding: 9px var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-inset); color: var(--text-primary); font: var(--font-body); }
+.ny-field:focus-visible { border-color: var(--border-focus); outline: none; }
+.ny-field::placeholder { color: var(--text-tertiary); }
+.ny-field:read-only { color: var(--text-disabled); }
+
+/* What a press did: a mint row, or its refusal. */
+.ny-done { display: flex; align-items: center; gap: var(--space-2-5); padding: var(--space-2-5) 14px; border-top: var(--hairline); background: var(--mint-tint); color: var(--text-secondary); font: var(--font-ui); }
+.ny-done-icon { display: inline-flex; color: var(--mint-400); }
+.ny-done-what { color: var(--text-primary); font-weight: var(--weight-medium); min-width: 0; overflow-wrap: anywhere; }
+.ny-done-detail { color: var(--text-tertiary); font-family: var(--font-mono); }
+.ny-done-who { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--text-meta); }
+.ny-act-error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin: 0; padding: var(--space-2) var(--space-4); border-top: var(--hairline); background: var(--neg-soft); color: var(--red-300); font: var(--font-ui); }
+.ny-notice { margin: 0; padding: var(--space-2) var(--space-4); border-top: var(--hairline); color: var(--text-tertiary); font: var(--font-ui); }
+
+/* The quiet row of a held merge card. */
+.ny-held { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); color: var(--text-tertiary); font: var(--font-ui); }
+
+/* Answered today: one bordered group of rows. */
+.ny-answered { overflow: hidden; margin: 0; padding: 0; list-style: none; border: var(--hairline); border-radius: var(--radius-lg); }
+.ny-ans { display: flex; flex-direction: column; gap: var(--space-2); padding: 14px var(--space-4); }
+.ny-ans + .ny-ans { border-top: var(--hairline); }
+.ny-ans-question { margin: 0; color: var(--text-secondary); font-size: var(--text-base); line-height: var(--leading-normal); overflow-wrap: anywhere; }
+.ny-ans-line { display: flex; align-items: center; gap: var(--space-2); }
+.ny-ans-icon { display: inline-flex; color: var(--mint-400); }
+.ny-ans-what { font-size: var(--text-base); font-weight: var(--weight-medium); line-height: 1.2; overflow-wrap: anywhere; }
+.ny-ans-detail { color: var(--text-tertiary); font-family: var(--font-mono); font-size: var(--text-meta); }
+
+/* The compact card of the dock (328 px). */
+.ny-card-compact .ny-main { gap: var(--space-2-5); padding: var(--space-3); }
+.ny-card-compact .ny-foot { padding: var(--space-2-5) var(--space-3); }
+.ny-card-compact .ny-question-merge { font-size: var(--text-md); }
+.ny-card-compact .ny-fromto { padding: var(--space-2-5); }
+.ny-card-compact .ny-line { left: 15px; top: 22px; }
+.ny-card-compact .ny-head { flex-wrap: wrap; }

@@ -1,14 +1,15 @@
-// AC-7 (r1.s4.w3): the Needs you page. What it calls and when, what its cards show, how the request
-// frames and the reads feed it, and that it sets no timer and opens no stream.
+// AC-7 (r1.s4.w3), updated by r1.s5.w4 (11d, one press, G1): the Needs you page. What it calls and when, what
+// its cards show, how the request frames and the reads feed it, and that it sets no timer and opens no stream.
+// The cards' own acts, Hold and Answered today are in needs-you-cards.test.tsx.
 import type { RequestSummary } from "@pulse-factory/api-client";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { parseStreamEvent } from "../transport/types";
 import { advance, boot, type User } from "./chat-helpers";
+import { resetHeld } from "../needs-you/held";
 import {
   FakeTransport,
-  claimRecord,
   mergeAck,
   requestFrames,
   requestSummary,
@@ -21,8 +22,9 @@ const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
 const closed = (id: string, patch: Partial<RequestSummary> = {}) =>
   requestSummary(id, { status: "answered", answered_at: ago(1), verbs: [], ...patch });
 
-/** A string that no source file holds: the page must show the run's own text (C12). */
-const WAITING = "close spine zq-7731 once the moon is full";
+beforeEach(() => {
+  resetHeld();
+});
 
 const rail = () => within(screen.getByRole("navigation"));
 const main = () => within(screen.getByRole("main"));
@@ -50,7 +52,7 @@ async function frame(fake: FakeTransport, f: Parameters<FakeTransport["requestFr
 const since = (fake: FakeTransport, boot: number) => fake.calls.slice(boot);
 
 describe("Needs you: what it calls", () => {
-  it("makes exactly W9's calls when it opens: requests {all}, runList, and a show for each answerable request", async () => {
+  it("makes exactly W9's calls when it opens: requests {all}, runList, and a show for each open request of every kind", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), mergeAck("R-2"), requestSummary("R-3", { kind: "gaps" })]);
     fake.bodies["R-1"] = { stop_text: "Which database do we use?" };
@@ -59,15 +61,14 @@ describe("Needs you: what it calls", () => {
 
     await gotoNeedsYou(user);
     await screen.findByText("Which database do we use?");
-    await waitFor(() => expect(fake.count("show")).toBe(2));
+    await waitFor(() => expect(fake.count("show")).toBe(3));
 
-    expect(since(fake, before).slice().sort()).toEqual(["requests", "runList", "show", "show"]);
+    expect(since(fake, before).slice().sort()).toEqual(["requests", "runList", "show", "show", "show"]);
     expect(fake.requestsArgs).toEqual([{ all: true }]);
-    expect(fake.showArgs.map((a) => a.id).sort()).toEqual(["R-1", "R-3"]);
+    expect(fake.showArgs.map((a) => a.id).sort()).toEqual(["R-1", "R-2", "R-3"]);
     expect(fake.count("confirmCode")).toBe(0);
     expect(fake.count("answer") + fake.count("ack") + fake.count("clear")).toBe(0);
   });
-
   it("opens no stream of its own", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1")]);
@@ -83,7 +84,7 @@ describe("Needs you: what it calls", () => {
     fake.seedRequests([requestSummary("R-1"), mergeAck("R-2")]);
     const user = await openPage(fake);
     await screen.findByRole("article", { name: "Request R-2" });
-    await waitFor(() => expect(fake.count("show")).toBe(1));
+    await waitFor(() => expect(fake.count("show")).toBe(2));
     const before = fake.calls.length;
     // The shell's sidebar read the run list once on Projects, and the page read it once: two calls so far.
     expect(fake.count("runList")).toBe(2);
@@ -96,26 +97,27 @@ describe("Needs you: what it calls", () => {
 });
 
 describe("Needs you: the cards", () => {
-  it("lists the merge card first with its facts from the summary, and calls no show for it", async () => {
+  it("lists the merge card first, with its facts from the body, then the other requests", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), mergeAck("R-2", { opened_at: "2026-11-10T12:00:00.000Z" })]);
     fake.bodies["R-1"] = { stop_text: "Which database do we use?" };
+    fake.bodies["R-2"] = { head_branch: "spine/s1" };
     await openPage(fake);
     await screen.findByText("Which database do we use?");
+    await screen.findByText("Merge spine/s1 into main?");
 
     const cards = openList().getAllByRole("article");
     expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual(["Request R-2", "Request R-1"]);
 
     const merge = card("R-2");
-    expect(merge.getByText("pulseai-labs/example#9")).toBeTruthy();
-    expect(merge.getByText("main")).toBeTruthy();
-    expect(merge.getByText("a".repeat(40))).toBeTruthy();
-    expect(merge.getByRole("button", { name: "Confirm merge" })).toBeTruthy();
-    expect(fake.showArgs.map((a) => a.id)).toEqual(["R-1"]);
+    expect(merge.getByTestId("merge-pr").textContent).toBe("pulseai-labs/example#9");
+    expect(merge.getByTestId("merge-into").textContent).toBe("main");
+    expect(merge.getByTestId("merge-sha").getAttribute("title")).toBe("a".repeat(40));
+    expect(merge.getByRole("button", { name: "Approve merge" })).toBeTruthy();
+    expect(fake.showArgs.map((a) => a.id).sort()).toEqual(["R-1", "R-2"]);
     // No click so far: no code was asked for.
     expect(fake.count("confirmCode")).toBe(0);
   });
-
   it("shows a stop request's text from show, as text only", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1")]);
@@ -127,11 +129,10 @@ describe("Needs you: the cards", () => {
     expect(text.querySelector("b")).toBeNull();
     const c = card("R-1");
     expect(c.getByLabelText("Your answer")).toBeTruthy();
-    const send = c.getByRole("button", { name: "Send answer" }) as HTMLButtonElement;
+    const send = c.getByRole("button", { name: "Send" }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
   });
-
-  it("shows each gap of a gaps request, and enables Send answer once there is text", async () => {
+  it("shows each gap of a gaps request, and enables Send once there is text", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-4", { kind: "gaps" })]);
     fake.bodies["R-4"] = {
@@ -148,9 +149,8 @@ describe("Needs you: the cards", () => {
     expect(within(gaps).getByText("nice-to-have")).toBeTruthy();
 
     await user.type(card("R-4").getByLabelText("Your answer"), "yes");
-    expect((card("R-4").getByRole("button", { name: "Send answer" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((card("R-4").getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false);
   });
-
   it("shows a stop card with no more than its facts when the body holds neither text nor gaps", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1")]);
@@ -200,20 +200,19 @@ describe("Needs you: the stream's frames", () => {
     expect(fake.count("show")).toBe(2);
   });
 
-  it("moves a request that a frame closes to Answered", async () => {
+  it("moves a request that a frame closes to Answered today", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), requestSummary("R-2")]);
     await openPage(fake);
     await screen.findByRole("article", { name: "Request R-2" });
 
+    fake.requestRows = fake.requestRows.map((r) => (r.id === "R-1" ? closed("R-1") : r));
     await frame(fake, requestFrames.request(closed("R-1")));
 
     expect(screen.queryByRole("article", { name: "Request R-1" })).toBeNull();
-    const answered = within(screen.getByRole("list", { name: "Answered" }));
-    expect(answered.getByText("R-1", { selector: "strong" })).toBeTruthy();
-    expect(answered.getByText("answered")).toBeTruthy();
+    const answered = within(main().getByRole("list", { name: "Answered today" }));
+    expect(answered.getByRole("listitem", { name: "Answered R-1" })).toBeTruthy();
   });
-
   it("drops, on a requests snapshot after a reconnect, a request that closed meanwhile", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), requestSummary("R-2")]);
@@ -224,7 +223,7 @@ describe("Needs you: the stream's frames", () => {
 
     expect(screen.queryByRole("article", { name: "Request R-1" })).toBeNull();
     expect(screen.getByRole("article", { name: "Request R-2" })).toBeTruthy();
-    expect(main().getByText("1 open")).toBeTruthy();
+    expect(main().getByTestId("open-count").textContent).toBe("1");
   });
 
   it("counts the open requests on the rail from frames alone, before the page ever opened", async () => {
@@ -243,21 +242,6 @@ describe("Needs you: the stream's frames", () => {
 
     await frame(fake, requestFrames.request(closed("R-1")));
     expect((button.querySelector(".ui-count") as HTMLElement).textContent).toBe("1");
-  });
-
-  it("follows claim frames in the claim line", async () => {
-    const fake = new FakeTransport();
-    await openPage(fake);
-    expect(main().getByText("No claim")).toBeTruthy();
-
-    await frame(fake, requestFrames.claim(claimRecord({ generation: 2, holder: "ann@host" })));
-    expect(main().getByText("ann@host, generation 2")).toBeTruthy();
-
-    await frame(fake, requestFrames.claim(claimRecord({ generation: 2, holder: "ann@host", revoked: true })));
-    expect(main().getByText("ann@host, generation 2, revoked")).toBeTruthy();
-
-    await frame(fake, requestFrames.claim(null));
-    expect(main().getByText("No claim")).toBeTruthy();
   });
 
   it("drops a request_frame that does not have the summary's shape and applies the next good one", async () => {
@@ -281,36 +265,28 @@ describe("Needs you: the stream's frames", () => {
 });
 
 describe("Needs you: the reads", () => {
-  it("fills Answered from the requests {all} read alone: 3 hours ago is in, 30 hours ago is not", async () => {
+  it("fills Answered today from the requests {all} read alone: 3 hours ago is in, 30 hours ago is not", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([closed("R-1", { answered_at: ago(3) }), closed("R-2", { answered_at: ago(30) })]);
     await openPage(fake);
 
-    const answered = within(await screen.findByRole("list", { name: "Answered" }));
-    expect(answered.getByText("R-1", { selector: "strong" })).toBeTruthy();
-    expect(answered.queryByText("R-2", { selector: "strong" })).toBeNull();
+    const answered = within(await screen.findByRole("list", { name: "Answered today" }));
+    expect(answered.getByRole("listitem", { name: "Answered R-1" })).toBeTruthy();
+    expect(answered.queryByRole("listitem", { name: "Answered R-2" })).toBeNull();
+    expect(main().getByTestId("answered-count").textContent).toBe("1");
     // No frame was emitted.
     expect(fake.count("requests")).toBe(1);
   });
-
-  it("shows Running, Waiting on you with the run's own text, Done and Halted from runList", async () => {
+  it("uses runList for the cards' spine names only, and shows no Runs list", async () => {
     const fake = new FakeTransport();
-    fake.runs = [
-      runSummary("R-1", { waiting: WAITING }),
-      runSummary("R-2", { state: "ended", end_reason: "spine closed" }),
-      runSummary("R-3", { halted_reason: "checks red" }),
-      runSummary("R-4"),
-    ];
+    fake.seedRequests([requestSummary("R-1", { run: "R-9" })]);
+    fake.runs = [runSummary("R-9", { spine: "zq-7731" })];
     await openPage(fake);
 
-    await screen.findByRole("article", { name: "Run R-1" });
-    const run = (id: string) => within(screen.getByRole("article", { name: `Run ${id}` }));
-    expect(run("R-1").getByText(`Waiting on you: ${WAITING}`)).toBeTruthy();
-    expect(run("R-2").getByText("Done: spine closed")).toBeTruthy();
-    expect(run("R-3").getByText("Halted: checks red")).toBeTruthy();
-    expect(run("R-4").getByText("Running")).toBeTruthy();
+    expect(await screen.findByText("zq-7731")).toBeTruthy();
+    expect(main().queryByRole("list", { name: "Runs" })).toBeNull();
+    expect(main().queryByText(/Waiting on you|Halted|Running/)).toBeNull();
   });
-
   it("shows one error line and Refresh when requests fails at open, and a good Refresh clears it", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1")]);
@@ -327,34 +303,28 @@ describe("Needs you: the reads", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("shows one error line and Refresh when runList fails at open, and a good Refresh clears it", async () => {
+  it("leaves the run IDs as the names, with no error line, when runList fails at open", async () => {
     const fake = new FakeTransport();
-    fake.runs = [runSummary("R-1")];
+    fake.seedRequests([requestSummary("R-1", { run: "R-9" })]);
+    fake.runs = [runSummary("R-9", { spine: "zq-7731" })];
     fake.fail("runList", "refused", "no runs for you");
-    const user = await openPage(fake);
+    await openPage(fake);
 
-    const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText("no runs for you")).toBeTruthy();
-    expect(screen.queryByRole("article", { name: "Run R-1" })).toBeNull();
-
-    fake.heal("runList");
-    await user.click(within(alert).getByRole("button", { name: "Refresh" }));
-    expect(await screen.findByRole("article", { name: "Run R-1" })).toBeTruthy();
+    expect(await screen.findByRole("article", { name: "Request R-1" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("zq-7731")).toBeNull();
   });
-
   it("labels what it still shows after a failed read, and never shows it as current", async () => {
     const fake = new FakeTransport();
-    fake.runs = [runSummary("R-1")];
+    fake.seedRequests([requestSummary("R-1")]);
     const user = await openPage(fake);
-    await screen.findByRole("article", { name: "Run R-1" });
+    await screen.findByRole("article", { name: "Request R-1" });
 
-    fake.fail("runList", "server", "gone");
+    fake.fail("requests", "server", "gone");
     await user.click(main().getByRole("button", { name: "Refresh" }));
     expect(await screen.findByText(/^Last read at /)).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("gone");
   });
-
   it("shows the 3c banner for an unauthorized requests, and no error line", async () => {
     const fake = new FakeTransport();
     // A down kind reaches the banner from any call; a call that works clears it, so fail both reads.
@@ -394,7 +364,7 @@ describe("Needs you: no timer, no focus handler", () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), mergeAck("R-2")]);
     fake.bodies["R-1"] = { stop_text: "still there?" };
-    fake.runs = [runSummary("R-1", { waiting: WAITING })];
+    fake.runs = [runSummary("R-1")];
     render(<App transport={fake} />);
     await advance(0);
     fireEvent.click(rail().getByRole("button", { name: "Needs you" }));

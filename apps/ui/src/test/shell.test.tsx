@@ -15,7 +15,6 @@ async function open(fake: FakeTransport) {
 const rail = () => within(screen.getByRole("navigation"));
 const titlebar = () => within(screen.getByRole("banner"));
 const sidebar = () => screen.queryByRole("region", { name: "Sidebar" });
-const SERVER_META = new RegExp(`Connected · \\d+ ms · ${ADDRESS.replaceAll(".", "\\.")}`);
 const LATER = ["Add a server", "Pair a phone", "Paired devices", "Server settings"];
 
 describe("the shell (2a to 2c)", () => {
@@ -128,13 +127,14 @@ describe("the shell (2a to 2c)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("shows the same server section on the Settings page", async () => {
+  it("shows the server on the Settings page: its state row, its Address row and Disconnect this Mac (11k)", async () => {
     const { user } = await open(new FakeTransport());
     await user.click(rail().getByRole("button", { name: "Settings" }));
 
     const page = within(screen.getByRole("main"));
     expect(page.getAllByText(ADDRESS).length).toBeGreaterThan(0);
-    expect(await page.findByText(SERVER_META)).toBeTruthy();
+    expect(await page.findByText(/^Connected · \d+ ms$/)).toBeTruthy();
+    expect(page.getByText("Address")).toBeTruthy();
     expect(page.getByRole("button", { name: "Disconnect this Mac" })).toBeTruthy();
     for (const later of LATER) expect(screen.queryByText(later)).toBeNull();
   });
@@ -144,6 +144,9 @@ describe("the shell (2a to 2c)", () => {
     const { user } = await open(fake);
     await user.click(rail().getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("button", { name: "Disconnect this Mac" }));
+    // 11k: the confirm is in place; nothing is forgotten before Disconnect.
+    expect(fake.count("forget")).toBe(0);
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Disconnect" }));
 
     expect(await screen.findByText("Connect to your server")).toBeTruthy();
     expect(fake.count("forget")).toBe(1);

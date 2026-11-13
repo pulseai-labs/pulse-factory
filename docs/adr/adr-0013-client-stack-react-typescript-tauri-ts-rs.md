@@ -532,7 +532,55 @@ Filled by `r1.s5.w3` when it lands.
 
 ## Amendment (`r1.s5.w4`)
 
-Filled by `r1.s5.w4` when it lands.
+This item is round 3 of `r1.s5`. It gives the Needs you page, the Needs-you dock's content, the Agents page and
+the Settings page the look and layout of the approved frames 11d, 11g and 11k. It changes no Rust, no verb and
+no transport or state file.
+
+- **The one-press confirm.** Each act on Needs you is one press: Send (`answer`), Resume (`clear`) or Approve
+  merge (`ack`). Behind the press the app asks for a fresh confirm code and spends it at once (`confirmCode`,
+  then the act, with two distinct command IDs). The `client-api-auth` control stays whole: the code is still
+  fresh, one-use and bound to this device and this act, and it lives in memory for that press only. The
+  two-click confirm panel is gone (grill ruling G1), and so are the claim line and the Runs list: the claim
+  shows only in "Answered today", and a run's state shows in the sidebar's Workflow runs group. `ConfirmDialog.tsx`
+  stays in the tree, unchanged, with its own component test; Needs you no longer renders it. The refusal lines
+  and the retry rules of the dialog carry over to the hook (`needs-you/useConfirmedAct.ts`).
+- **A client-only close (Hold).** Hold sets a merge card aside on this Mac (operator ruling R5). It makes no
+  call and stores nothing: the held set lives in memory, the request stays open on the server and the rail's
+  count still counts it, and the card shows again on a new revision or after a reload. This is a client-only
+  close: no server-side hold exists.
+- **The `clear` action.** A parked item (a unit request of a kind other than `stop` and `gaps` that lists
+  `clear` in `verbs`) gets "Resume <unit>", a one-press `clear` with no `to`. Until this item the app never
+  called `clear` (the `r1.s4` retrospective, item 2). The device path (`Act::Clear`) and the API allowlist
+  already held it.
+- **Accepted gaps**, each a later release or a data limit, not an omission:
+  - The chat question's text and option buttons are not in the Needs you card. A device reads a chat's items
+    only on the stream that follows that chat (ADR-0012: `session_items` is off the allowlist), so the card
+    shows who waits and where, with Open session.
+  - The persona text is not shown: the agent record carries none.
+  - A parked item's attempt count and asker are not shown: the request carries neither. Its note to the
+    Implementer and "Open run view" are `NotBuilt` (R4).
+  - The Agents page lists the agents the server lists. Autopilot, Research partner and Plain, agent create and
+    edit, Add skill, phone notifications and a permission change are `NotBuilt` or absent.
+  - The merge's demo-walk gate is not built (G4: no workflow sets it yet).
+- **The screenshots** `3f-needs-you`, `6a-agents`, `settings` and `dock-needs-you` are this item's. The
+  parked item in `3f-needs-you` comes through the `overlay` of d25, so the rail's count on the other screens
+  does not change.
+
+### Verified claims (r1.s5.w4)
+
+Checked on draco-desk on 2026-11-13 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite passes (27 files, 689 tests) and `tsc` is clean. `needs-you-cards.test.tsx` names the
+  one-press claims above: two calls in order with the right subject, two distinct command IDs, no call without
+  a press, the retry rules, Hold and Show making no call, and Resume calling `clear`.
+- `scripts/demo/ui-screens.sh` passes three runs in a row, and a copy of the built CSS with `--amber-border`
+  changed fails the line and names `6a-agents`.
+- `scripts/demo/ui-needs-you.sh` (d23) passes in card mode against the real controller, API and bridge, with
+  one press for each act, no dialog, exactly two confirm codes, and a second use of a spent code refused as
+  `code_used`.
+
+### Unverified claims (r1.s5.w4)
+- A person has not yet compared the four screenshots with frames 11d, 11g and 11k (AC-14).
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
 
 
 ## Amendment (`r1.s5.w5`)
