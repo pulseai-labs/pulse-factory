@@ -151,7 +151,7 @@ secret.
 
 | Kind | Screen |
 |---|---|
-| `unreachable` | 3c banner "Not connected to <address>"; retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. |
+| `unreachable` | 3c banner "Not connected to <name>" (the server's name, else <address>); retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. The banner also shows while the chat stream is `reconnecting` (title "Not connected to <name>", body "Reconnecting…", and "Retry now" calls the stream's `reconnect()`): the UI reads that state and sets no timer for it. |
 | `unauthorized` | 3c banner "This device is no longer paired with <address>." and "Pair again". No timer. |
 | `key_changed` | 3c banner `server key changed: re-pair` and "Pair again". No timer. |
 | `rate_limited` | 3c banner with the server's text and "Retry now". No timer. |
@@ -172,8 +172,8 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
 - When a chat is on screen, the stream **follows that chat**: the UI closes the current stream and opens
   `openStream({session, after})`, where `after` is the highest `seq` it holds for that session (0 the first
   time). When no chat is on screen, it goes back to the overview. Each switch is an operator action.
-- `reconnecting` shows "Reconnecting…" with its reason on the open chat and does nothing else: `pf-client`
-  retries. `closed` by kind:
+- `reconnecting` shows "Reconnecting…" with its reason on the open chat, and the 3c banner (`r1.s5.w2`, the
+  `unreachable` row above); it calls nothing and sets no timer: `pf-client` retries. `closed` by kind:
   - `unreachable` (the local leg dropped, or the bridge or the app's Rust side is gone) and `rate_limited`:
     the same 3c banner and `status()` retry as a failed call. When the link comes back, the UI opens the
     stream again with the last `seq` it holds. No new timer: the only retry timer is the connection's.
@@ -184,30 +184,55 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
   when the Agents page or the first chat opens, after `session_start`, and once when the link comes back,
   and the cache-warm display ticks once a minute on the chat that is on screen and calls nothing.
 - A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
-  chat's items replay from `after=0`. The UI keeps no chat state in storage (`pf.sidebar` is its only key).
+  chat's items replay from `after=0`. The UI keeps no chat state in storage. It keeps two keys in
+  `localStorage`, both per device and both a fold state: `pf.sidebar` and `pf.dock` (`r1.s5.w2`, see below).
 
-**Needs you and the request frames (`r1.s4.w3`).** The controller sends the request frames on **every**
-stream, the overview included, so the UI needs no stream of its own for them: the one stream the app holds
-feeds the requests state (the rail's count, and the Needs you page while it is open), with no call. The
-page's calls (W9) are:
+**The shell (`r1.s5.w2`).** The shell's sidebar holds the Workflow runs group, one row for each run of
+`runList`. The sidebar calls `runList` **once each time it mounts** and **once when the link comes back**
+(`epoch`). It mounts on the Projects, Agents and chat pages and unmounts on the focused pages (Needs you and
+Settings), so a visit to Needs you and back reads the list again. No timer and no focus handler make this call.
+A failed call leaves the group as it was, and a disconnect shows the banner. The need-you pill and the dock
+read the requests state, which the stream feeds: they make no call. The dock's open state is kept per device
+in `localStorage` under `pf.dock` (`open` or `closed`, read in a `try`, closed by default), as `pf.sidebar`
+keeps the sidebar's. These are the only two keys; there is still no chat state in storage. While the link is
+down the add-a-project form is disabled, and the Projects page shows "As of <time>, when <name> was last
+reachable" over the list it holds.
 
-- when it opens: one `requests {all: true}` (the correctness path: a fresh page fills its Open requests,
-  its claim and its Answered list from that read alone, with no frame), one `runList`, and one `show` for
-  each open request that takes `answer` (its question is in the body);
+**Needs you and the request frames (`r1.s4.w3`, one press at `r1.s5.w4`).** The controller sends the request
+frames on **every** stream, the overview included, so the UI needs no stream of its own for them: the one
+stream the app holds feeds the requests state (the rail's count, and the Needs you page and the dock while they
+are open), with no call. The page's calls (W9) are:
+
+- when it opens: one `requests {all: true}` (the correctness path: a fresh page fills its Open cards, its
+  claim and its Answered today rows from that read alone, with no frame), one `runList` (for the cards' spine
+  names only), one `show` for each open request of every kind (the merge card's PR, From, Into and head SHA
+  come from the body; the run question's text is in it), and one `show` for each answered row it holds no
+  detail for (an answered request does not change, so it is read once);
 - when the link comes back: the same, once;
-- on the operator's **Refresh**: `requests` and `runList`;
-- after the operator's own `ack`: `runList` once; after a replayed `answer` or `ack`: `requests` once;
-- while the page is on screen, a `request` frame that brings an open request that takes `answer` at a
-  revision the page holds no body for: one `show` for it.
+- on the operator's **Refresh**: the same;
+- after a replayed `answer`, `clear` or `ack`, and after a `subject_moved` refusal: `requests` once;
+- while the page is on screen, a `request` frame that brings an open request at a revision the page holds no
+  body for: one `show` for it. The dock makes the same `show` calls and no `requests` or `runList` call.
 
-Nothing else: no timer, no focus handler, no second stream. **No `confirmCode` is asked for, and no code
-is spent, except on the operator's click** (the dialog's first and second click); a reload, a reconnect, a
-frame or a timer never asks. The page offers Answer and Merge only: `clear` is on the interface for
-parity and the CLI keeps it. A run that starts waiting or ends while the page is on screen shows it at
-the next read (known limit: there is no run frame).
+Nothing else: no timer, no focus handler, no second stream.
 
-**The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its Project
-or Agent select changes (an operator action) and once when the link comes back, and `sessionList` once
+**One press (`r1.s5.w4`).** Each act is one press of one button: **Send** (`answer`, on a run question),
+**Resume** (`clear`, on a parked item) and **Approve merge** (`ack`). A press makes exactly two calls, in order:
+`confirmCode` with a fresh `command_id` and the act's subject (the `answer` subject carries the SHA-256 of the
+text; `clear` carries no `to`), then the act with that code and a second fresh `command_id`. The code stays in
+the hook's memory for that one press: it is never rendered, stored, logged or put in a URL. The confirm is
+still fresh, one-use and bound to this device and this act (the `client-api-auth` control); the two-click
+confirm panel is gone (G1). **No `confirmCode` is asked for, and no code is spent, except on the operator's
+press**: a reload, a reconnect, a frame or a timer never asks. `unreachable` on the ask offers Retry with a new
+`command_id`; `unreachable` on the spend offers Retry with the same code and the same `command_id`; a refusal
+shows its line and drops the code. The page offers Send, Resume and Approve merge, and no option answer: a
+chat question's option buttons stay in the chat. **Hold** (on a merge card) makes no call: it sets the card
+aside on this Mac, in memory only, and the request stays open on the server. A run that starts waiting or ends
+shows in the sidebar's Workflow runs group, which reads `runList` when it mounts (known limit: there is no run
+frame).
+
+**The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its scope
+changes (the scope buttons and the project and agent pills; an operator action) and once when the link comes back, and `sessionList` once
 when the list is not loaded (for the Agent select). It names no key: it renders the records the server
 returns. A `settingsSet` or `settingsUnset` is one action with one `command_id`, reused only for a retry
 after `unreachable`.
@@ -413,6 +438,12 @@ Tauri's IPC only, so the webview opens no network connection.
   `crates/pulse-factory/tests/client_chat.rs`: the client, a drop and a reconnect, a revoke and the
   bridge against a real controller with `FakeChat`.
 - `scripts/demo/ui-pair.sh` (d12): the whole journey in headless Chromium against the built binary.
+- `apps/ui/src/test/shell-parts.test.tsx` and `history.test.ts` (Vitest, the fake transport, `r1.s5.w2`): the
+  title bar, the rail, the sidebar (By project, By state, the search, the Workflow runs rows), the dock and
+  `pf.dock`, `DockRequests`, the banner on `reconnecting`, the server menu and its confirm, each `NotBuilt`
+  form, New session's two paths, the page history and the navigation seam. `shell.test.tsx`,
+  `projects.test.tsx`, `disconnected.test.tsx` and `no-polling.test.tsx` carry the shell's one `runList` in
+  their call lists.
 - `apps/ui/src/test/{agents,chat,composer,cards,chat-stream}.test.tsx` (Vitest, the fake transport,
   `r1.s3.w5`): the Agents page, the chat screen and its items, the composer's controls, the gauge, the
   cache timer and the cost in wu, the approval and question cards, and the stream rule above, including the
@@ -429,7 +460,55 @@ Tauri's IPC only, so the webview opens no network connection.
   transport, `r1.s4.w3`): the Needs you page and what it calls, the confirm dialog's two clicks and its
   refusals, the requests state's rules, and the Settings rows. `transport-contract.test.ts` and
   `tauri-transport.test.ts` gain the ten methods, the `request_frame` event and the refusal word.
+- `apps/ui/src/test/needs-you-cards.test.tsx` (Vitest, the fake transport, `r1.s5.w4`): one press makes one
+  `confirmCode` then one act with the right subject and two distinct command IDs, no call without a press, the
+  retry rules after `unreachable`, each refusal's line, Hold and Show make no call, the parked item's Resume
+  calls `clear`, the chat question's Open session, the Answered today rows and the Open count.
+  `needs-you.test.tsx`, `agents.test.tsx`, `settings-rows.test.tsx` and `page-styles.test.ts` carry the page's
+  reads, the Agents page, the Settings page and the style rule of the three page files. `confirm.test.tsx` keeps
+  the test of `ConfirmDialog` as a component.
 - `scripts/demo/ui-needs-you.sh` (d23, `r1.s4.w3`): the Needs you and Settings journey in headless
   Chromium through `pf-client-bridge`, against the real controller on the paper env. Its journey is
   `apps/ui/e2e/needs-you.spec.ts`; `PF_D23_START=cli` starts the run with the CLI, and the default
   `card` starts it from the start card of `r1.s4.w2`.
+- `scripts/demo/ui-screens.sh` (d25, `r1.s5.w1`; twelve screens after `r1.s5.w2`, counted from the `test(`
+  calls of the spec): the screens of the Mac app in headless Chromium, each
+  compared with a committed screenshot (`apps/ui/e2e/screens.spec.ts-snapshots/`). Its spec is
+  `apps/ui/e2e/screens.spec.ts`, which reads the bridge protocol's routes above from a fixture server of its
+  own (`apps/ui/e2e/screens/server.ts`): a Node http server on `127.0.0.1` that serves the built bundle with
+  the bridge's Content-Security-Policy and answers `GET /bridge/paired`, `POST /bridge/status`,
+  `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
+  fixtures.ts`, which re-exports one module for each area under `fixtures/`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
+  real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.
+
+## Add a project and Remove project (`r1.s5.w5`)
+
+The Add a project dialog and the remove confirm of the Projects page reach two verbs through two typed
+methods of the `Transport`. Each is one `verb<T>(...)` call in `tauri.ts` and in `bridge.ts`: both verbs are
+on `pf_api::ALLOWLIST`, so the one `verb` command carries them and no Tauri command is added.
+
+| Method | Verb | Arguments | Answer |
+|---|---|---|---|
+| `folderList(args?)` | `folder_list` | `FolderListArgs`: no `path` is the server's home folder | `FolderList` |
+| `projectRemove(args)` | `project_remove` | `ProjectRemoveArgs`: `id`, `end_sessions?`, `command_id` | `ProjectChanged`, with `ended` after `end_sessions` |
+
+`projectAdd` gains no method: its `ProjectAddArgs` gains `git_init?`.
+
+- **When the UI calls `folder_list`.** Once when the Add a project dialog opens (no path), and once for each
+  navigation: a row's open button, a crumb, the up button, "Add another", and one read of the parent folder
+  after an add with `git_init`, to name the branch. Never on a timer. A pick, a typed name and the tick of the
+  box make no call.
+- **When the UI calls `project_remove`.** Once for each press of the confirm's danger action, with
+  `end_sessions: true` and a command ID. A retry after `unreachable` reuses the command ID. The confirm reads
+  `run_list` once when it opens and locks the action while a run of the project is active; the server's
+  refusal holds even when that list is stale, and its text is shown.
+- **After an add or a remove**, the page loads `project_list` once.
+
+### Verified by
+
+- `apps/ui/src/test/add-project.test.tsx` (Vitest, the fake transport): the dialog's two reads, the rows
+  and their marks, the pick and the name, the `git init` tip and `git_init`, the success view, the retry
+  with the same command ID, the refusal text, `NotBuilt` for the later-release choices, Escape, Cancel and
+  focus. `projects.test.tsx`: the header button, no form, and the remove confirm in its three states.
+- `apps/ui/e2e/screens.spec.ts` (d25, fourteen screens): `2c-projects`, `11e-remove-confirm` and
+  `11f-add-project`. `scripts/demo/ui-pair.sh` (d12): add a folder with `git init`, remove it, add it again.

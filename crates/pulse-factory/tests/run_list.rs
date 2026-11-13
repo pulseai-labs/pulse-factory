@@ -16,11 +16,12 @@ use pf_client::transport::Transport;
 use pf_engine::port::store::Store;
 use serde_json::{Value, json};
 
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 9] = [
     "end_reason",
     "halted_reason",
     "id",
     "open_requests",
+    "project_id",
     "spine",
     "state",
     "waiting",

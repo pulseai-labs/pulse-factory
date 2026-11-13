@@ -15,23 +15,29 @@ async function open(fake: FakeTransport) {
 const rail = () => within(screen.getByRole("navigation"));
 const titlebar = () => within(screen.getByRole("banner"));
 const sidebar = () => screen.queryByRole("region", { name: "Sidebar" });
-const SERVER_META = new RegExp(`Connected · \\d+ ms · ${ADDRESS.replaceAll(".", "\\.")}`);
 const LATER = ["Add a server", "Pair a phone", "Paired devices", "Server settings"];
 
 describe("the shell (2a to 2c)", () => {
-  it("has a rail with exactly Projects, Agents, Needs you and Settings, and nothing the later spines add", async () => {
+  it("has a rail with Projects, Needs you, Agents and Settings as buttons, and More and the usage ring as not built", async () => {
     await open(new FakeTransport());
     expect(rail().getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
       "Projects",
-      "Agents",
       "Needs you",
+      "Agents",
       "Settings",
     ]);
     // r1.s4.w3: no badge while no request is open.
     expect(rail().getByRole("button", { name: "Needs you" }).querySelector("[title$=' open']")).toBeNull();
-    for (const text of [/need you/i, /more/i, /usage/i]) {
-      expect(screen.queryByText(text)).toBeNull();
+    // 11a and 11l: More and the usage ring are in the rail, dimmed, with the "Later" tag. They are not buttons.
+    for (const later of ["More", "Usage"]) {
+      const item = rail().getByText(later).closest("[data-not-built]");
+      expect(item?.getAttribute("aria-disabled")).toBe("true");
+      expect(item?.getAttribute("data-not-built")).toBe("rail");
+      expect(rail().queryByRole("button", { name: later })).toBeNull();
     }
+    expect(rail().getAllByText("Later")).toHaveLength(2);
+    // No request is open: the pill in the title bar says so.
+    expect(titlebar().getByText("0 need you")).toBeTruthy();
     // No right panel, and no tab strip until a chat opens.
     expect(screen.queryByRole("complementary")).toBeNull();
     expect(screen.queryAllByRole("tab")).toHaveLength(0);
@@ -57,15 +63,19 @@ describe("the shell (2a to 2c)", () => {
     expect(projects.getAttribute("title")).toMatch(/hide the sidebar/);
   });
 
-  it("keeps only the sidebar's open state in localStorage, and reads it back", async () => {
+  it("keeps only the sidebar's and the dock's open state in localStorage, and reads the sidebar back", async () => {
     const fake = new FakeTransport();
     const { user, view } = await open(fake);
+    // The dock is written when the operator changes it, not on mount.
     expect(Object.keys(window.localStorage)).toEqual(["pf.sidebar"]);
     expect(window.localStorage.getItem("pf.sidebar")).toBe("open");
 
     await user.keyboard("{Meta>}b{/Meta}");
     expect(Object.keys(window.localStorage)).toEqual(["pf.sidebar"]);
     expect(window.localStorage.getItem("pf.sidebar")).toBe("closed");
+    await user.click(titlebar().getByTitle("Show or hide Needs you"));
+    expect(Object.keys(window.localStorage).sort()).toEqual(["pf.dock", "pf.sidebar"]);
+    expect(window.localStorage.getItem("pf.dock")).toBe("open");
 
     view.unmount();
     render(<App transport={fake} />);
@@ -94,28 +104,37 @@ describe("the shell (2a to 2c)", () => {
     expect((titlebar().getByRole("button", { name: "Forward" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("opens the server menu from the server's name and shows what this spine builds", async () => {
+  it("opens the server menu from the chip in the title bar and shows what this spine builds", async () => {
     const { user } = await open(new FakeTransport());
     expect(screen.queryByRole("dialog")).toBeNull();
-    await user.click(within(sidebar() as HTMLElement).getByRole("button", { name: new RegExp(ADDRESS.replaceAll(".", "\\.")) }));
+    // The chip's accessible name is the server's name, else its address (the fake has no name).
+    await user.click(titlebar().getByRole("button", { name: new RegExp(ADDRESS.replaceAll(".", "\\.")) }));
 
     const menu = within(screen.getByRole("dialog", { name: "Server menu" }));
     expect(menu.getAllByText(ADDRESS).length).toBeGreaterThan(0);
-    expect(menu.getByText(SERVER_META)).toBeTruthy();
+    expect(menu.getByText("Connected")).toBeTruthy();
+    expect(menu.getByText(/^\d+ ms$/)).toBeTruthy();
     expect(menu.getByRole("button", { name: "Disconnect this Mac" })).toBeTruthy();
-    for (const later of LATER) expect(menu.queryByText(later)).toBeNull();
+    // 11h: the later-release rows are in the menu, dimmed and not buttons (11l).
+    expect(menu.getByText("Coming in a later release")).toBeTruthy();
+    for (const later of LATER) {
+      const row = menu.getByText(later).closest("[data-not-built]");
+      expect(row?.getAttribute("aria-disabled")).toBe("true");
+      expect(menu.queryByRole("button", { name: later })).toBeNull();
+    }
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("shows the same server section on the Settings page", async () => {
+  it("shows the server on the Settings page: its state row, its Address row and Disconnect this Mac (11k)", async () => {
     const { user } = await open(new FakeTransport());
     await user.click(rail().getByRole("button", { name: "Settings" }));
 
     const page = within(screen.getByRole("main"));
     expect(page.getAllByText(ADDRESS).length).toBeGreaterThan(0);
-    expect(await page.findByText(SERVER_META)).toBeTruthy();
+    expect(await page.findByText(/^Connected · \d+ ms$/)).toBeTruthy();
+    expect(page.getByText("Address")).toBeTruthy();
     expect(page.getByRole("button", { name: "Disconnect this Mac" })).toBeTruthy();
     for (const later of LATER) expect(screen.queryByText(later)).toBeNull();
   });
@@ -125,6 +144,9 @@ describe("the shell (2a to 2c)", () => {
     const { user } = await open(fake);
     await user.click(rail().getByRole("button", { name: "Settings" }));
     await user.click(screen.getByRole("button", { name: "Disconnect this Mac" }));
+    // 11k: the confirm is in place; nothing is forgotten before Disconnect.
+    expect(fake.count("forget")).toBe(0);
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Disconnect" }));
 
     expect(await screen.findByText("Connect to your server")).toBeTruthy();
     expect(fake.count("forget")).toBe(1);

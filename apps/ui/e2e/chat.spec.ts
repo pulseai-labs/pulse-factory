@@ -38,7 +38,8 @@ const ENTRY: Record<string, string> = {
   redacted: "Redacted item",
   unknown: "Unsupported item",
 };
-// The answer items render inside their cards, as no entry of their own.
+// The answer items render inside their cards, as no entry of their own. The `Turn result` article is the
+// "Worked for" disclosure of a turn with tool calls, and a plain line for a turn with none.
 const INSIDE_A_CARD = ["approval_answer", "question_answer"];
 
 test("chat with the Orchestrator of two projects: approve, reload, set, switch branch", async ({ page }) => {
@@ -103,7 +104,7 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await rail("Agents").click();
   const main = page.getByRole("main");
   await expect(main.getByRole("heading", { name: "Orchestrator" })).toBeVisible();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("high", { exact: true })).toBeVisible();
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("High", { exact: true })).toBeVisible();
   for (const project of ["alpha", "beta"]) {
     await expect(projectRow(project).getByRole("button", { name: "Start session" })).toBeVisible();
   }
@@ -182,8 +183,8 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await expect(fact("Project")).toHaveText("alpha");
   await expect(control("Effort")).toHaveValue("high");
   await rail("Agents").click();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("high", { exact: true })).toBeVisible();
-  await expect(main.getByRole("list", { name: "Defaults" }).getByText("medium", { exact: true })).toHaveCount(0);
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("High", { exact: true })).toBeVisible();
+  await expect(main.getByRole("group", { name: "Reasoning effort" }).getByText("Medium", { exact: true })).toHaveCount(0);
   const after = sessionList();
   expect(after.sessions.find((s) => s.id === "S-1")?.effort).toBe("high");
   expect(after.sessions.find((s) => s.id === "S-2")?.effort).toBe("medium");
@@ -196,16 +197,25 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await openFromSidebar("alpha");
   await expect(fact("Branch")).toHaveText("d19-branch");
   const stored = cli<{ items: ChatItemRecord[] }>("session", "items", "S-1", "--json").items;
-  const expected = stored.filter((i) => !INSIDE_A_CARD.includes(i.body.kind)).map((i) => ENTRY[i.body.kind] ?? i.body.kind);
+  const shown = stored.filter((i) => !INSIDE_A_CARD.includes(i.body.kind));
+  // Each shown item is one article with its seq in `data-seq` and the label of its kind. The disclosure comes
+  // before the reply inside a turn, so the check reads `seq`, not the position.
+  const expected = shown.map((i): [number, string] => [i.seq, ENTRY[i.body.kind] ?? i.body.kind]).sort((a, b) => a[0] - b[0]);
   expect(expected.length).toBeGreaterThan(3);
   await expect
     .poll(
-      () =>
-        page
-          .getByRole("log", { name: "Messages" })
+      async () => {
+        const log = page.getByRole("log", { name: "Messages" });
+        // Open every "Worked for" disclosure: a closed one holds its tool calls out of the page.
+        for (const toggle of await log.getByRole("button", { name: /^Worked for/ }).all()) {
+          if ((await toggle.getAttribute("aria-expanded")) === "false") await toggle.click();
+        }
+        const found = await log
           .getByRole("article")
-          .evaluateAll((nodes) => nodes.map((n) => n.getAttribute("aria-label"))),
-      { timeout: 15_000, message: "the chat shows the stored items, in order" },
+          .evaluateAll((nodes) => nodes.map((n): [number, string | null] => [Number(n.getAttribute("data-seq")), n.getAttribute("aria-label")]));
+        return found.sort((a, b) => a[0] - b[0]);
+      },
+      { timeout: 15_000, message: "the chat shows the stored items, each with its seq and its label" },
     )
     .toEqual(expected);
 

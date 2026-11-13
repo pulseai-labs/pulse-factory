@@ -18,10 +18,14 @@ import type {
   DeviceArmArgs,
   DeviceClearArgs,
   DeviceRecord,
+  FolderEntry,
+  FolderList,
+  FolderListArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
   ProjectRecord,
+  ProjectRemoveArgs,
   RequestActed,
   RequestDetail,
   RequestFrame,
@@ -67,6 +71,8 @@ export type Method =
   | "status"
   | "projectList"
   | "projectAdd"
+  | "projectRemove"
+  | "folderList"
   | "forget"
   | "sessionList"
   | "sessionStart"
@@ -137,6 +143,26 @@ export function project(n: number, name = `project-${n}`): ProjectRecord {
     kind: "git",
     remote_key: null,
     kind_error: null,
+  };
+}
+
+/** One folder of a `folder_list` answer: a plain folder unless `patch` says more (r1.s5.w5). */
+export function folderEntry(name: string, patch: Partial<FolderEntry> = {}, parent = "/home/dev"): FolderEntry {
+  return { name, path: `${parent}/${name}`, git: false, branch: null, project_id: null, ...patch };
+}
+
+/** A `folder_list` answer for `path`, the home folder by default. */
+export function folderList(entries: FolderEntry[], patch: Partial<FolderList> = {}): FolderList {
+  const path = patch.path ?? "/home/dev";
+  return {
+    schema_version: 1,
+    home: "/home/dev",
+    path,
+    parent: path === "/home/dev" ? null : path.slice(0, path.lastIndexOf("/")) || "/",
+    repo: null,
+    entries,
+    truncated: false,
+    ...patch,
   };
 }
 
@@ -372,6 +398,13 @@ export class FakeTransport implements Transport {
   private replays = new Set<Method>();
   private codeCounter = 0;
   readonly addArgs: ProjectAddArgs[] = [];
+  readonly removeArgs: ProjectRemoveArgs[] = [];
+  /** The arguments of every `folderList` call, in order. */
+  readonly folderArgs: Array<FolderListArgs | undefined> = [];
+  /** What `folderList` answers, by path. No path is the home folder, `/home/dev`. */
+  folders: Record<string, FolderList> = {};
+  /** The sessions a `projectRemove` with `end_sessions` reports as ended. */
+  endedOnRemove: string[] | null = null;
   readonly pairArgs: Array<{ code: string; deviceName: string }> = [];
   readonly sendArgs: SessionSendArgs[] = [];
   readonly startArgs: SessionStartArgs[] = [];
@@ -463,6 +496,27 @@ export class FakeTransport implements Transport {
     const record = { ...added, root: args.root };
     this.projects.push(record);
     return { schema_version: 1, replayed: false, project: record };
+  }
+
+  async projectRemove(args: ProjectRemoveArgs): Promise<ProjectChanged> {
+    this.removeArgs.push(args);
+    this.enter("projectRemove");
+    const at = this.projects.findIndex((p) => p.id === args.id);
+    if (at < 0) throw new TransportError("refused", `no such project: ${args.id}`);
+    const record = { ...this.projects[at]!, removed_at: "2026-11-13T10:00:00Z" };
+    this.projects.splice(at, 1);
+    const answer: ProjectChanged = { schema_version: 1, replayed: false, project: record };
+    if (args.end_sessions === true) answer.ended = this.endedOnRemove ?? [];
+    return answer;
+  }
+
+  async folderList(args?: FolderListArgs): Promise<FolderList> {
+    this.folderArgs.push(args);
+    this.enter("folderList");
+    const path = args?.path ?? "/home/dev";
+    const listing = this.folders[path];
+    if (!listing) throw new TransportError("refused", "the path is outside the home folder");
+    return { ...listing, entries: listing.entries.map((e) => ({ ...e })) };
   }
 
   async forget(): Promise<void> {

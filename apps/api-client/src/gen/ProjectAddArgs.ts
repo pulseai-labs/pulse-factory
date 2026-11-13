@@ -7,4 +7,9 @@ export type ProjectAddArgs = { root: string,
 /**
  * The default is the last component of the canonical root.
  */
-name?: string | null, command_id: string, };
+name?: string | null, 
+/**
+ * Run `git init` in the root before the project is added (`r1.s5.w5`). The default is false.
+ * The root must be under the server's home folder and must not be in a repository.
+ */
+git_init?: boolean | null, command_id: string, };

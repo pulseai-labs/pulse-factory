@@ -5,6 +5,8 @@
 - **Date:** 2026-11-08
 - **Amended:** 2026-11-09, at `r1.s3.w3`: the controller's half of the chat: verbs, processes, pump,
   `chat.ledger`, lifetime, `halt` and the caller rule.
+- **Amended:** 2026-11-13, at `r1.s5.w5`: `git_init` on `project_add`, `end_sessions` on `project_remove`,
+  the refusal of a remove while a run is active, and no archive of a removed project.
 
 ## Context
 - Release 1's second exit criterion: the operator chats with a project's Orchestrator from the
@@ -30,7 +32,7 @@
   subdirectory of a repository (its git operations would reach outside it, so it is a folder). A new
   project always has a kind. A trigger holds both rules: no insert without a kind, and no change of a
   kind once set. After `git init` in a folder project, the operator removes the project and adds it
-  again.
+  again, or adds the folder with `git_init`.
 - **The refusals.** `project add` refuses a root that is neither kind, with the cause: a linked
   worktree (the reason names its main worktree), a bare repository, the inside of a git directory, a
   repository that git refuses for dubious ownership, and any other git failure. A failed detection is
@@ -293,3 +295,26 @@ The chat-lifetime side only. The cap's value comes from ADR-0016's settings laye
   controller restart. The package it names is copied into the controller's state dir at the propose,
   and the arm runs that copy.
 - **The Orchestrator's persona names `propose`** and the skill's path, and never `arm`.
+
+## Amendment, 2026-11-13 (`r1.s5.w5`): add with `git init`, remove with its sessions
+
+- **`project_add` takes `git_init`.** The operator can ask for `git init` in the folder as the project is
+  added. It is an argument of the add, not a verb of its own, so one admitted command holds the init and
+  the add, and **the kind is decided after the init**: the project is `git` from its first row, and the
+  rule that a kind never changes stays whole. The root must lie under the server's home folder, must not be
+  a repository and must not be inside one. Each check, and the checks of today's add, runs before any change
+  on disk. `git init` makes a local `.git` and nothing else: no commit, no remote, no push, and deleting
+  `.git` undoes it. A replay of the command ID runs no second `git init`. Known limit: when the store
+  refuses the add after the init (a race with a second add of the same root), the folder stays a
+  repository, and the refusal says so.
+- **`project_remove` takes `end_sessions`.** The store still refuses a remove while a chat session is live.
+  With `end_sessions`, the controller first ends each live session of the project through the code of
+  `session_end`, in session order, each with a command ID derived from the remove's (`<command_id>:end:<S-n>`),
+  then removes the project. The store's rule stays as the last guard, so a session that starts in between
+  refuses the remove. The answer names the sessions it ended.
+- **A remove is refused while a run of the project is active.** The check is in the controller, for every
+  caller, and it runs before anything is ended. The store (`run-state-admission`) is not changed. Known
+  limit: a run armed between the check and the remove is not seen; arm refuses a removed project, and a run
+  of a removed project keeps running.
+- **No archive.** A removed project's sessions and runs stay in the store as they are. The app keeps no
+  list of them, and a removed root or name can be added again under a new ID.

@@ -74,7 +74,9 @@ The Orchestrator chat starts nothing by itself. It posts a **start card** into i
 operator confirms the card on a paired device. Only then does the run arm.
 
 1. Work out the `--param` values as in step 1 of "Arm a run".
-2. Run `propose` with the spine and the same inputs as `arm`. It has no `--replace` and no `--yes`.
+2. Run `propose` with the spine and the same inputs as `arm`, except the parameters that arm sets itself:
+   `spine`, `briefs` and `forge_repo`. Do not pass them: arm sets them, and `propose` refuses one with
+   "parameter <name> is set by arm itself; do not pass it". It has no `--replace` and no `--yes`.
    `--workflow` takes the name of an installed workflow, not a path, and `propose` refuses a path:
 
    ```bash
@@ -88,11 +90,12 @@ operator confirms the card on a paired device. Only then does the run arm.
 
 3. The controller builds the plan in its own process, with the dry run that `arm` makes, and posts
    the card into this chat. The card shows the spine, the project, the item count, each role with
-   its model, the caps, the most launches the run can make, and the two merge lines. `propose`
+   its model, the caps, the most sessions the run can make, and the merge line. `propose`
    starts nothing and records no run. Tell the operator that the card is waiting for them.
-4. The operator presses **Confirm start** on a paired device and then **Arm the run**. The device
-   gets a one-use confirm code for exactly this card and this plan. The run belongs to the chat's
-   project. The card then shows the run, or the reason it was withdrawn or failed.
+4. The operator presses **Start workflow** once on a paired device. That one press gets a one-use
+   confirm code for exactly this card and this plan, and arms the run with it. The run belongs to the
+   chat's project. The card then shows who started it, when, and the run, or the reason it was
+   withdrawn or failed.
 5. A second `propose` in the same chat withdraws the first card. A card is also withdrawn when the
    session ends, on `halt` and when the controller restarts. Propose again after any of these.
 

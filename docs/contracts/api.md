@@ -229,6 +229,7 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
 | `run_list` | none (API only); on the host, `status` shows the same runs |
+| `folder_list` | none (API only); the CLI user has a shell (`r1.s5.w5`) |
 
 Every other verb is 403: `runs`, `status`, `claim`, `propose`, `halt`, `hook`, `device_pair`,
 `device_list`, `device_revoke`, `api_status`, `session_items` and `session_redact`. `session_redact` (the redaction of one chat item) is CLI-only: a device that
@@ -296,16 +297,67 @@ second merge.
   CLI's `ack`.
 - **`run_list`** (`r1.s4.w3`): `{}` (`RunListArgs`; unknown fields are ignored). The answer is a
   `RunList`: `schema_version` 1 and `runs`, oldest first, one `RunSummary` for every run the controller
-  holds (an ended run too, while the controller holds it). A `RunSummary` has exactly eight fields: `id`,
+  holds (an ended run too, while the controller holds it). A `RunSummary` has exactly nine fields: `id`,
   `spine`, `workflow`, `state` (`active` or `ended`), `halted_reason` (null unless the run is halted),
-  `end_reason` (null unless it ended), `open_requests` and `waiting`. **`waiting`** is the `end_when`
+  `end_reason` (null unless it ended), `open_requests`, `waiting` and `project_id`. **`waiting`** is the `end_when`
   waiting text that the last tick noted, rendered from the run's workflow (`workflow-file.md`,
   `end_when`), and null when the last tick noted none. It is what a device shows for a run that waits
-  for the operator. `status` is off the allowlist, so this is the one read of a run that a device has.
+  for the operator. **`project_id`** (`r1.s5.w5`) is the project of the chat that proposed the run, when a
+  device armed it from a start card (`runs.project_id`, `r1.s4.w2`), and null for a run armed from the CLI.
+  The Mac app's Remove project reads it. `status` is off the allowlist, so this is the one read of a run
+  that a device has.
   The verb is **device auth only** (the token check, and the peer guard counts a failure), **read-only**
   (no admission, no `controller.ledger` line, no store write, no driver action: the one `api.ledger`
   line, `verb=run_list`, is its only trace), and **one allowlist entry**. It carries no run units,
   sessions, costs or tokens. `status`'s JSON does not change.
+- **`folder_list`** (`r1.s5.w5`): a `FolderListArgs`, `{"path"?}`. It is the read behind the Mac app's Add a
+  project picker.
+  - **The path.** No `path` is the server's home folder (`controller::run` takes it from `$HOME`). A `path` is
+    absolute. The controller makes it canonical, so `..` and symlinks are resolved first. The canonical path
+    must be the home folder or lie under it (whole path components). Otherwise the verb is refused with
+    `the path is outside the home folder` and gives no listing. A path that does not exist, or that is not a
+    directory, is refused with that cause. A server with no home folder refuses with `the server has no home
+    folder`. An unreadable folder is refused with the system's cause.
+  - **The answer** is a `FolderList`: `schema_version`, `home`, `path` (canonical), `parent` (null at the home
+    folder), `repo` (the top level of the git repository that holds `path`, or null), `entries` and
+    `truncated`. `entries` holds at most 500 `FolderEntry` values, sorted by name in byte order, and
+    `truncated` is true when there were more. A `FolderEntry` is `name`, `path` (canonical: for a symlink, its
+    target), `git` (the folder has a `.git`, a directory or a file), `branch` (from `git symbolic-ref --short
+    -q HEAD`; null for a detached HEAD or a git failure) and `project_id` (the live project whose root is the
+    folder, else null).
+  - **What is listed.** A name that starts with `.` is not. A directory is. A symlink is, only when its
+    canonical target is a directory under the home folder. A file, a FIFO, a socket and a broken link are
+    skipped. **No file is opened**: the verb reads directory entries and metadata, and git reads `.git`.
+  - **Its controls.** Device auth only (the token check; the peer guard counts a failure), read-only (no
+    admission, no `controller.ledger` line, no store write: the one `api.ledger` line, `verb=folder_list`, is
+    its trace), one allowlist entry. No file content, remote URL or token reaches the answer, a ledger or
+    stderr. It has no CLI form, and it takes no confirm code.
+- **`project_add` with `git_init`** (`r1.s5.w5`): `ProjectAddArgs.git_init` is optional and false by default.
+  All of the add's checks run first. With `true`, the canonical root must lie under the home folder (not be
+  the home folder), must not be a repository and must not be inside one, and no live project may hold its
+  root or name. Each is refused with its cause before any change on disk. When the command ID is new, the
+  controller then runs `git init --quiet` in the root (a replay runs nothing), and detection runs as it does
+  today, so the project's kind is `git` from its first row (ADR-0015: the kind never changes). The admission
+  content gains `"git_init": true` only when it is set, so the content of every add without it is byte for
+  byte as before; the ledger line gains `git_init=true`. **Known limit:** when the store refuses the add after
+  `git init` ran (a race with a second add of the same root), the folder stays a repository, and the refusal
+  says so.
+- **`project_remove` with `end_sessions`, and the run refusal** (`r1.s5.w5`): `ProjectRemoveArgs.end_sessions`
+  is optional and false by default. **The run check is for every caller, the socket and a device, and runs
+  first**: a project with an active run is refused with `project P-n has an active run <run>; remove it after
+  the run ends`, which names every such run, and nothing is ended. The check is in the controller, not in the
+  store. Known limit: a run armed between that read and the remove is not seen. Without `end_sessions`, a live
+  chat session refuses the remove as the store's rule says. With `true`, the controller ends each live chat
+  session of the project, in session order, through the code of `session_end` (stop the process, close what is
+  pending, the admitted `chat_session_end` command and its ledger line), each with the command ID
+  `<command_id>:end:<S-n>`. Every derived ID is checked against the command-ID rule before the first end, and
+  one that breaks it refuses the whole remove. Then the project is removed as before, and the store's rule
+  stays as the last guard. A replay of the command ID replays each end and the remove; nothing runs twice. The
+  answer is a `ProjectChanged` with `ended`, the sessions this call ended (an empty list when none was live;
+  absent when the call had no `end_sessions`). On the socket, a `project_remove` with `end_sessions: true` is
+  refused for a caller that is, or descends from, a seat or a live chat process, as `session_end` is
+  (ADR-0005, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
+  is refused and the sessions before it stay ended. There is no archive.
 - **`arm`** (`r1.s4.w2`): a `DeviceArmArgs`, `{"proposal","plan_sha256","code","command_id"}`. The
   answer is an `ArmActed`: `schema_version`, `replayed`, `device`, `proposal`, `run_id` and
   `project_id` (`run_id` is null on a replay that cannot name the run). The controller spends the code, then builds

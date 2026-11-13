@@ -1,0 +1,81 @@
+/* The app's own tokens (`r1.s5.w1`). tokens.css holds the design system's tokens, copied from the canvas
+   without change. This file holds the two things the artboards need that the design system does not name:
+   the faces the app bundles, and the values the artboards use that no design-system token carries. Every
+   value here has a name and a source, and app.css and ui.css use these names and the design-system
+   tokens only: no raw colour, font size or radius appears in either. It is imported after tokens.css.
+   The artboard names below are the canvas's (docs/specs/r1/r1.s5-…/canvas/). */
+:root {
+  /* The faces. The app bundles them from @fontsource-variable, so the UI fetches nothing at run time
+     (ADR-0013). They come first; the design system's own stack follows. (tokens/typography.css names
+     "Geist" and "Geist Mono" only, which the canvas loads from Google Fonts.) */
+  --font-sans: "Geist Variable", "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "SF Mono", monospace;
+  color-scheme: dark;
+
+  /* Text sizes the design system has no step for. */
+  --text-ui: 12.5px;   /* labels of rows, buttons and answer options: 2a Chat, 3a Pair, 3f Needs you, 11d */
+  --text-meta: 11.5px; /* the state pill and meta lines: 3f Needs you, 6a Agents, 11g */
+  --text-tag: 10.5px;  /* the eyebrow and the billing chip (`wu`): 2a Chat, 11d, 11g */
+
+  /* Composite type, built from the sizes above and the design system's weights and leading. */
+  --font-ui: var(--weight-regular) var(--text-ui)/var(--leading-normal) var(--font-sans);        /* secondary text of rows and notes: 2a Chat, 3f Needs you */
+  --font-ui-label: var(--weight-medium) var(--text-ui)/var(--leading-snug) var(--font-sans);    /* field labels and row titles: 3a Pair, 11d */
+  --font-meta: var(--weight-regular) var(--text-meta)/var(--leading-snug) var(--font-sans);      /* times, keys and captions: 2a Chat, 6a Agents */
+  --font-meta-mono: var(--weight-medium) var(--text-meta)/var(--leading-snug) var(--font-mono);  /* server and branch meta: 3b server menu, 3c Pair */
+
+  /* Radii. The design system's control radius is 4 px; the artboards' buttons are 5 px. */
+  --radius-btn: 5px;    /* every button and field: 3f Needs you, 11d, 11j */
+  --radius-btn-lg: 6px; /* the pair card's full-width primary: 3a Pair */
+
+  /* Control heights: --control-h (30 px) is the design system's. The artboards add three. */
+  --btn-h-sm: 28px; /* `Retry now` in the 3c banner */
+  --btn-h-lg: 32px; /* `Hold` and `Approve merge` in 3f Needs you */
+  --btn-h-xl: 40px; /* `Pair` in 3a Pair */
+
+  /* Tags and marks. */
+  --pill-h: 22px;  /* the state pill: 3f Needs you, 6a Agents */
+  --chip-h: 18px;  /* the billing chip and the count badge: 2a Chat, 11d */
+  --dot: 7px;      /* the state dot and its hollow form: 2a Chat, 3f Needs you */
+
+  /* Colours the design system has no token for. */
+  --amber-border: rgba(255, 176, 32, 0.28); /* the border of a card that needs you: 3f Needs you, 11d */
+  --amber-fg: #1a1205;                      /* the count on an amber fill: 2a Chat (rail), 11d */
+
+  /* The shell's layout (`r1.s5.w2`). The canvas draws it in 11a; tokens.css holds the older sizes of the same
+     names (a 38 px title bar, a 232 px sidebar), and this file is imported after it, so these win. */
+  --titlebar-h: 42px;   /* the title bar: 11a */
+  --rail-w: 56px;       /* the rail: 11a */
+  --sidebar-w: 288px;   /* the sidebar: 11a */
+  --dock-w: 328px;      /* the dock (Needs you and Files): 11a */
+  --rail-btn: 38px;     /* the rail's buttons: 11a */
+  --tab-h: 30px;        /* the page title and the chat tabs in the title bar: 11a */
+  --column-max: 1180px; /* the centred page column of the Projects page: 11e */
+  --titlebar-inset: 0px; /* room for the window's traffic lights at the title bar's left; apps/desktop sets it, 11a draws them */
+
+  /* Type sizes the design system has no step for, beside --text-ui, --text-meta and --text-tag. */
+  --text-page: 24px;       /* the page title ("Projects"): 11e */
+  --text-project: 15px;    /* a project's name in its block: 11e */
+  --text-name: 13.5px;     /* the server's name in the server menu, and the pair card's copy: 11h, 11j */
+  --text-pair-title: 20px; /* "Connect to your server": 11j */
+  --text-micro: 8.5px;     /* the rail's compact "Later" tag: 11l */
+
+  /* Radii the design system has no step for. */
+  --radius-rail: 7px;  /* the rail's buttons and the server tile: 11a, 11h */
+  --radius-tile: 9px;  /* the pair card's icon tile: 11j */
+
+  /* Colours the design system has no token for, beside --amber-border and --amber-fg. */
+  --amber-pill-border: rgba(255, 176, 32, 0.45); /* the need-you pill's border while the dock is open: 11a (pillBd) */
+  --amber-pill-rule: rgba(255, 176, 32, 0.3);    /* the rule inside the need-you pill: 11a */
+  --red-border: rgba(255, 77, 99, 0.28);          /* the border of the disconnect confirm: 11h */
+  --on-red: #ffffff;                              /* the label of the red-filled Disconnect: 11h */
+
+  /* The agent avatar (9a, Agent Avatars): the four built-in agents' colours, and the parts of the head
+     that are not a design-system colour. Violet, red and mint are the design system's accents; gray is
+     its tertiary step. */
+  --avatar-violet: var(--violet-400); /* Orchestrator */
+  --avatar-red: var(--red-400);       /* Autopilot */
+  --avatar-mint: var(--mint-400);     /* Research partner */
+  --avatar-gray: var(--gray-9);       /* Plain */
+  --avatar-socket: #0b0c0e;           /* the dark socket the eye sits in */
+  --avatar-glint: #ffffff;            /* the highlight in the eye */
+}

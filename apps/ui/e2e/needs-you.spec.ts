@@ -3,9 +3,11 @@
 // `scripts/demo/ui-needs-you.sh` builds the env, starts everything and runs this file as its one journey,
 // in both start modes: `cli` (the script arms the run) and `card` (w2's start card armed it first).
 //
-// The journey: answer the stop-rule question in two clicks, see the spine merge approval arrive with no
-// read, confirm the merge in two clicks, watch the run wait and then finish, and set and unset a chat
-// policy. Last it checks that no token, pairing code or confirm code is anywhere the page can see.
+// The journey: answer the stop-rule question in one press, see the spine merge approval arrive with no
+// read, approve the merge in one press, watch the run wait and then finish, and set and remove a chat
+// policy. Each press asks for a fresh confirm code and spends it at once (r1.s5.w4): the page shows no
+// dialog, and a second use of a spent code is refused. Last it checks that no token, pairing code or
+// confirm code is anywhere the page can see.
 import type { RequestDetail, SettingsView } from "@pulse-factory/api-client";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
@@ -41,10 +43,19 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   const consoleText: string[] = [];
   const answers: string[] = [];
   const confirmCodes: string[] = [];
+  /** The device verbs the page called, in order: `confirm_code`, `answer` and `ack`. */
+  const acts: string[] = [];
+  let answerBody = "";
   let requestsCalls = 0;
   page.on("request", (r) => {
     requests.push(r.url());
-    if (new URL(r.url()).pathname === "/bridge/verbs/requests") requestsCalls += 1;
+    const route = new URL(r.url()).pathname;
+    if (route === "/bridge/verbs/requests") requestsCalls += 1;
+    const verb = /^\/bridge\/verbs\/(confirm_code|answer|ack)$/.exec(route)?.[1];
+    if (verb !== undefined) {
+      acts.push(verb);
+      if (verb === "answer" && answerBody === "") answerBody = r.postData() ?? "";
+    }
   });
   page.on("console", (m) => consoleText.push(m.text()));
   page.on("pageerror", (e) => consoleText.push(String(e)));
@@ -80,11 +91,10 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   const rail = (name: string) => page.getByRole("navigation").getByRole("button", { name });
   const main = page.getByRole("main");
   const openList = main.getByRole("list", { name: "Open requests" });
-  const answeredList = main.getByRole("list", { name: "Answered" });
+  const answeredList = main.getByRole("list", { name: "Answered today" });
+  /** The "Answered today" row of a request. */
+  const answeredRow = (id: string): Locator => answeredList.locator(`li[aria-label="Answered ${id}"]`);
   const dialog = page.getByRole("dialog");
-  const refresh = () => main.getByRole("button", { name: "Refresh" });
-  /** The text of a fact (`<dt>` then `<dd>`) inside a locator. */
-  const fact = (within: Locator, label: string) => within.locator(`dt:text-is("${label}") + dd`);
 
   async function openNeedsYou() {
     await rail("Needs you").click();
@@ -110,118 +120,144 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   await expect(stopCard).toBeVisible({ timeout: 60_000 });
   const stopId = ((await stopCard.getAttribute("aria-label")) ?? "").replace(/^Request /, "");
   expect(stopId).toMatch(/^R-\d+$/);
-  await expect(fact(stopCard, "Kind")).toHaveText("stop");
+  await expect(stopCard).toHaveAttribute("data-kind", "stop");
   const stopText = fieldOf(stopId, "stop_text");
   expect(stopText.length).toBeGreaterThan(0);
   await expect(stopCard.getByTestId("stop-text")).toHaveText(stopText);
-  await expect(rail("Needs you").locator(".rail-badge")).toHaveText("1");
+  await expect(rail("Needs you").locator(".ui-count")).toHaveText("1");
 
-  // 3. Type the answer, Send answer: the dialog shows the text and that no one holds the claim (this journey
-  //    takes no CLI claim, and the card journey's device arm moves none); Send: the card leaves Open requests,
-  //    shows in Answered, and the claim now names this device.
+  // 3. Type the answer, press Send: one press, no dialog. It made exactly one `confirm_code` and one `answer`
+  //    call; the card leaves Open requests and shows in Answered today with the answer and this device's name.
+  //    A second use of the same code is refused as `code_used`.
   await stopCard.getByLabel("Your answer").fill(answer);
-  await stopCard.getByRole("button", { name: "Send answer" }).click();
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByText(answer, { exact: true })).toBeVisible();
-  await expect(dialog.getByText("No one holds the claim")).toBeVisible();
-  await dialog.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
+  expect(acts, "no call before the press").toEqual([]);
+  await stopCard.getByRole("button", { name: "Send", exact: true }).click();
   await expect(openList.getByRole("article", { name: `Request ${stopId}` })).toHaveCount(0);
-  await expect(answeredList.getByText(stopId, { exact: true })).toBeVisible();
-  await expect(fact(main, "The claim")).toContainText("device D-1");
+  await expect(dialog).toHaveCount(0);
+  expect(acts, "one press: one confirm_code, then one answer").toEqual(["confirm_code", "answer"]);
+  await expect(answeredRow(stopId)).toContainText(answer);
+  await expect(answeredRow(stopId)).toContainText("d23 browser");
+  expect(confirmCodes.length).toBe(1);
+  const spent = JSON.parse(answerBody) as { request: string; rev: number; text: string; code: string; command_id: string };
+  expect(spent.code, "the answer spent the code the page was given").toBe(confirmCodes[0]);
+  const again = await page.request.post(`${origin}/bridge/verbs/answer`, {
+    data: { ...spent, command_id: `d23-reuse-${Date.now()}` },
+  });
+  const refused = (await again.json()) as { ok: boolean; error?: { refusal?: string } };
+  expect(refused.ok).toBe(false);
+  expect(refused.error?.refusal, "a spent confirm code is refused").toBe("code_used");
   const readsAfterAnswer = requestsCalls;
 
   // 4. Freshness (W1): with the page left open, the merge approval appears with no `requests` call: the
   //    stream's frame brought it.
   const mergeCard = openList.getByRole("article").first();
-  await expect(fact(mergeCard, "Kind")).toHaveText("merge_ack", { timeout: MERGE_CARD_MS });
+  await expect(mergeCard).toHaveAttribute("data-kind", "merge_ack", { timeout: MERGE_CARD_MS });
   const mergeId = ((await mergeCard.getAttribute("aria-label")) ?? "").replace(/^Request /, "");
   expect(mergeId).toMatch(/^R-\d+$/);
   expect(requestsCalls, "the merge card came by a read, not by the stream").toBe(readsAfterAnswer);
 
   // 5. The lid (G3): reload and open Needs you: the merge card is there first, and the stop request answered
-  //    in step 3 is in Answered, filled from the `requests {all: true}` read alone. Before any click, the
-  //    card's PR, Base and Head SHA are the body's.
+  //    in step 3 is in Answered today, filled from the `requests {all: true}` read and its `show`. Before any
+  //    click, the card's PR, from-branch with its short head SHA, and into-branch are the body's.
   await page.reload();
   await expect(page.getByRole("navigation")).toBeVisible();
   await openNeedsYou();
   const merge = openList.getByRole("article", { name: `Request ${mergeId}` });
   await expect(merge).toBeVisible();
   await expect(openList.getByRole("article").first()).toHaveAttribute("aria-label", `Request ${mergeId}`);
-  await expect(answeredList.getByText(stopId, { exact: true })).toBeVisible();
+  await expect(answeredRow(stopId)).toBeVisible();
   const pr = fieldOf(mergeId, "pr");
   const mergeBase = fieldOf(mergeId, "base");
   const headSha = fieldOf(mergeId, "head_sha");
   const headBranch = fieldOf(mergeId, "head_branch");
-  await expect(fact(merge, "PR")).toHaveText(pr);
-  await expect(fact(merge, "Base")).toHaveText(mergeBase);
-  await expect(fact(merge, "Head SHA")).toHaveText(headSha);
+  const prNumber = /\/pull\/(\d+)$/.exec(pr)?.[1];
+  await expect(merge.getByTestId("merge-pr")).toContainText(prNumber ?? pr);
+  await expect(merge.getByTestId("merge-into")).toHaveText(mergeBase);
+  await expect(merge.getByTestId("merge-from")).toHaveText(headBranch);
+  await expect(merge.getByTestId("merge-sha")).toHaveText(headSha.slice(0, 7));
+  await expect(merge.getByTestId("merge-sha")).toHaveAttribute("title", headSha);
 
-  // 6. Confirm merge: the dialog names the PR, base, head branch and head SHA of the body. Merge: the card shows
-  //    the merge at that SHA and leaves Open requests.
-  await merge.getByRole("button", { name: "Confirm merge" }).click();
-  await expect(dialog).toBeVisible();
-  await expect(fact(dialog, "PR")).toHaveText(pr);
-  await expect(fact(dialog, "Base")).toHaveText(mergeBase);
-  await expect(fact(dialog, "Head branch")).toHaveText(headBranch);
-  await expect(fact(dialog, "Head SHA")).toHaveText(headSha);
-  await dialog.getByRole("button", { name: "Merge", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(main.getByText(new RegExp(`Merged at ${headSha}`))).toBeVisible();
+  // 6. Approve merge: one press, no dialog. It made one `confirm_code` and one `ack` call; the `ack` answer names
+  //    the PR, the base and the head SHA of the body; the card leaves Open requests and shows in Answered today
+  //    as "Merge approved" by this device.
+  const callsBeforeMerge = acts.length;
+  const answersBeforeMerge = answers.length;
+  await merge.getByRole("button", { name: "Approve merge" }).click();
   await expect(openList.getByRole("article", { name: `Request ${mergeId}` })).toHaveCount(0);
+  await expect(dialog).toHaveCount(0);
+  expect(acts.slice(callsBeforeMerge), "one press: one confirm_code, then one ack").toEqual(["confirm_code", "ack"]);
+  await expect(answeredRow(mergeId)).toContainText("Merge approved");
+  await expect(answeredRow(mergeId)).toContainText("d23 browser");
+  await expect.poll(() => answers.length, { message: "the ack answer" }).toBeGreaterThan(answersBeforeMerge);
+  const ackAnswer = answers
+    .slice(answersBeforeMerge)
+    .map((t) => JSON.parse(t) as { ok: boolean; result?: { merged?: boolean; head_sha?: string; pr?: string; base?: string } })
+    .find((a) => a.result?.merged !== undefined);
+  expect(ackAnswer?.ok).toBe(true);
+  expect(ackAnswer?.result?.merged).toBe(true);
+  expect(ackAnswer?.result?.head_sha).toBe(headSha);
+  expect(ackAnswer?.result?.pr).toBe(pr);
+  expect(ackAnswer?.result?.base).toBe(mergeBase);
 
-  // 7. The waiting run (C12): Refresh, at most once a second and bounded, until the run shows what it waits
-  //    for, and that text is one of the notes of `status`. Then the operator's close, and Refresh until the run
-  //    shows it is done with the end reason of `status`.
-  const runState = () => fact(main.getByRole("article", { name: `Run ${run}` }), "State");
+  // 7. The waiting run (C12): the run's state is in the sidebar's "Workflow runs" row (G1 moved it from Needs you).
+  //    Each poll opens Needs you and then Projects, so the sidebar mounts and reads `runList` again, at most once a
+  //    second and bounded, until the run shows what it waits for, and that text is one of the notes of `status`.
+  //    Then the operator's close, and the same poll until the run shows it ended with the end reason of `status`.
+  const runRow = () => page.getByRole("region", { name: "Sidebar" }).locator(`li[aria-label="Run ${run}"] .sb-run-sub`);
   const settle = async (want: RegExp, within: number): Promise<string> => {
     let seen = "";
     await expect
       .poll(
         async () => {
-          await refresh().click();
-          seen = ((await runState().textContent({ timeout: 2_000 }).catch(() => null)) ?? "").trim();
+          await rail("Needs you").click();
+          await expect(main.getByRole("heading", { level: 2, name: "Needs you" })).toBeVisible();
+          await rail("Projects").click();
+          seen = ((await runRow().textContent({ timeout: 2_000 }).catch(() => null)) ?? "").trim();
           return want.test(seen);
         },
-        { timeout: within, intervals: [1_000], message: "the run's state on Needs you" },
+        { timeout: within, intervals: [1_000], message: "the run's state in the sidebar" },
       )
       .toBe(true);
     return seen;
   };
-  const waiting = (await settle(/^Waiting on you: /, RUN_STATE_MS)).replace(/^Waiting on you: /, "");
+  const waiting = (await settle(/^Waiting: /, RUN_STATE_MS)).replace(/^Waiting: /, "");
   const notes = cli<{ notes: string[] }>("status", run, "--json").notes;
   expect(notes, "the waiting text is one of status's notes").toContain(waiting);
   fs.mkdirSync(path.dirname(closeFile), { recursive: true });
   fs.writeFileSync(closeFile, "closed\n");
-  const done = (await settle(/^Done: /, RUN_STATE_MS)).replace(/^Done: /, "");
+  const done = (await settle(/^Ended: /, RUN_STATE_MS)).replace(/^Ended: /, "");
   expect(done).toBe(cli<{ end_reason: string }>("status", run, "--json").end_reason);
 
-  // 8. Settings: choose the project; chat.self_turn_cap shows its value from built-in; set it to 5 at this scope: the
-  //    row shows 5 from the project, and the CLI reads it with the device that set it; unset it: the built-in again.
+  // 8. Settings: choose "A project" and then the project's pill; chat.self_turn_cap shows its value from the
+  //    built-in link of the chain; type 5 and press Enter at this scope: the row shows 5 from the project's link, and
+  //    the CLI reads it with the device that set it; Remove this override: the built-in link again.
   await rail("Settings").click();
   await expect(main.getByRole("heading", { level: 2, name: "Settings" })).toBeVisible();
   const policies = main.getByRole("region", { name: "Chat policies" });
-  await policies.getByLabel("Project", { exact: true }).selectOption({ label: projectName });
+  await policies.getByRole("button", { name: "A project", exact: true }).click();
+  await policies.getByRole("group", { name: "Project", exact: true }).getByRole("button", { name: projectName, exact: true }).click();
   const row = policies.getByRole("group", { name: "Setting chat.self_turn_cap" });
   await expect(row).toBeVisible();
+  const live = row.getByRole("list", { name: "Comes from" }).locator('li[aria-current="true"] .st-node-label');
+  const valueField = row.getByLabel("Value", { exact: true });
   const builtIn = cli<SettingsView>("settings", "get", "chat.self_turn_cap", "--project", projectId, "--json").settings[0];
   expect(builtIn?.from.kind).toBe("built_in");
-  await expect(fact(row, "From")).toHaveText("built-in");
-  await expect(fact(row, "Value")).toHaveText(String(builtIn?.value));
+  await expect(live).toHaveText("Built-in");
+  await expect(valueField).toHaveValue(String(builtIn?.value));
 
-  await row.getByLabel("New value").fill("5");
-  await row.getByRole("button", { name: "Set at this scope" }).click();
-  await expect(fact(row, "From")).toHaveText(`project ${projectName}`);
-  await expect(fact(row, "Value")).toHaveText("5");
+  await valueField.fill("5");
+  await valueField.press("Enter");
+  await expect(live).toHaveText(projectName);
+  await expect(valueField).toHaveValue("5");
   const set = cli<SettingsView>("settings", "get", "chat.self_turn_cap", "--project", projectId, "--json").settings[0];
   expect(set?.value).toBe(5);
   expect(set?.from.kind).toBe("project");
   expect(set?.layers[0]?.set_by).toBe("D-1");
 
-  await row.getByRole("button", { name: "Unset at this scope" }).click();
-  await expect(fact(row, "From")).toHaveText("built-in");
-  await expect(fact(row, "Value")).toHaveText(String(builtIn?.value));
-  await expect(row.getByRole("button", { name: "Unset at this scope" })).toHaveCount(0);
+  await row.getByRole("button", { name: "Remove this override" }).click();
+  await expect(live).toHaveText("Built-in");
+  await expect(valueField).toHaveValue(String(builtIn?.value));
+  await expect(row.getByRole("button", { name: "Remove this override" })).toHaveCount(0);
 
   // 9. Secrets: every request went to the bridge's origin, and the device token, the pairing code and every
   //    confirm code that the bridge answered are in no storage, cookie, IndexedDB name, console line, request
@@ -230,7 +266,7 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   expect(foreign).toEqual([]);
   const token = (JSON.parse(fs.readFileSync(deviceFile, "utf8")) as { token: string }).token;
   expect(token).toMatch(/^[0-9a-f]{64}$/);
-  expect(confirmCodes.length, "the bridge answered a confirm code for the answer and for the merge").toBeGreaterThanOrEqual(2);
+  expect(confirmCodes.length, "the bridge answered one confirm code for each press: the answer and the merge").toBe(2);
   for (const c of confirmCodes) expect(c).toMatch(/^pfc1-[0-9a-f]{32}$/);
   const kept = await visibleState(page);
   const dom = await page.content();

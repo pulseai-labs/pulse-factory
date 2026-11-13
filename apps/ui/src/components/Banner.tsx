@@ -1,66 +1,88 @@
-// The disconnected banner (3c). It sits over the shell. Which kind of failure it shows decides
-// whether a timer runs: only `unreachable` retries by itself.
+// The not-connected banner (11i): full width under the title bar, a red dot, the title, the body, "last
+// reached HH:MM" when known, and its button. It shows while `link.state` is `down`, and while the chat
+// stream is `reconnecting` (read only), so the operator sees at once that the server cannot be reached.
+// Which kind of failure it shows decides whether a timer runs: only `unreachable` retries by itself.
+import type { ReactNode } from "react";
 import { KEY_CHANGED_MESSAGE } from "../transport/types";
+import { useChat } from "../state/chat";
 import { useConnection } from "../state/connection";
 import { clock } from "./format";
+import { Button } from "../ui";
+
+function Shape(props: { title: string; body?: string; reached: string | null; children: ReactNode }) {
+  return (
+    <div className="banner" role="status">
+      <span className="banner-dot" aria-hidden="true" />
+      <p className="banner-title">{props.title}</p>
+      {props.body ? <p className="banner-body">{props.body}</p> : null}
+      <span className="banner-spacer" />
+      {props.reached ? <span className="banner-meta">{`last reached ${props.reached}`}</span> : null}
+      {props.children}
+    </div>
+  );
+}
 
 export function Banner() {
   const conn = useConnection();
+  const chat = useChat();
   const link = conn.link;
-  if (link.state === "up") return null;
   const address = conn.server.address;
+  const name = conn.server.server?.name ?? address;
   const reached = conn.lastReachedAt === null ? null : clock(conn.lastReachedAt);
+
+  if (link.state === "up") {
+    if (chat.status.state !== "reconnecting") return null;
+    return (
+      <Shape
+        title={`Not connected to ${name}`}
+        body="Your sessions and runs keep going on the server. Reconnecting…"
+        reached={reached}
+      >
+        <Button size="sm" icon="refresh" onClick={chat.reconnect}>
+          Retry now
+        </Button>
+      </Shape>
+    );
+  }
 
   switch (link.kind) {
     case "unreachable": {
       const seconds = Math.max(0, Math.ceil(((link.nextAt ?? conn.now) - conn.now) / 1000));
       return (
-        <div className="banner" role="status">
-          <div className="banner-text">
-            <p className="banner-title">{`Not connected to ${address}`}</p>
-            <p className="banner-body">
-              {`Your sessions and runs keep going on the server. Retrying in ${seconds}s.`}
-            </p>
-          </div>
-          {reached ? <span className="banner-meta">{`last reached ${reached}`}</span> : null}
-          <button className="btn" type="button" onClick={conn.retryNow}>
+        <Shape
+          title={`Not connected to ${name}`}
+          body={`Your sessions and runs keep going on the server. Retrying in ${seconds}s.`}
+          reached={reached}
+        >
+          <Button size="sm" icon="refresh" onClick={conn.retryNow}>
             Retry now
-          </button>
-        </div>
+          </Button>
+        </Shape>
       );
     }
     case "unauthorized":
       return (
-        <div className="banner" role="status">
-          <div className="banner-text">
-            <p className="banner-title">{`This device is no longer paired with ${address}.`}</p>
-          </div>
-          <button className="btn" type="button" onClick={conn.pairAgain}>
+        <Shape title={`This device is no longer paired with ${address}.`} reached={reached}>
+          <Button size="sm" onClick={conn.pairAgain}>
             Pair again
-          </button>
-        </div>
+          </Button>
+        </Shape>
       );
     case "key_changed":
       return (
-        <div className="banner" role="status">
-          <div className="banner-text">
-            <p className="banner-title">{KEY_CHANGED_MESSAGE}</p>
-          </div>
-          <button className="btn" type="button" onClick={conn.pairAgain}>
+        <Shape title={KEY_CHANGED_MESSAGE} reached={reached}>
+          <Button size="sm" onClick={conn.pairAgain}>
             Pair again
-          </button>
-        </div>
+          </Button>
+        </Shape>
       );
     case "rate_limited":
       return (
-        <div className="banner" role="status">
-          <div className="banner-text">
-            <p className="banner-title">{link.message}</p>
-          </div>
-          <button className="btn" type="button" onClick={conn.retryNow}>
+        <Shape title={link.message} reached={reached}>
+          <Button size="sm" icon="refresh" onClick={conn.retryNow}>
             Retry now
-          </button>
-        </div>
+          </Button>
+        </Shape>
       );
   }
 }

@@ -36,11 +36,12 @@ describe("the UI never polls", () => {
     const fake = new FakeTransport({ projects: [project(1, "alpha")] });
     render(<App transport={fake} />);
     await advance(0);
-    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
+    // The shell's sidebar reads the run list once when it mounts (Approach 7).
+    expect(fake.calls).toEqual(["paired", "runList", "projectList", "openStream"]);
     expect(screen.getByRole("region", { name: "Sidebar" })).toBeTruthy();
 
     await wiggle();
-    expect(fake.calls).toEqual(["paired", "projectList", "openStream"]);
+    expect(fake.calls).toEqual(["paired", "runList", "projectList", "openStream"]);
   });
 
   it("makes no call on the Settings page for an hour, blurred or focused", async () => {
@@ -51,7 +52,8 @@ describe("the UI never polls", () => {
     await advance(0);
     // r1.s4.w3: the page also reads its settings, and the session list for its Agent select (once, as
     // the list is not loaded yet).
-    const opened = ["paired", "projectList", "openStream", "settingsGet", "sessionList", "status"];
+    // The shell's sidebar read the run list once before the page opened.
+    const opened = ["paired", "runList", "projectList", "openStream", "settingsGet", "sessionList", "status"];
     expect(fake.calls).toEqual(opened);
 
     await wiggle();
@@ -64,8 +66,9 @@ describe("the UI never polls", () => {
     await advance(0);
     fireEvent.click(screen.getByRole("button", { name: "Needs you" }));
     await advance(0);
-    // r1.s4.w3: the requests and the runs, once, when the page opens; no stream of its own.
-    const opened = ["paired", "projectList", "openStream", "requests", "runList"];
+    // r1.s4.w3: the requests and the runs, once, when the page opens; no stream of its own. The shell's
+    // sidebar read the run list once before, on Projects.
+    const opened = ["paired", "runList", "projectList", "openStream", "requests", "runList"];
     expect(fake.calls).toEqual(opened);
 
     await wiggle();
