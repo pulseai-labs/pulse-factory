@@ -3,7 +3,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
-import { ADDRESS, FakeTransport, project } from "./fake-transport";
+import { ADDRESS, FakeTransport, folderEntry, folderList, project } from "./fake-transport";
 
 const TEN_MINUTES = 10 * 60 * 1000;
 
@@ -28,6 +28,16 @@ async function boot(fake: FakeTransport) {
 
 // Every call list starts "paired", "runList", ...: the shell's sidebar reads the run list once when it mounts.
 const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
+
+/** Adds the folder `name` of the home folder through the Add a project dialog (`r1.s5.w5`; the page's own form is gone). */
+async function addFolder(fake: FakeTransport, name: string) {
+  fake.folders["/home/dev"] = folderList([folderEntry(name)]);
+  click("Add a project");
+  await advance(0);
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${name}`) }));
+  click("Add project");
+  await advance(0);
+}
 
 describe("the disconnected screen (3c)", () => {
   it("unreachable: retries only status() at 4, 8, 16, 32 and 60 seconds, then recovers", async () => {
@@ -105,10 +115,10 @@ describe("the disconnected screen (3c)", () => {
     expect(screen.queryByText(/As of/)).toBeNull();
 
     await advance(60_000); // 14:39
-    fake.fail("projectAdd", "unreachable", "no answer");
+    // The dialog's first call fails: nothing reached the server at 14:39.
+    fake.fail("folderList", "unreachable", "no answer");
     fake.fail("status", "unreachable", "no answer");
-    fireEvent.change(screen.getByLabelText("Project root"), { target: { value: "/home/dev/new" } });
-    click("Add project");
+    click("Add a project");
     await advance(0);
 
     expect(screen.getByText(`Not connected to ${ADDRESS}`)).toBeTruthy();
@@ -195,9 +205,7 @@ describe("the disconnected screen (3c)", () => {
 
     // A later fetch fails: an add succeeds, and the list fetch after it is refused.
     fake.fail("projectList", kind, text);
-    fireEvent.change(screen.getByLabelText("Project root"), { target: { value: "/home/dev/beta" } });
-    click("Add project");
-    await advance(0);
+    await addFolder(fake, "beta");
 
     const alerts = screen.getAllByRole("alert");
     expect(alerts).toHaveLength(1);

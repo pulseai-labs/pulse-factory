@@ -681,7 +681,11 @@ pub fn project_add(a: &ProjectAddArgs) -> i32 {
         Ok(id) => id,
         Err(why) => return project_failed("add", &why),
     };
-    let args = json!({ "root": root, "name": a.name, "command_id": command_id });
+    let mut args = json!({ "root": root, "name": a.name, "command_id": command_id });
+    // Only when asked, so an add without the flag sends what it always sent.
+    if a.git_init {
+        args["git_init"] = json!(true);
+    }
     match call("project_add", args) {
         Ok(v) => {
             if a.json {
@@ -729,16 +733,25 @@ pub fn project_remove(a: &ProjectRemoveArgs) -> i32 {
         Ok(id) => id,
         Err(why) => return project_failed("remove", &why),
     };
-    match call(
-        "project_remove",
-        json!({ "id": a.id, "command_id": command_id }),
-    ) {
+    let mut args = json!({ "id": a.id, "command_id": command_id });
+    if a.end_sessions {
+        args["end_sessions"] = json!(true);
+    }
+    match call("project_remove", args) {
         Ok(v) => {
             if a.json {
                 print_json(&v);
             } else {
                 let (id, name, root) = project_parts(&v["project"]);
                 println!("project {id} removed: {name} ({root})");
+                // The sessions this remove ended, when it ended any.
+                let ended: Vec<String> = v["ended"]
+                    .as_array()
+                    .map(|a| a.iter().map(|s| tame(&s_of(s))).collect())
+                    .unwrap_or_default();
+                if !ended.is_empty() {
+                    println!("sessions ended: {}", ended.join(", "));
+                }
             }
             0
         }

@@ -22,6 +22,11 @@ pub struct ProjectAddArgs {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub name: Option<String>,
+    /// Run `git init` in the root before the project is added (`r1.s5.w5`). The default is false.
+    /// The root must be under the server's home folder and must not be in a repository.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub git_init: Option<bool>,
     pub command_id: String,
 }
 
@@ -29,6 +34,11 @@ pub struct ProjectAddArgs {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ProjectRemoveArgs {
     pub id: String,
+    /// End the project's live chat sessions first (`r1.s5.w5`). The default is false: a live session
+    /// then refuses the remove, as the store's rule says.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub end_sessions: Option<bool>,
     pub command_id: String,
 }
 
@@ -60,12 +70,17 @@ pub struct ProjectRecord {
 }
 
 /// The answer of `project_add` and `project_remove`. `replayed` is true when the command ID was
-/// admitted before with the same content: the project is the first record's.
+/// admitted before with the same content: the project is the first record's. `ended` is in the answer
+/// of a `project_remove` that had `end_sessions`: the sessions that command ended, in session order
+/// (a replay names the same ones). It is absent from every other answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ProjectChanged {
     pub schema_version: u32,
     pub replayed: bool,
     pub project: ProjectRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub ended: Option<Vec<String>>,
 }
 
 /// The answer of `project_list`: the live projects, in creation order.
@@ -73,6 +88,41 @@ pub struct ProjectChanged {
 pub struct ProjectList {
     pub schema_version: u32,
     pub projects: Vec<ProjectRecord>,
+}
+
+/// The arguments of `folder_list` (`r1.s5.w5`). No path means the home folder. A path is absolute and
+/// is the home folder or lies under it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FolderListArgs {
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub path: Option<String>,
+}
+
+/// One folder of a listing. `path` is canonical: for a symlink it is the target. `git` is true when the
+/// folder has a `.git`, and `branch` is its branch, or null for a detached HEAD or a git failure.
+/// `project_id` is the live project whose root is this folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FolderEntry {
+    pub name: String,
+    pub path: String,
+    pub git: bool,
+    pub branch: Option<String>,
+    pub project_id: Option<String>,
+}
+
+/// The answer of `folder_list`: the folders of one path inside the home folder, sorted by name, at most
+/// 500. `parent` is null at the home folder. `repo` is the top level of the repository that holds the
+/// listed path, or null. A file is never listed and never opened.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FolderList {
+    pub schema_version: u32,
+    pub home: String,
+    pub path: String,
+    pub parent: Option<String>,
+    pub repo: Option<String>,
+    pub entries: Vec<FolderEntry>,
+    pub truncated: bool,
 }
 
 // ------------------------------------------------------------------ devices and pairing
@@ -1199,8 +1249,8 @@ pub enum RequestFrame {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RunListArgs {}
 
-/// One run as `run_list` shows it: what the Needs you page reads of a run, and no more. The eight
-/// fields are all of it (W14).
+/// One run as `run_list` shows it: what the Needs you page reads of a run, and no more. The nine
+/// fields are all of it (W14; `project_id` joined at `r1.s5.w5`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RunSummary {
     pub id: String,
@@ -1216,6 +1266,11 @@ pub struct RunSummary {
     /// The `end_when` waiting text the last tick noted, rendered from the run's workflow; null when
     /// the last tick noted none.
     pub waiting: Option<String>,
+    /// The project of the chat that proposed the run, when a device armed it from a start card; null
+    /// for a run armed from the CLI. The app's Remove project reads it (`r1.s5.w5`).
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub project_id: Option<String>,
 }
 
 /// The answer of `run_list`: every run the controller holds, oldest first, ended runs included.
@@ -1234,6 +1289,9 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ProjectKind::export_all(cfg)?;
     ProjectChanged::export_all(cfg)?;
     ProjectList::export_all(cfg)?;
+    FolderListArgs::export_all(cfg)?;
+    FolderEntry::export_all(cfg)?;
+    FolderList::export_all(cfg)?;
     DeviceRecord::export_all(cfg)?;
     PairRequest::export_all(cfg)?;
     PairResult::export_all(cfg)?;

@@ -858,3 +858,73 @@ fn a_controller_ledger_that_cannot_be_written_stops_the_project_commands_and_not
     assert!(err.contains("stopped"), "{err}");
     assert_eq!(listed(&live).len(), 2, "nothing was added or removed");
 }
+
+// ------------------------------------------------------------------ `r1.s5.w5`: --git-init and --end-sessions
+
+#[test]
+fn the_git_init_flag_sends_git_init_and_an_add_without_it_sends_none() {
+    // With no home folder the controller refuses `git_init`, so the refusal shows the flag arrived.
+    let live = Live::start();
+    let plain = dir(&live, "plain");
+    let err = refused(&run(
+        &live,
+        &["project", "add", &path_str(&plain), "--git-init"],
+    ));
+    assert!(err.contains("the server has no home folder"), "{err}");
+    assert!(!plain.join(".git").exists(), "nothing was made on disk");
+    assert!(listed(&live).is_empty());
+    // The same folder without the flag is added as before, and stays no repository.
+    let v = ok_json(&run(
+        &live,
+        &["project", "add", &path_str(&plain), "--json"],
+    ));
+    assert_eq!(v["project"]["kind"], "folder");
+    assert!(!plain.join(".git").exists());
+
+    // With a home folder, the flag makes the repository and the project is `git` from its first row.
+    let home = tempfile::tempdir().unwrap();
+    let home_path = std::fs::canonicalize(home.path()).unwrap();
+    let for_cfg = home_path.clone();
+    let live = Live::start_config(BIN.into(), move |cfg| cfg.home = Some(for_cfg));
+    let target = home_path.join("fresh");
+    std::fs::create_dir_all(&target).unwrap();
+    let v = ok_json(&run(
+        &live,
+        &["project", "add", &path_str(&target), "--git-init", "--json"],
+    ));
+    assert_eq!(v["project"]["kind"], "git");
+    assert!(target.join(".git").exists());
+    // `--help` names the flag.
+    let help = stdout(&run(&live, &["project", "add", "--help"]));
+    assert!(help.contains("--git-init"), "{help}");
+}
+
+#[test]
+fn the_end_sessions_flag_sends_end_sessions_and_a_remove_without_it_sends_none() {
+    let live = Live::start();
+    let a = dir(&live, "a");
+    let b = dir(&live, "b");
+    run(&live, &["project", "add", &path_str(&a)]);
+    run(&live, &["project", "add", &path_str(&b)]);
+
+    // With the flag the answer carries `ended`, an empty list when nothing was live.
+    let v = ok_json(&run(
+        &live,
+        &["project", "remove", "P-1", "--end-sessions", "--json"],
+    ));
+    assert_eq!(v["ended"], serde_json::json!([]), "{v}");
+    // Without it the answer has no `ended`.
+    let v = ok_json(&run(&live, &["project", "remove", "P-2", "--json"]));
+    assert!(v.get("ended").is_none(), "{v}");
+    assert!(listed(&live).is_empty());
+    // The text form of a remove that ended nothing is the line it always was.
+    run(&live, &["project", "add", &path_str(&a)]);
+    let out = run(&live, &["project", "remove", "P-3", "--end-sessions"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("project P-3 removed: a ({})\n", a.display())
+    );
+    let help = stdout(&run(&live, &["project", "remove", "--help"]));
+    assert!(help.contains("--end-sessions"), "{help}");
+}

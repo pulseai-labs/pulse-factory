@@ -61,9 +61,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The controller: the API on a free loopback port, its state in the temp directory.
+# The controller: the API on a free loopback port, its state in the temp directory. Its home folder is a
+# directory of the temp directory, so the Add a project picker lists that and never the operator's own
+# (r1.s5.w5). The spec gets the path in PF_D12_HOME and makes its folder there.
+home="$tmp/home"
+mkdir -p "$home"
+export PF_D12_HOME="$home"
 export PF_STATE_DIR="$tmp/state"
-"$pf_bin" controller --api-listen 127.0.0.1:0 > "$tmp/controller.log" 2>&1 &
+HOME="$home" "$pf_bin" controller --api-listen 127.0.0.1:0 > "$tmp/controller.log" 2>&1 &
 controller_pid=$!
 waited=0
 until [ "$("$pf_bin" api status --json 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)" = "listening" ]; do

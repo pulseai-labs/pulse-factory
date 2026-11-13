@@ -253,6 +253,10 @@ pub struct ProjectAddArgs {
     /// The name: 1 to 64 characters. The default is the last component of the root.
     #[arg(long)]
     pub name: Option<String>,
+    /// Run `git init` in the root before the project is added. The root must be a folder under the
+    /// server's home folder that is not in a git repository.
+    #[arg(long)]
+    pub git_init: bool,
     /// The command ID. A retry sends the same one, and the command is admitted once. The default
     /// is a random one for each call.
     #[arg(long, value_name = "ID")]
@@ -273,6 +277,10 @@ pub struct ProjectListArgs {
 pub struct ProjectRemoveArgs {
     /// The project, such as `P-1`.
     pub id: String,
+    /// End the project's live chat sessions first. Without it, a live session refuses the remove.
+    /// A project with an active run is never removed.
+    #[arg(long)]
+    pub end_sessions: bool,
     /// The command ID. A retry sends the same one, and the command is admitted once. The default
     /// is a random one for each call.
     #[arg(long, value_name = "ID")]

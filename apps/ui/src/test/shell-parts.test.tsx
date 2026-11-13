@@ -498,9 +498,8 @@ describe("the not-connected banner (11i, Approach 7)", () => {
     expect(banner.querySelector(".banner-dot")).not.toBeNull();
     expect(within(banner).getByText(/Retrying in \d+s\./)).toBeTruthy();
     expect(within(banner).getByRole("button", { name: "Retry now" }).querySelector("[data-icon=refresh]")).not.toBeNull();
-    // The Add project form is disabled while the server cannot be reached.
-    expect((screen.getByLabelText("Project root") as HTMLInputElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "Add project" }) as HTMLButtonElement).disabled).toBe(true);
+    // The Add a project button is disabled while the server cannot be reached.
+    expect((screen.getByRole("button", { name: "Add a project" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -618,12 +617,12 @@ describe("the Projects page (11e, Approach 8)", () => {
     expect(await main().findByText(new RegExp(`^As of \\d\\d:\\d\\d, when ${ADDRESS.replaceAll(".", "\\.")} was last reachable$`))).toBeTruthy();
   });
 
-  it("keeps the empty state and the Add project form", async () => {
+  it("keeps the empty state and has the Add a project button, not a form (r1.s5.w5)", async () => {
     await boot(seed([], []));
-    expect(await main().findByText("No projects yet. Add one below.")).toBeTruthy();
-    expect(screen.getByRole("form", { name: "Add project" })).toBeTruthy();
-    expect(screen.getByLabelText("Project root")).toBeTruthy();
-    expect(screen.getByLabelText("Name (optional)")).toBeTruthy();
+    expect(await main().findByText("No projects yet. Use Add a project to add one.")).toBeTruthy();
+    expect(main().getByRole("button", { name: "Add a project" })).toBeTruthy();
+    expect(screen.queryByRole("form", { name: "Add project" })).toBeNull();
+    expect(screen.queryByLabelText("Project root")).toBeNull();
   });
 });
 

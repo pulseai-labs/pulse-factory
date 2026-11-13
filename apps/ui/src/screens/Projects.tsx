@@ -1,11 +1,13 @@
 // The Projects page (11e): the live projects from `projectList()`, each as a block with its live sessions as
-// cards, and today's "Add project" form below them (`w5` replaces the form). The page sits in the centred
+// cards. "Add a project" in the header opens the picker (`components/AddProject.tsx`), and the remove
+// button of each block opens its confirm (`components/RemoveProject.tsx`). The page sits in the centred
 // `Column` of the shell. "New session" opens the project's Orchestrator chat, or starts one
 // (`shell/useStartSession.ts`).
 import type { ChatSessionRecord, ProjectRecord } from "@pulse-factory/api-client";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AddProject } from "../components/AddProject";
+import { RemoveButton, RemoveConfirm, RemovedLine } from "../components/RemoveProject";
 import { branchText } from "../components/chat-format";
-import { newCommandId } from "../components/command-id";
 import { costLabel } from "../components/cost";
 import { clock } from "../components/format";
 import { Column } from "../shell/Column";
@@ -14,7 +16,7 @@ import { GroupSwitch, STATE_GROUPS, groupOf, type Grouping } from "../shell/Side
 import { useStartSession } from "../shell/useStartSession";
 import { agentName, stateLabel, useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
-import { Avatar, Button, CountBadge, Icon, Input, StatePill, agentLook } from "../ui";
+import { Avatar, Button, CountBadge, Icon, StatePill, agentLook } from "../ui";
 
 function SessionCard(props: { session: ChatSessionRecord; projects: ProjectRecord[]; byState: boolean }) {
   const { session: s, projects, byState } = props;
@@ -40,14 +42,20 @@ function SessionCard(props: { session: ChatSessionRecord; projects: ProjectRecor
   );
 }
 
-function ProjectBlock(props: { project: ProjectRecord; projects: ProjectRecord[]; start: ReturnType<typeof useStartSession> }) {
-  const { project: p, projects, start } = props;
+function ProjectBlock(props: {
+  project: ProjectRecord;
+  projects: ProjectRecord[];
+  start: ReturnType<typeof useStartSession>;
+  onRemoved: (project: ProjectRecord) => Promise<void>;
+}) {
+  const { project: p, projects, start, onRemoved } = props;
   const chat = useChat();
+  const [confirming, setConfirming] = useState(false);
   const sessions = chat.live.filter((s) => s.project_id === p.id);
   const needs = sessions.filter((s) => s.state === "needs_you").length;
   const error = start.errorOf(p.id);
   return (
-    <div className="pj-block">
+    <div className="pj-block" id={`pj-${p.id}`} role="group" aria-label={p.name} tabIndex={-1}>
       <div className="pj-block-head">
         <span className="pj-chevron">
           <Icon name="chevron-down" size={14} />
@@ -66,7 +74,11 @@ function ProjectBlock(props: { project: ProjectRecord; projects: ProjectRecord[]
         >
           New session
         </Button>
+        <RemoveButton project={p} open={confirming} onOpen={() => setConfirming(true)} />
       </div>
+      {confirming ? (
+        <RemoveConfirm project={p} projects={projects} onCancel={() => setConfirming(false)} onRemoved={onRemoved} />
+      ) : null}
       {error ? (
         <p className="pj-error" role="alert">
           {error}
@@ -88,16 +100,14 @@ function ProjectBlock(props: { project: ProjectRecord; projects: ProjectRecord[]
 export function Projects() {
   const { call, setProjects, epoch, projects, projectsAt, link, server } = useConnection();
   const [pageError, setPageError] = useState<string | null>(null);
-  const [root, setRoot] = useState("");
-  const [name, setName] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  // The projects this page removed, so each block's place keeps its notice line after the reload.
+  const [removed, setRemoved] = useState<ProjectRecord[]>([]);
+  // The block that "Open project" names; it takes focus once the list holds it.
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [grouping, setGrouping] = useState<Grouping>("project");
   const chat = useChat();
   const start = useStartSession();
-  // The command ID of an add that ended with `unreachable`: a retry of the same submit reuses it,
-  // so the server admits the add once (A7).
-  const pending = useRef<{ root: string; name: string; id: string } | null>(null);
   const live = useRef(true);
 
   useEffect(() => {
@@ -124,36 +134,34 @@ export function Projects() {
     void load();
   }, [load, epoch]);
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (busy) return;
-    const r = root.trim();
-    const n = name.trim();
-    if (r === "") {
-      setFormError("Enter the absolute path of the project's folder on the server.");
-      return;
+  useEffect(() => {
+    if (focusId === null) return;
+    const block = document.getElementById(`pj-${focusId}`);
+    if (block) {
+      block.focus();
+      setFocusId(null);
     }
-    setFormError(null);
-    setBusy(true);
-    const same = pending.current && pending.current.root === r && pending.current.name === n;
-    const id = same && pending.current ? pending.current.id : newCommandId();
-    pending.current = { root: r, name: n, id };
-    try {
-      await call((t) => t.projectAdd({ root: r, ...(n ? { name: n } : {}), command_id: id }));
-      pending.current = null;
-      if (live.current) {
-        setRoot("");
-        setName("");
-      }
+  }, [focusId, projects]);
+
+  const closeDialog = useCallback((openId?: string) => {
+    setAdding(false);
+    if (openId) setFocusId(openId);
+    else document.getElementById("pj-add-project")?.focus();
+  }, []);
+
+  const afterRemove = useCallback(
+    async (project: ProjectRecord) => {
+      setRemoved((list) => (list.some((p) => p.id === project.id) ? list : [...list, project]));
       await load();
-    } catch (err) {
-      const te = asTransportError(err);
-      if (te.kind !== "unreachable") pending.current = null;
-      if (live.current) setFormError(te.message);
-    } finally {
-      if (live.current) setBusy(false);
-    }
-  }
+    },
+    [load],
+  );
+
+  // The live projects and, in their places, the lines of the projects removed here.
+  const shown: Array<{ project: ProjectRecord; gone: boolean }> = [
+    ...(projects ?? []).map((project) => ({ project, gone: false })),
+    ...removed.filter((r) => !(projects ?? []).some((p) => p.id === r.id)).map((project) => ({ project, gone: true })),
+  ].sort((a, b) => a.project.id.localeCompare(b.project.id, undefined, { numeric: true }));
 
   const down = link.state === "down";
   const serverName = server.server?.name ?? server.address;
@@ -169,6 +177,9 @@ export function Projects() {
               <p className="stale">{`As of ${clock(projectsAt)}, when ${serverName} was last reachable`}</p>
             ) : null}
           </div>
+          <Button id="pj-add-project" size="lg" icon="plus" disabled={down} onClick={() => setAdding(true)}>
+            Add a project
+          </Button>
           <GroupSwitch value={grouping} onChange={setGrouping} />
         </div>
 
@@ -181,10 +192,18 @@ export function Projects() {
 
         {projects === null ? (
           <p className="muted">Loading…</p>
-        ) : projects.length === 0 ? (
-          <p className="empty">No projects yet. Add one below.</p>
+        ) : shown.length === 0 ? (
+          <p className="empty">No projects yet. Use Add a project to add one.</p>
         ) : grouping === "project" ? (
-          projects.map((p) => <ProjectBlock key={p.id} project={p} projects={projects} start={start} />)
+          shown.map(({ project: p, gone }) =>
+            gone ? (
+              <div className="pj-block" key={p.id}>
+                <RemovedLine name={p.name} />
+              </div>
+            ) : (
+              <ProjectBlock key={p.id} project={p} projects={projects} start={start} onRemoved={afterRemove} />
+            ),
+          )
         ) : (
           <div className="pj-groups">
             {STATE_GROUPS.map((g) => ({ ...g, rows: chat.live.filter((s) => groupOf(s.state) === g.id) }))
@@ -205,38 +224,7 @@ export function Projects() {
           </div>
         )}
 
-        <form className="add-form" onSubmit={submit} noValidate aria-label="Add project">
-          <h3>Add project</h3>
-          <label htmlFor="pf-root">Project root</label>
-          <Input
-            mono
-            id="pf-root"
-            type="text"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="/home/you/code/project"
-            value={root}
-            disabled={busy || down}
-            onChange={(e) => setRoot(e.target.value)}
-          />
-          <label htmlFor="pf-project-name">Name (optional)</label>
-          <Input
-            id="pf-project-name"
-            type="text"
-            autoComplete="off"
-            value={name}
-            disabled={busy || down}
-            onChange={(e) => setName(e.target.value)}
-          />
-          {formError ? (
-            <p className="problem-title" role="alert">
-              {formError}
-            </p>
-          ) : null}
-          <Button type="submit" disabled={busy || down}>
-            Add project
-          </Button>
-        </form>
+        {adding ? <AddProject onAdded={load} onClose={closeDialog} /> : null}
       </Column>
     </section>
   );

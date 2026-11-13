@@ -3,6 +3,8 @@ import type { ProjectRecord } from "./ProjectRecord";
 
 /**
  * The answer of `project_add` and `project_remove`. `replayed` is true when the command ID was
- * admitted before with the same content: the project is the first record's.
+ * admitted before with the same content: the project is the first record's. `ended` is in the answer
+ * of a `project_remove` that had `end_sessions`: the sessions that command ended, in session order
+ * (a replay names the same ones). It is absent from every other answer.
  */
-export type ProjectChanged = { schema_version: number, replayed: boolean, project: ProjectRecord, };
+export type ProjectChanged = { schema_version: number, replayed: boolean, project: ProjectRecord, ended?: Array<string> | null, };

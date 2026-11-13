@@ -480,3 +480,35 @@ Tauri's IPC only, so the webview opens no network connection.
   `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
   fixtures.ts`, which re-exports one module for each area under `fixtures/`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
   real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.
+
+## Add a project and Remove project (`r1.s5.w5`)
+
+The Add a project dialog and the remove confirm of the Projects page reach two verbs through two typed
+methods of the `Transport`. Each is one `verb<T>(...)` call in `tauri.ts` and in `bridge.ts`: both verbs are
+on `pf_api::ALLOWLIST`, so the one `verb` command carries them and no Tauri command is added.
+
+| Method | Verb | Arguments | Answer |
+|---|---|---|---|
+| `folderList(args?)` | `folder_list` | `FolderListArgs`: no `path` is the server's home folder | `FolderList` |
+| `projectRemove(args)` | `project_remove` | `ProjectRemoveArgs`: `id`, `end_sessions?`, `command_id` | `ProjectChanged`, with `ended` after `end_sessions` |
+
+`projectAdd` gains no method: its `ProjectAddArgs` gains `git_init?`.
+
+- **When the UI calls `folder_list`.** Once when the Add a project dialog opens (no path), and once for each
+  navigation: a row's open button, a crumb, the up button, "Add another", and one read of the parent folder
+  after an add with `git_init`, to name the branch. Never on a timer. A pick, a typed name and the tick of the
+  box make no call.
+- **When the UI calls `project_remove`.** Once for each press of the confirm's danger action, with
+  `end_sessions: true` and a command ID. A retry after `unreachable` reuses the command ID. The confirm reads
+  `run_list` once when it opens and locks the action while a run of the project is active; the server's
+  refusal holds even when that list is stale, and its text is shown.
+- **After an add or a remove**, the page loads `project_list` once.
+
+### Verified by
+
+- `apps/ui/src/test/add-project.test.tsx` (Vitest, the fake transport): the dialog's two reads, the rows
+  and their marks, the pick and the name, the `git init` tip and `git_init`, the success view, the retry
+  with the same command ID, the refusal text, `NotBuilt` for the later-release choices, Escape, Cancel and
+  focus. `projects.test.tsx`: the header button, no form, and the remove confirm in its three states.
+- `apps/ui/e2e/screens.spec.ts` (d25, fourteen screens): `2c-projects`, `11e-remove-confirm` and
+  `11f-add-project`. `scripts/demo/ui-pair.sh` (d12): add a folder with `git init`, remove it, add it again.

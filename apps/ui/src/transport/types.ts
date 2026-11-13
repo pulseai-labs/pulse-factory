@@ -12,9 +12,12 @@ import type {
   DeviceArmArgs,
   DeviceClearArgs,
   DeviceRecord,
+  FolderList,
+  FolderListArgs,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
+  ProjectRemoveArgs,
   RequestActed,
   RequestDetail,
   RequestFrame,
@@ -199,6 +202,10 @@ export interface Transport {
   status(): Promise<ApiStatus>;
   projectList(): Promise<ProjectList>;
   projectAdd(args: ProjectAddArgs): Promise<ProjectChanged>;
+  /** Ends the project's live sessions with `end_sessions`, then removes it. A run that is active refuses it (r1.s5.w5). */
+  projectRemove(args: ProjectRemoveArgs): Promise<ProjectChanged>;
+  /** The folders of one path inside the server's home folder; no path is the home folder (r1.s5.w5). */
+  folderList(args?: FolderListArgs): Promise<FolderList>;
   sessionList(args?: SessionListArgs): Promise<SessionList>;
   /** A state-changing call carries a `command_id`. A retry of the same submit reuses it (A7). */
   sessionStart(args: SessionStartArgs): Promise<SessionStarted>;

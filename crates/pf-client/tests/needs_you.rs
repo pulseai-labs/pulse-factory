@@ -451,7 +451,7 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
             json!({"schema_version": 1, "runs": [{
                 "id": "R-1", "spine": "s", "workflow": "w", "state": "active",
                 "halted_reason": null, "end_reason": null, "open_requests": 1,
-                "waiting": "the spine PR is merged: close it"}]}),
+                "waiting": "the spine PR is merged: close it", "project_id": null}]}),
         ),
     ];
     for (verb, answer) in &canned {

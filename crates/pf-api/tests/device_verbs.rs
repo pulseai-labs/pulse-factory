@@ -253,3 +253,85 @@ async fn the_record_of_a_200_and_of_a_plain_refusal_holds_no_word() {
     let records = fake.records.lock().unwrap();
     assert!(records.iter().all(|r| r.refusal.is_none()), "{records:?}");
 }
+
+// ------------------------------------------------------------------ `r1.s5.w5`: folder_list
+
+#[test]
+fn folder_list_is_on_the_allowlist_beside_the_verbs_it_joined() {
+    assert!(ALLOWLIST.contains(&"folder_list"));
+    assert!(is_allowed("folder_list"));
+    // Once: an allowlist entry that appears twice is a merge error.
+    assert_eq!(ALLOWLIST.iter().filter(|v| **v == "folder_list").count(), 1);
+    // The verbs that change who acts stay off, and the new read opens none of them.
+    for verb in [
+        "claim",
+        "halt",
+        "device_pair",
+        "device_revoke",
+        "session_redact",
+    ] {
+        assert!(!is_allowed(verb), "{verb}");
+    }
+}
+
+#[tokio::test]
+async fn folder_list_reaches_the_host_with_its_arguments_and_its_record_names_the_verb() {
+    let (app, fake) = rig();
+    let (status, _) = post(&app, "folder_list", json!({ "path": "/home/dev/code" })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = post(&app, "folder_list", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let calls = fake.calls.lock().unwrap();
+    assert_eq!(
+        *calls,
+        [
+            (
+                "folder_list".to_string(),
+                json!({ "path": "/home/dev/code" })
+            ),
+            ("folder_list".to_string(), json!({})),
+        ]
+    );
+    let records = fake.records.lock().unwrap();
+    assert_eq!(records.len(), 2, "one record for each call: {records:?}");
+    for record in records.iter() {
+        assert_eq!(record.verb.as_deref(), Some("folder_list"));
+        assert_eq!(record.device.as_deref(), Some("D-1"));
+        assert_eq!(record.status, 200);
+        assert_eq!(record.refusal, None);
+    }
+}
+
+#[tokio::test]
+async fn folder_list_with_no_token_is_401_and_never_reaches_the_host() {
+    let (app, fake) = rig();
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/verbs/folder_list")
+        .body(Body::from("{}"))
+        .unwrap();
+    request.extensions_mut().insert(PeerAddr(PEER));
+    let response = app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(fake.calls.lock().unwrap().is_empty());
+    let records = fake.records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, 401);
+    assert_eq!(records[0].device, None);
+}
+
+#[tokio::test]
+async fn a_folder_list_the_host_refuses_is_a_422_with_its_text_and_no_listing() {
+    let (app, fake) = rig();
+    *fake.answer.lock().unwrap() = Some(refused("the path is outside the home folder", None));
+
+    let (status, body) = post(&app, "folder_list", json!({ "path": "/etc" })).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"], "the path is outside the home folder");
+    assert!(body.get("entries").is_none(), "{body}");
+    assert!(body.get("refusal").is_none(), "{body}");
+    assert_eq!(fake.records.lock().unwrap().last().unwrap().status, 422);
+}
