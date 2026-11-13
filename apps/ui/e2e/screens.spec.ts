@@ -13,7 +13,7 @@
 // rendering check). The journey lines d12, d19 and d23 keep the real controller, API and bridge.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { CONTRACT, openUnderContract, settle, type Recorder } from "./screens/contract";
-import type { RequestList } from "@pulse-factory/api-client";
+import type { RequestList, SessionList } from "@pulse-factory/api-client";
 import { PARKED } from "./screens/fixtures/needs-you";
 import { clearOverlay, overlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
 
@@ -103,18 +103,46 @@ test.describe("shell", () => {
   });
 });
 
-/** The chat S-2, opened from the sidebar, with its whole log held. */
-async function openChat(page: Page): Promise<void> {
-  await open(page);
-  await sidebar(page).getByRole("button", { name: /Orchestrator session in pulse-factory/ }).click();
-  await expect(page.getByRole("region", { name: "Chat" })).toBeVisible();
-  await expect(page.getByTestId("start-card")).toBeAttached();
-  await expect(page.getByText("Chat first", { exact: true })).toBeVisible();
-}
-
 test.describe("chat", () => {
+  /**
+   * The chat S-2, opened from the sidebar, with its whole log held. The composer shows the `artifacts` switch of
+   * 11a, which the shared runtime fixture does not declare: this block adds it through `overlay`, as every
+   * screen of the block needs it. `working` makes the session work (a newer record wins in the app).
+   */
+  async function openChat(page: Page, options: { working?: boolean } = {}): Promise<void> {
+    overlay({
+      session_list: (base: unknown) => {
+        const list = base as SessionList;
+        return {
+          ...list,
+          runtimes: list.runtimes.map((r) => ({
+            ...r,
+            options: [...r.options, { id: "artifacts", label: "Artifacts", values: ["on", "off"], default: "off", free: false, live: false }],
+          })),
+          sessions: list.sessions.map((s) =>
+            s.id === "S-2" && options.working ? { ...s, state: "working", updated_at: "2026-11-08T14:46:00Z" } : s,
+          ),
+        };
+      },
+    });
+    await open(page);
+    await sidebar(page).getByRole("button", { name: /Orchestrator session in pulse-factory/ }).click();
+    await expect(page.getByRole("region", { name: "Chat" })).toBeVisible();
+    await expect(page.getByTestId("start-card")).toBeAttached();
+    await expect(page.getByText("Store schema first", { exact: false })).toBeVisible();
+  }
+
+  /** The stream starts at its end. A wheel turn up shows its beginning: the day divider, the first turns. */
+  async function toStart(page: Page): Promise<void> {
+    const log = page.getByRole("log", { name: "Messages" });
+    await log.hover();
+    await page.mouse.wheel(0, -10_000);
+    await expect(log.getByText("Today", { exact: true })).toBeInViewport();
+  }
+
   test("2a-chat: the shell with the sidebar open, the chat", async ({ page }) => {
     await openChat(page);
+    await toStart(page);
     await compare(page, "2a-chat.png", page.getByRole("log", { name: "Messages" }));
   });
 
@@ -122,13 +150,21 @@ test.describe("chat", () => {
     await openChat(page);
     await page.keyboard.press("Meta+b");
     await expect(sidebar(page)).toBeHidden();
+    await toStart(page);
     await compare(page, "2b-chat-sidebar-closed.png", page.getByRole("log", { name: "Messages" }));
   });
 
   test("6b-start-card: the start card in the chat", async ({ page }) => {
     await openChat(page);
     await page.getByTestId("start-card").scrollIntoViewIfNeeded();
-    await compare(page, "6b-start-card.png", page.getByRole("button", { name: "Confirm start" }));
+    await compare(page, "6b-start-card.png", page.getByTestId("start-workflow"));
+  });
+
+  test("11b-end-session: End session asked while the agent works", async ({ page }) => {
+    await openChat(page, { working: true });
+    await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+    await page.getByRole("group", { name: "Chat header" }).getByRole("button", { name: "End session" }).click();
+    await compare(page, "11b-end-session.png", page.getByRole("group", { name: "Confirm end" }));
   });
 });
 

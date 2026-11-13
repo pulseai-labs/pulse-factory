@@ -1,28 +1,35 @@
-// The chat with an agent (2a): a header with the project, the worktree and the branch the server read
-// live, the state, the `unqualified` mark and the cost; the message stream; and the composer. Every
-// call goes through the transport, and the stream is the one the shell holds open.
+// The chat with an agent (11a, 11b): a header with the avatar, the agent, the project, the state, the
+// worktree and branch chips the server read live, the `unqualified` mark, the cost, End session and the
+// agent's settings; the message stream; and the composer. End session asks in a strip under the header
+// (11b). Every call goes through the transport, and the stream is the one the shell holds open.
 import type { ChatAnswerArg } from "@pulse-factory/api-client";
 import { useEffect, useMemo, useState } from "react";
 import type { AnswerFn } from "../components/Cards";
 import { Messages } from "../components/ChatItems";
 import { Composer } from "../components/Composer";
+import { Column } from "../shell/Column";
+import { useNavigation } from "../shell/navigation";
 import { StreamLine } from "../components/StreamLine";
 import { branchText, lastSegment } from "../components/chat-format";
 import { useCommandId } from "../components/command-id";
 import { costLabel, dollarsTitle } from "../components/cost";
 import { agentName, stateLabel, useChat } from "../state/chat";
 import { asTransportError, useConnection } from "../state/connection";
-import { Button, Chip, StatePill } from "../ui";
+import { Avatar, Button, Chip, Icon, IconButton, StatePill, agentLook } from "../ui";
 
 export function Chat(props: { sessionId: string }) {
   const { sessionId } = props;
-  const { call, projects } = useConnection();
+  const { call, projects, server } = useConnection();
   const chat = useChat();
   const { ensureList } = chat;
   const endId = useCommandId();
   const answerId = useCommandId();
+  const startId = useCommandId();
+  const { openPage, openSession } = useNavigation();
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [endError, setEndError] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   // The runtimes (the composer's controls) come with the list, read when the first chat opens.
   useEffect(() => {
@@ -84,46 +91,44 @@ export function Chat(props: { sessionId: string }) {
     }
   };
 
-  const endControls = confirmEnd ? (
-    <span className="confirm" role="group" aria-label="Confirm end">
-      <span>End this session?</span>
-      <Button variant="danger" onClick={() => void end()}>
-        Yes, end it
-      </Button>
-      <Button onClick={() => setConfirmEnd(false)}>
-        Keep it
-      </Button>
-    </span>
-  ) : (
-    <Button onClick={() => setConfirmEnd(true)}>
-      End session
-    </Button>
-  );
+  // Start session after the session ended: a new session of the same project and agent. The server has
+  // no verb that resumes an ended one (`session_start` always starts a new session).
+  async function startAgain() {
+    if (!record || starting) return;
+    setStarting(true);
+    setStartError(null);
+    const id = startId.idFor(`start:${record.project_id}:${record.agent_id}`);
+    try {
+      const started = await call((t) => t.sessionStart({ project_id: record.project_id, agent_id: record.agent_id, command_id: id }));
+      startId.clear();
+      await chat.refreshList();
+      openSession(started.session_id);
+    } catch (e) {
+      const err = asTransportError(e);
+      if (err.kind !== "unreachable") startId.clear();
+      setStartError(err.message);
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const cost = costLabel(record.usage, record.cache_ttl_seconds);
+  const unit = cost.lastIndexOf(" ");
+  const pillState = ended ? "ended" : record.state;
 
   return (
     <section className="chat" aria-label="Chat">
       <div className="chat-head" role="group" aria-label="Chat header">
+        <Avatar agent={agentLook(record.agent_id)} size={28} state={record.state === "needs_you" && !ended ? "needs_you" : "idle"} />
         <h2 className="chat-agent">{name}</h2>
-        <span className="head-key" aria-hidden="true">
-          Project
+        <span className="chat-title">
+          {"· "}
+          <span role="group" aria-label="Project">
+            {record.project_name}
+          </span>
         </span>
-        <span className="head-value" role="group" aria-label="Project">
-          {record.project_name}
-        </span>
-        <span className="head-key" aria-hidden="true">
-          Worktree
-        </span>
-        <span className="head-value mono" role="group" aria-label="Worktree" title={record.worktree_dir}>
-          {lastSegment(record.worktree_dir)}
-        </span>
-        <span className="head-key" aria-hidden="true">
-          Branch
-        </span>
-        <span className="head-value mono" role="group" aria-label="Branch">
-          {branchText(record, projects)}
-        </span>
-        <StatePill state={record.state} role="group" aria-label="State">
-          {stateLabel(record.state)}
+        <StatePill state={pillState} role="group" aria-label="State">
+          {ended ? "Ended" : stateLabel(record.state)}
         </StatePill>
         {unqualified ? (
           <Chip tone="amber" title="This chat runs an override binary, not the qualified Claude Code version.">
@@ -131,27 +136,59 @@ export function Chat(props: { sessionId: string }) {
           </Chip>
         ) : null}
         <span className="head-spacer" />
-        <span className="head-value" role="group" aria-label="Cost" title={dollarsTitle(record.usage)}>
-          {costLabel(record.usage, record.cache_ttl_seconds)}
+        <Chip mono role="group" aria-label="Worktree" title={record.worktree_dir}>
+          <Icon name="archive" size={12} />
+          {lastSegment(record.worktree_dir)}
+        </Chip>
+        <Chip mono role="group" aria-label="Branch">
+          <Icon name="git-branch" size={12} />
+          {branchText(record, projects)}
+        </Chip>
+        <span className="head-rule" aria-hidden="true" />
+        <span className="chat-cost" role="group" aria-label="Cost" title={dollarsTitle(record.usage)}>
+          {cost.slice(0, unit)}{" "}
+          <Chip tone="violet" mono>
+            {cost.slice(unit + 1)}
+          </Chip>
         </span>
-        {ended ? null : endControls}
+        {ended ? (
+          <Button variant="primary" icon="play" disabled={starting} onClick={() => void startAgain()}>
+            Start session
+          </Button>
+        ) : (
+          <Button onClick={() => setConfirmEnd(true)}>End session</Button>
+        )}
+        <IconButton icon="settings" title="Agent settings" size={28} onClick={() => openPage("agents")} />
       </div>
+
+      {confirmEnd && !ended ? (
+        <div className="end-strip" role="group" aria-label="Confirm end">
+          <span className="end-icon" aria-hidden="true">
+            <Icon name="alert" size={15} />
+          </span>
+          <div className="end-text">
+            <span className="end-title">End this session?</span>
+            <span className="end-note">
+              {`The ${name}'s process on ${server.server?.name ?? server.address} stops, mid-turn if it is working. The chat stays, and you can start the session again from here.`}
+            </span>
+          </div>
+          <Button onClick={() => setConfirmEnd(false)}>Keep it</Button>
+          <Button variant="danger" onClick={() => void end()}>
+            End session
+          </Button>
+        </div>
+      ) : null}
 
       <StreamLine />
       {endError ? (
-        <p className="problem-title" role="alert">
+        <p className="problem-title chat-problem" role="alert">
           {endError}
         </p>
       ) : null}
-      {ended ? <p className="chat-note">This session ended</p> : null}
       {lost !== null && !ended ? (
         <p className="chat-note chat-lost" role="status">
           {`Context lost: ${lost}. End this session and start a new one.`}
-          {confirmEnd ? null : (
-            <Button onClick={() => setConfirmEnd(true)}>
-              End session
-            </Button>
-          )}
+          {confirmEnd ? null : <Button onClick={() => setConfirmEnd(true)}>End session</Button>}
         </p>
       ) : null}
 
@@ -161,8 +198,15 @@ export function Chat(props: { sessionId: string }) {
         running={chat.running[sessionId] ?? {}}
         readOnly={ended}
         onAnswer={onAnswer}
+        agentId={record.agent_id}
+        agentName={name}
+        working={record.state === "working" && !ended}
       />
-      <Composer record={record} agentName={name} />
+      <div className="chat-foot">
+        <Column max={736}>
+          <Composer record={record} agentName={name} onStart={() => void startAgain()} starting={starting} startError={startError} />
+        </Column>
+      </div>
     </section>
   );
 }
