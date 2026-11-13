@@ -132,92 +132,140 @@ describe("a pending approval", () => {
   });
 });
 
-describe("a pending question", () => {
-  it("shows each question with its header, text and numbered options", async () => {
-    await bootChat(seeded(), "S-1", [questionRequest([question()])]);
+describe("a pending question (11a)", () => {
+  const send = () => questionCard().getByRole("button", { name: "Send answer" }) as HTMLButtonElement;
+
+  it("shows the card as 'Needs you · since <time> · <request ID>', the question and one numbered button per option", async () => {
+    await bootChat(seeded(), "S-1", [
+      frame(1, { kind: "question_request", request_id: "Q-31", items: [question()] }, { created_at: "2026-11-09T14:31:00Z" }),
+    ]);
     const card = questionCard();
+    expect(card.getByText(`Needs you · since ${clock(Date.parse("2026-11-09T14:31:00Z"))} · Q-31`)).toBeTruthy();
     expect(card.getByText("Option")).toBeTruthy();
     expect(card.getByText("Which option do you prefer?")).toBeTruthy();
-    expect(card.getByText("1.")).toBeTruthy();
-    expect(card.getByText("3.")).toBeTruthy();
-    expect(card.getByRole("radio", { name: "B" })).toBeTruthy();
-    expect(card.getByText(/the second/)).toBeTruthy();
+    const buttons = card.getAllByRole("button").filter((b) => /^\d/.test(b.textContent ?? ""));
+    expect(buttons.map((b) => b.textContent)).toEqual(["1Athe first", "2Bthe second", "3Cthe third"]);
+    expect(card.getByText("the second")).toBeTruthy();
+    expect(card.getByText("Or type a different answer:")).toBeTruthy();
     expect(card.getByRole("textbox", { name: "Other answer" })).toBeTruthy();
-    expect((card.getByRole("button", { name: "Answer" }) as HTMLButtonElement).disabled).toBe(true);
+    // A single-select question has no radio, no checkbox and no toggle.
+    expect(card.queryByRole("radio")).toBeNull();
+    expect(card.queryByRole("checkbox")).toBeNull();
+    expect(buttons.every((b) => !b.hasAttribute("aria-pressed"))).toBe(true);
   });
 
-  it("sends the chosen label under the question's text", async () => {
+  it("one press on an option sends that answer for a single-select request, once, with a command ID and no code", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [questionRequest([question()], 3)]);
-    await user.click(questionCard().getByRole("radio", { name: "B" }));
-    await user.click(questionCard().getByRole("button", { name: "Answer" }));
+    await user.click(questionCard().getByRole("button", { name: /^2\s*B/ }));
 
     await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
-    expect(fake.answerArgs[0]).toMatchObject({
+    expect(fake.answerArgs[0]).toEqual({
       session_id: "S-1",
       seq: 3,
       answer: { type: "answers", value: { "Which option do you prefer?": "B" } },
+      command_id: expect.stringMatching(/^[0-9a-f-]{16,}$/),
     });
+    // A chat answer is not a request act: no confirm code is asked for.
+    expect(fake.count("confirmCode")).toBe(0);
+    // The buttons lock while the card waits for its answer item.
+    expect(await questionCard().findByText("Answer sent. Waiting for the agent.")).toBeTruthy();
+    expect((questionCard().getByRole("button", { name: /^1\s*A/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("takes one choice for a single-select question", async () => {
-    const user = await bootChat(seeded(), "S-1", [questionRequest([question()])]);
-    await user.click(questionCard().getByRole("radio", { name: "A" }));
-    await user.click(questionCard().getByRole("radio", { name: "C" }));
-    expect((questionCard().getByRole("radio", { name: "A" }) as HTMLInputElement).checked).toBe(false);
-    expect((questionCard().getByRole("radio", { name: "C" }) as HTMLInputElement).checked).toBe(true);
-  });
-
-  it("joins several choices of a multi-select question with a comma and a space", async () => {
-    const fake = seeded();
-    const user = await bootChat(fake, "S-1", [questionRequest([question({ multi_select: true })])]);
-    await user.click(questionCard().getByRole("checkbox", { name: "A" }));
-    await user.click(questionCard().getByRole("checkbox", { name: "C" }));
-    await user.click(questionCard().getByRole("button", { name: "Answer" }));
-
-    await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
-    expect(fake.answerArgs[0]?.answer).toEqual({ type: "answers", value: { "Which option do you prefer?": "A, C" } });
-  });
-
-  it("sends a typed answer from the Other field", async () => {
+  it("sends a typed answer from the Other answer field with its own Send", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [questionRequest([question()])]);
-    await user.click(questionCard().getByRole("radio", { name: "A" }));
+    expect(send().disabled).toBe(true);
     await user.type(questionCard().getByRole("textbox", { name: "Other answer" }), "something else");
-    // A typed answer replaces the choice of a single-select question.
-    expect((questionCard().getByRole("radio", { name: "A" }) as HTMLInputElement).checked).toBe(false);
-    await user.click(questionCard().getByRole("button", { name: "Answer" }));
+    expect(send().disabled).toBe(false);
+    await user.click(send());
 
     await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
     expect(fake.answerArgs[0]?.answer).toEqual({ type: "answers", value: { "Which option do you prefer?": "something else" } });
   });
 
-  it("answers every question of the request in one call, and waits until each has an answer", async () => {
+  it("shows each option of a multi-select question as a toggle, and joins the chosen ones with a comma and a space", async () => {
+    const fake = seeded();
+    const user = await bootChat(fake, "S-1", [questionRequest([question({ multi_select: true })])]);
+    const a = questionCard().getByRole("button", { name: /^1\s*A/ });
+    const c = questionCard().getByRole("button", { name: /^3\s*C/ });
+    expect(a.getAttribute("aria-pressed")).toBe("false");
+    expect(send().disabled).toBe(true);
+    await user.click(a);
+    await user.click(c);
+    expect(a.getAttribute("aria-pressed")).toBe("true");
+    expect(fake.answerArgs).toHaveLength(0);
+    await user.click(send());
+
+    await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
+    expect(fake.answerArgs[0]?.answer).toEqual({ type: "answers", value: { "Which option do you prefer?": "A, C" } });
+  });
+
+  it("a second press on a toggle takes the choice back", async () => {
+    const user = await bootChat(seeded(), "S-1", [questionRequest([question({ multi_select: true })])]);
+    const a = questionCard().getByRole("button", { name: /^1\s*A/ });
+    await user.click(a);
+    await user.click(a);
+    expect(a.getAttribute("aria-pressed")).toBe("false");
+    expect(send().disabled).toBe(true);
+  });
+
+  it("answers every question of a request with more than one question in one call, after each has an answer", async () => {
     const fake = seeded();
     const second = question({ text: "Which colour?", header: "Colour", options: [{ label: "red", description: "" }, { label: "blue", description: "" }] });
     const user = await bootChat(fake, "S-1", [questionRequest([question(), second])]);
-    await user.click(within(questionCard().getByRole("group", { name: /Which option/ })).getByRole("radio", { name: "A" }));
-    expect((questionCard().getByRole("button", { name: "Answer" }) as HTMLButtonElement).disabled).toBe(true);
-    await user.click(within(questionCard().getByRole("group", { name: /Which colour/ })).getByRole("radio", { name: "blue" }));
-    await user.click(questionCard().getByRole("button", { name: "Answer" }));
+    const first = within(questionCard().getByRole("group", { name: /Which option/ }));
+    const colour = within(questionCard().getByRole("group", { name: /Which colour/ }));
+    // One question per group; a press toggles, it sends nothing.
+    await user.click(first.getByRole("button", { name: /^1\s*A/ }));
+    expect(fake.answerArgs).toHaveLength(0);
+    expect(send().disabled).toBe(true);
+    await user.click(colour.getByRole("button", { name: /blue/ }));
+    // A single-select question of a many-question card takes one choice.
+    await user.click(first.getByRole("button", { name: /^3\s*C/ }));
+    expect(first.getByRole("button", { name: /^1\s*A/ }).getAttribute("aria-pressed")).toBe("false");
+    await user.click(send());
 
     await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
     expect(fake.answerArgs[0]?.answer).toEqual({
       type: "answers",
-      value: { "Which option do you prefer?": "A", "Which colour?": "blue" },
+      value: { "Which option do you prefer?": "C", "Which colour?": "blue" },
     });
   });
 
-  it("shows the answered question with its answers", async () => {
+  it("shows the answered question as 'Answered · <time>', the question and the answer, with no button", async () => {
     await bootChat(seeded(), "S-1", [
       questionRequest([question()]),
-      answered(2, 1, { kind: "question_answer", outcome: "answered", reason: null, answers: { "Which option do you prefer?": "B" } }),
+      frames.item(item("S-1", 2, { kind: "question_answer", outcome: "answered", reason: null, answers: { "Which option do you prefer?": "B" } }, { answers_seq: 1, created_at: "2026-11-09T14:08:00Z" })),
     ]);
     const card = questionCard();
+    expect(card.getByText(`Answered · ${clock(Date.parse("2026-11-09T14:08:00Z"))}`)).toBeTruthy();
     expect(card.getByText("Which option do you prefer?")).toBeTruthy();
     expect(card.getByText("B")).toBeTruthy();
-    expect(card.queryByRole("button", { name: "Answer" })).toBeNull();
-    expect(card.queryByRole("radio")).toBeNull();
+    expect(card.queryByRole("button")).toBeNull();
+    expect(card.queryByRole("textbox")).toBeNull();
+  });
+
+  it("a read-only card of an ended session shows the question and no button", async () => {
+    const fake = seeded();
+    await bootChat(fake, "S-1", [questionRequest([question()])]);
+    expect(questionCard().getAllByRole("button").length).toBeGreaterThan(0);
+    await push(fake, frames.session(alpha({ ended_at: "2026-11-09T11:00:00Z", state: "idle" })));
+    const card = questionCard();
+    expect(card.getByText("Which option do you prefer?")).toBeTruthy();
+    expect(card.queryByRole("button")).toBeNull();
+    expect(card.queryByRole("textbox")).toBeNull();
+    expect(fake.count("sessionAnswer")).toBe(0);
+  });
+
+  it("shows the server's text for a refused answer and keeps the buttons live", async () => {
+    const fake = seeded();
+    fake.fail("sessionAnswer", "refused", "request 1 of S-1 is already answered, closed or lost", 1);
+    const user = await bootChat(fake, "S-1", [questionRequest([question()])]);
+    await user.click(questionCard().getByRole("button", { name: /^1\s*A/ }));
+    expect(await questionCard().findByText("request 1 of S-1 is already answered, closed or lost")).toBeTruthy();
+    expect((questionCard().getByRole("button", { name: /^1\s*A/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

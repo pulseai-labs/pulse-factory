@@ -1,6 +1,6 @@
-// AC-18: the start card (r1.s4, Approach 8). A `start_card` item shows the plan's facts. Confirm start
-// asks for a one-use code and opens a dialog. Arm the run spends the code. The card learns the outcome
-// from the `start_result` item on the stream, and it never shows the code.
+// AC-2 of `r1.s5.w3`: the start card (11c). A `start_card` item shows the plan's facts, limits first. One
+// press on Start workflow asks for a one-use code and arms the run with it (G1). The card learns the
+// outcome from the `start_result` item on the stream, and it never shows the code.
 import type { ArmSummary, ChatItemBody } from "@pulse-factory/api-client";
 import { waitFor, within, screen, act } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
@@ -54,198 +54,239 @@ const result = (seq: number, answers: number, over: Partial<Extract<ChatItemBody
   );
 
 const startCard = () => within(screen.getByTestId("start-card"));
-const dialog = () => within(screen.getByRole("dialog", { name: "Confirm the start of s1" }));
+const press = () => startCard().getByTestId("start-workflow") as HTMLButtonElement;
+const group = (name: string) => startCard().getByRole("group", { name });
 
-describe("a start card", () => {
-  it("shows Start workflow with every fact group", async () => {
-    await bootChat(seeded(), "S-1", [card()]);
+describe("a start card (11c)", () => {
+  it("shows the limits first, the merge line, the work items and who runs it, and one Start workflow", async () => {
+    await bootChat(seeded(), "S-1", [card(1)]);
     const el = screen.getByRole("article", { name: "Start workflow" });
     expect(el.getAttribute("data-proposal")).toBe("sp-1");
-    const c = within(el);
-    for (const name of [
-      "Spine",
-      "Project",
-      "Items",
-      "Workflow",
-      "Roles",
-      "Caps",
-      "Plugins",
-      "Most launches",
-      "Merges",
-      "Base pushes",
-      "Forge",
-      "Paper env",
-      "Ledger",
-      "Parameters",
-    ]) {
-      expect(c.getByRole("group", { name }), name).toBeTruthy();
+    // The head: the eyebrow with the time of the proposal, the spine ID and the project as a chip.
+    expect(startCard().getByText("Start a workflow")).toBeTruthy();
+    expect(startCard().getByText(`proposed ${clock(Date.parse("2026-11-09T10:00:00Z"))}`)).toBeTruthy();
+    expect(startCard().getByText("s1")).toBeTruthy();
+    expect(startCard().getByText("alpha").className).toContain("ui-chip");
+
+    // Limits: tiles for the caps the plan has, then the other caps and the stop sentence.
+    const limits = within(group("Limits"));
+    expect(limits.getByText("12")).toBeTruthy();
+    expect(limits.getByText("Model sessions")).toBeTruthy();
+    expect(limits.getByText("Cold builds")).toBeTruthy();
+    expect(within(group("Most sessions")).getByText("9")).toBeTruthy();
+    expect(limits.getByText(/seed w1: at most 3 · relaunch: once · loop main review to fix: at most 2/)).toBeTruthy();
+    expect(limits.getByText("The run stops and asks you when it reaches a limit.")).toBeTruthy();
+
+    // The merge line holds the controller's sentence as written.
+    expect(group("Merge line").textContent).toContain("merges on the operator's ack");
+    expect(group("Work items").textContent).toContain("3 work items");
+
+    // Who runs it: one row per role, with the model's display name and the runtime as a chip.
+    const who = group("Who runs it");
+    expect(within(who).getAllByRole("listitem")).toHaveLength(2);
+    expect(who.textContent).toContain("implementer");
+    expect(who.textContent).toContain("fake-model");
+    expect(within(who).getAllByText("claude-code")[0]?.className).toContain("ui-chip-mono");
+    // The paper mark is one chip in the head, with its reason.
+    expect(group("Paper env").getAttribute("title")).toBe("No model, no spend");
+
+    expect(startCard().getByText("Nothing launches until you start it.")).toBeTruthy();
+    expect(press().textContent).toBe("Start workflow");
+    expect(startCard().getAllByRole("button", { name: "Start workflow" })).toHaveLength(1);
+  });
+
+  it("shows a role's model as its display name", async () => {
+    const real: ArmSummary = { ...summary, roles: [{ name: "planner", runtime: "claude-code", model: "claude-sonnet-5-5" }] };
+    await bootChat(seeded(), "S-1", [card(1, { summary: real })]);
+    expect(group("Who runs it").textContent).toContain("Sonnet 5.5");
+  });
+
+  it("the thirteen old groups are gone and no name of the old two steps is on the card", async () => {
+    await bootChat(seeded(), "S-1", [card()]);
+    for (const name of ["Spine", "Project", "Items", "Workflow", "Roles", "Caps", "Plugins", "Most launches", "Merges", "Base pushes", "Forge", "Ledger", "Parameters"]) {
+      expect(startCard().queryByRole("group", { name }), name).toBeNull();
     }
-    expect(c.getByRole("group", { name: "Roles" }).textContent).toContain("implementer: claude-code, fake-model");
-    expect(c.getByRole("group", { name: "Roles" }).textContent).toContain("reviewer: claude-code, other-model");
-    expect(c.getByRole("group", { name: "Parameters" }).textContent).toContain("goal=demo");
-    expect(c.getByRole("button", { name: "Confirm start" })).toBeTruthy();
+    expect(startCard().queryByRole("button", { name: /Confirm start|Arm the run/ })).toBeNull();
+    expect(screen.queryByTestId("start-dialog")).toBeNull();
+    expect(document.body.textContent).not.toContain("ossify-spine");
+    expect(document.body.textContent).not.toContain("docs/ledger.md");
+    expect(document.body.textContent).not.toContain("goal=demo");
   });
 
   it("leaves out a group whose value is empty", async () => {
     const bare: ArmSummary = { ...summary, items: null, most_launches: null, paper: null, plugins: [], merges: [], base_pushes: [] };
     await bootChat(seeded(), "S-1", [card(1, { summary: bare, params: {}, ledger: "" })]);
-    const c = startCard();
-    for (const name of ["Items", "Most launches", "Paper env", "Plugins", "Merges", "Base pushes", "Parameters", "Ledger"]) {
-      expect(c.queryByRole("group", { name }), name).toBeNull();
+    for (const name of ["Work items", "Most sessions", "Paper env", "Merge line"]) {
+      expect(startCard().queryByRole("group", { name }), name).toBeNull();
     }
-    expect(c.getByRole("group", { name: "Spine" })).toBeTruthy();
+    expect(group("Limits")).toBeTruthy();
+    expect(group("Who runs it")).toBeTruthy();
   });
 
-  it("Confirm start asks for a code once, with the arm subject and a command ID, and opens the dialog", async () => {
+  it("CLI, Change something and Open run view are not built: disabled, each with the Later release tag", async () => {
+    await bootChat(seeded(), "S-1", [card()]);
+    for (const label of ["CLI", "Change something"]) {
+      const el = startCard().getByText(label).closest("[data-not-built]") as HTMLElement;
+      expect(el.getAttribute("aria-disabled")).toBe("true");
+      expect(within(el).getByText("Later release")).toBeTruthy();
+      expect(el.tagName).not.toBe("BUTTON");
+      // 11b and 11c draw these stubs with the label and the tag only: no icon.
+      expect(el.querySelector("[data-icon]"), label).toBeNull();
+    }
+  });
+
+  it("one press asks for a code once and arms once, in that order, with the issued code", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
+    await user.click(press());
 
-    await waitFor(() => expect(screen.getByTestId("start-dialog")).toBeTruthy());
+    await waitFor(() => expect(fake.armArgs).toHaveLength(1));
     expect(fake.confirmArgs).toEqual([
       { subject: { kind: "arm", proposal: "sp-1", plan_sha256: PLAN }, command_id: expect.stringMatching(COMMAND_ID) },
     ]);
-    const d = dialog();
-    expect(d.getByText(new RegExp(`expires at ${clock(Date.parse("2026-11-09T10:10:00Z"))}`))).toBeTruthy();
-    expect(d.getByText(/device D-1/)).toBeTruthy();
-    expect(d.getByRole("button", { name: "Arm the run" })).toBeTruthy();
-    expect(d.getByRole("button", { name: "Cancel" })).toBeTruthy();
-    // The code is in no text of the page.
+    expect(fake.armArgs[0]).toEqual({ proposal: "sp-1", plan_sha256: PLAN, code: fake.nextCode, command_id: expect.stringMatching(COMMAND_ID) });
+    expect(fake.armArgs[0]?.command_id).not.toBe(fake.confirmArgs[0]?.command_id);
+    const order = fake.calls.filter((c) => c === "confirmCode" || c === "arm");
+    expect(order).toEqual(["confirmCode", "arm"]);
+    // No dialog, no expiry text, no second button.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByTestId("start-dialog")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/expires/i);
+    // The code is in no text or attribute of the page.
     expect(document.body.textContent).not.toContain(fake.nextCode);
     expect(document.body.innerHTML).not.toContain(fake.nextCode);
+    await waitFor(() => expect(screen.getByTestId("start-outcome").textContent).toBe("Arming…"));
   });
 
-  it("Arm the run sends the code with a new command ID, shows Arming… and then the result", async () => {
+  it("disables the button while the press is in flight", async () => {
+    const fake = seeded();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = fake.confirmCode.bind(fake);
+    fake.confirmCode = async (args) => {
+      await gate;
+      return original(args);
+    };
+    const user = await bootChat(fake, "S-1", [card()]);
+    await user.click(press());
+    await waitFor(() => expect(press().disabled).toBe(true));
+    await user.click(press());
+    release();
+    await waitFor(() => expect(fake.armArgs).toHaveLength(1));
+    expect(fake.confirmArgs).toHaveLength(1);
+  });
+
+  it("shows Started with the device's name, the time and the run once the result is held", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await user.click(await screen.findByRole("button", { name: "Arm the run" }));
-
+    await user.click(press());
     await waitFor(() => expect(fake.armArgs).toHaveLength(1));
-    expect(fake.armArgs[0]).toEqual({
-      proposal: "sp-1",
-      plan_sha256: PLAN,
-      code: fake.nextCode,
-      command_id: expect.stringMatching(COMMAND_ID),
-    });
-    expect(fake.armArgs[0]?.command_id).not.toBe(fake.confirmArgs[0]?.command_id);
-    await waitFor(() => expect(screen.getByTestId("start-outcome").textContent).toBe("Arming…"));
-    expect(screen.queryByTestId("start-dialog")).toBeNull();
-    expect(document.body.innerHTML).not.toContain(fake.nextCode);
-
-    await push(fake, result(2, 1));
-    expect(screen.getByTestId("start-outcome").textContent).toBe("Armed: run run-1 from D-1");
-    expect(startCard().queryByRole("button", { name: "Confirm start" })).toBeNull();
+    await push(fake, frame(2, { kind: "start_result", outcome: "answered", result: "armed", reason: null, run: "run-1", device: "D-1" }, { answers_seq: 1, created_at: "2026-11-09T10:12:00Z" }));
+    const outcome = screen.getByTestId("start-outcome");
+    expect(outcome.getAttribute("role")).toBe("status");
+    expect(outcome.getAttribute("data-run")).toBe("run-1");
+    expect(outcome.getAttribute("data-device")).toBe("D-1");
+    expect(outcome.textContent).toContain(`Started · MacBook · ${clock(Date.parse("2026-11-09T10:12:00Z"))}`);
+    expect(outcome.textContent).toContain("Run run-1 is running");
+    // Start workflow is gone, and Open run view is not built.
+    expect(screen.queryByTestId("start-workflow")).toBeNull();
+    const view = startCard().getByText("Open run view").closest("[data-not-built]") as HTMLElement;
+    expect(within(view).getByText("Later release")).toBeTruthy();
+    expect(view.querySelector("[data-icon]")).toBeNull();
     // The result shows inside its card, not as an entry of its own.
     expect(within(main().getByRole("log", { name: "Messages" })).queryByRole("article", { name: "Answer" })).toBeNull();
   });
 
-  it("Cancel calls nothing more and drops the code", async () => {
-    const fake = seeded();
-    const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await screen.findByTestId("start-dialog");
-    const before = [...fake.calls];
-    await user.click(dialog().getByRole("button", { name: "Cancel" }));
-
-    expect(screen.queryByTestId("start-dialog")).toBeNull();
-    expect(fake.calls).toEqual(before);
-    expect(fake.armArgs).toHaveLength(0);
-    // The next Confirm start asks again, with a new command ID.
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await waitFor(() => expect(fake.confirmArgs).toHaveLength(2));
-    expect(fake.confirmArgs[1]?.command_id).not.toBe(fake.confirmArgs[0]?.command_id);
+  it("names the device by its ID when the result is another device's", async () => {
+    await bootChat(seeded(), "S-1", [card(), result(2, 1, { device: "D-7" })]);
+    expect(screen.getByTestId("start-outcome").textContent).toContain("Started · D-7 ·");
+    expect(screen.getByTestId("start-outcome").getAttribute("data-device")).toBe("D-7");
   });
 
-  it("a refused arm shows its message as an alert, drops the code and the next Confirm start asks again", async () => {
+  it("a refused arm shows its message, drops the code, and the next press asks for a new one", async () => {
     const fake = seeded();
     fake.fail("arm", "refused", "the code was already used", 1);
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await user.click(await screen.findByRole("button", { name: "Arm the run" }));
+    await user.click(press());
 
     expect((await startCard().findByRole("alert")).textContent).toBe("the code was already used");
-    expect(screen.queryByTestId("start-dialog")).toBeNull();
     expect(screen.queryByTestId("start-outcome")).toBeNull();
-
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
+    await user.click(press());
     await waitFor(() => expect(fake.confirmArgs).toHaveLength(2));
     expect(fake.confirmArgs[1]?.command_id).not.toBe(fake.confirmArgs[0]?.command_id);
-    await user.click(await screen.findByRole("button", { name: "Arm the run" }));
     await waitFor(() => expect(fake.armArgs).toHaveLength(2));
     expect(fake.armArgs[1]?.command_id).not.toBe(fake.armArgs[0]?.command_id);
   });
 
-  it("a refused Confirm start shows its message as an alert and opens no dialog", async () => {
+  it("a refused code request shows its message and arms nothing", async () => {
     const fake = seeded();
     fake.fail("confirmCode", "refused", "the proposal is not open", 1);
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-
+    await user.click(press());
     expect((await startCard().findByRole("alert")).textContent).toBe("the proposal is not open");
-    expect(screen.queryByTestId("start-dialog")).toBeNull();
     expect(fake.count("arm")).toBe(0);
   });
 
-  it("a retry of Confirm start after unreachable reuses the command ID", async () => {
+  it("a retry after unreachable on the code request reuses its command ID", async () => {
     const fake = seeded();
     fake.fail("confirmCode", "unreachable", "the server did not answer", 1);
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
+    await user.click(press());
     expect((await startCard().findByRole("alert")).textContent).toBe("the server did not answer");
 
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await screen.findByTestId("start-dialog");
+    await user.click(press());
+    await waitFor(() => expect(fake.armArgs).toHaveLength(1));
     expect(fake.confirmArgs).toHaveLength(2);
     expect(fake.confirmArgs[1]?.command_id).toBe(fake.confirmArgs[0]?.command_id);
   });
 
-  it("a retry of Arm the run after unreachable keeps the dialog and reuses the command ID", async () => {
+  it("after unreachable on arm the code and the command ID stay: the next press retries arm only", async () => {
     const fake = seeded();
     fake.fail("arm", "unreachable", "the server did not answer", 1);
     const user = await bootChat(fake, "S-1", [card()]);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await user.click(await screen.findByRole("button", { name: "Arm the run" }));
+    await user.click(press());
 
-    expect((await dialog().findByRole("alert")).textContent).toBe("the server did not answer");
-    await user.click(dialog().getByRole("button", { name: "Arm the run" }));
+    expect((await startCard().findByRole("alert")).textContent).toBe("the server did not answer");
+    await user.click(press());
     await waitFor(() => expect(fake.armArgs).toHaveLength(2));
     expect(fake.armArgs[1]).toEqual(fake.armArgs[0]);
     expect(fake.confirmArgs).toHaveLength(1);
     await waitFor(() => expect(screen.getByTestId("start-outcome").textContent).toBe("Arming…"));
   });
 
-  it("a replayed confirm answer has no code to show: it says so and asks for a new one next time", async () => {
+  it("a replayed code answer has no code to show: it says so and asks for a new one next time", async () => {
     const fake = seeded();
     const user = await bootChat(fake, "S-1", [card()]);
     // The first answer is lost on the way: the server holds the code, the app got `unreachable`.
     fake.fail("confirmCode", "unreachable", "the server did not answer", 1);
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
+    await user.click(press());
     await startCard().findByRole("alert");
     // The server did admit it, so the replay of the same command ID answers with no code.
     await act(async () => {
       await fake.confirmCode(fake.confirmArgs[0]!).catch(() => undefined);
     });
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
+    await user.click(press());
     expect((await startCard().findByRole("alert")).textContent).toMatch(/cannot show it again/);
-    expect(screen.queryByTestId("start-dialog")).toBeNull();
-    await user.click(startCard().getByRole("button", { name: "Confirm start" }));
-    await screen.findByTestId("start-dialog");
+    expect(fake.count("arm")).toBe(0);
+    await user.click(press());
+    await waitFor(() => expect(fake.armArgs).toHaveLength(1));
     expect(fake.confirmArgs.at(-1)?.command_id).not.toBe(fake.confirmArgs[0]?.command_id);
   });
 });
 
 describe("the end of a start card", () => {
-  it("a withdrawn result shows Withdrawn: <reason> and no Confirm start", async () => {
+  it("a withdrawn result shows Withdrawn: <reason> and no Start workflow", async () => {
     await bootChat(seeded(), "S-1", [card(), result(2, 1, { result: "withdrawn", reason: "halted", run: null, device: null })]);
     expect(screen.getByTestId("start-outcome").textContent).toBe("Withdrawn: halted");
-    expect(startCard().queryByRole("button", { name: "Confirm start" })).toBeNull();
+    expect(screen.queryByTestId("start-workflow")).toBeNull();
   });
 
-  it("a failed result shows Failed: <reason> and no Confirm start", async () => {
+  it("a failed result shows Failed: <reason> and no Start workflow", async () => {
     await bootChat(seeded(), "S-1", [card(), result(2, 1, { result: "failed", reason: "the run could not be created", run: null, device: "D-1" })]);
     expect(screen.getByTestId("start-outcome").textContent).toBe("Failed: the run could not be created");
-    expect(startCard().queryByRole("button", { name: "Confirm start" })).toBeNull();
+    expect(screen.queryByTestId("start-workflow")).toBeNull();
   });
 
   it("a result with no card held shows as an Answer entry", async () => {
@@ -255,12 +296,12 @@ describe("the end of a start card", () => {
     expect(screen.queryByTestId("start-card")).toBeNull();
   });
 
-  it("an ended session shows no Confirm start", async () => {
+  it("an ended session shows no Start workflow", async () => {
     const fake = seeded();
     await bootChat(fake, "S-1", [card()]);
-    expect(startCard().getByRole("button", { name: "Confirm start" })).toBeTruthy();
+    expect(press()).toBeTruthy();
     await push(fake, frames.session(alpha({ ended_at: "2026-11-09T11:00:00Z", state: "idle" })));
-    expect(startCard().queryByRole("button", { name: "Confirm start" })).toBeNull();
+    expect(screen.queryByTestId("start-workflow")).toBeNull();
     expect(fake.count("confirmCode")).toBe(0);
   });
 });

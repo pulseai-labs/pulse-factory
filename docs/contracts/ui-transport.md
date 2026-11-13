@@ -198,28 +198,41 @@ keeps the sidebar's. These are the only two keys; there is still no chat state i
 down the add-a-project form is disabled, and the Projects page shows "As of <time>, when <name> was last
 reachable" over the list it holds.
 
-**Needs you and the request frames (`r1.s4.w3`).** The controller sends the request frames on **every**
-stream, the overview included, so the UI needs no stream of its own for them: the one stream the app holds
-feeds the requests state (the rail's count, and the Needs you page while it is open), with no call. The
-page's calls (W9) are:
+**Needs you and the request frames (`r1.s4.w3`, one press at `r1.s5.w4`).** The controller sends the request
+frames on **every** stream, the overview included, so the UI needs no stream of its own for them: the one
+stream the app holds feeds the requests state (the rail's count, and the Needs you page and the dock while they
+are open), with no call. The page's calls (W9) are:
 
-- when it opens: one `requests {all: true}` (the correctness path: a fresh page fills its Open requests,
-  its claim and its Answered list from that read alone, with no frame), one `runList`, and one `show` for
-  each open request that takes `answer` (its question is in the body);
+- when it opens: one `requests {all: true}` (the correctness path: a fresh page fills its Open cards, its
+  claim and its Answered today rows from that read alone, with no frame), one `runList` (for the cards' spine
+  names only), one `show` for each open request of every kind (the merge card's PR, From, Into and head SHA
+  come from the body; the run question's text is in it), and one `show` for each answered row it holds no
+  detail for (an answered request does not change, so it is read once);
 - when the link comes back: the same, once;
-- on the operator's **Refresh**: `requests` and `runList`;
-- after the operator's own `ack`: `runList` once; after a replayed `answer` or `ack`: `requests` once;
-- while the page is on screen, a `request` frame that brings an open request that takes `answer` at a
-  revision the page holds no body for: one `show` for it.
+- on the operator's **Refresh**: the same;
+- after a replayed `answer`, `clear` or `ack`, and after a `subject_moved` refusal: `requests` once;
+- while the page is on screen, a `request` frame that brings an open request at a revision the page holds no
+  body for: one `show` for it. The dock makes the same `show` calls and no `requests` or `runList` call.
 
-Nothing else: no timer, no focus handler, no second stream. **No `confirmCode` is asked for, and no code
-is spent, except on the operator's click** (the dialog's first and second click); a reload, a reconnect, a
-frame or a timer never asks. The page offers Answer and Merge only: `clear` is on the interface for
-parity and the CLI keeps it. A run that starts waiting or ends while the page is on screen shows it at
-the next read (known limit: there is no run frame).
+Nothing else: no timer, no focus handler, no second stream.
 
-**The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its Project
-or Agent select changes (an operator action) and once when the link comes back, and `sessionList` once
+**One press (`r1.s5.w4`).** Each act is one press of one button: **Send** (`answer`, on a run question),
+**Resume** (`clear`, on a parked item) and **Approve merge** (`ack`). A press makes exactly two calls, in order:
+`confirmCode` with a fresh `command_id` and the act's subject (the `answer` subject carries the SHA-256 of the
+text; `clear` carries no `to`), then the act with that code and a second fresh `command_id`. The code stays in
+the hook's memory for that one press: it is never rendered, stored, logged or put in a URL. The confirm is
+still fresh, one-use and bound to this device and this act (the `client-api-auth` control); the two-click
+confirm panel is gone (G1). **No `confirmCode` is asked for, and no code is spent, except on the operator's
+press**: a reload, a reconnect, a frame or a timer never asks. `unreachable` on the ask offers Retry with a new
+`command_id`; `unreachable` on the spend offers Retry with the same code and the same `command_id`; a refusal
+shows its line and drops the code. The page offers Send, Resume and Approve merge, and no option answer: a
+chat question's option buttons stay in the chat. **Hold** (on a merge card) makes no call: it sets the card
+aside on this Mac, in memory only, and the request stays open on the server. A run that starts waiting or ends
+shows in the sidebar's Workflow runs group, which reads `runList` when it mounts (known limit: there is no run
+frame).
+
+**The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its scope
+changes (the scope buttons and the project and agent pills; an operator action) and once when the link comes back, and `sessionList` once
 when the list is not loaded (for the Agent select). It names no key: it renders the records the server
 returns. A `settingsSet` or `settingsUnset` is one action with one `command_id`, reused only for a retry
 after `unreachable`.
@@ -447,6 +460,13 @@ Tauri's IPC only, so the webview opens no network connection.
   transport, `r1.s4.w3`): the Needs you page and what it calls, the confirm dialog's two clicks and its
   refusals, the requests state's rules, and the Settings rows. `transport-contract.test.ts` and
   `tauri-transport.test.ts` gain the ten methods, the `request_frame` event and the refusal word.
+- `apps/ui/src/test/needs-you-cards.test.tsx` (Vitest, the fake transport, `r1.s5.w4`): one press makes one
+  `confirmCode` then one act with the right subject and two distinct command IDs, no call without a press, the
+  retry rules after `unreachable`, each refusal's line, Hold and Show make no call, the parked item's Resume
+  calls `clear`, the chat question's Open session, the Answered today rows and the Open count.
+  `needs-you.test.tsx`, `agents.test.tsx`, `settings-rows.test.tsx` and `page-styles.test.ts` carry the page's
+  reads, the Agents page, the Settings page and the style rule of the three page files. `confirm.test.tsx` keeps
+  the test of `ConfirmDialog` as a component.
 - `scripts/demo/ui-needs-you.sh` (d23, `r1.s4.w3`): the Needs you and Settings journey in headless
   Chromium through `pf-client-bridge`, against the real controller on the paper env. Its journey is
   `apps/ui/e2e/needs-you.spec.ts`; `PF_D23_START=cli` starts the run with the CLI, and the default

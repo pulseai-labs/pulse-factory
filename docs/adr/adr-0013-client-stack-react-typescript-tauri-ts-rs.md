@@ -525,14 +525,98 @@ Checked on draco-desk on 2026-11-12 with the item's verification commands (each 
 - The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
 
 
-## Amendment (`r1.s5.w3`)
+## Amendment, 2026-11-13 (`r1.s5.w3`)
 
-Filled by `r1.s5.w3` when it lands.
+This item is round 3 of `r1.s5`. It gives the Orchestrator chat and the start card the look and the behaviour
+of R1 Screens 11a, 11b and 11c. It changes no Rust, no transport, no verb and no `client-api-auth` behaviour.
+Three decisions amend this ADR:
+
+- **The chat renders Markdown through an in-house renderer.** `apps/ui/src/components/markdown.tsx` turns a
+  reply into React elements from text nodes: paragraphs, `**bold**`, `*italic*`, inline code, fenced code
+  blocks, `-` and `1.` lists, and headings as bold lines. It adds **no dependency**, it has **no HTML
+  pass-through** (no `dangerouslySetInnerHTML`; HTML in a reply shows as literal text), and it draws **no live
+  link**: a link shows as its text with the URL in `title`. The live delta of a turn in progress stays plain
+  text until its item is held.
+- **The start card has one press.** **Start workflow** asks the server for the one-use confirm code for this
+  proposal and this plan (`confirm_code`) and, at once, arms the run with it (`arm`). The code lives in the
+  component's state only and never leaves it: it is never shown, stored, logged or put in a URL. After
+  `unreachable` on `arm` the code and the command ID stay for the next press; any refusal drops the code and
+  the next press asks for a new one. The force of the `client-api-auth` confirm does not change: a fresh code
+  for each press, spent once, for this card and this plan, and a second use fails. The card names who started
+  the run and when.
+- **The window centres and has size limits.** `apps/desktop/src-tauri/tauri.conf.json` opens the window at
+  1440×860 with `"center": true`, `"minWidth": 1024` and `"minHeight": 640`, so a 14-inch MacBook's visible
+  frame holds it. The title bar is an overlay (`"titleBarStyle": "Overlay"`): `main.rs` sets
+  `--titlebar-inset` from the page-load event in the desktop app only, and the browser bundle never sets it.
+- **The pixel claim.** The claim "the screens match the canvas pixel for pixel" stays unclaimed until the
+  operator's ack at the close of `r1.s5`.
+
+### Verified claims (r1.s5.w3)
+Checked on draco-desk on 2026-11-13 with the item's verification commands (see the item's report):
+- The Markdown tests show each construct, and that `<script>`, `<img onerror>`, `<b>` and a `javascript:`
+  link render as literal text with no element of that kind and no anchor.
+- The unit tests show that one press calls `confirmCode` and then `arm` once each with the issued code, that
+  the code never reaches the DOM, and the retry and refusal rules above.
+- d25 holds the screenshots `2a-chat`, `2b-chat-sidebar-closed`, `6b-start-card` and `11b-end-session`.
+
+### Unverified claims (r1.s5.w3)
+- A person has not yet compared the four screenshots with frames 11a, 11b and 11c (AC-15).
+- The window stays on screen after a start, and the title bar is one row with the traffic lights clear of the
+  server chip (AC-16, on the MacBook). The cause of the window leaving the screen is read from the config and the
+  walks, not seen live.
 
 
 ## Amendment (`r1.s5.w4`)
 
-Filled by `r1.s5.w4` when it lands.
+This item is round 3 of `r1.s5`. It gives the Needs you page, the Needs-you dock's content, the Agents page and
+the Settings page the look and layout of the approved frames 11d, 11g and 11k. It changes no Rust, no verb and
+no transport or state file.
+
+- **The one-press confirm.** Each act on Needs you is one press: Send (`answer`), Resume (`clear`) or Approve
+  merge (`ack`). Behind the press the app asks for a fresh confirm code and spends it at once (`confirmCode`,
+  then the act, with two distinct command IDs). The `client-api-auth` control stays whole: the code is still
+  fresh, one-use and bound to this device and this act, and it lives in memory for that press only. The
+  two-click confirm panel is gone (grill ruling G1), and so are the claim line and the Runs list: the claim
+  shows only in "Answered today", and a run's state shows in the sidebar's Workflow runs group. `ConfirmDialog.tsx`
+  stays in the tree, unchanged, with its own component test; Needs you no longer renders it. The refusal lines
+  and the retry rules of the dialog carry over to the hook (`needs-you/useConfirmedAct.ts`).
+- **A client-only close (Hold).** Hold sets a merge card aside on this Mac (operator ruling R5). It makes no
+  call and stores nothing: the held set lives in memory, the request stays open on the server and the rail's
+  count still counts it, and the card shows again on a new revision or after a reload. This is a client-only
+  close: no server-side hold exists.
+- **The `clear` action.** A parked item (a unit request of a kind other than `stop` and `gaps` that lists
+  `clear` in `verbs`) gets "Resume <unit>", a one-press `clear` with no `to`. Until this item the app never
+  called `clear` (the `r1.s4` retrospective, item 2). The device path (`Act::Clear`) and the API allowlist
+  already held it.
+- **Accepted gaps**, each a later release or a data limit, not an omission:
+  - The chat question's text and option buttons are not in the Needs you card. A device reads a chat's items
+    only on the stream that follows that chat (ADR-0012: `session_items` is off the allowlist), so the card
+    shows who waits and where, with Open session.
+  - The persona text is not shown: the agent record carries none.
+  - A parked item's attempt count and asker are not shown: the request carries neither. Its note to the
+    Implementer and "Open run view" are `NotBuilt` (R4).
+  - The Agents page lists the agents the server lists. Autopilot, Research partner and Plain, agent create and
+    edit, Add skill, phone notifications and a permission change are `NotBuilt` or absent.
+  - The merge's demo-walk gate is not built (G4: no workflow sets it yet).
+- **The screenshots** `3f-needs-you`, `6a-agents`, `settings` and `dock-needs-you` are this item's. The
+  parked item in `3f-needs-you` comes through the `overlay` of d25, so the rail's count on the other screens
+  does not change.
+
+### Verified claims (r1.s5.w4)
+
+Checked on draco-desk on 2026-11-13 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite passes (27 files, 689 tests) and `tsc` is clean. `needs-you-cards.test.tsx` names the
+  one-press claims above: two calls in order with the right subject, two distinct command IDs, no call without
+  a press, the retry rules, Hold and Show making no call, and Resume calling `clear`.
+- `scripts/demo/ui-screens.sh` passes three runs in a row, and a copy of the built CSS with `--amber-border`
+  changed fails the line and names `6a-agents`.
+- `scripts/demo/ui-needs-you.sh` (d23) passes in card mode against the real controller, API and bridge, with
+  one press for each act, no dialog, exactly two confirm codes, and a second use of a spent code refused as
+  `code_used`.
+
+### Unverified claims (r1.s5.w4)
+- A person has not yet compared the four screenshots with frames 11d, 11g and 11k (AC-14).
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
 
 
 ## Amendment (`r1.s5.w5`)
