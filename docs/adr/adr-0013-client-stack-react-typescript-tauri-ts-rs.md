@@ -854,3 +854,36 @@ Checked on draco-desk on 2026-11-14 with the item's verification commands (each 
 ## Amendment (`r1.s6.w4`)
 
 This section belongs to `r1.s6.w4`. Its item writes here, and nowhere else in this file.
+
+This item closes the second gap walk's gaps in the Add a project dialog (11f) and the Remove project confirm
+(11e): NG-13 to NG-18, KL-7 and KL-8. It changes no Rust, no verb, no transport file and no dependency.
+`project_add`, `project_remove` and `folder_list` keep their calls, their command-ID rules and the locked rule.
+
+- **The breadcrumb (NG-14).** The path row is the Up one folder button, then a home part ("~" with the Lucide
+  `house` icon, added to `icon-nodes.ts` in this item's section), then one part for each folder below home,
+  separated by "/". The home part carries the full home path in its `title`. The current folder is the last
+  part and carries `aria-current="location"`; at the home folder the row shows the home part alone, as plain
+  text. Every other part is a button, and a press on it makes **one** `folder_list` call for that part's path,
+  as a row's Open button and the Up button do. No timer, no extra call.
+- **A folder that is a project already (NG-15).** Its row has no Open (chevron) button. Its pick stays
+  disabled and the row shows "Already a project", dimmed. A folder that is not a project keeps its chevron and
+  its call.
+- **The host row and the button (NG-17, NG-16).** The host row's icon is `server` (added in `r1.s6.w1`). The
+  Add project button carries the `plus` icon.
+- **The dialog's height rule (NG-18, KL-7).** The overlay leaves the title bar's height (`--titlebar-h`) and
+  11f's 20 px margin free above the dialog, and 20 px on the other sides. The dialog is at most that tall, so its
+  heading stays below the title bar in any window. The folder list is the part that gives way: it is 240 px
+  (six rows) while the window has room and shrinks to 100 px, then the body scrolls under the heading and the
+  footer stays in view. At 1440 × 932 a picked git folder shows six rows without scrolling. The tip of a picked
+  plain folder is 137 px more, so the list gives way to it (at 1440 × 900, 120 px). The body's gap (18 px) and
+  bottom padding (20 px) follow 11f. The window's own height (`apps/desktop/**`) is out of scope.
+- **The live-session confirm (NG-13).** Each session line reads "<agent> · <branch>", then the state in its own
+  dimmed span after a dot, in lower case: `needs_you` is "· waiting on you", `idle` is "· idle", `working` is
+  "· working", and any other state is its label in lower case. The state dot stays. No session title is drawn:
+  the record has none.
+- **The locked confirm (KL-8) and P9.** The sentence reads as 11e: "Workflow <spine> is running. You can remove
+  the project after the run ends." (one run) or "Workflows <a>, <b> are running. …" (more). The locked Remove
+  project button's `title` is "Locked while <spine> runs" (one run) or "Locked while its workflows run" (more).
+  **P9:** `RunSummary` carries the spine's ID only, so `<spine>` is the ID, not the spine name that 11e draws
+  ("S-1 skeleton spine"). The spine name is a data gap: the run record has no such field, and a field is a
+  later spine's change to `pf-api`. The d26 rulings accept it or carry it (constraint 3).

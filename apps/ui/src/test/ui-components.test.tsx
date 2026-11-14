@@ -27,6 +27,7 @@ const CANVAS_ICONS = [
   "chevron-left", "chevron-right", "chevrons-up-down", "circle-dot", "clock", "copy", "git-branch",
   "layers", "lock", "pause", "play", "plus", "refresh", "search", "settings", "sliders", "sparkles",
   "upload", "x", "zap",
+  "house",
   // Round 2 adds the five names that frames 11a to 11l use and w1's set lacked (Approach 11).
   "more", "trash", "square", "minus", "alert",
   "paperclip", "triangle-alert", // r1.s6.w2: 11a's Attach and 11b's End session strip

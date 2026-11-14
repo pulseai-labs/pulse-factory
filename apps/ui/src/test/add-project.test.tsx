@@ -191,8 +191,8 @@ describe("the folder list (11f)", () => {
     expect(await dialog.findByText("deep")).toBeTruthy();
     expect(fake.count("folderList")).toBe(2);
     expect(fake.folderArgs[1]).toEqual({ path: "/home/dev/notes" });
-    // The breadcrumb goes back to the home folder: one more call.
-    await user.click(dialog.getByRole("button", { name: "/home/dev" }));
+    // The breadcrumb goes back to the home folder: one more call. `r1.s6.w4` (NG-14): the home part is "~".
+    await user.click(dialog.getByRole("button", { name: "~" }));
     expect(await dialog.findByText("scratch")).toBeTruthy();
     expect(fake.count("folderList")).toBe(3);
     expect(fake.folderArgs[2]).toEqual({ path: "/home/dev" });
