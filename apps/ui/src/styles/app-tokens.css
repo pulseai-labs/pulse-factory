@@ -62,6 +62,7 @@
   /* Radii the design system has no step for. */
   --radius-rail: 7px;  /* the rail's buttons and the server tile: 11a, 11h */
   --radius-tile: 9px;  /* the pair card's icon tile: 11j */
+  --radius-chat-card: 10px; /* the operator's bubble, the start card and the composer box: 11a, 11b, 11c (r1.s6.w2; --radius-xl stays 12px for the screens that use it) */
 
   /* Colours the design system has no token for, beside --amber-border and --amber-fg. */
   --amber-pill-border: rgba(255, 176, 32, 0.45); /* the need-you pill's border while the dock is open: 11a (pillBd) */

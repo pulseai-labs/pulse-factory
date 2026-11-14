@@ -1,10 +1,11 @@
-// The chat with an agent (11a, 11b): a header with the avatar, the agent, the project, the state, the
-// worktree and branch chips the server read live, the `unqualified` mark, the cost, End session and the
-// agent's settings; the message stream; and the composer. End session asks in a strip under the header
-// (11b). Every call goes through the transport, and the stream is the one the shell holds open.
+// The chat with an agent (11a, 11b): a header with the avatar, the agent, the state, the worktree and branch
+// chips the server read live, the `unqualified` mark, the cost, End session and the agent's settings; the
+// message stream; and the composer. The project is in the header's tree and not drawn (11a has none; the
+// chat's tab already reads "<agent> · <project>"). End session asks in a strip under the header (11b).
+// Every call goes through the transport, and the stream is the one the shell holds open.
 import type { ChatAnswerArg } from "@pulse-factory/api-client";
 import { useEffect, useMemo, useState } from "react";
-import type { AnswerFn } from "../components/Cards";
+import { openSingleQuestion, type AnswerFn } from "../components/Cards";
 import { Messages } from "../components/ChatItems";
 import { Composer } from "../components/Composer";
 import { Column } from "../shell/Column";
@@ -113,6 +114,8 @@ export function Chat(props: { sessionId: string }) {
     }
   }
 
+  // While the chat holds exactly one open single-question card, the composer's Send answers it (P4).
+  const openQuestion = ended ? null : openSingleQuestion(items);
   const cost = costLabel(record.usage, record.cache_ttl_seconds);
   const unit = cost.lastIndexOf(" ");
   const pillState = ended ? "ended" : record.state;
@@ -122,11 +125,8 @@ export function Chat(props: { sessionId: string }) {
       <div className="chat-head" role="group" aria-label="Chat header">
         <Avatar agent={agentLook(record.agent_id)} size={28} state={record.state === "needs_you" && !ended ? "needs_you" : "idle"} />
         <h2 className="chat-agent">{name}</h2>
-        <span className="chat-title">
-          {"· "}
-          <span role="group" aria-label="Project">
-            {record.project_name}
-          </span>
+        <span className="ui-sr-only" role="group" aria-label="Project">
+          {record.project_name}
         </span>
         <StatePill state={pillState} role="group" aria-label="State">
           {ended ? "Ended" : stateLabel(record.state)}
@@ -165,7 +165,7 @@ export function Chat(props: { sessionId: string }) {
       {confirmEnd && !ended ? (
         <div className="end-strip" role="group" aria-label="Confirm end">
           <span className="end-icon" aria-hidden="true">
-            <Icon name="alert" size={15} />
+            <Icon name="triangle-alert" size={15} />
           </span>
           <div className="end-text">
             <span className="end-title">End this session?</span>
@@ -174,7 +174,7 @@ export function Chat(props: { sessionId: string }) {
             </span>
           </div>
           <Button onClick={() => setConfirmEnd(false)}>Keep it</Button>
-          <Button variant="danger" onClick={() => void end()}>
+          <Button variant="danger-solid" onClick={() => void end()}>
             End session
           </Button>
         </div>
@@ -205,7 +205,15 @@ export function Chat(props: { sessionId: string }) {
       />
       <div className="chat-foot">
         <Column max={736}>
-          <Composer record={record} agentName={name} onStart={() => void startAgain()} starting={starting} startError={startError} />
+          <Composer
+            record={record}
+            agentName={name}
+            onStart={() => void startAgain()}
+            starting={starting}
+            startError={startError}
+            openQuestion={openQuestion}
+            onAnswer={onAnswer}
+          />
         </Column>
       </div>
     </section>

@@ -724,7 +724,65 @@ Checked on draco-desk on 2026-11-14 with the item's verification commands (each 
 
 ## Amendment (`r1.s6.w2`)
 
-This section belongs to `r1.s6.w2`. Its item writes here, and nowhere else in this file.
+This item is round 2 of `r1.s6`. It closes the second gap walk's gaps in the chat, the End session confirm and
+the start card (frames 11a, 11b, 11c). It changes no Rust, no verb, no transport file and no dependency
+(AC-9). Round 1's seams are used as built: this item's icons are in its own section of `icon-nodes.ts`.
+
+- **P4: a typed answer goes in the composer.** While the chat holds exactly one open single-question card, the
+  composer's Send (and Enter) calls `sessionAnswer` with the card's `seq` and
+  `{ type: "answers", value: { <question text>: <typed text> } }`, through the same `AnswerFn` the card used, with
+  its command-ID rules. The composer's placeholder stays `Message <agent>`, and Send's title reads "Answer the
+  open question". The card shows 11a's sentence ("Or type a different answer below. You can also answer from
+  your phone or the CLI.") and has no field and no Send. In every other case Send is `sessionSend`: a request
+  with more than one question, or a multi-select question, keeps its toggles, its "Other answer" fields and its
+  one Send on the card (no frame draws it). This replaces `r1.s5.w3`'s planner ruling 6. The rule is in
+  `docs/contracts/ui-transport.md`, and `composer-answer.test.tsx` holds it.
+- **P5: the merge sentence.** The merge rule is not a field of `ArmMerge`. The server writes it into `sentence`,
+  in one of two forms only (`crates/pulse-factory/src/arm.rs`): "item PRs merge into <base> on green checks with
+  no ack" and "the <track> PR merges into <base> only on the claim's ack". The card maps them to 11c's words:
+  "Item PRs merge into `<base>` without asking." and "The <track> PR into `<base>` waits for you.", with the base
+  in a code chip (the merge's own `base` and `track`). Any other sentence shows as the server wrote it. Making
+  the rule a field is a `crates/pf-api` change, left to a later spine.
+- **P6: the header without the project.** The chat header shows the avatar, the agent's name and the state pill.
+  The `Project` group stays in the header's accessible tree, visually hidden (`ui-sr-only`), so nothing is lost
+  and d19's steps read it as before. No session title is drawn: `ChatSessionRecord` has none.
+- **The cache line always shows** while the session is live: "Cache warm · Nm left" while the cache is warm, else
+  "Cache cold", and so before the first turn. Its one display tick makes no call. Its title is 11b's sentence
+  where the record gives the numbers (the TTL, and for a warm cache the reply time and the context's tokens).
+  The "steers the running turn" line is gone; Send's title carries it ("Steers the running turn" or "Runs as the
+  next turn"), and while the agent works Send shows beside Stop once there is text.
+- **A button variant and a radius token.** `Button` gains `danger-solid`, the filled red button of 11b's End
+  session confirm. The `danger` variant keeps its look: Settings' Disconnect and Remove project use it.
+  `app-tokens.css` gains `--radius-chat-card` (10 px, 11a, 11b, 11c), used on the operator's bubble, the start card
+  and the composer box. `--radius-xl` and every other token are unchanged: other screens use them.
+- **The start card.** The per-loop limits line is gone (the seeds, the relaunch limit and the loops are the
+  Limits group's title); the three tiles keep their values and take 11c's icon tiles. The head has the chip row
+  (the spine ID, the spine branch, an arrow, the base): the branch is the `base` of the first merge that is not
+  the plan's `default_branch`, and with no such merge the row shows the spine ID only. The item count is at the
+  right of the Work items label row. After the start the note, CLI and Change something leave, and the Started
+  block (check icon, "Started", "<device> · <time>", "Run <run> is running") holds "Open run view" as 11l's
+  quiet link with its tag. The one press, the code's life and every refusal path are as in `r1.s5.w3`.
+- **Not built, shown so (KL-11).** Attach (the paperclip) and the request ID chip ("Copy as CLI command") use
+  `NotBuilt`: dimmed, tagged "Later release", no call.
+
+### Verified claims (`r1.s6.w2`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. The new and changed tests name each rule above, including the two sentence
+  forms and an unknown one, the one open card against two, a multi-select and a many-question request, and the
+  end of the Started block.
+- `scripts/demo/ui-screens.sh` (d25) passes three runs in a row; only `2a-chat`, `2b-chat-sidebar-closed`,
+  `6b-start-card` and `11b-end-session` changed. A copy of the built CSS with `.start-card{margin-top:7px}`
+  fails the line and names `6b-start-card` (the screenshot now shows the line above the card, so the card's place
+  in the thread is part of it).
+- d19 and d23 (card mode) pass against the real controller, API and bridge, and the `client-api-auth` Rust tests
+  pass unchanged.
+
+### Unverified claims (`r1.s6.w2`)
+- A person has not yet compared the four changed screenshots with their frames. The report lists each
+  difference left, one line for each gap ID.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only. The composer's
+  invisible pop-up over each control (`opacity: 0`) is a Chromium-checked layout: the Mac's WebKit has not shown it.
 
 ## Amendment (`r1.s6.w3`)
 

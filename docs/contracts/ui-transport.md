@@ -477,6 +477,10 @@ Tauri's IPC only, so the webview opens no network connection.
   `r1.s3.w5`): the Agents page, the chat screen and its items, the composer's controls, the gauge, the
   cache timer and the cost in wu, the approval and question cards, and the stream rule above, including the
   no-call-for-an-hour checks.
+- `apps/ui/src/test/composer-answer.test.tsx` (Vitest, the fake transport, `r1.s6.w2`): Send and Enter call
+  `sessionAnswer`, once, with the card's `seq` and the typed text, while the chat holds one open single-question
+  card, and never `sessionSend`; a refusal keeps the draft; `unreachable` keeps the command ID; with no such
+  card, with a multi-select question or with a request of several questions Send is `sessionSend`.
 - `scripts/demo/ui-chat.sh` (d19, `r1.s3.w5`): the Orchestrator chat of two projects in headless Chromium,
   through `pf-client-bridge`, against the real controller, the real Claude Code adapter and
   `pf-claude-replay`. Its journey is `apps/ui/e2e/chat.spec.ts`.
@@ -509,6 +513,24 @@ Tauri's IPC only, so the webview opens no network connection.
   `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
   fixtures.ts`, which re-exports one module for each area under `fixtures/`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
   real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.
+
+## The chat's Send and an open question (`r1.s6.w2`)
+
+The composer's Send and Enter call one of two methods, by what the chat holds. This adds no method, no verb
+and no argument: both are in the interface above.
+
+- **Send while one open single-question card is in the chat calls `sessionAnswer`, not `sessionSend`.** The
+  card is a `question_request` item that no `question_answer` item (of any outcome) answers, with one question
+  that is single-select. The answer is the card's own: `sessionAnswer` with the request's `seq` and
+  `{ type: "answers", value: { <the question's text>: <the typed text> } }`, and a command ID that follows the
+  answer, so the same text after `unreachable` reuses it (A7). The draft clears when the answer went through. A
+  refusal shows on the composer and keeps the draft. The press on one of the card's options still sends the
+  same call (one press, one answer), and the card has no field and no Send of its own.
+- **Every other case is `sessionSend`**: no open single-question card, two such cards, an open approval, and a
+  request with more than one question or a multi-select question (which keeps its toggles, its own "Other
+  answer" fields and its one Send on the card).
+- **A send or an answer happens only on the operator's submit** (`seat-launch-spend`): a typed draft, a card
+  and a timer start nothing.
 
 ## Add a project and Remove project (`r1.s5.w5`)
 
