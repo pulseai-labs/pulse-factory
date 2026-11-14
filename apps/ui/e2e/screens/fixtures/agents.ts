@@ -12,7 +12,8 @@ export const RUNTIME = claudeRuntime([], {
 });
 
 export const AGENT = orchestrator({
-  title: "Plans spines with you and arms workflows",
+  // The store's own title for the built-in Orchestrator (migration 0005_hierarchy.sql), so d25 shows what the Mac shows (r1.s6.w3, P8).
+  title: "Runs this project",
   model: "claude-opus-5-5",
   skills: ["pulse-factory", "ossify"],
   runtime_options: {},

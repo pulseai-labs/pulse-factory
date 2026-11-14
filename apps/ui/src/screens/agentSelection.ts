@@ -41,3 +41,8 @@ export function useSelectedAgent(agents: AgentRecord[]): AgentRecord | undefined
   const id = useSelectedAgentId();
   return agents.find((a) => a.id === id) ?? agents[0];
 }
+
+/** The Orchestrator: the one agent whose live sessions the server limits to one for each project (`ORCHESTRATOR_AGENT`, `controller/sessions.rs`). */
+export function isOrchestrator(agent: AgentRecord): boolean {
+  return agent.id === "orchestrator";
+}

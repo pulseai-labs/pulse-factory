@@ -728,7 +728,70 @@ This section belongs to `r1.s6.w2`. Its item writes here, and nowhere else in th
 
 ## Amendment (`r1.s6.w3`)
 
-This section belongs to `r1.s6.w3`. Its item writes here, and nowhere else in this file.
+This item is round 2 of `r1.s6`. It closes the second gap walk's gaps on the Agents page, its tab and its
+sidebar list, on the Needs you header and on Settings' layout. It changes no Rust, no verb, no transport file and
+no dependency (AC-8). It edits no `ui/` component except `display-names.ts` (and the `ui` index's export of it)
+and its own section of `icon-nodes.ts`.
+
+- **The Agents tab** (W1-29). `shell/TitleBar.tsx`'s `PageTab` reads "<selected agent's name> agent" with that
+  agent's `Avatar` (16 px) in place of the bot icon, and its × reads "Close <name> agent". The agent is
+  `useSelectedAgent(chat.list.agents)`, the one the sidebar list and the page use. With no agent listed yet the
+  tab reads "Agents" with the bot icon. No other tab changes.
+- **The Orchestrator's one-session label and its source** (NG-21, d17-10). The list row's second line and a chip in
+  the page header read "One session per project" for the Orchestrator (`isOrchestrator`, `agent.id ===
+  "orchestrator"`). The source is the server's rule: `crates/pulse-factory/src/controller/sessions.rs`
+  (`live_orchestrator`, keyed on `ORCHESTRATOR_AGENT`) allows one live session for each project **for the
+  Orchestrator only**. Any other agent's row shows its `title`, and its header has no chip. The footnote under
+  Sessions by project (KL-5, "At most one live Orchestrator session per project. …") shows for the Orchestrator only.
+- **P8: the agent's subtitle is store data.** The header's subtitle is the agent's `title`. For the built-in
+  Orchestrator the store writes "Runs this project" (`crates/pf-store-sqlite/migrations/0005_hierarchy.sql`).
+  Changing it is a store migration (Rust), which this round does not make, so the d25 fixture takes the real title
+  and the frame's "Plans spines with you and arms workflows" stays a difference that d26 rules.
+- **`runtimeName`** (d17-12). `ui/display-names.ts` gains `runtimeName(id)`: `claude-code` is "Claude Code", `omp` is
+  "OMP", any other id comes back unchanged, as the file's other tables do. The Runtime tile shows it, with "or
+  <names>" under it for the other runtimes in `session_list`'s `runtimes` (none, no note). The agent's runtime
+  options moved from the page's "Runtime options" line into the Runtime tile's `title` (G8), so none is lost.
+- **The Model note rule.** The Model tile's note is `runtime_options.billing` when the agent sets it, else
+  "Anthropic subscription · wu" for the `claude-code` runtime (the basis `components/cost.ts` records: a chat runs the
+  operator's subscription login and is shown in wu), else no note.
+- **P7: the permission switch's position.** The six modes map to the three positions: `plan` is Read only, `manual`
+  is Ask before edits, and `acceptEdits`, `auto`, `dontAsk` and `bypassPermissions` are Edit freely. A mode the
+  table does not know selects none. The selected position has `aria-pressed="true"`. The bold mode text above the
+  control left; the control's `title` and a visually hidden text name the exact mode (`permissionName`). The control
+  stays disabled with its Later tag (R5).
+- **The notification card** (NG-20) is drawn in `screens/Agents.tsx` (an amber `chat` tile, the label and its
+  description, the Later tag, then the off switch), so `NotBuilt`'s `row` form has no user and `ui/NotBuilt.tsx`
+  is untouched. It stays not built: no call, no focus, `aria-disabled`.
+- **New agent** (NG-19). The sidebar head draws 11g's "Later release" tag beside the `+`. `NotBuilt`'s `compact`
+  form, which the pair screen uses, is unchanged.
+- **Needs you loses its header Refresh button** (W1-33, d24-9): 11d has none. The read-error line keeps its Refresh
+  button, the only recovery after a failed read (G8). The page reads again when the link comes back and the stream
+  brings new requests, so no other call and no timer changes.
+- **Settings' layout** (NG-25 to NG-27). "Disconnect this Mac" spans the device card, the This device tile shows
+  Lucide's `laptop` (in this item's `icon-nodes.ts` section), and the server card ends under its Address and Server
+  version rows (the two cards no longer stretch to one height). The Disconnect confirm and its calls are unchanged.
+  The Settings text (KL-1, NG-28 to NG-30) is carried to Release 2.
+- **The screenshots.** Three of this item's four screenshots change (`3f-needs-you`, `6a-agents`, `settings`);
+  `dock-needs-you` is byte for byte as before. The other eleven are as before.
+
+### Verified claims (`r1.s6.w3`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. `agents-gaps.test.tsx` asserts the rendered text and markup named above:
+  the tab and its ×, the row and the chip, the Runtime and Model tiles, each of the six modes' position and an
+  unknown mode's none, the notification card's order and that it makes no call, and the footnote.
+  `needs-you.test.tsx` asserts that the header has no Refresh and that the read-error Refresh makes the same
+  calls as before; `no-polling.test.tsx` passes.
+- d25 (`scripts/demo/ui-screens.sh`) passes three runs in a row within 60 s, and a copy of the built CSS with
+  `.ag-identity` moved fails it and names `6a-agents`. d23 passes against the real controller, API and bridge
+  with no selector change. The `client-api-auth` Rust tests pass unchanged.
+
+### Unverified claims (`r1.s6.w3`)
+- A person has not yet compared the three changed screenshots with their frames (11d, 11g, 11k). The report
+  lists each remaining difference by gap ID.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+- The real agent's `permission_mode` values are the six of the pinned CLI; the d25 fixture's `bypass` is an
+  unknown mode, so `6a-agents` shows no selected position where 11g shows "Ask before edits".
 
 ## Amendment (`r1.s6.w4`)
 
