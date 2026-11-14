@@ -149,6 +149,13 @@ export const ICON_NODES = {
     ["path", {"d":"m21 21-4.34-4.34"}],
     ["circle", {"cx":"11","cy":"11","r":"8"}],
   ],
+  /* lucide: server */
+  server: [
+    ["rect", {"width":"20","height":"8","x":"2","y":"2","rx":"2","ry":"2"}],
+    ["rect", {"width":"20","height":"8","x":"2","y":"14","rx":"2","ry":"2"}],
+    ["line", {"x1":"6","x2":"6.01","y1":"6","y2":"6"}],
+    ["line", {"x1":"6","x2":"6.01","y1":"18","y2":"18"}],
+  ],
   /* lucide: settings */
   settings: [
     ["path", {"d":"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"}],
@@ -200,4 +207,10 @@ export const ICON_NODES = {
   zap: [
     ["path", {"d":"M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"}],
   ],
+  // ---- r1.s6.w2: the icons this item adds go between these two lines, and nowhere else in the file. ----
+  // ---- end r1.s6.w2 ----
+  // ---- r1.s6.w3: the icons this item adds go between these two lines, and nowhere else in the file. ----
+  // ---- end r1.s6.w3 ----
+  // ---- r1.s6.w4: the icons this item adds go between these two lines, and nowhere else in the file. ----
+  // ---- end r1.s6.w4 ----
 } as const satisfies Record<string, readonly IconShape[]>;

@@ -24,7 +24,10 @@ import {
 } from "./fixtures";
 import type { Verbs } from "./fixtures/verbs";
 
-/** `paired`: every screen. `unpaired`: `paired` answers null (3a). `unreachable`: every call after `paired` fails (3c). */
+/**
+ * `paired`: every screen. `unpaired`: `paired` answers null (3a). `unreachable`: `paired` and the first `status` answer,
+ * and every call after them fails (3c): the app has learned the server's name and the time it was last reached, as on the Mac.
+ */
 export type Mode = "paired" | "unpaired" | "unreachable";
 
 export interface FixtureServer {
@@ -137,6 +140,19 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
 export async function startFixtureServer(uiDir: string): Promise<FixtureServer> {
   const root = path.resolve(uiDir);
   let mode: Mode = "paired";
+  // `unreachable` answers the first `status` (the one the connection makes at mount) and fails the rest. The
+  // other calls wait for that answer, so the failures reach the page after it, in the same order on every run
+  // (a failure that came first would be cleared by the answer, as an answer shows the server is reachable).
+  let statusAnswered = false;
+  let firstStatus: Promise<void>;
+  let firstStatusDone: () => void;
+  const resetFirstStatus = () => {
+    statusAnswered = false;
+    firstStatus = new Promise<void>((resolve) => {
+      firstStatusDone = resolve;
+    });
+  };
+  resetFirstStatus();
   const unexpected: string[] = [];
   const sockets = new Set<Socket>();
 
@@ -166,8 +182,17 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
     const method = req.method ?? "GET";
     const route = `${method} ${url.pathname}`;
     if (route === "GET /bridge/paired") return ok(res, mode === "unpaired" ? null : PAIRED);
+    if (mode === "unreachable" && route !== "POST /bridge/status") await firstStatus;
     if (route === "GET /bridge/stream") return stream(req, res, url);
-    if (route === "POST /bridge/status") return mode === "unreachable" ? unreachable(res) : ok(res, STATUS);
+    if (route === "POST /bridge/status") {
+      if (mode === "unreachable" && statusAnswered) return unreachable(res);
+      statusAnswered = true;
+      ok(res, STATUS);
+      // The page has read the answer before the held calls fail: two responses on two connections can arrive in
+      // either order, and a failure that the page read first would be cleared by the answer.
+      setTimeout(firstStatusDone, 250);
+      return;
+    }
     const verb = /^\/bridge\/verbs\/([a-z][a-z_]*)$/.exec(url.pathname)?.[1];
     if (method === "POST" && verb !== undefined) {
       const args = await readBody(req);
@@ -234,6 +259,7 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
     origin: `http://127.0.0.1:${address.port}`,
     setMode: (next) => {
       mode = next;
+      resetFirstStatus();
     },
     unexpected,
     close: () =>

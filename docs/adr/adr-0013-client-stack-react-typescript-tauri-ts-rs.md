@@ -660,3 +660,76 @@ no change in `apps/desktop`.
 - The two new screenshots show the dialog and the confirm as built. A person has not yet compared them with
   frames 11e and 11f (AC-16 of this item). The differences the build leaves are in the item's report.
 - The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+
+## Amendment (`r1.s6.w1`)
+
+This item is round 1 of `r1.s6`. It closes the second gap walk's gaps in the title bar, the server's name, the
+not-connected state, the server icon and the Pair button. It changes no Rust, no verb, no transport file and no
+dependency (AC-10).
+
+- **One source of the server's name.** `ConnectionProvider` makes **one** `status()` call when it mounts (no
+  timer; the no-polling rule holds), through `call()`, so a down kind marks the link down as any call does. It
+  is no `retry()`, so it refetches no page. The connection keeps the `server` of every `status()` answer: this
+  call, the retry and Settings' call. `apps/ui/src/state/connection.tsx` exports the pure `serverNameOf(paired,
+  learned?)` and the hook `useServerName()`: the learned name, else the pairing's `server.name`, else the stored
+  name, else the address. All nine former `server.server?.name ?? server.address` sites use one of them
+  (`useServerName()` inside the provider, `serverNameOf(paired)` on the pair screen, which renders outside it).
+  The pair-success heading reads "Connected to <name>". "No server" before pairing stays (frame 11j).
+- **P1: the stored name, and its limit.** The last name an answer gave is kept in `localStorage` under
+  `pf.server-name` as `{address, name}`, read and written in a `try`, and used before the first answer when the
+  address matches the pairing's. It is a label only: never used for trust, routing or a call. `pf-client` keeps
+  the server's name **in memory only** (`note_server`), not with the pairing, so a first launch after pairing
+  with the server down, before any answer, shows the address. Storing the name with the pairing is a
+  `crates/pf-client` change and is out of scope here.
+- **P2: the derived state "not connected".** One display state: the link is down, **or** the chat stream is
+  `reconnecting`. It adds no state to the connection's machine and no timer. The banner (11i's copy for both
+  causes), the dimmed page, the "As of <time>, when <name> was last reachable" subtitle and the grey pill with
+  the time and no dock toggle key on it (`useNotConnected()` in `state/chat.tsx`). `ChatStatus` carries the
+  stream's `retry_in_ms`, so the banner counts down on a display tick that makes no call. `StreamLine` no
+  longer shows `reconnecting`; it keeps showing a stream that `closed` with a refusal or a server error, with
+  its Reconnect button (G8).
+- **The title bar is the same on every page** (W2-2, NG-2). Needs you and Settings keep the Projects tab, the
+  chat tabs, New tab and the need-you pill with its dock toggle, and hide only the sidebar toggle. The active
+  page tab (Projects with a chat tab open, Agents, Needs you, Settings) carries a × (NG-3). **P3:** the ×
+  closes the page and shows the last chat tab the operator used, else Projects.
+- **The server icon** (NG-22): Lucide's `server` joins `icon-nodes.ts` and is used on the server menu's tile
+  and Settings' server tile. **Pair** (NG-24, KL-6): the button is disabled, grey, while the code field is
+  empty or blank and while pairing runs; `IconSize` gains 22 for the pair tile.
+- **The seams for round 2.** `icon-nodes.ts` holds three marked, empty sections for `r1.s6.w2`, `r1.s6.w3` and
+  `r1.s6.w4`, and this file holds three empty amendment sections, one for each, below.
+- **The screenshots.** d25 keeps the pairing as the Mac gives it (no name in `PAIRED`), so the name in each
+  screenshot came from `status`. The `unreachable` mode answers the first `status` and fails every call after
+  it. Six of the fifteen screenshots change (`3a-pair`, `3b-server-menu`, `3c-disconnected`, `3f-needs-you`,
+  `6a-agents`, `settings`); the other nine are byte for byte as before.
+
+### Verified claims (`r1.s6.w1`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. `server-name.test.tsx` names the nine sites, the stored name for the same
+  address and not another, and the fallback to the address when `localStorage` fails. `disconnected.test.tsx`
+  and `no-polling.test.tsx` name the derived state: a `reconnecting` event with the link up shows the banner,
+  dims the page, greys the pill and calls nothing by a timer.
+- `scripts/demo/ui-screens.sh` (d25) passes three runs in a row, and a copy of the built CSS with the sidebar
+  width changed fails the line and names `sidebar-by-state`. d12, d19 and d23 pass against the real controller,
+  API and bridge, with three selector changes (the heading `Connected to <name>`, the rail's Projects button,
+  and the `localStorage` keys, which now include `pf.server-name`); the `client-api-auth` Rust tests pass
+  unchanged.
+
+### Unverified claims (`r1.s6.w1`)
+- A person has not yet compared the six changed screenshots with their frames. The report lists each
+  screenshot's w1 elements with the item's verdict.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+- The name that the real `pf-client` gives after a pairing (the server's host name) is shown as it is; the
+  fixture's `draco-desk` is test data.
+
+## Amendment (`r1.s6.w2`)
+
+This section belongs to `r1.s6.w2`. Its item writes here, and nowhere else in this file.
+
+## Amendment (`r1.s6.w3`)
+
+This section belongs to `r1.s6.w3`. Its item writes here, and nowhere else in this file.
+
+## Amendment (`r1.s6.w4`)
+
+This section belongs to `r1.s6.w4`. Its item writes here, and nowhere else in this file.

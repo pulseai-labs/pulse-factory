@@ -282,7 +282,8 @@ describe("the Agents page makes no call by itself", () => {
     expect(within(screen.getByRole("main")).getByText("Sessions by project")).toBeTruthy();
     const settled = [...fake.calls];
     // The shell's sidebar read the run list once when it mounted on Projects.
-    expect(settled).toEqual(["paired", "runList", "projectList", "openStream", "projectList", "sessionList"]);
+    // The connection's one `status()` call at mount (r1.s6.w1) comes after the pages' first calls.
+    expect(settled).toEqual(["paired", "runList", "projectList", "openStream", "status", "projectList", "sessionList"]);
 
     for (let i = 0; i < 2; i++) {
       await act(async () => {

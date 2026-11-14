@@ -14,12 +14,13 @@ import { branchText, lastSegment } from "../components/chat-format";
 import { useCommandId } from "../components/command-id";
 import { costLabel, dollarsTitle } from "../components/cost";
 import { agentName, stateLabel, useChat } from "../state/chat";
-import { asTransportError, useConnection } from "../state/connection";
+import { asTransportError, useConnection, useServerName } from "../state/connection";
 import { Avatar, Button, Chip, Icon, IconButton, StatePill, agentLook } from "../ui";
 
 export function Chat(props: { sessionId: string }) {
   const { sessionId } = props;
-  const { call, projects, server } = useConnection();
+  const { call, projects } = useConnection();
+  const serverName = useServerName();
   const chat = useChat();
   const { ensureList } = chat;
   const endId = useCommandId();
@@ -169,7 +170,7 @@ export function Chat(props: { sessionId: string }) {
           <div className="end-text">
             <span className="end-title">End this session?</span>
             <span className="end-note">
-              {`The ${name}'s process on ${server.server?.name ?? server.address} stops, mid-turn if it is working. The chat stays, and you can start the session again from here.`}
+              {`The ${name}'s process on ${serverName} stops, mid-turn if it is working. The chat stays, and you can start the session again from here.`}
             </span>
           </div>
           <Button onClick={() => setConfirmEnd(false)}>Keep it</Button>

@@ -19,7 +19,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useCommandId } from "../components/command-id";
 import { Column } from "../shell/Column";
 import { agentName, useChat } from "../state/chat";
-import { asTransportError, isDownKind, useConnection } from "../state/connection";
+import { asTransportError, isDownKind, useConnection, useServerName } from "../state/connection";
 import { Avatar, Button, Icon, agentLook } from "../ui";
 import "../styles/settings.css";
 
@@ -512,7 +512,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const up = conn.link.state === "up";
-  const name = conn.server.server?.name ?? props.status?.server?.name ?? conn.server.address;
+  const name = useServerName();
   const ms = conn.lastCallMs === null ? "no call yet" : `${conn.lastCallMs} ms`;
 
   async function disconnect() {
@@ -535,7 +535,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
         <div className="st-card st-card-server">
           <div className="st-server-head">
             <span className="st-tile st-tile-mint">
-              <Icon name="layers" size={18} />
+              <Icon name="server" size={18} />
             </span>
             <div className="st-server-id">
               <span className="st-server-name">{name}</span>
@@ -601,7 +601,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
 }
 
 export function Settings() {
-  const { call, epoch } = useConnection();
+  const { call, epoch, noteServer } = useConnection();
   const [status, setStatus] = useState<ApiStatus | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const live = useRef(true);
@@ -616,6 +616,7 @@ export function Settings() {
   const load = useCallback(async () => {
     try {
       const s = await call((t) => t.status());
+      noteServer(s.server);
       if (live.current) {
         setStatus(s);
         setPageError(null);
@@ -624,7 +625,7 @@ export function Settings() {
       const err = asTransportError(e);
       if (live.current) setPageError(isDownKind(err.kind) ? null : err.message);
     }
-  }, [call]);
+  }, [call, noteServer]);
 
   // On opening the page, and once when the link comes back. Never on a timer.
   useEffect(() => {

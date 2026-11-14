@@ -109,7 +109,7 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
     await pairCode.fill(code);
     await page.getByLabel("Device name").fill("d23 browser");
     await page.getByRole("button", { name: "Pair" }).click();
-    await expect(page.getByRole("heading", { name: /^Connected to 127\.0\.0\.1:\d+$/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Connected to .+/ })).toBeVisible();
     await page.getByRole("button", { name: "Open Pulse Factory" }).click();
   }
   await expect(page.getByRole("navigation")).toBeVisible();
@@ -290,7 +290,8 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   expect(dom).not.toContain("pfc1-");
   expect(answers.length).toBeGreaterThan(0);
   const local = await page.evaluate(() => Object.keys(localStorage));
-  expect(local).toEqual(["pf.sidebar"]);
+  // `pf.server-name` is the last name an answer gave, a label (r1.s6.w1, P1); `pf.dock` is written only when the dock changes.
+  expect([...local].sort()).toEqual(["pf.server-name", "pf.sidebar"]);
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
 });
 
