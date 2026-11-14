@@ -3,27 +3,65 @@
 // this plan, and at once arms the run with it. The code lives in this component's state only: it is never
 // shown, stored, logged or put in a URL. The card learns the outcome from the `start_result` item on the
 // chat stream the shell already holds, so it has no timer and no stream of its own.
-import type { ChatItemBody } from "@pulse-factory/api-client";
-import { useState } from "react";
+//
+// r1.s6.w2: the head has 11c's chip row (the spine ID, the spine branch, an arrow, the base: KL-4) and the
+// merge sentence as 11c writes it (P5); the limits are three icon tiles, and the seeds, relaunch and loops are
+// the group's title; the item count is at the right of the Work items label row; after the start the card
+// ends in the Started block, with the quiet "Open run view" link, and the note and the two stubs leave.
+import type { ArmMerge, ChatItemBody } from "@pulse-factory/api-client";
+import { Fragment, useState } from "react";
 import { asTransportError, useConnection } from "../state/connection";
-import { Button, Chip, Eyebrow, Icon, NotBuilt, modelName } from "../ui";
+import { Button, Chip, Eyebrow, Icon, NotBuilt, modelName, type IconName } from "../ui";
 import { timeText } from "./chat-format";
 import { useCommandId } from "./command-id";
 
 type Card = Extract<ChatItemBody, { kind: "start_card" }>;
 type Result = Extract<ChatItemBody, { kind: "start_result" }>;
 
-/** One tile of the Limits group. */
-function Tile(props: { value: string | number; label: string; name?: string }) {
+/** One tile of the Limits group: 11c's icon tile, the value, and the label. */
+function Tile(props: { value: string | number; label: string; icon: IconName; tone: "blue" | "violet" | "neutral"; name?: string }) {
   return (
     <div className="limit-tile" {...(props.name ? { role: "group", "aria-label": props.name } : {})}>
-      <span className="limit-value">{props.value}</span>
-      <span className="limit-label">{props.label}</span>
+      <span className={`limit-icon limit-icon-${props.tone}`}>
+        <Icon name={props.icon} size={14} />
+      </span>
+      <span className="limit-text">
+        <span className="limit-value">{props.value}</span>
+        <span className="limit-label">{props.label}</span>
+      </span>
     </div>
   );
 }
 
-function Section(props: { name: string; aside?: string; children: React.ReactNode }) {
+/**
+ * One merge as 11c writes it (ruling P5), with the base in a code chip. The merge rule is not a field of
+ * `ArmMerge`: the server writes it into `sentence`, in one of two forms only (`arm.rs:315-322`):
+ * "item PRs merge into <base> on green checks with no ack" reads "Item PRs merge into `<base>` without
+ * asking.", and "the <track> PR merges into <base> only on the claim's ack" reads "The <track> PR into
+ * `<base>` waits for you." Any other sentence shows unchanged, as the server wrote it. The base and the track
+ * are the merge's own fields.
+ */
+function MergeSentence(props: { merge: ArmMerge }) {
+  const { sentence, base, track } = props.merge;
+  if (sentence.startsWith("item PRs merge into ")) {
+    return (
+      <span>
+        Item PRs merge into <code className="merge-code">{base}</code> without asking.
+      </span>
+    );
+  }
+  if (sentence.endsWith(" only on the claim's ack")) {
+    return (
+      <span>
+        {`The ${track} PR into `}
+        <code className="merge-code">{base}</code> waits for you.
+      </span>
+    );
+  }
+  return <span>{sentence}</span>;
+}
+
+function Section(props: { name: string; aside?: string; children?: React.ReactNode }) {
   return (
     <div className="card-section" role="group" aria-label={props.name}>
       <div className="section-head">
@@ -101,12 +139,19 @@ export function StartCard(props: {
     }
   }
 
+  // The spine's branch (KL-4): the base of the first merge whose base is not the default branch. With no such
+  // merge the row shows the spine ID only. The base the row ends in is the plan's default branch.
+  const spineBranch = s.merges.find((m) => m.base !== s.default_branch)?.base ?? null;
+
+  // The seeds, the relaunch limit and the loops: the Limits group's title (d24-1, d24-4).
   const others = [
     ...s.caps.seeds.map((x) => `seed ${x.id}: at most ${x.max}`),
     `relaunch: ${s.caps.relaunch}`,
     ...s.caps.loops.map((x) => `loop ${x.track} ${x.from} to ${x.to}: at most ${x.max}`),
   ].join(" · ");
 
+  // The run is armed: the card ends in the Started block, and the note and the two stubs leave (W1-31).
+  const armed = result !== null && result.result === "armed" ? result : null;
   const device = result?.device ? (result.device === server.device.id ? server.device.name : result.device) : "";
   const at = resultAt === null ? "" : timeText(resultAt);
 
@@ -119,8 +164,7 @@ export function StartCard(props: {
           <span className="start-proposed">{`proposed ${timeText(proposedAt)}`}</span>
         </div>
         <div className="start-title">
-          <span className="start-spine">{s.spine}</span>
-          <Chip>{card.project_name}</Chip>
+          <span className="start-project">{card.project_name}</span>
           {s.paper ? (
             <Chip tone="mint" role="group" aria-label="Paper env" title="No model, no spend">
               Paper
@@ -128,28 +172,49 @@ export function StartCard(props: {
           ) : null}
         </div>
 
-        <div className="limits" role="group" aria-label="Limits">
+        <div className="start-branches" role="group" aria-label="Spine and branches">
+          <Chip mono>{s.spine}</Chip>
+          {spineBranch === null ? null : (
+            <>
+              <Chip mono tone="violet">
+                {spineBranch}
+              </Chip>
+              <span className="branch-arrow">
+                <Icon name="chevron-right" size={14} />
+              </span>
+              <Chip mono tone="mint">
+                {s.default_branch}
+              </Chip>
+            </>
+          )}
+        </div>
+
+        <div className="limits" role="group" aria-label="Limits" title={others}>
           <div className="limit-tiles">
-            <Tile value={s.caps.model_sessions} label="Model sessions" />
-            <Tile value={s.caps.cold_builds} label="Cold builds" />
-            {s.most_launches === null ? null : <Tile value={s.most_launches} label="Most sessions" name="Most sessions" />}
+            <Tile value={s.caps.model_sessions} label="Model sessions" icon="sparkles" tone="violet" />
+            <Tile value={s.caps.cold_builds} label="Cold builds" icon="zap" tone="blue" />
+            {s.most_launches === null ? null : (
+              <Tile value={s.most_launches} label="Most sessions" icon="layers" tone="neutral" name="Most sessions" />
+            )}
           </div>
-          <p className="limit-line">{others}</p>
           <p className="limit-note">The run stops and asks you when it reaches a limit.</p>
         </div>
         {s.merges.length === 0 ? null : (
           <div className="merge-line" role="group" aria-label="Merge line">
             <Icon name="git-branch" size={14} />
-            <span>{s.merges.map((m) => m.sentence).join(" · ")}</span>
+            <span>
+              {s.merges.map((m, i) => (
+                <Fragment key={i}>
+                  {i === 0 ? null : " "}
+                  <MergeSentence merge={m} />
+                </Fragment>
+              ))}
+            </span>
           </div>
         )}
       </div>
 
-      {s.items === null ? null : (
-        <Section name="Work items">
-          <p className="section-body">{`${s.items} work ${s.items === 1 ? "item" : "items"}`}</p>
-        </Section>
-      )}
+      {s.items === null ? null : <Section name="Work items" aside={`${s.items} work ${s.items === 1 ? "item" : "items"}`} />}
 
       <Section name="Who runs it">
         <ul className="role-list">
@@ -163,50 +228,57 @@ export function StartCard(props: {
         </ul>
       </Section>
 
-      <div className="start-foot">
-        <p className="start-note">Nothing launches until you start it.</p>
-        {result !== null ? (
-          <p
-            className="start-outcome"
-            role="status"
-            data-testid="start-outcome"
-            {...(result.result === "armed" ? { "data-run": result.run ?? "", "data-device": result.device ?? "" } : {})}
-          >
-            {result.result === "armed" ? (
-              <>
-                <strong>{`Started · ${device === "" ? "unknown device" : device} · ${at}`}</strong>
-                <span>{`Run ${result.run ?? "unknown"} is running`}</span>
-              </>
-            ) : (
+      {armed ? (
+        <div
+          className="start-started"
+          role="status"
+          data-testid="start-outcome"
+          data-run={armed.run ?? ""}
+          data-device={armed.device ?? ""}
+        >
+          <span className="started-icon">
+            <Icon name="check" size={15} />
+          </span>
+          <span className="started-title">Started</span>
+          <span className="started-meta">{`${device === "" ? "unknown device" : device} · ${at}`}</span>
+          <span className="head-spacer" />
+          <span className="started-run">
+            Run <b>{armed.run ?? "unknown"}</b> is running
+          </span>
+          <NotBuilt as="button" label="Open run view" />
+        </div>
+      ) : (
+        <div className="start-foot">
+          <p className="start-note">Nothing launches until you start it.</p>
+          {result !== null ? (
+            <p className="start-outcome" role="status" data-testid="start-outcome">
               <strong>
                 {result.result === "withdrawn"
                   ? `Withdrawn: ${result.reason ?? "the proposal was withdrawn"}`
                   : `Failed: ${result.reason ?? "the run could not start"}`}
               </strong>
+            </p>
+          ) : sent ? (
+            <p className="start-outcome" role="status" data-testid="start-outcome">
+              <strong>Arming…</strong>
+            </p>
+          ) : null}
+          <div className="start-actions">
+            <NotBuilt as="button" label="CLI" />
+            <NotBuilt as="button" label="Change something" />
+            {result !== null || readOnly ? null : (
+              <Button variant="primary" size="lg" icon="play" data-testid="start-workflow" disabled={busy || sent} onClick={() => void start()}>
+                Start workflow
+              </Button>
             )}
-          </p>
-        ) : sent ? (
-          <p className="start-outcome" role="status" data-testid="start-outcome">
-            <strong>Arming…</strong>
-          </p>
-        ) : null}
-        <div className="start-actions">
-          <NotBuilt as="button" label="CLI" />
-          <NotBuilt as="button" label="Change something" />
-          {result !== null ? (
-            result.result === "armed" ? <NotBuilt as="button" label="Open run view" /> : null
-          ) : readOnly ? null : (
-            <Button variant="primary" size="lg" icon="play" data-testid="start-workflow" disabled={busy || sent} onClick={() => void start()}>
-              Start workflow
-            </Button>
-          )}
+          </div>
+          {problem ? (
+            <p className="problem-title" role="alert">
+              {problem}
+            </p>
+          ) : null}
         </div>
-        {problem ? (
-          <p className="problem-title" role="alert">
-            {problem}
-          </p>
-        ) : null}
-      </div>
+      )}
     </article>
   );
 }

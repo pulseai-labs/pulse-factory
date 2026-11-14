@@ -65,7 +65,7 @@ const main = () => within(screen.getByRole("main"));
 const labelOf = (el: Element): string => el.getAttribute("aria-label") ?? el.textContent?.trim() ?? "";
 
 describe("the title bar (11a, Approach 1)", () => {
-  it("is one banner with the chip, the toggle, Back, Forward, the title, the tabs, New tab and the pill, in that order", async () => {
+  it("is one banner with the chip, the toggle, Back, Forward, the Projects tab, the chat tabs, New tab and the pill, in that order", async () => {
     const user = await boot(seed([s1()]));
     await user.click(await side().findByRole("button", { name: /Orchestrator session in alpha/ }));
     await screen.findByRole("tab", { name: "Orchestrator · alpha" });
@@ -76,19 +76,23 @@ describe("the title bar (11a, Approach 1)", () => {
       (el) => el.matches("[role=tablist]") || !el.closest("[role=tablist]"),
     );
     const order = parts.map((el) => (el.matches("[role=tablist]") ? "tabs" : el.matches("h1") ? "title" : labelOf(el)));
-    expect(order).toEqual([ADDRESS, "Show or hide the sidebar", "Back", "Forward", "title", "tabs", "New tab", "0 need you"]);
+    // A chat is on screen: the Projects tab is a button (11a), and no page title is a heading.
+    expect(order).toEqual([ADDRESS, "Show or hide the sidebar", "Back", "Forward", "Projects", "tabs", "New tab", "0 need you"]);
   });
 
-  it("names the page: Projects on Projects and on a chat page, the page's name elsewhere", async () => {
+  it("names the page in its tab: the active page's tab is the heading, and Projects is a button on a chat page", async () => {
     const user = await boot(seed([s1()]));
     const title = () => bar().getByRole("heading", { level: 1 }).textContent;
     expect(title()).toBe("Projects");
     await user.click(await side().findByRole("button", { name: /Orchestrator session in alpha/ }));
-    expect(title()).toBe("Projects");
+    expect(bar().queryByRole("heading", { level: 1 })).toBeNull();
+    expect(bar().getByRole("button", { name: "Projects" })).toBeTruthy();
     await user.click(rail().getByRole("button", { name: "Agents" }));
-    expect(title()).toBe("Agents");
-    // The title is no tab and no button.
-    expect(bar().queryByRole("button", { name: "Agents" })).toBeNull();
+    // r1.s6.w3 (W1-29): the Agents tab reads "<selected agent> agent".
+    expect(title()).toBe("Orchestrator agent");
+    // The page tab is no button and no tab: its × is a button named "Close Orchestrator agent".
+    expect(bar().queryByRole("button", { name: "Orchestrator agent" })).toBeNull();
+    expect(bar().getByRole("button", { name: "Close Orchestrator agent" })).toBeTruthy();
     expect(bar().queryAllByRole("tab")).toHaveLength(1);
   });
 
@@ -108,16 +112,17 @@ describe("the title bar (11a, Approach 1)", () => {
     expect(bar().getByRole("heading", { level: 1 }).textContent).toBe("Projects");
   });
 
-  it("hides the toggle, the tabs, New tab and the pill on the focused pages, and keeps the chip, Back, Forward and the title", async () => {
+  it("hides only the toggle on the focused pages, and keeps the chip, Back, Forward, the Projects tab, the chat tabs, New tab and the pill (11d, 11k)", async () => {
     const user = await boot(seed([s1()]));
     await user.click(await side().findByRole("button", { name: /Orchestrator session in alpha/ }));
     for (const name of ["Settings", "Needs you"]) {
       await user.click(rail().getByRole("button", { name }));
       const banner = screen.getByRole("banner");
-      const labels = [...banner.querySelectorAll("button, h1, [role=tablist]")].map((el) =>
-        el.matches("[role=tablist]") ? "tabs" : el.matches("h1") ? "title" : labelOf(el),
+      const parts = [...banner.querySelectorAll("button, h1, [role=tablist]")].filter(
+        (el) => el.matches("[role=tablist]") || !el.closest("[role=tablist]"),
       );
-      expect(labels, name).toEqual([ADDRESS, "Back", "Forward", "title"]);
+      const labels = parts.map((el) => (el.matches("[role=tablist]") ? "tabs" : el.matches("h1") ? "title" : labelOf(el)));
+      expect(labels, name).toEqual([ADDRESS, "Back", "Forward", "Projects", "tabs", "title", `Close ${name}`, "New tab", "0 need you"]);
       expect(bar().getByRole("heading", { level: 1 }).textContent).toBe(name);
     }
   });
@@ -131,7 +136,8 @@ describe("the title bar (11a, Approach 1)", () => {
     expect(bar().getByRole("button", { name: "Close Orchestrator · beta" })).toBeTruthy();
     await user.click(bar().getByRole("button", { name: "Close Orchestrator · beta" }));
     expect(bar().getAllByRole("tab")).toHaveLength(1);
-    expect(bar().getByRole("heading", { level: 1 }).textContent).toBe("Projects");
+    // The page goes back to the one before it: the chat of the tab that stays.
+    expect(bar().getByRole("tab", { name: "Orchestrator · alpha" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("shows the need-you count in the pill, and the dock's state with aria-pressed", async () => {
@@ -172,7 +178,7 @@ describe("the title bar (11a, Approach 1)", () => {
     expect(bar().queryByTitle("Show or hide Needs you")).toBeNull();
   });
 
-  it("while the link is up and the stream is reconnecting: only the chip's dot turns red; the chip title, the pill and the tab dots keep their live form", async () => {
+  it("while the link is up and the stream is reconnecting: the chip's dot turns red and the pill greys with the time and no toggle (11i); the chip title and the tab dots keep their live form", async () => {
     const fake = seed([s1()]);
     const user = await boot(fake);
     await user.click(await side().findByRole("button", { name: /Orchestrator session in alpha/ }));
@@ -188,13 +194,11 @@ describe("the title bar (11a, Approach 1)", () => {
     expect(chip().querySelector(".tb-dot")?.className).toContain("tb-dot-down");
     // The chip title says "Connected to ..." while the link is up (Approach 1).
     expect(chip().getAttribute("title")).toMatch(/^Connected to .+ · \d+ ms$/);
-    // The pill is a button that opens the dock (Approach 1.7), not the static 11i form.
-    const pill = bar().getByTitle("Show or hide Needs you");
-    expect(pill.tagName).toBe("BUTTON");
-    expect(bar().queryByTitle(/^Counts as of/)).toBeNull();
-    expect(pill.getAttribute("aria-pressed")).toBe("false");
-    await user.click(pill);
-    expect(pill.getAttribute("aria-pressed")).toBe("true");
+    // r1.s6.w1 (P2): the pill is the static 11i form, as when the link is down: grey, with the time, no toggle.
+    const pill = bar().getByTitle(/^Counts as of \d\d:\d\d$/);
+    expect(pill.tagName).not.toBe("BUTTON");
+    expect(pill.textContent).toMatch(/^0 need you · \d\d:\d\d$/);
+    expect(bar().queryByTitle("Show or hide Needs you")).toBeNull();
     // The tab dots keep their state colour (Approach 1.5): grey only while the link is down.
     const dot = bar().getByRole("tab", { name: "Orchestrator · alpha" }).parentElement?.querySelector(".tb-tab-dot");
     expect(dot?.className).not.toContain("tb-tab-dot-down");
@@ -374,6 +378,17 @@ describe("the sidebar (11a, Approach 4)", () => {
     await waitFor(() => expect(fake.count("runList")).toBe(3));
   });
 
+  it("StreamLine shows nothing while the stream is reconnecting: the banner owns that state (r1.s6.w1)", async () => {
+    const fake = seed([]);
+    await boot(fake);
+    await act(async () => {
+      fake.emit({ event: "reconnecting", after: 0, retry_in_ms: 4000, reason: "the stream dropped" });
+    });
+    expect(side().queryByText(/the stream dropped/)).toBeNull();
+    expect(side().queryByText(/Reconnecting/)).toBeNull();
+    expect(document.querySelector(".stream-line")).toBeNull();
+  });
+
   it("keeps StreamLine and its Reconnect at the bottom while no chat is followed (G8)", async () => {
     const fake = seed([]);
     await boot(fake);
@@ -478,8 +493,9 @@ describe("the not-connected banner (11i, Approach 7)", () => {
       fake.emit({ event: "reconnecting", after: 0, retry_in_ms: 1000, reason: "the stream dropped" });
     });
     expect(screen.getByText(`Not connected to ${ADDRESS}`)).toBeTruthy();
-    expect(screen.getByText("Your sessions and runs keep going on the server. Reconnecting…")).toBeTruthy();
-    expect(screen.getAllByText(/Reconnecting…/).length).toBeGreaterThan(0); // StreamLine says it too
+    // 11i's copy: the stream's `retry_in_ms` is the countdown, and no line says "Reconnecting…" (r1.s6.w1).
+    expect(screen.getByText("Your sessions and runs keep going on the server. Retrying in 1s.")).toBeTruthy();
+    expect(screen.queryByText(/Reconnecting…/)).toBeNull();
     await user.click(screen.getByRole("button", { name: "Retry now" }));
     await waitFor(() => expect(fake.streams.length).toBe(streams + 1));
     // The stream opens again: the banner goes when the first event arrives.
@@ -768,6 +784,8 @@ describe("landmarks (Approach 15)", () => {
       .filter((b) => /projects|settings/i.test(b.getAttribute("aria-label") ?? b.textContent ?? ""))
       // The chat header's gear (11a, `r1.s5.w3`) is named "Agent settings": it opens Agents, not Settings.
       .filter((b) => b.getAttribute("aria-label") !== "Agent settings")
+      // The Projects tab of the title bar (11a, `r1.s6.w1`) is a tab, not a navigation: the rail stays the one navigation.
+      .filter((b) => !screen.getByRole("banner").contains(b))
       .filter((b) => !screen.getByRole("navigation").contains(b));
     expect(onChat.map(labelOf)).toEqual([]);
   });

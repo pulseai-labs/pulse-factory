@@ -1,5 +1,6 @@
 // The Settings page (11k, r1.s5.w4): the Server block (the server, this Mac, Disconnect with its in-place
-// confirm), then "Chat policies": a scope chooser (the whole server, a project, an agent in a project) and one
+// confirm; r1.s6.w3: Disconnect spans the device card, the device tile shows a laptop, the server card ends under
+// its rows), then "Chat policies": a scope chooser (the whole server, a project, an agent in a project) and one
 // block for each setting the server returns, with the value in force, where it comes from (the chain from the
 // built-in value to the chosen scope), a change at that scope and "Remove this override".
 //
@@ -19,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useCommandId } from "../components/command-id";
 import { Column } from "../shell/Column";
 import { agentName, useChat } from "../state/chat";
-import { asTransportError, isDownKind, useConnection } from "../state/connection";
+import { asTransportError, isDownKind, useConnection, useServerName } from "../state/connection";
 import { Avatar, Button, Icon, agentLook } from "../ui";
 import "../styles/settings.css";
 
@@ -512,7 +513,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const up = conn.link.state === "up";
-  const name = conn.server.server?.name ?? props.status?.server?.name ?? conn.server.address;
+  const name = useServerName();
   const ms = conn.lastCallMs === null ? "no call yet" : `${conn.lastCallMs} ms`;
 
   async function disconnect() {
@@ -535,7 +536,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
         <div className="st-card st-card-server">
           <div className="st-server-head">
             <span className="st-tile st-tile-mint">
-              <Icon name="layers" size={18} />
+              <Icon name="server" size={18} />
             </span>
             <div className="st-server-id">
               <span className="st-server-name">{name}</span>
@@ -559,7 +560,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
         <div className="st-card st-card-device">
           <div className="st-server-head">
             <span className="st-tile">
-              <Icon name="settings" size={16} />
+              <Icon name="laptop" size={18} />
             </span>
             <div className="st-server-id">
               <span className="st-field-label">This device</span>
@@ -585,9 +586,11 @@ function ServerBlock(props: { status: ApiStatus | null }) {
               </div>
             </div>
           ) : (
-            <Button variant="danger" disabled={busy} onClick={() => setConfirming(true)}>
-              Disconnect this Mac
-            </Button>
+            <div className="st-disconnect">
+              <Button variant="danger" disabled={busy} onClick={() => setConfirming(true)}>
+                Disconnect this Mac
+              </Button>
+            </div>
           )}
           {error ? (
             <p className="problem-title" role="alert">
@@ -601,7 +604,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
 }
 
 export function Settings() {
-  const { call, epoch } = useConnection();
+  const { call, epoch, noteServer } = useConnection();
   const [status, setStatus] = useState<ApiStatus | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const live = useRef(true);
@@ -616,6 +619,7 @@ export function Settings() {
   const load = useCallback(async () => {
     try {
       const s = await call((t) => t.status());
+      noteServer(s.server);
       if (live.current) {
         setStatus(s);
         setPageError(null);
@@ -624,7 +628,7 @@ export function Settings() {
       const err = asTransportError(e);
       if (live.current) setPageError(isDownKind(err.kind) ? null : err.message);
     }
-  }, [call]);
+  }, [call, noteServer]);
 
   // On opening the page, and once when the link comes back. Never on a timer.
   useEffect(() => {

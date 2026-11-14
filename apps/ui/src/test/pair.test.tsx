@@ -79,20 +79,73 @@ describe("the pair screen (3a)", () => {
     expect(fake.count("projectList")).toBe(1);
   });
 
-  it("names the address in the heading and the server's name in the lede, the Server fact and the chip", async () => {
+  it("names the server in the heading, the lede, the Server fact and the chip, and the address in its own fact", async () => {
     const fake = new FakeTransport({ server: null });
     const plain = fake.pair.bind(fake);
     fake.pair = async (code, deviceName) => ({ ...(await plain(code, deviceName)), server: { ...SERVER, name: "draco-desk" } });
     const user = setup(fake);
     await fillAndPair(user, makeCode(ADDRESS), "d12 browser");
 
-    // d19 and d23 find the heading as `Connected to <address>` (see Pair.tsx).
-    expect(await screen.findByRole("heading", { name: `Connected to ${ADDRESS}` })).toBeTruthy();
+    // KL-10 (r1.s6.w1): the heading reads `Connected to <name>`, as 11j draws it.
+    expect(await screen.findByRole("heading", { name: "Connected to draco-desk" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: `Connected to ${ADDRESS}` })).toBeNull();
     expect(screen.getByText("This Mac is paired and trusts draco-desk’s key. You only do this once.")).toBeTruthy();
     expect(screen.getByText("Server").nextElementSibling?.textContent).toBe("draco-desk");
     expect(screen.getByText("Address").nextElementSibling?.textContent).toBe(ADDRESS);
     // The title-bar chip shows the name (the `[KL]` fix); on this screen it is not a button.
     expect(within(screen.getByRole("banner")).getByText("draco-desk")).toBeTruthy();
+  });
+
+  it("Pair is disabled with an empty or blank code and enabled with a code (NG-24)", async () => {
+    const fake = new FakeTransport({ server: null });
+    const user = setup(fake);
+    const pair = async () => (await screen.findByRole("button", { name: "Pair" })) as HTMLButtonElement;
+    const code = await screen.findByLabelText("Pairing code");
+    expect((await pair()).disabled).toBe(true);
+
+    await user.click(code);
+    await user.paste("   ");
+    expect((await pair()).disabled).toBe(true);
+    await user.clear(code);
+    await user.paste("pf1-abc");
+    expect((await pair()).disabled).toBe(false);
+    await user.clear(code);
+    expect((await pair()).disabled).toBe(true);
+    expect(fake.count("pair")).toBe(0);
+  });
+
+  it("draws the pair tile's icon at 22 px (KL-6), on the form and on the success card", async () => {
+    const fake = new FakeTransport({ server: null });
+    const user = setup(fake);
+    const tileIcon = () => document.querySelector(".pair-tile svg") as SVGElement;
+    await screen.findByLabelText("Pairing code");
+    expect(tileIcon().getAttribute("width")).toBe("22");
+    await fillAndPair(user, makeCode(ADDRESS), "Studio Mac");
+    await screen.findByText(`Connected to ${ADDRESS}`);
+    expect(tileIcon().getAttribute("width")).toBe("22");
+  });
+
+  it("Pair is disabled while pairing runs", async () => {
+    const fake = new FakeTransport({ server: null });
+    let release: () => void = () => {};
+    const plain = fake.pair.bind(fake);
+    fake.pair = async (code, deviceName) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return plain(code, deviceName);
+    };
+    const user = setup(fake);
+    await fillAndPair(user, makeCode(ADDRESS), "Studio Mac");
+    expect(((await screen.findByRole("button", { name: "Pairing…" })) as HTMLButtonElement).disabled).toBe(true);
+    release();
+    expect(await screen.findByText(`Connected to ${ADDRESS}`)).toBeTruthy();
+  });
+
+  it("the unpaired chip reads No server and has no menu (11j)", async () => {
+    setup(new FakeTransport({ server: null }));
+    expect(await screen.findByText("No server")).toBeTruthy();
+    expect(within(screen.getByRole("banner")).queryByRole("button", { name: /No server/ })).toBeNull();
   });
 
   it("holds the device-name rule: 1 to 64 characters", async () => {
