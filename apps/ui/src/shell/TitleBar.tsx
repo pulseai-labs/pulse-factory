@@ -4,10 +4,12 @@
 // tab, a spacer and the need-you pill with its dock toggle. A focused page (Needs you, Settings) hides only
 // the sidebar toggle (W2-2, R1-a). The active page tab carries a × as a chat tab does (NG-3); P3: it closes
 // the page and shows the last chat tab the operator used, else Projects, and Projects with no chat tab open
-// draws none. The chip, the pill and the dock toggle follow the derived not-connected state (11i, P2).
+// draws none. The Agents tab reads "<selected agent> agent" with that agent's avatar (11g, r1.s6.w3). The chip, the pill and the dock toggle follow the derived not-connected state (11i, P2).
 // `data-tauri-drag-region` is on the empty parts, and the left padding is `--titlebar-inset`, so a later
 // change in `apps/desktop/**` can make room for the traffic lights without a UI change.
+import type { AgentRecord } from "@pulse-factory/api-client";
 import { useRef, useState } from "react";
+import { useSelectedAgent } from "../screens/agentSelection";
 import { ServerMenu } from "../components/ServerMenu";
 import { clock } from "../components/format";
 import { agentName, useChat, useNotConnected } from "../state/chat";
@@ -64,20 +66,26 @@ function Glyph(props: { side: "left" | "right" }) {
   );
 }
 
-/** A page tab (Projects, Agents, Needs you, Settings): the active one is the page's heading and may carry a ×. */
-function PageTab(props: { kind: Page["kind"]; active: boolean; closable: boolean; onOpen?: () => void; onClose: () => void }) {
-  const { kind, active, closable } = props;
-  const label = PAGE_NAME[kind];
+/**
+ * A page tab (Projects, Agents, Needs you, Settings): the active one is the page's heading and may carry a ×.
+ * The Agents tab with an `agent` reads "<name> agent" with that agent's avatar in place of the bot icon (11g, W1-29);
+ * with no agent listed yet it reads "Agents" with the bot icon.
+ */
+function PageTab(props: { kind: Page["kind"]; active: boolean; closable: boolean; agent?: AgentRecord; onOpen?: () => void; onClose: () => void }) {
+  const { kind, active, closable, agent } = props;
+  const label = kind === "agents" && agent !== undefined ? `${agent.name} agent` : PAGE_NAME[kind];
+  const glyph =
+    kind === "agents" && agent !== undefined ? <Avatar agent={agentLook(agent.id)} size={16} /> : <Icon name={PAGE_ICON[kind]} size={14} />;
   return (
     <div className={`tb-tab tb-pagetab${active ? " tb-tab-on" : ""}${active && closable ? " tb-pagetab-x" : ""}`}>
       {active ? (
         <h1 className="tb-page tb-page-on">
-          <Icon name={PAGE_ICON[kind]} size={14} />
+          {glyph}
           {label}
         </h1>
       ) : (
         <button className="tb-tab-main" type="button" onClick={props.onOpen}>
-          <Icon name={PAGE_ICON[kind]} size={14} />
+          {glyph}
           {label}
         </button>
       )}
@@ -97,6 +105,7 @@ export function TitleBar(props: TitleBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const anchor = useRef<HTMLDivElement>(null);
   const { page } = props;
+  const agent = useSelectedAgent(chat.list?.agents ?? []);
 
   const name = useServerName();
   // `down`: the link is down. It drives the tab dots (Approaches 1.1, 1.5, 1.7).
@@ -202,7 +211,7 @@ export function TitleBar(props: TitleBarProps) {
           </div>
         ) : null}
         {page.kind === "agents" || page.kind === "needs_you" || page.kind === "settings" ? (
-          <PageTab kind={page.kind} active closable onClose={props.onClosePage} />
+          <PageTab kind={page.kind} active closable agent={page.kind === "agents" ? agent : undefined} onClose={props.onClosePage} />
         ) : null}
         <button className="tb-btn tb-new" type="button" title="New tab" aria-label="New tab" onClick={props.onNewTab}>
           <Icon name="plus" size={14} />

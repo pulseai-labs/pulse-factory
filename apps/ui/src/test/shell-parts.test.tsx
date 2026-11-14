@@ -88,10 +88,11 @@ describe("the title bar (11a, Approach 1)", () => {
     expect(bar().queryByRole("heading", { level: 1 })).toBeNull();
     expect(bar().getByRole("button", { name: "Projects" })).toBeTruthy();
     await user.click(rail().getByRole("button", { name: "Agents" }));
-    expect(title()).toBe("Agents");
-    // The page tab is no button and no tab: its × is a button named "Close Agents".
-    expect(bar().queryByRole("button", { name: "Agents" })).toBeNull();
-    expect(bar().getByRole("button", { name: "Close Agents" })).toBeTruthy();
+    // r1.s6.w3 (W1-29): the Agents tab reads "<selected agent> agent".
+    expect(title()).toBe("Orchestrator agent");
+    // The page tab is no button and no tab: its × is a button named "Close Orchestrator agent".
+    expect(bar().queryByRole("button", { name: "Orchestrator agent" })).toBeNull();
+    expect(bar().getByRole("button", { name: "Close Orchestrator agent" })).toBeTruthy();
     expect(bar().queryAllByRole("tab")).toHaveLength(1);
   });
 

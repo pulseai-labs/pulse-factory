@@ -213,10 +213,11 @@ describe("the active page tab's × (NG-3; P3)", () => {
   it("Agents has its ×, and closes to the last chat tab used", async () => {
     const { user } = await withChat();
     await user.click(rail().getByRole("button", { name: "Agents" }));
-    expect(titlebar().getByRole("heading", { name: "Agents" })).toBeTruthy();
-    await user.click(closeButton("Agents")!);
+    // r1.s6.w3 (W1-29): the Agents tab reads "<selected agent> agent".
+    expect(titlebar().getByRole("heading", { name: "Orchestrator agent" })).toBeTruthy();
+    await user.click(closeButton("Orchestrator agent")!);
     expect(titlebar().getByRole("tab", { name: /Orchestrator · alpha/ }).getAttribute("aria-selected")).toBe("true");
-    expect(titlebar().queryByRole("heading", { name: "Agents" })).toBeNull();
+    expect(titlebar().queryByRole("heading", { name: "Orchestrator agent" })).toBeNull();
   });
 
   it.each(["Needs you", "Settings"])("%s closes to the last chat tab the operator used", async (page) => {

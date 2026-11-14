@@ -6,7 +6,9 @@
 //
 // When this page calls (docs/contracts/ui-transport.md, W9): when it opens, `requests {all: true}`, `runList`
 // (for the cards' spine names only), one `show` for each open request of every kind and one `show` for each
-// answered row it holds no detail for; when the link comes back, the same once; on Refresh, the same; a press
+// answered row it holds no detail for; when the link comes back, the same once; on Refresh, the same (the
+// Refresh of the read-error line: the header's Refresh icon button left in r1.s6.w3, W1-33, because 11d has none,
+// and the page reads again when the link comes back while the stream brings new requests); a press
 // makes exactly two calls (`confirmCode` and the act); Hold and Show make none. While it is on screen, a
 // request frame for an open request at a revision it holds no body for costs one `show`. Nothing else: no
 // timer, no interval, no focus handler, and no stream of its own: the frames come from the one stream the
@@ -22,7 +24,7 @@ import { useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
 import { useRequests } from "../state/requests";
 import { Column } from "../shell/Column";
-import { Button, IconButton } from "../ui";
+import { Button } from "../ui";
 import "../styles/needs-you.css";
 
 /** The last read of `requests`: when it worked, and the line of its failure. */
@@ -112,7 +114,6 @@ export function NeedsYou() {
               Every open question across your projects. Answer here, in the session, on your phone or from the CLI.
             </p>
           </div>
-          <IconButton icon="refresh" title="Refresh" onClick={refresh} />
         </div>
 
         <section className="ny-block" aria-labelledby="ny-open">

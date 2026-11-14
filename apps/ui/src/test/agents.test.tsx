@@ -70,30 +70,30 @@ describe("the Agents page (6a)", () => {
     expect(main.getByText("The persona text is not shown in this release.")).toBeTruthy();
     expect(main.getByText("Edit").closest("[data-not-built]")).not.toBeNull();
     // Brain: three tiles, with display names (G3).
-    expect(within(main.getByRole("group", { name: "Runtime" })).getByText("claude-code")).toBeTruthy();
+    expect(within(main.getByRole("group", { name: "Runtime" })).getByText("Claude Code")).toBeTruthy();
     expect(within(main.getByRole("group", { name: "Model" })).getByText("Opus 5.5")).toBeTruthy();
     const effort = within(main.getByRole("group", { name: "Reasoning effort" }));
     expect(effort.getByText("XHigh")).toBeTruthy();
     expect(main.getByRole("group", { name: "Reasoning effort" }).querySelectorAll("[data-bar]")).toHaveLength(4);
     expect(main.getByRole("group", { name: "Reasoning effort" }).querySelectorAll("[data-bar=on]")).toHaveLength(4);
-    // Runtime options stay as a quiet line (G8).
-    expect(main.getByText("artifacts: off")).toBeTruthy();
+    // Runtime options left the page as a line and stay in the Runtime tile's title (G8; r1.s6.w3).
+    expect(main.queryByText("artifacts: off")).toBeNull();
+    expect(main.getByRole("group", { name: "Runtime" }).getAttribute("title")).toBe("artifacts: off");
     // Skills: one chip each, then Add skill, not built.
     expect(main.getByText("pulse-factory")).toBeTruthy();
     expect(main.getByText("review")).toBeTruthy();
     expect(main.getByText("Add skill").closest("[data-not-built]")).not.toBeNull();
-    // Permissions: the actual mode as its value, and the three-way switch, disabled, with the Later tag.
-    expect(main.getByText("Ask before edits", { selector: ".ag-perm-value" })).toBeTruthy();
+    // Permissions: the three-way switch, disabled, with the Later tag, at the position nearest the mode (P7).
     const switchGroup = main.getByRole("group", { name: "Permissions" });
     const positions = within(switchGroup).getAllByRole("button");
     expect(positions.map((b) => b.textContent)).toEqual(["Read only", "Ask before edits", "Edit freely"]);
     for (const b of positions) {
       expect((b as HTMLButtonElement).disabled).toBe(true);
-      expect(b.getAttribute("aria-pressed")).toBe("false");
+      expect(b.getAttribute("aria-pressed")).toBe(b.textContent === "Ask before edits" ? "true" : "false");
     }
     expect(within(switchGroup).getByText("Later release")).toBeTruthy();
-    // Notifications: the row, not built.
-    expect(main.getByText("Send its questions to my phone").closest("[data-not-built]")?.getAttribute("data-not-built")).toBe("row");
+    // Notifications: the card, not built.
+    expect(main.getByText("Send its questions to my phone").closest("[data-not-built]")?.getAttribute("data-not-built")).toBe("notify");
     // P1: no edit control in Release 1.
     expect(main.queryByRole("textbox")).toBeNull();
     expect(main.queryByRole("combobox")).toBeNull();
@@ -115,7 +115,8 @@ describe("the Agents page (6a)", () => {
     await openAgents(fake);
     expect(within(screen.getByRole("group", { name: "Model" })).getByText("fake-model")).toBeTruthy();
     expect(within(screen.getByRole("group", { name: "Reasoning effort" })).getByText("turbo")).toBeTruthy();
-    expect(screen.getByText("bypass", { selector: ".ag-perm-value" })).toBeTruthy();
+    // A mode the table does not know selects no position, and the control's title names it as it is.
+    expect(screen.getByRole("group", { name: "Permissions" }).getAttribute("title")).toBe("bypass");
   });
 
   it("lists each project with its live session (state, branch, cost, Open) or Start session", async () => {

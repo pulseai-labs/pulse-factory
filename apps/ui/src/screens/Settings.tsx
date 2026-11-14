@@ -1,5 +1,6 @@
 // The Settings page (11k, r1.s5.w4): the Server block (the server, this Mac, Disconnect with its in-place
-// confirm), then "Chat policies": a scope chooser (the whole server, a project, an agent in a project) and one
+// confirm; r1.s6.w3: Disconnect spans the device card, the device tile shows a laptop, the server card ends under
+// its rows), then "Chat policies": a scope chooser (the whole server, a project, an agent in a project) and one
 // block for each setting the server returns, with the value in force, where it comes from (the chain from the
 // built-in value to the chosen scope), a change at that scope and "Remove this override".
 //
@@ -559,7 +560,7 @@ function ServerBlock(props: { status: ApiStatus | null }) {
         <div className="st-card st-card-device">
           <div className="st-server-head">
             <span className="st-tile">
-              <Icon name="settings" size={16} />
+              <Icon name="laptop" size={18} />
             </span>
             <div className="st-server-id">
               <span className="st-field-label">This device</span>
@@ -585,9 +586,11 @@ function ServerBlock(props: { status: ApiStatus | null }) {
               </div>
             </div>
           ) : (
-            <Button variant="danger" disabled={busy} onClick={() => setConfirming(true)}>
-              Disconnect this Mac
-            </Button>
+            <div className="st-disconnect">
+              <Button variant="danger" disabled={busy} onClick={() => setConfirming(true)}>
+                Disconnect this Mac
+              </Button>
+            </div>
           )}
           {error ? (
             <p className="problem-title" role="alert">
