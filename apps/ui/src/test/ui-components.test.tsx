@@ -27,6 +27,7 @@ const CANVAS_ICONS = [
   "chevron-left", "chevron-right", "chevrons-up-down", "circle-dot", "clock", "copy", "git-branch",
   "layers", "lock", "pause", "play", "plus", "refresh", "search", "settings", "sliders", "sparkles",
   "upload", "x", "zap",
+  "house",
   // Round 2 adds the five names that frames 11a to 11l use and w1's set lacked (Approach 11).
   "more", "trash", "square", "minus", "alert",
   // `r1.s6.w1` adds the server icon of 11h and 11k.
