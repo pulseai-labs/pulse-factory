@@ -151,18 +151,39 @@ secret.
 
 | Kind | Screen |
 |---|---|
-| `unreachable` | 3c banner "Not connected to <name>" (the server's name, else <address>); retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. The banner also shows while the chat stream is `reconnecting` (title "Not connected to <name>", body "Reconnecting…", and "Retry now" calls the stream's `reconnect()`): the UI reads that state and sets no timer for it. |
+| `unreachable` | 3c banner "Not connected to <name>" (the server's name, else <address>); retries `status()` after 4, 8, 16, 32 and then every 60 seconds. This is the only kind that sets a timer: no request reached the server. The banner reads "Not connected to <name>", "Your sessions and runs keep going on the server. Retrying in <n>s.", "last reached <HH:MM>" and "Retry now". |
 | `unauthorized` | 3c banner "This device is no longer paired with <address>." and "Pair again". No timer. |
 | `key_changed` | 3c banner `server key changed: re-pair` and "Pair again". No timer. |
 | `rate_limited` | 3c banner with the server's text and "Retry now". No timer. |
 | `forbidden`, `bad_request`, `server`, `refused` | One error line on the page with the text and "Retry now". The page keeps its last data. No timer. |
 | `code_refused` | On 3a: the code is not accepted, ask for a new one. The form stays. |
 
+**The derived state "not connected" (`r1.s6.w1`).** The UI shows one display state, "not connected", when
+the link is down **or** the chat stream is `reconnecting`. It changes no state machine and adds no timer.
+Every element of frame 11i keys on it: the banner (the same copy for both causes), the dimmed page, the
+Projects subtitle "As of <time>, when <name> was last reachable", and the grey need-you pill with the time and
+no dock toggle. The banner's countdown is the link's next retry while the link is down, else the stream's
+`retry_in_ms` from its `reconnecting` event (`pf-client` retries the stream by itself, so the UI shows it and
+does nothing else); "Retry now" calls `retryNow()` for the link and the stream's `reconnect()` for the
+stream. The stream's countdown is a display tick that makes no call. The next frame of the stream clears the
+state. A stream that `closed` with a refusal or a server error is no "not connected": it keeps its error line
+and Reconnect (`StreamLine`).
+
 ### When the UI calls
 
 On start, on opening a page, after an action, and on "Retry now". **While connected no timer,
 interval or focus handler makes a call** (planning audit C15: the controller's ledger is local and
 unbounded). After an HTTP refusal the UI never retries by itself.
+
+**The server's name (`r1.s6.w1`).** The connection makes **one** `status()` call when it mounts, to learn the
+server's name: the pairing the UI reads at start holds none until `pf-client` has had an answer. It is no
+timer and no retry: it goes through `call()`, so a down kind marks the link down as any call does, and it
+refetches no page. The connection keeps the `server` of every `status()` answer (this call, the retry and the
+Settings page's call), so every screen names the server by that name. The last name an answer gave is also
+kept in `localStorage` under `pf.server-name` as `{address, name}` and read in a `try`, so a launch with the
+server down shows the name at once when the address is the pairing's. The name is a label: it is never used for
+trust, routing or a call. A first launch after pairing, with the server down, before any answer, shows the
+address.
 
 **The chat stream (`r1.s3.w5`).** The UI holds **one stream open at a time**: a browser keeps six
 HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A10).
@@ -172,8 +193,8 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
 - When a chat is on screen, the stream **follows that chat**: the UI closes the current stream and opens
   `openStream({session, after})`, where `after` is the highest `seq` it holds for that session (0 the first
   time). When no chat is on screen, it goes back to the overview. Each switch is an operator action.
-- `reconnecting` shows "Reconnecting…" with its reason on the open chat, and the 3c banner (`r1.s5.w2`, the
-  `unreachable` row above); it calls nothing and sets no timer: `pf-client` retries. `closed` by kind:
+- `reconnecting` shows the 3c banner (the derived state "not connected" above; the countdown is its
+  `retry_in_ms`) and no line of its own; it calls nothing and sets no timer: `pf-client` retries. `closed` by kind:
   - `unreachable` (the local leg dropped, or the bridge or the app's Rust side is gone) and `rate_limited`:
     the same 3c banner and `status()` retry as a failed call. When the link comes back, the UI opens the
     stream again with the last `seq` it holds. No new timer: the only retry timer is the connection's.
@@ -184,8 +205,9 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
   when the Agents page or the first chat opens, after `session_start`, and once when the link comes back,
   and the cache-warm display ticks once a minute on the chat that is on screen and calls nothing.
 - A reload is a fresh start: the shell opens the overview, the operator reopens a chat from its row, and the
-  chat's items replay from `after=0`. The UI keeps no chat state in storage. It keeps two keys in
-  `localStorage`, both per device and both a fold state: `pf.sidebar` and `pf.dock` (`r1.s5.w2`, see below).
+  chat's items replay from `after=0`. The UI keeps no chat state in storage. It keeps two fold-state keys in
+  `localStorage`, both per device: `pf.sidebar` and `pf.dock` (`r1.s5.w2`, see below), and one label,
+  `pf.server-name` (`r1.s6.w1`, see "The server's name" below).
 
 **The shell (`r1.s5.w2`).** The shell's sidebar holds the Workflow runs group, one row for each run of
 `runList`. The sidebar calls `runList` **once each time it mounts** and **once when the link comes back**
@@ -194,7 +216,7 @@ Settings), so a visit to Needs you and back reads the list again. No timer and n
 A failed call leaves the group as it was, and a disconnect shows the banner. The need-you pill and the dock
 read the requests state, which the stream feeds: they make no call. The dock's open state is kept per device
 in `localStorage` under `pf.dock` (`open` or `closed`, read in a `try`, closed by default), as `pf.sidebar`
-keeps the sidebar's. These are the only two keys; there is still no chat state in storage. While the link is
+keeps the sidebar's. `pf.server-name` (`r1.s6.w1`) is the third key, written when an answer names the server. There is still no chat state in storage. While the link is
 down the add-a-project form is disabled, and the Projects page shows "As of <time>, when <name> was last
 reachable" over the list it holds.
 
@@ -330,6 +352,10 @@ connection (planning audit C15). **Neither implementation of the interface sets 
 reconnect lives in `pf-client`, once, for both. When the local leg itself drops (the bridge or the
 app's Rust side is gone), the UI gets `closed` and opens a new stream with the last `seq` it holds.
 
+The stream's `reconnecting` event shows the derived state "not connected" (`r1.s6.w1`). The countdown on the
+banner is a display tick (a state update each second, while the stream reconnects and the link is up): it
+makes no request, so the no-polling rule holds while the stream reconnects as it does while connected.
+
 ### The bridge's stream
 
 `GET /bridge/stream[?session=<S-n>&after=<n>]` is Server-Sent Events: `200`, `Content-Type:
@@ -421,7 +447,10 @@ Tauri's IPC only, so the webview opens no network connection.
 ## Verified by
 
 - `apps/ui/src/test/*.test.tsx` (Vitest, the fake transport): every screen, every error kind, the
-  retry schedule and the no-polling rule.
+  retry schedule and the no-polling rule. `apps/ui/src/test/server-name.test.tsx` (`r1.s6.w1`): the name
+  at the nine sites from the mount `status()` call, the stored name for the same address and not another,
+  and the fallback to the address when `localStorage` fails. `disconnected.test.tsx` and
+  `no-polling.test.tsx`: the derived state "not connected" while the stream reconnects, with no call by a timer.
 - `crates/pf-client/tests/` (`cargo test -p pf-client`): the pin check against a local TLS server, the
   mapping of every status, the device file and the verb allowlist. `crates/pulse-factory/tests/
   client_pinned.rs` and `client_bridge.rs`: the client and the bridge against a real controller.

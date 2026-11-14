@@ -14,8 +14,8 @@ import { Column } from "../shell/Column";
 import { useNavigation } from "../shell/navigation";
 import { GroupSwitch, STATE_GROUPS, groupOf, type Grouping } from "../shell/Sidebar";
 import { useStartSession } from "../shell/useStartSession";
-import { agentName, stateLabel, useChat } from "../state/chat";
-import { asTransportError, isDownKind, useConnection } from "../state/connection";
+import { agentName, stateLabel, useChat, useNotConnected } from "../state/chat";
+import { asTransportError, isDownKind, useConnection, useServerName } from "../state/connection";
 import { Avatar, Button, CountBadge, Icon, StatePill, agentLook } from "../ui";
 
 function SessionCard(props: { session: ChatSessionRecord; projects: ProjectRecord[]; byState: boolean }) {
@@ -98,7 +98,10 @@ function ProjectBlock(props: {
 }
 
 export function Projects() {
-  const { call, setProjects, epoch, projects, projectsAt, link, server } = useConnection();
+  const { call, setProjects, epoch, projects, projectsAt, link } = useConnection();
+  const serverName = useServerName();
+  // The subtitle follows the derived not-connected state (r1.s6.w1): the stream that reconnects counts too.
+  const notConnected = useNotConnected();
   const [pageError, setPageError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   // The projects this page removed, so each block's place keeps its notice line after the reload.
@@ -164,7 +167,6 @@ export function Projects() {
   ].sort((a, b) => a.project.id.localeCompare(b.project.id, undefined, { numeric: true }));
 
   const down = link.state === "down";
-  const serverName = server.server?.name ?? server.address;
   return (
     <section aria-labelledby="projects-title">
       <Column>
@@ -173,7 +175,7 @@ export function Projects() {
             <h2 id="projects-title" className="pj-title">
               Projects
             </h2>
-            {down && projectsAt !== null ? (
+            {notConnected && projectsAt !== null ? (
               <p className="stale">{`As of ${clock(projectsAt)}, when ${serverName} was last reachable`}</p>
             ) : null}
           </div>

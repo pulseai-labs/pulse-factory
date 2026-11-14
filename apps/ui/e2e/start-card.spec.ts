@@ -92,7 +92,7 @@ test("start a spine from the Orchestrator chat: card, one press, outcome, reload
     await pairing.fill(code);
     await page.getByLabel("Device name").fill("d23 browser");
     await page.getByRole("button", { name: "Pair" }).click();
-    await expect(page.getByRole("heading", { name: /^Connected to 127\.0\.0\.1:\d+$/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Connected to .+/ })).toBeVisible();
     await page.getByRole("button", { name: "Open Pulse Factory" }).click();
   }
   await expect(nav).toBeVisible();

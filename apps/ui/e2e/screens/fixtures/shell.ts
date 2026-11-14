@@ -1,5 +1,7 @@
 // The d25 test data of the shell: the pairing, the status, the server's name and this device, the session
 // list the sidebar and the Projects cards read, and the run list of the sidebar's Workflow runs group.
+// The pairing has the shape the Mac gives the UI at start (r1.s6.w1): this device and the address, with no
+// name. The name comes from the `status` answer, as on the Mac.
 // Owner: w2. A round-3 item changes a value here only through `overlay` (w5: the active run's `project_id`).
 import type { ApiStatus, RunList, SessionList } from "@pulse-factory/api-client";
 import { ADDRESS, SERVER, device, runSummary } from "../../../src/test/fake-transport";
@@ -11,7 +13,7 @@ import type { Verbs } from "./verbs";
 export const SERVER_NAME = "draco-desk";
 export const THIS_DEVICE = { ...device("D-1", "MacBook"), paired_at: "2026-11-08T09:00:00Z", last_seen_at: "2026-11-08T14:46:00Z" };
 
-export const PAIRED: PairedServer = { address: ADDRESS, device: THIS_DEVICE, server: { ...SERVER, name: SERVER_NAME } };
+export const PAIRED: PairedServer = { address: ADDRESS, device: THIS_DEVICE };
 
 export const STATUS: ApiStatus = {
   schema_version: 1,

@@ -6,7 +6,7 @@
 import type { ProjectRecord, RunSummary } from "@pulse-factory/api-client";
 import { useEffect, useRef, useState } from "react";
 import { agentName, stateLabel, useChat } from "../state/chat";
-import { asTransportError, useConnection } from "../state/connection";
+import { asTransportError, useConnection, useServerName } from "../state/connection";
 import { Button, Icon, StateDot } from "../ui";
 import { branchText } from "./chat-format";
 import { useCommandId } from "./command-id";
@@ -31,8 +31,7 @@ export function RemoveButton(props: { project: ProjectRecord; open: boolean; onO
 
 /** The line that shows in the block's place after a remove. */
 export function RemovedLine(props: { name: string }) {
-  const { server } = useConnection();
-  const serverName = server.server?.name ?? server.address;
+  const serverName = useServerName();
   return (
     <p className="rm-removed" role="status">
       <Icon name="check" size={14} />
@@ -51,9 +50,9 @@ export interface RemoveConfirmProps {
 
 export function RemoveConfirm(props: RemoveConfirmProps) {
   const { project, projects, onCancel, onRemoved } = props;
-  const { call, link, server } = useConnection();
+  const { call, link } = useConnection();
   const chat = useChat();
-  const serverName = server.server?.name ?? server.address;
+  const serverName = useServerName();
   const down = link.state === "down";
   const sessions = chat.live.filter((s) => s.project_id === project.id);
   // `null` until `run_list` answers. A failed read counts as no run: the server's refusal holds anyway.

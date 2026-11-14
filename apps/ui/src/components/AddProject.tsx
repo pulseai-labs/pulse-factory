@@ -9,7 +9,7 @@
 import type { FolderEntry, FolderList, ProjectRecord } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { asTransportError, useConnection } from "../state/connection";
+import { asTransportError, useConnection, useServerName } from "../state/connection";
 import { Button, Icon, IconButton, Input, NotBuilt } from "../ui";
 import "../styles/add-project.css";
 import { useCommandId } from "./command-id";
@@ -44,8 +44,8 @@ function crumbsOf(list: FolderList): Array<{ label: string; path: string }> {
 
 export function AddProject(props: AddProjectProps) {
   const { onAdded, onClose } = props;
-  const { call, link, server } = useConnection();
-  const serverName = server.server?.name ?? server.address;
+  const { call, link } = useConnection();
+  const serverName = useServerName();
   const down = link.state === "down";
 
   const [listing, setListing] = useState<FolderList | null>(null);
