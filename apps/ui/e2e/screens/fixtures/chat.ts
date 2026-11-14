@@ -1,5 +1,5 @@
 // The d25 test data of the chat: the two live sessions (S-1, S-2), the items of S-2 and the events of the
-// stream. Owner: w3. The shell's `SESSION_LIST` (fixtures/shell.ts) carries S-1 and S-2 in its rows.
+// stream. Owner: r1.s6.w2 (r1.s5.w3 before it). The shell's `SESSION_LIST` (fixtures/shell.ts) carries S-1 and S-2 in its rows.
 import type { ArmSummary, ChatFrame, ChatItemBody, ChatItemRecord, ChatSessionRecord } from "@pulse-factory/api-client";
 import { chatSession, frames, item } from "../../../src/test/fake-transport";
 import type { StreamEvent } from "../../../src/transport/types";
@@ -58,9 +58,10 @@ const SUMMARY: ArmSummary = {
   caps: { model_sessions: 24, cold_builds: 2, seeds: [{ id: "w1", max: 2 }], relaunch: "once", loops: [{ track: "main", from: "review", to: "fix", max: 3 }] },
   plugins: [{ name: "ossify", version: "1.39.0" }],
   most_launches: 18,
+  // The two merging tracks of the `ossify-spine` workflow, and the two sentences the server writes for them.
   merges: [
-    { track: "main", base: "spine/r1.s5", sentence: "item PRs merge into spine/r1.s5 on green checks with no ack" },
-    { track: "main", base: "main", sentence: "the main PR merges into main only on the claim's ack" },
+    { track: "item", base: "spine/r1.s5", sentence: "item PRs merge into spine/r1.s5 on green checks with no ack" },
+    { track: "spine", base: "main", sentence: "the spine PR merges into main only on the claim's ack" },
   ],
   base_pushes: [{ track: "main", stage: "plan", dir: "/home/dev/pulse-factory", branch: "spine/r1.s5" }],
   replaces: null,

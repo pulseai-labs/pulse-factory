@@ -208,6 +208,16 @@ export const ICON_NODES = {
     ["path", {"d":"M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"}],
   ],
   // ---- r1.s6.w2: the icons this item adds go between these two lines, and nowhere else in the file. ----
+  /* lucide: paperclip */
+  paperclip: [
+    ["path", {"d":"m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"}],
+  ],
+  /* lucide: triangle-alert */
+  "triangle-alert": [
+    ["path", {"d":"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"}],
+    ["path", {"d":"M12 9v4"}],
+    ["path", {"d":"M12 17h.01"}],
+  ],
   // ---- end r1.s6.w2 ----
   // ---- r1.s6.w3: the icons this item adds go between these two lines, and nowhere else in the file. ----
   // ---- end r1.s6.w3 ----

@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { costLabel, dollarsTitle, formatWu, weightedUnits } from "../components/cost";
+import { clock } from "../components/format";
 import { alpha, bootChat, main, push, seeded } from "./chat-helpers";
 import { FakeTransport, chatSession, claudeRuntime, frames } from "./fake-transport";
 
@@ -92,6 +93,72 @@ describe("the controls come from the runtime's declaration (P2)", () => {
     await main().findByLabelText("Model");
     expect(select("Model").value).toBe("claude-opus-5-5");
     expect(Array.from(select("Model").options).map((o) => o.value)).toContain("claude-opus-5-5");
+  });
+});
+
+describe("the controls of 11a: an icon, the display name, and as wide as the label (r1.s6.w2)", () => {
+  const control = (label: string) => (screen.getByLabelText(label) as HTMLElement).closest(".control") as HTMLElement;
+
+  it("each control renders its icon before its display name, and a chevron after it", async () => {
+    const fake = seeded({ sessions: [alpha({ model: "claude-opus-5-5", effort: "xhigh", permission_mode: "manual" })] });
+    const runtime = fake.runtimes[0];
+    const model = runtime?.options.find((o) => o.id === "model");
+    if (model) model.values = ["claude-opus-5-5", "claude-sonnet-5-5"];
+    const effort = runtime?.options.find((o) => o.id === "effort");
+    if (effort) effort.values = ["low", "xhigh"];
+    const mode = runtime?.options.find((o) => o.id === "permission_mode");
+    if (mode) mode.values = ["manual", "plan"];
+    await bootChat(fake);
+    await main().findByLabelText("Model");
+
+    for (const [label, icon, text] of [
+      ["Model", "sparkles", "Opus 5.5"],
+      ["Effort", "zap", "XHigh"],
+      ["Permission mode", "lock", "Ask before edits"],
+    ] as const) {
+      const el = control(label);
+      expect(el.querySelector(`[data-icon=${icon}]`), `${label} icon`).not.toBeNull();
+      expect(el.querySelector("[data-icon=chevron-down]"), `${label} chevron`).not.toBeNull();
+      // The shown text is the display name of the chosen value, and the pop-up keeps the raw one.
+      expect(el.querySelector(".control-text")?.textContent, label).toBe(text);
+    }
+  });
+
+  it("the visible text is the label's width: the pop-up lies over it, so a longer option does not widen the control", async () => {
+    const fake = seeded({ sessions: [alpha({ effort: "low" })] });
+    await bootChat(fake);
+    await main().findByLabelText("Effort");
+    const el = control("Effort");
+    const field = el.querySelector("select") as HTMLSelectElement;
+    // The pop-up is a transparent overlay of the face (the icon, the text and the chevron); its own width
+    // never sets the control's.
+    expect(field.parentElement?.className).toContain("control-face");
+    expect(field.className).toContain("control-field");
+    expect(el.querySelector(".control-text")?.textContent).toBe("Low");
+  });
+
+  it("the Artifacts switch keeps its label and gets the layers icon", async () => {
+    await bootChat(seeded());
+    await main().findByLabelText("Artifacts");
+    const el = (screen.getByRole("switch", { name: "Artifacts" }) as HTMLElement).closest(".control") as HTMLElement;
+    expect(el.textContent).toContain("Artifacts");
+    expect(el.querySelector("[data-icon=layers]")).not.toBeNull();
+  });
+
+  it("Attach is the paperclip, not built yet: disabled, tagged `Later release`, with no click effect", async () => {
+    const fake = seeded();
+    const user = await bootChat(fake);
+    const attach = main().getByText("Attach").closest("[data-not-built]") as HTMLElement;
+    expect(attach.getAttribute("aria-disabled")).toBe("true");
+    expect(within(attach).getByText("Later release")).toBeTruthy();
+    expect(attach.querySelector("[data-icon=paperclip]")).not.toBeNull();
+    // It sits left of the controls.
+    const group = screen.getByRole("group", { name: "Chat controls" });
+    expect(attach.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const calls = [...fake.calls];
+    await user.click(attach);
+    expect(fake.calls).toEqual(calls);
+    expect(document.activeElement).not.toBe(attach);
   });
 });
 
@@ -244,11 +311,30 @@ describe("Send, Stop and the compact box (11a)", () => {
     expect(fake.count("sessionSend")).toBe(0);
   });
 
-  it("keeps the textbox's name `Message <agent>` with the label visually hidden, and the hint beside the box", async () => {
+  it("keeps the textbox's name `Message <agent>` with the label visually hidden, and no hint line under the box (NG-7)", async () => {
     await bootChat(seeded({ sessions: [alpha({ state: "working" })] }));
     expect(screen.getByRole("textbox", { name: "Message Orchestrator" })).toBeTruthy();
     expect(document.querySelector("label.ui-sr-only")?.textContent).toBe("Message Orchestrator");
-    expect(await main().findByText("steers the running turn")).toBeTruthy();
+    // The line leaves: no text of it is anywhere, in either form.
+    expect(document.body.textContent).not.toMatch(/steers the running turn/i);
+    expect(document.body.textContent).not.toMatch(/runs as the next turn/i);
+  });
+
+  it("while the agent works Send shows beside Stop once there is text, and its title says what a message does", async () => {
+    const user = await bootChat(seeded({ sessions: [alpha({ state: "working" })] }));
+    // No text: Stop alone, as 11a draws a working turn.
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    await user.type(screen.getByRole("textbox", { name: "Message Orchestrator" }), "wait, also this");
+    expect(screen.getByRole("button", { name: "Send" }).getAttribute("title")).toBe("Steers the running turn");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+  });
+
+  it("says `Runs as the next turn` in Send's title when the runtime does not steer", async () => {
+    const fake = seeded({ sessions: [alpha({ state: "working" })] });
+    fake.runtimes = [claudeRuntime([], { mid_turn: "next_turn" })];
+    const user = await bootChat(fake);
+    await user.type(screen.getByRole("textbox", { name: "Message Orchestrator" }), "later");
+    expect(screen.getByRole("button", { name: "Send" }).getAttribute("title")).toBe("Runs as the next turn");
   });
 
   it("shows the ended panel with Start session instead of the box", async () => {
@@ -314,10 +400,33 @@ describe("the cache-warm timer, under fake timers", () => {
     expect(screen.getByText("Cache cold")).toBeTruthy();
   });
 
-  it("shows nothing before the first turn", async () => {
+  it("shows `Cache cold` before the first turn, when nothing is cached, with no title", async () => {
     const fake = seeded({ sessions: [alpha({ last_turn_at: null, cache_ttl_seconds: null })] });
     await bootFake(fake);
-    expect(screen.queryByText(/Cache/)).toBeNull();
+    expect(screen.getByText("Cache cold")).toBeTruthy();
+    expect(screen.queryByText(/Cache warm/)).toBeNull();
+    expect(screen.getByText("Cache cold").closest(".cache-text")?.hasAttribute("title")).toBe(false);
+    // Nothing is warm: no timer runs.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("puts 11b's sentence on the line as its title where the record gives the numbers", async () => {
+    const fake = seeded({
+      sessions: [alpha({ last_turn_at: "2026-11-09T10:00:00Z", cache_ttl_seconds: 3600, context: { used_tokens: 124000, max_tokens: 200000 } })],
+    });
+    await bootFake(fake);
+    const line = screen.getByText("Cache warm · 51m left").closest(".cache-text") as HTMLElement;
+    const until = clock(Date.parse("2026-11-09T11:00:00Z"));
+    expect(line.getAttribute("title")).toBe(
+      `Prompt cache stays warm for 1 hour after the last reply. A reply before ${until} reuses 124k cached tokens.`,
+    );
+  });
+
+  it("names the 5-minute TTL in the title, and leaves out the second sentence when the context is not known", async () => {
+    const fake = seeded({ sessions: [alpha({ last_turn_at: "2026-11-09T10:06:00Z", cache_ttl_seconds: 300, context: null })] });
+    await bootFake(fake);
+    const line = screen.getByText("Cache warm · 2m left").closest(".cache-text") as HTMLElement;
+    expect(line.getAttribute("title")).toBe("Prompt cache stays warm for 5 minutes after the last reply.");
   });
 
   it("makes no call for an hour on a chat with a warm cache, blurred or focused", async () => {

@@ -29,6 +29,7 @@ const CANVAS_ICONS = [
   "upload", "x", "zap",
   // Round 2 adds the five names that frames 11a to 11l use and w1's set lacked (Approach 11).
   "more", "trash", "square", "minus", "alert",
+  "paperclip", "triangle-alert", // r1.s6.w2: 11a's Attach and 11b's End session strip
   // `r1.s6.w1` adds the server icon of 11h and 11k.
   "server",
 ];
@@ -45,9 +46,16 @@ describe("Button", () => {
     expect(button).toHaveProperty("type", "button");
   });
 
-  it.each(["default", "primary", "ghost", "danger"] as const)("renders the %s variant", (variant) => {
+  it.each(["default", "primary", "ghost", "danger", "danger-solid"] as const)("renders the %s variant", (variant) => {
     render(<Button variant={variant}>{variant}</Button>);
     expect(screen.getByRole("button", { name: variant }).className).toContain(`ui-btn-${variant}`);
+  });
+
+  it("the filled red variant is its own class: `danger` keeps the class and the look Settings uses (r1.s6.w2)", () => {
+    render(<Button variant="danger-solid">End</Button>);
+    const solid = screen.getByRole("button", { name: "End" });
+    expect(solid.classList.contains("ui-btn-danger-solid")).toBe(true);
+    expect(solid.classList.contains("ui-btn-danger")).toBe(false);
   });
 
   it.each(["sm", "md", "lg", "xl"] as const)("renders the %s size", (size) => {

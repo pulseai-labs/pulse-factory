@@ -38,6 +38,24 @@ describe("the chat header", () => {
     expect(screen.getByRole("tab", { name: "Orchestrator · alpha" })).toBeTruthy();
   });
 
+  it("shows no `· <project>` after the agent's name; the Project group stays in the tree, visually hidden (P6)", async () => {
+    // The worktree's folder is not named like the project, so the chip cannot show the project's name.
+    await bootChat(seeded({ sessions: [alpha({ branch: "feature-x", worktree_dir: "/home/dev/tree-1" })] }));
+    const header = main().getByRole("group", { name: "Chat header" });
+    const project = within(header).getByRole("group", { name: "Project" });
+    expect(project.textContent).toBe("alpha");
+    expect(project.className).toContain("ui-sr-only");
+    // No other element of the header shows the project, and no "·" leads into it.
+    expect(header.textContent).not.toMatch(/·\s*alpha/);
+    for (const el of Array.from(header.querySelectorAll("*"))) {
+      if (el === project || project.contains(el) || el.contains(project)) continue;
+      expect(el.textContent, el.className).not.toContain("alpha");
+    }
+    expect(header.querySelector(".chat-title")).toBeNull();
+    // The tab still reads "<agent> · <project>".
+    expect(screen.getByRole("tab", { name: "Orchestrator · alpha" })).toBeTruthy();
+  });
+
   it("draws the worktree chip with the archive icon and the branch chip with git-branch, as 11a to 11c do", async () => {
     await bootChat(seeded({ sessions: [alpha({ branch: "feature-x" })] }));
     expect(field("Worktree").querySelector("[data-icon=archive]")).not.toBeNull();
@@ -405,19 +423,23 @@ describe("send, interrupt and end", () => {
     expect(fake.count("sessionSend")).toBe(0);
   });
 
-  it("allows a send during a turn, with the runtime's hint", async () => {
+  it("allows a send during a turn, with the runtime's hint in Send's title", async () => {
     const fake = seeded({ sessions: [alpha({ state: "working" })] });
     const user = await bootChat(fake);
-    expect(main().getByText("steers the running turn")).toBeTruthy();
-    await user.type(box(), "wait, also this{Enter}");
+    await user.type(box(), "wait, also this");
+    expect(sendButton().getAttribute("title")).toBe("Steers the running turn");
+    expect(document.body.textContent).not.toMatch(/steers the running turn/i);
+    await user.type(box(), "{Enter}");
     await waitFor(() => expect(fake.sendArgs).toHaveLength(1));
   });
 
-  it("says a message runs as the next turn when the runtime does not steer", async () => {
+  it("says in Send's title that a message runs as the next turn when the runtime does not steer", async () => {
     const fake = seeded({ sessions: [alpha({ state: "working" })] });
     fake.runtimes = [claudeRuntime([], { mid_turn: "next_turn" })];
-    await bootChat(fake);
-    expect(await main().findByText("runs as the next turn")).toBeTruthy();
+    const user = await bootChat(fake);
+    await user.type(box(), "later");
+    await waitFor(() => expect(sendButton().getAttribute("title")).toBe("Runs as the next turn"));
+    expect(document.body.textContent).not.toMatch(/runs as the next turn/i);
   });
 
   it("keeps the text and the command ID after unreachable, and Retry reuses both", async () => {
@@ -514,6 +536,16 @@ describe("End session (11b)", () => {
     expect(strip().getByText(/process on .* stops, mid-turn if it is working\. The chat stays, and you can start the session again from here\./)).toBeTruthy();
     expect(strip().getByText(/The Orchestrator's process/)).toBeTruthy();
 
+    // 11b: the strip's icon is the warning triangle, and End session is a filled red button (a variant of its
+    // own: the `danger` variant of Settings keeps its look).
+    const stripEl = screen.getByRole("group", { name: "Confirm end" });
+    expect(stripEl.querySelector("[data-icon=triangle-alert]")).not.toBeNull();
+    expect(stripEl.querySelector("[data-icon=alert]")).toBeNull();
+    const confirm = strip().getByRole("button", { name: "End session" });
+    expect(confirm.classList.contains("ui-btn-danger-solid")).toBe(true);
+    expect(confirm.classList.contains("ui-btn-danger")).toBe(false);
+    expect(strip().getByRole("button", { name: "Keep it" }).classList.contains("ui-btn-default")).toBe(true);
+
     await user.click(strip().getByRole("button", { name: "Keep it" }));
     expect(screen.queryByRole("group", { name: "Confirm end" })).toBeNull();
     expect(fake.count("sessionEnd")).toBe(0);
@@ -588,11 +620,11 @@ describe("the ended chat (11a)", () => {
 });
 
 describe("the chat header (11a)", () => {
-  it("shows the avatar, the agent, the project after a dot, and the chips with their icons", async () => {
+  it("shows the avatar, the agent with no project after it, and the chips with their icons", async () => {
     await bootChat(seeded());
     const head = within(main().getByRole("group", { name: "Chat header" }));
     expect(head.getByRole("heading", { name: "Orchestrator" })).toBeTruthy();
-    expect(head.getByText(/^·/).textContent).toContain("alpha");
+    expect(head.queryByText(/^·/)).toBeNull();
     expect(main().getByRole("group", { name: "Chat header" }).querySelector("[data-agent='orchestrator']")).not.toBeNull();
     expect(field("Worktree").classList.contains("ui-chip")).toBe(true);
     expect(field("Branch").classList.contains("ui-chip")).toBe(true);
@@ -715,7 +747,11 @@ describe("the stream's days, turns and notices (11a)", () => {
       itemFrame(3, { kind: "operator_message", text: "again" }),
       itemFrame(4, done({ is_error: true, stop: "max_turns" })),
     ]);
-    expect(log().getByText(`You stopped the turn · ${at("2026-11-09T10:52:00Z")}. The session stays open.`)).toBeTruthy();
+    const stopped = log().getByText(`You stopped the turn · ${at("2026-11-09T10:52:00Z")}. The session stays open.`);
+    expect(stopped).toBeTruthy();
+    // KL-3: 11b draws the stop icon (a square) before the line.
+    expect(stopped.querySelector("[data-icon=square]")).not.toBeNull();
+    expect(log().getByText("The turn failed: max_turns").querySelector("[data-icon]")).toBeNull();
     expect(log().getByText("The turn failed: max_turns")).toBeTruthy();
   });
 
