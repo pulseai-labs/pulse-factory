@@ -8,6 +8,10 @@
 // focus) a chat's tab. Two things stay in localStorage, per device: the sidebar's open state
 // (`pf.sidebar`) and the dock's (`pf.dock`). Round-3 screens open a page or a chat only through
 // `useNavigation()` (`shell/navigation.ts`), which this component provides.
+//
+// The sidebar and the dock each sit in a `SidePanel` frame, which keeps the panel mounted while it is closed
+// and animates its width as the canvas does. On a focused page the shell drops both frames, so a page change
+// has no transition.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner } from "../components/Banner";
 import { useChat, useNotConnected } from "../state/chat";
@@ -15,6 +19,7 @@ import { Dock, readDock, writeDock } from "../shell/Dock";
 import { back, canBack, canForward, closeTab, currentPage, forward, initialHistory, push, type Page } from "../shell/history";
 import { Navigation, type NavigationApi } from "../shell/navigation";
 import { Rail } from "../shell/Rail";
+import { SidePanel } from "../shell/SidePanel";
 import { Sidebar, type Grouping } from "../shell/Sidebar";
 import { TitleBar } from "../shell/TitleBar";
 import { Agents } from "./Agents";
@@ -142,8 +147,10 @@ export function Shell() {
         <Banner />
         <div className="body">
           <Rail page={page} sidebarOpen={sidebarOpen} onOpenPage={(name) => go({ kind: name })} onToggleSidebar={toggleSidebar} />
-          {hasSidebar && sidebarOpen ? (
-            <Sidebar page={page} current={chatOnScreen} grouping={grouping} onGrouping={setGrouping} onOpen={openChat} />
+          {hasSidebar ? (
+            <SidePanel name="sidebar" open={sidebarOpen}>
+              <Sidebar open={sidebarOpen} page={page} current={chatOnScreen} grouping={grouping} onGrouping={setGrouping} onOpen={openChat} />
+            </SidePanel>
           ) : null}
           <main className="main">
             {page.kind === "projects" ? (
@@ -158,7 +165,11 @@ export function Shell() {
               <Chat key={page.session} sessionId={page.session} />
             )}
           </main>
-          {!focused && dockOpen ? <Dock /> : null}
+          {focused ? null : (
+            <SidePanel name="dock" open={dockOpen}>
+              <Dock open={dockOpen} />
+            </SidePanel>
+          )}
         </div>
       </div>
     </Navigation.Provider>

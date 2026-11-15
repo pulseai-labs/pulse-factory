@@ -1,7 +1,8 @@
 // The dock (11a): 328 px on the right of the Projects, Agents and chat pages. The need-you pill opens and
 // closes it. Its open state is kept per device in localStorage under `pf.dock` (`open` or `closed`, read
 // in a `try`, as `pf.sidebar`), and it starts closed. It holds the switch (Needs you on, as text; Files not
-// built yet), the header and `DockRequests`.
+// built yet), the header and `DockRequests`. A closed dock stays mounted in its frame (`SidePanel`) and makes no
+// call: its cards read their bodies when it opens.
 import { CountBadge, Icon, NotBuilt } from "../ui";
 import { useRequests } from "../state/requests";
 import { DockRequests } from "./DockRequests";
@@ -24,7 +25,7 @@ export function writeDock(open: boolean): void {
   }
 }
 
-export function Dock() {
+export function Dock(props: { open: boolean }) {
   const requests = useRequests();
   const count = requests.open.length;
   return (
@@ -41,7 +42,7 @@ export function Dock() {
         <CountBadge count={count} title={`${count} open`} />
         <span className="dock-head-scope">all projects</span>
       </div>
-      <DockRequests />
+      <DockRequests active={props.open} />
     </aside>
   );
 }

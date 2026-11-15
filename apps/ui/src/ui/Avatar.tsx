@@ -5,8 +5,11 @@
 // with its markup (the `isEye` block of the 9a template, line 60) and the picks of 9a (line 222).
 // `avatar.test.tsx` checks every head against that source.
 //
-// No animation in this item: the eye sits in its idle place, and `needs_you` only adds the amber badge.
-// The canvas's blink, look and read animations come later, with the reduced-motion and 16 px rules.
+// The motion is 9a's (patch `fix/ui-canvas-motion`; the rules are in `ui.css`'s avatar block): `idle` blinks and
+// looks around, `working` blinks and reads side to side, and `needs_you` keeps its eye still and pings the amber
+// badge. None at 16 px (`ui-avatar-sm`) and none under reduced motion. Each avatar's eye starts at its own point
+// of the loop (`--avatar-delay`, 9a's `dl`), so two avatars on one screen do not blink together. 9a's wide eye
+// for `needs_you` (`scale(1.12)`) is a still look, not motion, and is not drawn here.
 import type { CSSProperties } from "react";
 import { cx } from "./cx";
 
@@ -70,6 +73,29 @@ export const BUILT_IN_AGENTS = {
 } as const satisfies Record<string, { color: string; head: HeadId }>;
 
 export type BuiltInAgent = keyof typeof BUILT_IN_AGENTS;
+
+/** The 9a palette's names of the built-in agents' colours (agent-avatars.dc.html, `PALETTE` and the picks of 9a). */
+const PALETTE_ID: Record<BuiltInAgent, string> = {
+  orchestrator: "violet",
+  autopilot: "red",
+  research_partner: "mint",
+  plain: "gray",
+};
+
+/** agent-avatars.dc.html line 181. */
+function hash(text: string): number {
+  let h = 0;
+  for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) % 997;
+  return h;
+}
+
+/**
+ * The delay of the eye's loop, 9a's `dl` (agent-avatars.dc.html line 196): `-(hash(colour + head + size) % 60) / 10`
+ * seconds, from 0 to -5.9 s. A custom agent's colour is its CSS colour.
+ */
+function avatarDelay(colour: string, head: HeadId, size: AvatarSize): string {
+  return `${-(hash(`${colour}${head}${size}`) % 60) / 10}s`;
+}
 /** A later custom agent: any CSS colour and one of the eight heads. */
 export interface CustomAgent {
   color: string;
@@ -93,7 +119,7 @@ export function agentLook(agentId: string): BuiltInAgent {
 export interface AvatarProps {
   agent: BuiltInAgent | CustomAgent;
   size: AvatarSize;
-  state?: "idle" | "needs_you";
+  state?: "idle" | "working" | "needs_you";
 }
 
 export function Avatar(props: AvatarProps) {
@@ -101,7 +127,8 @@ export function Avatar(props: AvatarProps) {
   const { color, head: headId } = typeof agent === "string" ? BUILT_IN_AGENTS[agent] : agent;
   const head = HEADS[headId];
   const [ex, ey, er] = head.eye;
-  const style = { width: size, height: size, "--avatar-c": color } as CSSProperties;
+  const delay = avatarDelay(typeof agent === "string" ? PALETTE_ID[agent] : color, headId, size);
+  const style = { width: size, height: size, "--avatar-c": color, "--avatar-delay": delay } as CSSProperties;
   return (
     <span
       className={cx("ui-avatar", size <= 18 && "ui-avatar-sm")}

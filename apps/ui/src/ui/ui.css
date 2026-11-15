@@ -108,4 +108,22 @@
 .ui-avatar .av-pupil { fill: var(--gray-0); }
 .ui-avatar .av-glint { fill: var(--avatar-glint); opacity: 0.85; }
 .ui-avatar .av-badge { fill: var(--amber-400); stroke: var(--bg-app); stroke-width: 2; }
+/* The 9a motion (patch `fix/ui-canvas-motion`): the keyframes and the state rules of r1-screens.dc.html's style
+   block, which agent-avatars.dc.html writes for 9a too. The canvas's `.ey-eye` is `.av-eye`, its `.ey-iris` is
+   `.av-iris-group`, its `st-<state>` is `data-state` and its `.lv.sm` is `.ui-avatar-sm`. `--avatar-delay` is 9a's
+   `dl`, set by the component. The translations are in the 40 × 40 view box's units. */
+.ui-avatar .av-eye, .ui-avatar .av-iris-group { transform-box: fill-box; transform-origin: center; }
+.ui-avatar[data-state="idle"] .av-eye { animation: lvBlink 4.6s infinite; animation-delay: var(--avatar-delay, 0s); }
+.ui-avatar[data-state="idle"] .av-iris-group { animation: lvLook 8s ease-in-out infinite; animation-delay: var(--avatar-delay, 0s); }
+.ui-avatar[data-state="working"] .av-eye { animation: lvBlink 6.5s infinite; animation-delay: var(--avatar-delay, 0s); }
+.ui-avatar[data-state="working"] .av-iris-group { animation: lvRead 0.8s ease-in-out infinite alternate; animation-delay: var(--avatar-delay, 0s); }
+.ui-avatar .av-badge { animation: lvPing 1.1s ease-in-out infinite; }
+.ui-avatar-sm * { animation: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .ui-avatar * { animation: none !important; }
+}
+@keyframes lvBlink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+@keyframes lvPing { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes lvLook { 0%, 16% { transform: translate(0, 0); } 24%, 44% { transform: translate(-2.6px, -0.8px); } 52%, 70% { transform: translate(2.6px, 0.6px); } 78%, 100% { transform: translate(0, 0); } }
+@keyframes lvRead { 0% { transform: translate(-2.4px, 0.8px); } 100% { transform: translate(2.4px, 0.8px); } }
 /* avatar:end */

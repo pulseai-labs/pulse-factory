@@ -3,10 +3,11 @@
 // By project / By state switch, Search sessions, the projects with their live sessions (or the sessions
 // grouped by state), and under them one "Workflow runs" group for the server (Planner ruling 6).
 //
-// The shell's run list: this component calls `runList` once each time it mounts (it unmounts on the
-// focused pages, so a visit to Needs you and back reads the list again) and once each time the link comes
-// back (`epoch`). No timer and no focus handler. A failure leaves the group as it was; a disconnect shows
-// the banner.
+// The shell's run list: this component calls `runList` once each time it opens (it mounts open, or the
+// operator opens it; it unmounts on the focused pages, so a visit to Needs you and back reads the list again)
+// and once each time the link comes back while it is open (`epoch`). A closed sidebar stays mounted in its
+// frame (`SidePanel`) and makes no call. No timer and no focus handler. A failure leaves the group as it was;
+// a disconnect shows the banner.
 import type { ChatSessionRecord, ProjectRecord, RunSummary } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useState } from "react";
 import { StreamLine } from "../components/StreamLine";
@@ -218,13 +219,15 @@ function Tree(props: { grouping: Grouping; query: string; current: string | null
 }
 
 export function Sidebar(props: {
+  /** The frame is open. A closed sidebar stays mounted and makes no call. */
+  open: boolean;
   page: Page;
   current: string | null;
   grouping: Grouping;
   onGrouping(value: Grouping): void;
   onOpen(session: string): void;
 }) {
-  const { page, current, grouping, onGrouping, onOpen } = props;
+  const { open, page, current, grouping, onGrouping, onOpen } = props;
   const { call, epoch } = useConnection();
   const chat = useChat();
   const requests = useRequests();
@@ -240,8 +243,8 @@ export function Sidebar(props: {
   }, [call, apply]);
 
   useEffect(() => {
-    void loadRuns();
-  }, [loadRuns, epoch]);
+    if (open) void loadRuns();
+  }, [open, loadRuns, epoch]);
 
   return (
     <section className="sidebar" aria-label="Sidebar">

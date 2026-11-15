@@ -174,8 +174,8 @@ export function NeedsYou() {
 }
 
 /** The open cards in the dock's 328 px width: the same hooks and Hold, no reads of its own. */
-export function NeedsYouDock() {
-  const ny = useNeedsYou();
+export function NeedsYouDock(props: { active: boolean }) {
+  const ny = useNeedsYou({ active: props.active });
   if (ny.open.length === 0) return <p className="dock-empty">Nothing needs you.</p>;
   return <OpenList ny={ny} compact />;
 }

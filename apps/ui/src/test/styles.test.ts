@@ -159,8 +159,9 @@ describe("app.css and ui.css use tokens only", () => {
     const defined = new Set(
       [...stripComments(tokens + appTokens).matchAll(/(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1]),
     );
-    // Set on an element by a component (src/ui/Avatar.tsx), not in a file.
+    // Set on an element by a component (src/ui/Avatar.tsx: the colour, and the 9a motion's delay), not in a file.
     defined.add("--avatar-c");
+    defined.add("--avatar-delay");
     for (const m of stripComments(css).matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) {
       expect(defined.has(m[1] ?? ""), `${name}: var(${m[1]}) has no definition`).toBe(true);
     }
