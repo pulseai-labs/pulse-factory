@@ -660,3 +660,230 @@ no change in `apps/desktop`.
 - The two new screenshots show the dialog and the confirm as built. A person has not yet compared them with
   frames 11e and 11f (AC-16 of this item). The differences the build leaves are in the item's report.
 - The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+
+## Amendment (`r1.s6.w1`)
+
+This item is round 1 of `r1.s6`. It closes the second gap walk's gaps in the title bar, the server's name, the
+not-connected state, the server icon and the Pair button. It changes no Rust, no verb, no transport file and no
+dependency (AC-10).
+
+- **One source of the server's name.** `ConnectionProvider` makes **one** `status()` call when it mounts (no
+  timer; the no-polling rule holds), through `call()`, so a down kind marks the link down as any call does. It
+  is no `retry()`, so it refetches no page. The connection keeps the `server` of every `status()` answer: this
+  call, the retry and Settings' call. `apps/ui/src/state/connection.tsx` exports the pure `serverNameOf(paired,
+  learned?)` and the hook `useServerName()`: the learned name, else the pairing's `server.name`, else the stored
+  name, else the address. All nine former `server.server?.name ?? server.address` sites use one of them
+  (`useServerName()` inside the provider, `serverNameOf(paired)` on the pair screen, which renders outside it).
+  The pair-success heading reads "Connected to <name>". "No server" before pairing stays (frame 11j).
+- **P1: the stored name, and its limit.** The last name an answer gave is kept in `localStorage` under
+  `pf.server-name` as `{address, name}`, read and written in a `try`, and used before the first answer when the
+  address matches the pairing's. It is a label only: never used for trust, routing or a call. `pf-client` keeps
+  the server's name **in memory only** (`note_server`), not with the pairing, so a first launch after pairing
+  with the server down, before any answer, shows the address. Storing the name with the pairing is a
+  `crates/pf-client` change and is out of scope here.
+- **P2: the derived state "not connected".** One display state: the link is down, **or** the chat stream is
+  `reconnecting`. It adds no state to the connection's machine and no timer. The banner (11i's copy for both
+  causes), the dimmed page, the "As of <time>, when <name> was last reachable" subtitle and the grey pill with
+  the time and no dock toggle key on it (`useNotConnected()` in `state/chat.tsx`). `ChatStatus` carries the
+  stream's `retry_in_ms`, so the banner counts down on a display tick that makes no call. `StreamLine` no
+  longer shows `reconnecting`; it keeps showing a stream that `closed` with a refusal or a server error, with
+  its Reconnect button (G8).
+- **The title bar is the same on every page** (W2-2, NG-2). Needs you and Settings keep the Projects tab, the
+  chat tabs, New tab and the need-you pill with its dock toggle, and hide only the sidebar toggle. The active
+  page tab (Projects with a chat tab open, Agents, Needs you, Settings) carries a × (NG-3). **P3:** the ×
+  closes the page and shows the last chat tab the operator used, else Projects.
+- **The server icon** (NG-22): Lucide's `server` joins `icon-nodes.ts` and is used on the server menu's tile
+  and Settings' server tile. **Pair** (NG-24, KL-6): the button is disabled, grey, while the code field is
+  empty or blank and while pairing runs; `IconSize` gains 22 for the pair tile.
+- **The seams for round 2.** `icon-nodes.ts` holds three marked, empty sections for `r1.s6.w2`, `r1.s6.w3` and
+  `r1.s6.w4`, and this file holds three empty amendment sections, one for each, below.
+- **The screenshots.** d25 keeps the pairing as the Mac gives it (no name in `PAIRED`), so the name in each
+  screenshot came from `status`. The `unreachable` mode answers the first `status` and fails every call after
+  it. Six of the fifteen screenshots change (`3a-pair`, `3b-server-menu`, `3c-disconnected`, `3f-needs-you`,
+  `6a-agents`, `settings`); the other nine are byte for byte as before.
+
+### Verified claims (`r1.s6.w1`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. `server-name.test.tsx` names the nine sites, the stored name for the same
+  address and not another, and the fallback to the address when `localStorage` fails. `disconnected.test.tsx`
+  and `no-polling.test.tsx` name the derived state: a `reconnecting` event with the link up shows the banner,
+  dims the page, greys the pill and calls nothing by a timer.
+- `scripts/demo/ui-screens.sh` (d25) passes three runs in a row, and a copy of the built CSS with the sidebar
+  width changed fails the line and names `sidebar-by-state`. d12, d19 and d23 pass against the real controller,
+  API and bridge, with three selector changes (the heading `Connected to <name>`, the rail's Projects button,
+  and the `localStorage` keys, which now include `pf.server-name`); the `client-api-auth` Rust tests pass
+  unchanged.
+
+### Unverified claims (`r1.s6.w1`)
+- A person has not yet compared the six changed screenshots with their frames. The report lists each
+  screenshot's w1 elements with the item's verdict.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+- The name that the real `pf-client` gives after a pairing (the server's host name) is shown as it is; the
+  fixture's `draco-desk` is test data.
+
+## Amendment (`r1.s6.w2`)
+
+This item is round 2 of `r1.s6`. It closes the second gap walk's gaps in the chat, the End session confirm and
+the start card (frames 11a, 11b, 11c). It changes no Rust, no verb, no transport file and no dependency
+(AC-9). Round 1's seams are used as built: this item's icons are in its own section of `icon-nodes.ts`.
+
+- **P4: a typed answer goes in the composer.** While the chat holds exactly one open single-question card, the
+  composer's Send (and Enter) calls `sessionAnswer` with the card's `seq` and
+  `{ type: "answers", value: { <question text>: <typed text> } }`, through the same `AnswerFn` the card used, with
+  its command-ID rules. The composer's placeholder stays `Message <agent>`, and Send's title reads "Answer the
+  open question". The card shows 11a's sentence ("Or type a different answer below. You can also answer from
+  your phone or the CLI.") and has no field and no Send. In every other case Send is `sessionSend`: a request
+  with more than one question, or a multi-select question, keeps its toggles, its "Other answer" fields and its
+  one Send on the card (no frame draws it). This replaces `r1.s5.w3`'s planner ruling 6. The rule is in
+  `docs/contracts/ui-transport.md`, and `composer-answer.test.tsx` holds it.
+- **P5: the merge sentence.** The merge rule is not a field of `ArmMerge`. The server writes it into `sentence`,
+  in one of two forms only (`crates/pulse-factory/src/arm.rs`): "item PRs merge into <base> on green checks with
+  no ack" and "the <track> PR merges into <base> only on the claim's ack". The card maps them to 11c's words:
+  "Item PRs merge into `<base>` without asking." and "The <track> PR into `<base>` waits for you.", with the base
+  in a code chip (the merge's own `base` and `track`). Any other sentence shows as the server wrote it. Making
+  the rule a field is a `crates/pf-api` change, left to a later spine.
+- **P6: the header without the project.** The chat header shows the avatar, the agent's name and the state pill.
+  The `Project` group stays in the header's accessible tree, visually hidden (`ui-sr-only`), so nothing is lost
+  and d19's steps read it as before. No session title is drawn: `ChatSessionRecord` has none.
+- **The cache line always shows** while the session is live: "Cache warm · Nm left" while the cache is warm, else
+  "Cache cold", and so before the first turn. Its one display tick makes no call. Its title is 11b's sentence
+  where the record gives the numbers (the TTL, and for a warm cache the reply time and the context's tokens).
+  The "steers the running turn" line is gone; Send's title carries it ("Steers the running turn" or "Runs as the
+  next turn"), and while the agent works Send shows beside Stop once there is text.
+- **A button variant and a radius token.** `Button` gains `danger-solid`, the filled red button of 11b's End
+  session confirm. The `danger` variant keeps its look: Settings' Disconnect and Remove project use it.
+  `app-tokens.css` gains `--radius-chat-card` (10 px, 11a, 11b, 11c), used on the operator's bubble, the start card
+  and the composer box. `--radius-xl` and every other token are unchanged: other screens use them.
+- **The start card.** The per-loop limits line is gone (the seeds, the relaunch limit and the loops are the
+  Limits group's title); the three tiles keep their values and take 11c's icon tiles. The head has the chip row
+  (the spine ID, the spine branch, an arrow, the base): the branch is the `base` of the first merge that is not
+  the plan's `default_branch`, and with no such merge the row shows the spine ID only. The item count is at the
+  right of the Work items label row. After the start the note, CLI and Change something leave, and the Started
+  block (check icon, "Started", "<device> · <time>", "Run <run> is running") holds "Open run view" as 11l's
+  quiet link with its tag. The one press, the code's life and every refusal path are as in `r1.s5.w3`.
+- **Not built, shown so (KL-11).** Attach (the paperclip) and the request ID chip ("Copy as CLI command") use
+  `NotBuilt`: dimmed, tagged "Later release", no call.
+
+### Verified claims (`r1.s6.w2`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. The new and changed tests name each rule above, including the two sentence
+  forms and an unknown one, the one open card against two, a multi-select and a many-question request, and the
+  end of the Started block.
+- `scripts/demo/ui-screens.sh` (d25) passes three runs in a row; only `2a-chat`, `2b-chat-sidebar-closed`,
+  `6b-start-card` and `11b-end-session` changed. A copy of the built CSS with `.start-card{margin-top:7px}`
+  fails the line and names `6b-start-card` (the screenshot now shows the line above the card, so the card's place
+  in the thread is part of it).
+- d19 and d23 (card mode) pass against the real controller, API and bridge, and the `client-api-auth` Rust tests
+  pass unchanged.
+
+### Unverified claims (`r1.s6.w2`)
+- A person has not yet compared the four changed screenshots with their frames. The report lists each
+  difference left, one line for each gap ID.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only. The composer's
+  invisible pop-up over each control (`opacity: 0`) is a Chromium-checked layout: the Mac's WebKit has not shown it.
+
+## Amendment (`r1.s6.w3`)
+
+This item is round 2 of `r1.s6`. It closes the second gap walk's gaps on the Agents page, its tab and its
+sidebar list, on the Needs you header and on Settings' layout. It changes no Rust, no verb, no transport file and
+no dependency (AC-8). It edits no `ui/` component except `display-names.ts` (and the `ui` index's export of it)
+and its own section of `icon-nodes.ts`.
+
+- **The Agents tab** (W1-29). `shell/TitleBar.tsx`'s `PageTab` reads "<selected agent's name> agent" with that
+  agent's `Avatar` (16 px) in place of the bot icon, and its × reads "Close <name> agent". The agent is
+  `useSelectedAgent(chat.list.agents)`, the one the sidebar list and the page use. With no agent listed yet the
+  tab reads "Agents" with the bot icon. No other tab changes.
+- **The Orchestrator's one-session label and its source** (NG-21, d17-10). The list row's second line and a chip in
+  the page header read "One session per project" for the Orchestrator (`isOrchestrator`, `agent.id ===
+  "orchestrator"`). The source is the server's rule: `crates/pulse-factory/src/controller/sessions.rs`
+  (`live_orchestrator`, keyed on `ORCHESTRATOR_AGENT`) allows one live session for each project **for the
+  Orchestrator only**. Any other agent's row shows its `title`, and its header has no chip. The footnote under
+  Sessions by project (KL-5, "At most one live Orchestrator session per project. …") shows for the Orchestrator only.
+- **P8: the agent's subtitle is store data.** The header's subtitle is the agent's `title`. For the built-in
+  Orchestrator the store writes "Runs this project" (`crates/pf-store-sqlite/migrations/0005_hierarchy.sql`).
+  Changing it is a store migration (Rust), which this round does not make, so the d25 fixture takes the real title
+  and the frame's "Plans spines with you and arms workflows" stays a difference that d26 rules.
+- **`runtimeName`** (d17-12). `ui/display-names.ts` gains `runtimeName(id)`: `claude-code` is "Claude Code", `omp` is
+  "OMP", any other id comes back unchanged, as the file's other tables do. The Runtime tile shows it, with "or
+  <names>" under it for the other runtimes in `session_list`'s `runtimes` (none, no note). The agent's runtime
+  options moved from the page's "Runtime options" line into the Runtime tile's `title` (G8), so none is lost.
+- **The Model note rule.** The Model tile's note is `runtime_options.billing` when the agent sets it, else
+  "Anthropic subscription · wu" for the `claude-code` runtime (the basis `components/cost.ts` records: a chat runs the
+  operator's subscription login and is shown in wu), else no note.
+- **P7: the permission switch's position.** The six modes map to the three positions: `plan` is Read only, `manual`
+  is Ask before edits, and `acceptEdits`, `auto`, `dontAsk` and `bypassPermissions` are Edit freely. A mode the
+  table does not know selects none. The selected position has `aria-pressed="true"`. The bold mode text above the
+  control left; the control's `title` and a visually hidden text name the exact mode (`permissionName`). The control
+  stays disabled with its Later tag (R5).
+- **The notification card** (NG-20) is drawn in `screens/Agents.tsx` (an amber `chat` tile, the label and its
+  description, the Later tag, then the off switch), so `NotBuilt`'s `row` form has no user and `ui/NotBuilt.tsx`
+  is untouched. It stays not built: no call, no focus, `aria-disabled`.
+- **New agent** (NG-19). The sidebar head draws 11g's "Later release" tag beside the `+`. `NotBuilt`'s `compact`
+  form, which the pair screen uses, is unchanged.
+- **Needs you loses its header Refresh button** (W1-33, d24-9): 11d has none. The read-error line keeps its Refresh
+  button, the only recovery after a failed read (G8). The page reads again when the link comes back and the stream
+  brings new requests, so no other call and no timer changes.
+- **Settings' layout** (NG-25 to NG-27). "Disconnect this Mac" spans the device card, the This device tile shows
+  Lucide's `laptop` (in this item's `icon-nodes.ts` section), and the server card ends under its Address and Server
+  version rows (the two cards no longer stretch to one height). The Disconnect confirm and its calls are unchanged.
+  The Settings text (KL-1, NG-28 to NG-30) is carried to Release 2.
+- **The screenshots.** Three of this item's four screenshots change (`3f-needs-you`, `6a-agents`, `settings`);
+  `dock-needs-you` is byte for byte as before. The other eleven are as before.
+
+### Verified claims (`r1.s6.w3`)
+
+Checked on draco-desk on 2026-11-14 with the item's verification commands (each through `oss verify_step`):
+- The whole UI suite and `tsc` pass. `agents-gaps.test.tsx` asserts the rendered text and markup named above:
+  the tab and its ×, the row and the chip, the Runtime and Model tiles, each of the six modes' position and an
+  unknown mode's none, the notification card's order and that it makes no call, and the footnote.
+  `needs-you.test.tsx` asserts that the header has no Refresh and that the read-error Refresh makes the same
+  calls as before; `no-polling.test.tsx` passes.
+- d25 (`scripts/demo/ui-screens.sh`) passes three runs in a row within 60 s, and a copy of the built CSS with
+  `.ag-identity` moved fails it and names `6a-agents`. d23 passes against the real controller, API and bridge
+  with no selector change. The `client-api-auth` Rust tests pass unchanged.
+
+### Unverified claims (`r1.s6.w3`)
+- A person has not yet compared the three changed screenshots with their frames (11d, 11g, 11k). The report
+  lists each remaining difference by gap ID.
+- The Mac app's WebKit draws the bundle as the screenshots show. d25 holds Chromium only.
+- The real agent's `permission_mode` values are the six of the pinned CLI; the d25 fixture's `bypass` is an
+  unknown mode, so `6a-agents` shows no selected position where 11g shows "Ask before edits".
+
+## Amendment (`r1.s6.w4`)
+
+This section belongs to `r1.s6.w4`. Its item writes here, and nowhere else in this file.
+
+This item closes the second gap walk's gaps in the Add a project dialog (11f) and the Remove project confirm
+(11e): NG-13 to NG-18, KL-7 and KL-8. It changes no Rust, no verb, no transport file and no dependency.
+`project_add`, `project_remove` and `folder_list` keep their calls, their command-ID rules and the locked rule.
+
+- **The breadcrumb (NG-14).** The path row is the Up one folder button, then a home part ("~" with the Lucide
+  `house` icon, added to `icon-nodes.ts` in this item's section), then one part for each folder below home,
+  separated by "/". The home part carries the full home path in its `title`. The current folder is the last
+  part and carries `aria-current="location"`; at the home folder the row shows the home part alone, as plain
+  text. Every other part is a button, and a press on it makes **one** `folder_list` call for that part's path,
+  as a row's Open button and the Up button do. No timer, no extra call.
+- **A folder that is a project already (NG-15).** Its row has no Open (chevron) button. Its pick stays
+  disabled and the row shows "Already a project", dimmed. A folder that is not a project keeps its chevron and
+  its call.
+- **The host row and the button (NG-17, NG-16).** The host row's icon is `server` (added in `r1.s6.w1`). The
+  Add project button carries the `plus` icon.
+- **The dialog's height rule (NG-18, KL-7).** The overlay leaves the title bar's height (`--titlebar-h`) and
+  11f's 20 px margin free above the dialog, and 20 px on the other sides. The dialog is at most that tall, so its
+  heading stays below the title bar in any window. The folder list is the part that gives way: it is 240 px
+  (six rows) while the window has room and shrinks to 100 px, then the body scrolls under the heading and the
+  footer stays in view. At 1440 × 932 a picked git folder shows six rows without scrolling. The tip of a picked
+  plain folder is 137 px more, so the list gives way to it (at 1440 × 900, 120 px). The body's gap (18 px) and
+  bottom padding (20 px) follow 11f. The window's own height (`apps/desktop/**`) is out of scope.
+- **The live-session confirm (NG-13).** Each session line reads "<agent> · <branch>", then the state in its own
+  dimmed span after a dot, in lower case: `needs_you` is "· waiting on you", `idle` is "· idle", `working` is
+  "· working", and any other state is its label in lower case. The state dot stays. No session title is drawn:
+  the record has none.
+- **The locked confirm (KL-8) and P9.** The sentence reads as 11e: "Workflow <spine> is running. You can remove
+  the project after the run ends." (one run) or "Workflows <a>, <b> are running. …" (more). The locked Remove
+  project button's `title` is "Locked while <spine> runs" (one run) or "Locked while its workflows run" (more).
+  **P9:** `RunSummary` carries the spine's ID only, so `<spine>` is the ID, not the spine name that 11e draws
+  ("S-1 skeleton spine"). The spine name is a data gap: the run record has no such field, and a field is a
+  later spine's change to `pf-api`. The d26 rulings accept it or carry it (constraint 3).

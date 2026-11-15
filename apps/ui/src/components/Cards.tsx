@@ -3,13 +3,16 @@
 // limit and no timer, and it answers nothing by itself: only the operator's press sends an answer.
 //
 // A question with one single-select question shows one button per option, and one press sends that
-// answer (O2). A request with more than one question, or a multi-select question, shows each option as a
-// toggle and one Send. The "different answer" field stays on the card (Planner ruling 6).
+// answer (O2). A typed answer to it goes in the composer, as 11a says ("Or type a different answer below"):
+// the card has no field and no Send for it (ruling P4, `composer-answer.test.tsx`). A request with more than
+// one question, or a multi-select question, shows each option as a toggle, its own "Other answer" field
+// and one Send on the card (no frame draws it; G8). The request's ID is a chip at the right of the head: it
+// is `NotBuilt`, "Copy as CLI command" (KL-11).
 import type { ChatAnswerArg, ChatItemBody, ChatItemRecord, QuestionRecord } from "@pulse-factory/api-client";
 import { useState } from "react";
 import { timeText } from "./chat-format";
 import { ToolText } from "./ToolText";
-import { Button, Chip, Icon, Input } from "../ui";
+import { Button, Chip, Icon, Input, NotBuilt } from "../ui";
 
 /**
  * Sends one answer for the request at `seq`. It resolves to the text to show on the card (a
@@ -18,6 +21,33 @@ import { Button, Chip, Icon, Input } from "../ui";
 export type AnswerFn = (seq: number, answer: ChatAnswerArg) => Promise<string | null>;
 
 type Approval = Extract<ChatItemBody, { kind: "approval_request" }>;
+
+/** The one open single-question card of a chat, as the composer needs it to send a typed answer (P4). */
+export interface OpenQuestion {
+  /** The request item's `seq`: the answer goes to it. */
+  seq: number;
+  /** The question's text: the key of the answer. */
+  text: string;
+}
+
+/**
+ * The chat's open single-question card, or `null`. A card is open while no `question_answer` item (of any
+ * outcome) answers its request. It counts when it has one question and that question is single-select. With
+ * no such card, or with more than one, there is no target: Send is a plain send.
+ */
+export function openSingleQuestion(items: ChatItemRecord[]): OpenQuestion | null {
+  const closed = new Set<number>();
+  for (const it of items) {
+    if (it.body.kind === "question_answer" && it.answers_seq !== null) closed.add(it.answers_seq);
+  }
+  const open: OpenQuestion[] = [];
+  for (const it of items) {
+    if (it.body.kind !== "question_request" || closed.has(it.seq)) continue;
+    const [only, ...rest] = it.body.items;
+    if (only !== undefined && rest.length === 0 && !only.multi_select) open.push({ seq: it.seq, text: only.text });
+  }
+  return open.length === 1 ? (open[0] ?? null) : null;
+}
 
 /** How a closed request ended, as text: answered, withdrawn by the agent, or lost. */
 function Outcome(props: { outcome: "answered" | "lost" | "withdrawn"; reason: string | null; answered: React.ReactNode }) {
@@ -198,13 +228,9 @@ export function QuestionCard(props: {
     if (!q.multi_select && value.trim() !== "") setChosen((c) => ({ ...c, [index]: [] }));
   }
 
-  const eyebrow = outcome
-    ? outcome.outcome === "answered"
-      ? `Answered · ${timeText(answer?.created_at ?? request.created_at)}`
-      : null
-    : readOnly
-      ? null
-      : `Needs you · since ${timeText(request.created_at)} · ${requestId}`;
+  const open = outcome === null && !readOnly;
+  const answeredHead =
+    outcome && outcome.outcome === "answered" ? `Answered · ${timeText(answer?.created_at ?? request.created_at)}` : null;
 
   return (
     <article
@@ -212,10 +238,21 @@ export function QuestionCard(props: {
       aria-label="Question"
       data-seq={request.seq}
     >
-      {eyebrow ? (
+      {answeredHead ? (
         <div className="card-head">
-          <Icon name={outcome ? "check" : "chat"} size={14} />
-          <span className="card-eyebrow">{eyebrow}</span>
+          <Icon name="check" size={14} />
+          <span className="card-eyebrow">{answeredHead}</span>
+        </div>
+      ) : null}
+      {open ? (
+        <div className="card-head">
+          <Icon name="chat" size={14} />
+          <span className="card-eyebrow">Needs you</span>
+          <span className="card-since">{`since ${timeText(request.created_at)}`}</span>
+          <span className="head-spacer" />
+          <span className="request-chip" title="Copy as CLI command">
+            <NotBuilt as="button" label={requestId} icon="copy" />
+          </span>
         </div>
       ) : null}
       {questions.map((q, i) => (
@@ -248,25 +285,20 @@ export function QuestionCard(props: {
                   </Button>
                 ))}
               </div>
-              <div className="question-other">
-                <span className="muted">Or type a different answer:</span>
-                <Input
-                  type="text"
-                  aria-label="Other answer"
-                  disabled={locked}
-                  value={other[i] ?? ""}
-                  onChange={(e) => type(i, q, e.target.value)}
-                />
-                {simple ? (
-                  <Button
-                    aria-label="Send answer"
-                    disabled={locked || answers[0] === ""}
-                    onClick={() => send(answers)}
-                  >
-                    Send
-                  </Button>
-                ) : null}
-              </div>
+              {simple ? (
+                <p className="question-hint">Or type a different answer below. You can also answer from your phone or the CLI.</p>
+              ) : (
+                <div className="question-other">
+                  <span className="muted">Or type another answer:</span>
+                  <Input
+                    type="text"
+                    aria-label="Other answer"
+                    disabled={locked}
+                    value={other[i] ?? ""}
+                    onChange={(e) => type(i, q, e.target.value)}
+                  />
+                </div>
+              )}
             </>
           )}
         </fieldset>

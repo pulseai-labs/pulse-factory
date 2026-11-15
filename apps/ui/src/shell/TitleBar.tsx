@@ -1,14 +1,19 @@
-// The title bar (11a, 11i): one row, 42 px. From the left: the server chip, the sidebar toggle, Back and
-// Forward (R1: right after the toggle and before the divider), the page title drawn as the first tab, the
-// chat tabs, New tab, a spacer and the need-you pill. The Needs you and Settings pages are focused pages:
-// they keep the chip, Back, Forward and the title, and hide the rest. `data-tauri-drag-region` is on the
-// empty parts, and the left padding is `--titlebar-inset`, so a later change in `apps/desktop/**` can make
-// room for the traffic lights without a UI change.
+// The title bar (11a, 11d, 11i, 11k): one row, 42 px, the same on every page. From the left: the server
+// chip, the sidebar toggle, Back and Forward (R1: right after the toggle and before the divider), the
+// Projects tab, the chat tabs, the tab of the page on screen when it is Agents, Needs you or Settings, New
+// tab, a spacer and the need-you pill with its dock toggle. A focused page (Needs you, Settings) hides only
+// the sidebar toggle (W2-2, R1-a). The active page tab carries a × as a chat tab does (NG-3); P3: it closes
+// the page and shows the last chat tab the operator used, else Projects, and Projects with no chat tab open
+// draws none. The Agents tab reads "<selected agent> agent" with that agent's avatar (11g, r1.s6.w3). The chip, the pill and the dock toggle follow the derived not-connected state (11i, P2).
+// `data-tauri-drag-region` is on the empty parts, and the left padding is `--titlebar-inset`, so a later
+// change in `apps/desktop/**` can make room for the traffic lights without a UI change.
+import type { AgentRecord } from "@pulse-factory/api-client";
 import { useRef, useState } from "react";
+import { useSelectedAgent } from "../screens/agentSelection";
 import { ServerMenu } from "../components/ServerMenu";
 import { clock } from "../components/format";
-import { agentName, useChat } from "../state/chat";
-import { useConnection } from "../state/connection";
+import { agentName, useChat, useNotConnected } from "../state/chat";
+import { useConnection, useServerName } from "../state/connection";
 import { useRequests } from "../state/requests";
 import { Avatar, Icon, agentLook, type IconName } from "../ui";
 import type { Page } from "./history";
@@ -36,8 +41,6 @@ export interface TitleBarProps {
   /** Show the toggle: the page has a sidebar. */
   hasSidebar: boolean;
   sidebarOpen: boolean;
-  /** Show the chat tabs, New tab and the pill: the page is not a focused page. */
-  focused: boolean;
   dockOpen: boolean;
   canBack: boolean;
   canForward: boolean;
@@ -47,6 +50,10 @@ export interface TitleBarProps {
   onToggleDock(): void;
   onOpenTab(session: string): void;
   onCloseTab(session: string): void;
+  /** The Projects tab, when another page is on screen. */
+  onOpenProjects(): void;
+  /** The × of the active page tab (P3). */
+  onClosePage(): void;
   onNewTab(): void;
 }
 
@@ -59,6 +66,38 @@ function Glyph(props: { side: "left" | "right" }) {
   );
 }
 
+/**
+ * A page tab (Projects, Agents, Needs you, Settings): the active one is the page's heading and may carry a ×.
+ * The Agents tab with an `agent` reads "<name> agent" with that agent's avatar in place of the bot icon (11g, W1-29);
+ * with no agent listed yet it reads "Agents" with the bot icon.
+ */
+function PageTab(props: { kind: Page["kind"]; active: boolean; closable: boolean; agent?: AgentRecord; onOpen?: () => void; onClose: () => void }) {
+  const { kind, active, closable, agent } = props;
+  const label = kind === "agents" && agent !== undefined ? `${agent.name} agent` : PAGE_NAME[kind];
+  const glyph =
+    kind === "agents" && agent !== undefined ? <Avatar agent={agentLook(agent.id)} size={16} /> : <Icon name={PAGE_ICON[kind]} size={14} />;
+  return (
+    <div className={`tb-tab tb-pagetab${active ? " tb-tab-on" : ""}${active && closable ? " tb-pagetab-x" : ""}`}>
+      {active ? (
+        <h1 className="tb-page tb-page-on">
+          {glyph}
+          {label}
+        </h1>
+      ) : (
+        <button className="tb-tab-main" type="button" onClick={props.onOpen}>
+          {glyph}
+          {label}
+        </button>
+      )}
+      {active && closable ? (
+        <button className="tb-tab-close" type="button" aria-label={`Close ${label}`} title={`Close ${label}`} onClick={props.onClose}>
+          <Icon name="x" size={12} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function TitleBar(props: TitleBarProps) {
   const conn = useConnection();
   const chat = useChat();
@@ -66,12 +105,14 @@ export function TitleBar(props: TitleBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const anchor = useRef<HTMLDivElement>(null);
   const { page } = props;
+  const agent = useSelectedAgent(chat.list?.agents ?? []);
 
-  const name = conn.server.server?.name ?? conn.server.address;
-  // `down`: the link is down. It drives the chip title, the static pill and the tab dots (Approaches 1.1, 1.5, 1.7).
-  // `dotRed` adds the reconnecting stream, and only the chip's dot reads it (Approach 1.1).
+  const name = useServerName();
+  // `down`: the link is down. It drives the tab dots (Approaches 1.1, 1.5, 1.7).
+  // `notConnected` is the derived state of 11i: the link is down or the stream reconnects (r1.s6.w1, P2). It
+  // drives the chip's dot and the grey pill with no toggle. The chip's title and the tab dots keep to `down`.
   const down = conn.link.state === "down";
-  const dotRed = down || chat.status.state === "reconnecting";
+  const notConnected = useNotConnected();
   const reached = conn.lastReachedAt === null ? null : clock(conn.lastReachedAt);
   const chip = down
     ? "Not connected"
@@ -101,7 +142,7 @@ export function TitleBar(props: TitleBarProps) {
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen((o) => !o)}
         >
-          <span className={`tb-dot tb-dot-${dotRed ? "down" : "up"}`} aria-hidden="true" />
+          <span className={`tb-dot tb-dot-${notConnected ? "down" : "up"}`} aria-hidden="true" />
           {name}
           <span className="tb-chip-caret" aria-hidden="true">
             <Icon name="chevrons-up-down" size={12} />
@@ -131,52 +172,54 @@ export function TitleBar(props: TitleBarProps) {
       <span className="tb-divider" aria-hidden="true" />
 
       <div className="tb-strip" data-tauri-drag-region>
-        <h1 className={`tb-page${page.kind === "chat" ? "" : " tb-page-on"}`}>
-          <Icon name={PAGE_ICON[page.kind]} size={14} />
-          {PAGE_NAME[page.kind]}
-        </h1>
-        {props.focused ? null : (
-          <>
-            {props.tabs.length > 0 ? (
-              <div className="tb-tabs" role="tablist" aria-label="Open chats">
-                {props.tabs.map((session) => {
-                  const record = chat.records[session];
-                  return (
-                    <div className={`tb-tab${chatOnScreen === session ? " tb-tab-on" : ""}`} key={session}>
-                      <button
-                        className="tb-tab-main"
-                        type="button"
-                        role="tab"
-                        aria-selected={chatOnScreen === session}
-                        onClick={() => props.onOpenTab(session)}
-                      >
-                        <Avatar agent={agentLook(record?.agent_id ?? "orchestrator")} size={16} />
-                        {tabName(session)}
-                        <span className={`tb-tab-dot tb-tab-dot-${tabDot(session)}`} aria-hidden="true" />
-                      </button>
-                      <button
-                        className="tb-tab-close"
-                        type="button"
-                        aria-label={`Close ${tabName(session)}`}
-                        title={`Close ${tabName(session)}`}
-                        onClick={() => props.onCloseTab(session)}
-                      >
-                        <Icon name="x" size={12} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-            <button className="tb-btn tb-new" type="button" title="New tab" aria-label="New tab" onClick={props.onNewTab}>
-              <Icon name="plus" size={14} />
-            </button>
-          </>
-        )}
+        <PageTab
+          kind="projects"
+          active={page.kind === "projects"}
+          closable={props.tabs.length > 0}
+          onOpen={props.onOpenProjects}
+          onClose={props.onClosePage}
+        />
+        {props.tabs.length > 0 ? (
+          <div className="tb-tabs" role="tablist" aria-label="Open chats">
+            {props.tabs.map((session) => {
+              const record = chat.records[session];
+              return (
+                <div className={`tb-tab${chatOnScreen === session ? " tb-tab-on" : ""}`} key={session}>
+                  <button
+                    className="tb-tab-main"
+                    type="button"
+                    role="tab"
+                    aria-selected={chatOnScreen === session}
+                    onClick={() => props.onOpenTab(session)}
+                  >
+                    <Avatar agent={agentLook(record?.agent_id ?? "orchestrator")} size={16} />
+                    {tabName(session)}
+                    <span className={`tb-tab-dot tb-tab-dot-${tabDot(session)}`} aria-hidden="true" />
+                  </button>
+                  <button
+                    className="tb-tab-close"
+                    type="button"
+                    aria-label={`Close ${tabName(session)}`}
+                    title={`Close ${tabName(session)}`}
+                    onClick={() => props.onCloseTab(session)}
+                  >
+                    <Icon name="x" size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {page.kind === "agents" || page.kind === "needs_you" || page.kind === "settings" ? (
+          <PageTab kind={page.kind} active closable agent={page.kind === "agents" ? agent : undefined} onClose={props.onClosePage} />
+        ) : null}
+        <button className="tb-btn tb-new" type="button" title="New tab" aria-label="New tab" onClick={props.onNewTab}>
+          <Icon name="plus" size={14} />
+        </button>
       </div>
 
       <div className="tb-spacer" data-tauri-drag-region />
-      {props.focused ? null : down ? (
+      {notConnected ? (
         <span className="tb-pill tb-pill-stale" title={reached === null ? undefined : `Counts as of ${reached}`}>
           <Icon name="circle-dot" size={14} />
           {`${count} need you${reached === null ? "" : ` · ${reached}`}`}

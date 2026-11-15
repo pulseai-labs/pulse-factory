@@ -9,7 +9,7 @@
 import type { FolderEntry, FolderList, ProjectRecord } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { asTransportError, useConnection } from "../state/connection";
+import { asTransportError, useConnection, useServerName } from "../state/connection";
 import { Button, Icon, IconButton, Input, NotBuilt } from "../ui";
 import "../styles/add-project.css";
 import { useCommandId } from "./command-id";
@@ -32,20 +32,27 @@ export interface AddProjectProps {
 /** Joins the class names that are set. */
 const cx = (...parts: Array<string | false>) => parts.filter((p) => p !== false && p !== "").join(" ");
 
-/** The crumbs of a path: the home folder first, then each folder below it. */
-function crumbsOf(list: FolderList): Array<{ label: string; path: string }> {
+/** One part of the folder path (11f). The home part is "~" with the house icon; its `path` is the full home path. */
+interface Crumb {
+  label: string;
+  path: string;
+  home: boolean;
+}
+
+/** The crumbs of a path: the home folder first ("~"), then each folder below it. */
+function crumbsOf(list: FolderList): Crumb[] {
   const rest = list.path === list.home ? [] : list.path.slice(list.home.length).split("/").filter((s) => s !== "");
-  const crumbs = [{ label: list.home, path: list.home }];
+  const crumbs: Crumb[] = [{ label: "~", path: list.home, home: true }];
   rest.forEach((segment, i) => {
-    crumbs.push({ label: segment, path: `${list.home}/${rest.slice(0, i + 1).join("/")}` });
+    crumbs.push({ label: segment, path: `${list.home}/${rest.slice(0, i + 1).join("/")}`, home: false });
   });
   return crumbs;
 }
 
 export function AddProject(props: AddProjectProps) {
   const { onAdded, onClose } = props;
-  const { call, link, server } = useConnection();
-  const serverName = server.server?.name ?? server.address;
+  const { call, link } = useConnection();
+  const serverName = useServerName();
   const down = link.state === "down";
 
   const [listing, setListing] = useState<FolderList | null>(null);
@@ -196,7 +203,7 @@ export function AddProject(props: AddProjectProps) {
         <section className="ap-section" aria-label="Host">
           <span className="ap-label">Host</span>
           <div className="ap-host">
-            <Icon name="layers" size={16} />
+            <Icon name="server" size={16} />
             <span className="ap-host-name">{serverName}</span>
             <span className="ap-host-state">
               <span className={cx("ap-dot", down && "ap-dot-down")} aria-hidden="true" />
@@ -234,14 +241,14 @@ export function AddProject(props: AddProjectProps) {
           </div>
         </section>
 
-        <section className="ap-section" aria-label="Folder">
+        <section className="ap-section ap-folder" aria-label="Folder">
           <div className="ap-folder-head">
             <span className="ap-label">Folder</span>
             <span className="ap-spacer" />
             <span className="ap-note">Only folders inside your home folder</span>
           </div>
           <div className="ap-browser">
-            <div className="ap-crumbs">
+            <div className="ap-crumbs" role="group" aria-label="Folder path">
               <IconButton
                 icon="arrow-left"
                 title="Up one folder"
@@ -254,11 +261,18 @@ export function AddProject(props: AddProjectProps) {
                 <span className="ap-crumb" key={crumb.path}>
                   {i > 0 ? <span className="ap-crumb-sep">/</span> : null}
                   {i === crumbs.length - 1 ? (
-                    <span className="ap-crumb-now" aria-current="location">
+                    <span className="ap-crumb-now" aria-current="location" title={crumb.home ? crumb.path : undefined}>
+                      {crumb.home ? <Icon name="house" size={13} /> : null}
                       {crumb.label}
                     </span>
                   ) : (
-                    <button type="button" className="ap-crumb-btn" onClick={() => void list(crumb.path)}>
+                    <button
+                      type="button"
+                      className="ap-crumb-btn"
+                      title={crumb.home ? crumb.path : undefined}
+                      onClick={() => void list(crumb.path)}
+                    >
+                      {crumb.home ? <Icon name="house" size={13} /> : null}
                       {crumb.label}
                     </button>
                   )}
@@ -292,12 +306,14 @@ export function AddProject(props: AddProjectProps) {
                       {" "}
                       {taken ? <span className="ap-taken">Already a project</span> : null}
                     </button>
-                    <IconButton
-                      icon="chevron-right"
-                      size={28}
-                      title={`Open ${entry.name}`}
-                      onClick={() => void list(entry.path)}
-                    />
+                    {taken ? null : (
+                      <IconButton
+                        icon="chevron-right"
+                        size={28}
+                        title={`Open ${entry.name}`}
+                        onClick={() => void list(entry.path)}
+                      />
+                    )}
                   </li>
                 );
               })}
@@ -363,7 +379,7 @@ export function AddProject(props: AddProjectProps) {
         <Button size="lg" onClick={() => onClose()}>
           Cancel
         </Button>
-        <Button size="lg" variant="primary" disabled={!canAdd} onClick={() => void submit()}>
+        <Button size="lg" variant="primary" icon="plus" disabled={!canAdd} onClick={() => void submit()}>
           Add project
         </Button>
       </div>

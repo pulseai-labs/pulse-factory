@@ -107,7 +107,9 @@ describe("Remove project (11e)", () => {
     const fake = removable();
     const { confirm } = await openConfirm(fake, "alpha");
     const list = confirm.getByRole("list", { name: "Live sessions" });
-    expect(within(list).getByText("Orchestrator · main · Idle")).toBeTruthy();
+    // `r1.s6.w4` (NG-13): the state is its own dimmed span, in lower case, after a dot.
+    expect(within(list).getByText("Orchestrator · main")).toBeTruthy();
+    expect(within(list).getByText("· idle")).toBeTruthy();
     confirm.getByText(
       (_: string, el: Element | null) =>
         el?.tagName === "P" &&

@@ -1,4 +1,5 @@
-// AC-7 (r1.s4.w3), updated by r1.s5.w4 (11d, one press, G1): the Needs you page. What it calls and when, what
+// AC-7 (r1.s4.w3), updated by r1.s5.w4 (11d, one press, G1) and r1.s6.w3 (W1-33: the header has no Refresh button;
+// the read-error line keeps its Refresh): the Needs you page. What it calls and when, what
 // its cards show, how the request frames and the reads feed it, and that it sets no timer and opens no stream.
 // The cards' own acts, Hold and Answered today are in needs-you-cards.test.tsx.
 import type { RequestSummary } from "@pulse-factory/api-client";
@@ -51,6 +52,22 @@ async function frame(fake: FakeTransport, f: Parameters<FakeTransport["requestFr
 /** The calls made since the app booted (the boot is paired, projectList, openStream). */
 const since = (fake: FakeTransport, boot: number) => fake.calls.slice(boot);
 
+/**
+ * The page holds its requests, then the local leg drops and the link comes back (`Retry now`), and the page's read
+ * fails with a server error: the read-error line shows, over the cards the page still holds. The header has no
+ * Refresh button (W1-33), so this is the way a read fails on an open page.
+ */
+async function failedRead(fake: FakeTransport, user: User): Promise<HTMLElement> {
+  fake.fail("requests", "server", "gone");
+  await act(async () => {
+    fake.emit({ event: "closed", error: { kind: "unreachable", message: "the bridge closed the stream" } });
+  });
+  await user.click(await screen.findByRole("button", { name: "Retry now" }));
+  const alert = await screen.findByRole("alert");
+  await waitFor(() => expect(fake.current()).toBeDefined());
+  return alert;
+}
+
 describe("Needs you: what it calls", () => {
   it("makes exactly W9's calls when it opens: requests {all}, runList, and a show for each open request of every kind", async () => {
     const fake = new FakeTransport();
@@ -79,19 +96,33 @@ describe("Needs you: what it calls", () => {
     expect(fake.count("openStream")).toBe(streams);
   });
 
-  it("calls requests and runList once each on Refresh, and no show for a body it holds", async () => {
+  it("has no Refresh button in its header (W1-33), and makes no call but the open's while it shows", async () => {
+    const fake = new FakeTransport();
+    fake.seedRequests([requestSummary("R-1"), mergeAck("R-2")]);
+    await openPage(fake);
+    await screen.findByRole("article", { name: "Request R-2" });
+    await waitFor(() => expect(fake.count("show")).toBe(2));
+    expect(screen.queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(document.querySelector("[title='Refresh']")).toBeNull();
+    expect(document.querySelector(".ny-title-row [data-icon='refresh']")).toBeNull();
+  });
+
+  it("calls requests and runList once each on the read-error Refresh, and no show for a body it holds", async () => {
     const fake = new FakeTransport();
     fake.seedRequests([requestSummary("R-1"), mergeAck("R-2")]);
     const user = await openPage(fake);
     await screen.findByRole("article", { name: "Request R-2" });
     await waitFor(() => expect(fake.count("show")).toBe(2));
+    const alert = await failedRead(fake, user);
+    // The cards the page holds stay under the error line.
+    expect(screen.getByRole("article", { name: "Request R-2" })).toBeTruthy();
+    fake.heal("requests");
     const before = fake.calls.length;
-    // The shell's sidebar read the run list once on Projects, and the page read it once: two calls so far.
-    expect(fake.count("runList")).toBe(2);
+    const runs = fake.count("runList");
 
-    await user.click(main().getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(fake.count("requests")).toBe(2));
-    await waitFor(() => expect(fake.count("runList")).toBe(3));
+    await user.click(within(alert).getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fake.count("runList")).toBe(runs + 1));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(since(fake, before).slice().sort()).toEqual(["requests", "runList"]);
   });
 });
@@ -320,8 +351,7 @@ describe("Needs you: the reads", () => {
     const user = await openPage(fake);
     await screen.findByRole("article", { name: "Request R-1" });
 
-    fake.fail("requests", "server", "gone");
-    await user.click(main().getByRole("button", { name: "Refresh" }));
+    await failedRead(fake, user);
     expect(await screen.findByText(/^Last read at /)).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("gone");
   });
@@ -396,21 +426,22 @@ describe("Needs you: no timer, no focus handler", () => {
     expect(fake.count("requests")).toBe(1);
     expect(fake.count("runList")).toBe(2);
 
-    // Refresh meets a dead link: the 3c banner shows and its retry calls only `status`.
-    fake.fail("requests", "unreachable", "no answer", 1);
-    fake.fail("runList", "unreachable", "no answer", 1);
+    // The local leg drops (the header has no Refresh to press, W1-33): the 3c banner shows and its retry calls only
+    // `status`, which fails too.
     fake.fail("status", "unreachable", "no answer");
-    fireEvent.click(main().getByRole("button", { name: "Refresh" }));
+    await act(async () => {
+      fake.emit({ event: "closed", error: { kind: "unreachable", message: "the bridge closed the stream" } });
+    });
     await advance(0);
     expect(screen.getByText(/Not connected to/)).toBeTruthy();
-    expect(fake.count("requests")).toBe(2);
-    expect(fake.count("runList")).toBe(3);
+    expect(fake.count("requests")).toBe(1);
+    expect(fake.count("runList")).toBe(2);
 
     fake.heal();
     await advance(60_000);
     expect(screen.queryByText(/Not connected to/)).toBeNull();
-    expect(fake.count("requests")).toBe(3);
-    expect(fake.count("runList")).toBe(4);
+    expect(fake.count("requests")).toBe(2);
+    expect(fake.count("runList")).toBe(3);
 
     const calls = [...fake.calls];
     await advance(60 * 60_000);

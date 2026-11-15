@@ -15,7 +15,7 @@ export { IconButton } from "./IconButton";
 export type { IconButtonProps } from "./IconButton";
 export { Input } from "./Input";
 export type { InputProps } from "./Input";
-export { effortName, modelName, permissionName } from "./display-names";
+export { effortName, modelName, permissionName, runtimeName } from "./display-names";
 export { LaterTag, NotBuilt } from "./NotBuilt";
 export type { NotBuiltForm, NotBuiltProps } from "./NotBuilt";
 export { Select } from "./Select";

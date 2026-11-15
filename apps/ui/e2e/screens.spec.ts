@@ -156,7 +156,12 @@ test.describe("chat", () => {
 
   test("6b-start-card: the start card in the chat", async ({ page }) => {
     await openChat(page);
-    await page.getByTestId("start-card").scrollIntoViewIfNeeded();
+    // The line above the card scrolls to the top of the log, so the card sits whole below it and its place in the
+    // thread is part of the screenshot: a change of the card's margin or of the gap above it moves the card.
+    // (The log keeps its end in place, so a change above a card that fills the top of the log would not show.)
+    await page.getByTestId("start-card").evaluate((card) => {
+      (card.previousElementSibling ?? card).scrollIntoView({ block: "start" });
+    });
     await compare(page, "6b-start-card.png", page.getByTestId("start-workflow"));
   });
 

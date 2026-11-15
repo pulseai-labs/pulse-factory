@@ -84,7 +84,8 @@ describe("one stream at a time", () => {
     // The first chat reads the session list once, for the runtimes of the composer.
     await waitFor(() => expect(fake.count("sessionList")).toBe(1));
     // And the shell's sidebar reads the run list once when it mounts (Approach 7).
-    expect(fake.calls.filter((c) => c !== "openStream")).toEqual(["paired", "runList", "projectList", "sessionList"]);
+    // The connection's one `status()` call at mount (r1.s6.w1) is the only other call.
+    expect(fake.calls.filter((c) => c !== "openStream")).toEqual(["paired", "runList", "projectList", "status", "sessionList"]);
   });
 });
 
@@ -96,12 +97,13 @@ describe("what the stream's events do", () => {
     const calls = fake.calls.length;
     await emit(fake, { event: "reconnecting", after: 0, retry_in_ms: 4000, reason: "the server is stopping" });
 
-    expect(main().getByText("Reconnecting… the server is stopping")).toBeTruthy();
+    // r1.s6.w1: the banner owns the `reconnecting` state; the chat shows no "Reconnecting…" line of its own.
+    expect(main().queryByText(/Reconnecting/)).toBeNull();
     expect(fake.count("openStream")).toBe(opens);
     expect(fake.calls).toHaveLength(calls);
     // 11i (Approach 7): the banner shows as soon as the stream is `reconnecting`, with no call of its own.
     expect(screen.getByText(`Not connected to ${ADDRESS}`)).toBeTruthy();
-    expect(screen.getByText("Your sessions and runs keep going on the server. Reconnecting…")).toBeTruthy();
+    expect(screen.getByText("Your sessions and runs keep going on the server. Retrying in 4s.")).toBeTruthy();
 
     // The next frame ends the notice and the banner.
     await push(fake, frames.hello(fake.sessions, "S-1"));
@@ -123,7 +125,7 @@ describe("what the stream's events do", () => {
     await user.click(screen.getByRole("button", { name: "Retry now" }));
     await waitFor(() => expect(fake.count("openStream")).toBe(opens + 1));
     expect(fake.current()?.options).toEqual({ session: "S-1", after: 2 });
-    expect(fake.count("status")).toBe(1);
+    expect(fake.count("status")).toBe(2); // the mount call (r1.s6.w1) and this retry
     expect(screen.queryByText(/Not connected/)).toBeNull();
   });
 
@@ -163,7 +165,7 @@ describe("what the stream's events do", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(fake.count("openStream")).toBe(opens + 1));
     expect(fake.current()?.options).toEqual({ session: "S-1", after: 2 });
-    expect(fake.count("status")).toBe(0);
+    expect(fake.count("status")).toBe(1); // the mount call only
     expect(screen.queryByText(/Not connected/)).toBeNull();
   });
 
@@ -336,7 +338,7 @@ describe("a chat page makes no call by itself", () => {
     await bootChatFake(fake);
     await push(fake, frames.item(item("S-1", 1, { kind: "approval_request", request_id: "r", tool: "Bash", input: null, reason: null })));
     const calls = [...fake.calls];
-    expect(calls).toEqual(["paired", "runList", "projectList", "openStream", "sessionList", "openStream"]);
+    expect(calls).toEqual(["paired", "runList", "projectList", "openStream", "status", "sessionList", "openStream"]);
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
 
     await wiggle();
@@ -369,7 +371,7 @@ describe("a chat page makes no call by itself", () => {
     const opens = fake.count("openStream");
     expect(screen.getByText(/Retrying in 4s/)).toBeTruthy();
     await advance(4000);
-    expect(fake.count("status")).toBe(1);
+    expect(fake.count("status")).toBe(2); // the mount call and the first retry
     expect(fake.count("openStream")).toBe(opens);
 
     // The link comes back: status() succeeds, the session list is read once, and one stream opens.

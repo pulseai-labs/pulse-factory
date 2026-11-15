@@ -3,13 +3,23 @@
 // takes no confirm code (it is no request act). It reads `run_list` once when it opens. It has three
 // states: a workflow of the project is running (Remove stays locked), the project has live sessions
 // (they end), or nothing is live.
-import type { ProjectRecord, RunSummary } from "@pulse-factory/api-client";
+import type { ChatSessionRecord, ProjectRecord, RunSummary } from "@pulse-factory/api-client";
 import { useEffect, useRef, useState } from "react";
 import { agentName, stateLabel, useChat } from "../state/chat";
-import { asTransportError, useConnection } from "../state/connection";
+import { asTransportError, useConnection, useServerName } from "../state/connection";
 import { Button, Icon, StateDot } from "../ui";
 import { branchText } from "./chat-format";
 import { useCommandId } from "./command-id";
+
+/** The state of a live session in the confirm, in lower case (11e): "waiting on you", "idle", "working". */
+function stateWords(state: ChatSessionRecord["state"]): string {
+  return state === "needs_you" ? "waiting on you" : stateLabel(state).toLowerCase();
+}
+
+/** The locked button's title (11e): the one run's spine ID, or the workflows. The record has the ID only (P9). */
+function lockedTitle(active: RunSummary[]): string {
+  return active.length === 1 ? `Locked while ${active[0]?.spine ?? ""} runs` : "Locked while its workflows run";
+}
 
 /** The button in the block's head. It is the 28 px icon button of the canvas, with a 14 px icon. */
 export function RemoveButton(props: { project: ProjectRecord; open: boolean; onOpen: () => void }) {
@@ -31,8 +41,7 @@ export function RemoveButton(props: { project: ProjectRecord; open: boolean; onO
 
 /** The line that shows in the block's place after a remove. */
 export function RemovedLine(props: { name: string }) {
-  const { server } = useConnection();
-  const serverName = server.server?.name ?? server.address;
+  const serverName = useServerName();
   return (
     <p className="rm-removed" role="status">
       <Icon name="check" size={14} />
@@ -51,9 +60,9 @@ export interface RemoveConfirmProps {
 
 export function RemoveConfirm(props: RemoveConfirmProps) {
   const { project, projects, onCancel, onRemoved } = props;
-  const { call, link, server } = useConnection();
+  const { call, link } = useConnection();
   const chat = useChat();
-  const serverName = server.server?.name ?? server.address;
+  const serverName = useServerName();
   const down = link.state === "down";
   const sessions = chat.live.filter((s) => s.project_id === project.id);
   // `null` until `run_list` answers. A failed read counts as no run: the server's refusal holds anyway.
@@ -129,7 +138,9 @@ export function RemoveConfirm(props: RemoveConfirmProps) {
         </div>
         <div className="rm-actions">
           <Button onClick={onCancel}>Cancel</Button>
-          <Button variant="locked">Remove project</Button>
+          <Button variant="locked" title={lockedTitle(active)}>
+            Remove project
+          </Button>
         </div>
       </div>
     );
@@ -151,7 +162,8 @@ export function RemoveConfirm(props: RemoveConfirmProps) {
             {sessions.map((s) => (
               <li className="rm-session" key={s.id}>
                 <StateDot state={s.state} />
-                <span>{`${agentName(chat.list, s.agent_id)} · ${branchText(s, projects)} · ${stateLabel(s.state)}`}</span>
+                <span>{`${agentName(chat.list, s.agent_id)} · ${branchText(s, projects)}`}</span>
+                <span className="rm-state">{`· ${stateWords(s.state)}`}</span>
               </li>
             ))}
           </ul>

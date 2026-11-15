@@ -135,8 +135,10 @@ test("pair, add a project, revoke the device, and see 3c", async ({ page }) => {
     // 4. The test revokes the device on the server and opens the Projects page again. The 3c banner
     //    says the device is no longer paired, and no timer runs.
     execFileSync(bin, ["device", "revoke", "D-1"], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-    await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByRole("button", { name: "Projects" }).click();
+    // The rail's buttons: the title bar has a Projects tab of its own since r1.s6.w1.
+    const rail = page.getByRole("navigation", { name: "Sections" });
+    await rail.getByRole("button", { name: "Settings" }).click();
+    await rail.getByRole("button", { name: "Projects" }).click();
     await expect(page.getByText(/This device is no longer paired with 127\.0\.0\.1:\d+\./)).toBeVisible();
     await expect(page.getByText(/Retrying/)).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Pair again" })).toBeVisible();

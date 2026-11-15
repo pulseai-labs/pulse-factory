@@ -1,11 +1,13 @@
-// The Agents page (11g, r1.s5.w4): the selected agent's identity band, its Persona card, Brain (three tiles),
-// Skills, Permissions, Notifications, and "Sessions by project" as one card for each project, each with Open or
-// Start session. The agent list is in the sidebar (`shell/AgentsSidebar.tsx`); the selection is in
+// The Agents page (11g, r1.s5.w4; r1.s6.w3): the selected agent's identity band (with the Orchestrator's "One
+// session per project" chip), its Persona card, Brain (three tiles: the runtime by its name with "or <the other
+// runtimes>", the model with its note, the effort), Skills, Permissions (the three-way control at the position
+// nearest the agent's mode, P7), Notifications (11g's card), and "Sessions by project" as one card for each
+// project, each with Open or Start session, and the Orchestrator's footnote under them. The agent list is in the sidebar (`shell/AgentsSidebar.tsx`); the selection is in
 // `screens/agentSelection.ts`. P1 puts agent create and edit in a later release: every function the page does
 // not build is drawn with the 11l look (`NotBuilt`) and does nothing. The page makes the calls it made before:
 // `projectList` when it opens and when the link comes back, `sessionList` when it opens, `sessionStart` on a
 // press of Start session. No timer.
-import type { AgentRecord, ChatSessionRecord, ProjectRecord } from "@pulse-factory/api-client";
+import type { AgentRecord, ChatRuntimeRecord, ChatSessionRecord, ProjectRecord } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { branchText, parseTime } from "../components/chat-format";
 import { useCommandId } from "../components/command-id";
@@ -15,8 +17,8 @@ import { useNavigation } from "../shell/navigation";
 import { asTransportError, useConnection } from "../state/connection";
 import { stateLabel, useChat } from "../state/chat";
 import { age } from "../needs-you/format";
-import { Avatar, Button, Card, Eyebrow, Icon, LaterTag, NotBuilt, StatePill, agentLook, effortName, modelName, permissionName } from "../ui";
-import { useSelectedAgent } from "./agentSelection";
+import { Avatar, Button, Card, Eyebrow, Icon, LaterTag, NotBuilt, StatePill, agentLook, effortName, modelName, permissionName, runtimeName } from "../ui";
+import { isOrchestrator, useSelectedAgent } from "./agentSelection";
 import "../styles/agents.css";
 
 /** How many of the four bars an effort fills. An effort the table does not know fills none. */
@@ -24,10 +26,10 @@ function effortRank(effort: string): number {
   return ({ low: 1, medium: 2, high: 3, xhigh: 4, max: 4 } as Record<string, number>)[effort] ?? 0;
 }
 
-function Tile(props: { label: string; value: string; icon: "bot" | "sparkles" | "zap"; violet?: boolean; note?: string | null; bars?: number }) {
-  const { label, value, icon, violet = false, note = null, bars } = props;
+function Tile(props: { label: string; value: string; icon: "bot" | "sparkles" | "zap"; violet?: boolean; note?: string | null; bars?: number; title?: string }) {
+  const { label, value, icon, violet = false, note = null, bars, title } = props;
   return (
-    <div className={`ag-tile${violet ? " ag-tile-violet" : ""}`} role="group" aria-label={label}>
+    <div className={`ag-tile${violet ? " ag-tile-violet" : ""}`} role="group" aria-label={label} title={title}>
       <div className="ag-tile-top">
         <span className="ag-tile-label">{label}</span>
         <span className="ag-tile-chevrons" aria-hidden="true">
@@ -52,21 +54,37 @@ function Tile(props: { label: string; value: string; icon: "bot" | "sparkles" | 
   );
 }
 
-/** The three-way switch of 11g: disabled with the Later tag (R5). No position is selected: the canvas's three labels do not map one-for-one to the six modes. */
-function PermissionSwitch() {
+/** The position of the three-way control that is nearest an agent's mode (P7): six modes, three positions. A mode the table does not know has none. */
+const POSITION_OF: Readonly<Record<string, number>> = {
+  plan: 0,
+  manual: 1,
+  acceptEdits: 2,
+  auto: 2,
+  dontAsk: 2,
+  bypassPermissions: 2,
+};
+
+/**
+ * The three-way switch of 11g: disabled with the Later tag (R5), at the position nearest the agent's mode (P7). The
+ * control's `title` and a visually hidden text name the exact mode, so the choice the six modes make is not lost.
+ */
+function PermissionSwitch(props: { mode: string }) {
+  const { mode } = props;
   const positions = [
     { name: "Read only", icon: "search" },
     { name: "Ask before edits", icon: "lock" },
     { name: "Edit freely", icon: "zap" },
   ] as const;
+  const selected = Object.hasOwn(POSITION_OF, mode) ? (POSITION_OF[mode] as number) : -1;
   return (
-    <div className="ag-switch" role="group" aria-label="Permissions">
-      {positions.map((p) => (
-        <button key={p.name} type="button" className="ag-switch-pos" disabled aria-pressed="false">
+    <div className="ag-switch" role="group" aria-label="Permissions" title={permissionName(mode)}>
+      {positions.map((p, i) => (
+        <button key={p.name} type="button" className={`ag-switch-pos${i === selected ? " ag-switch-pos-on" : ""}`} disabled aria-pressed={i === selected ? "true" : "false"}>
           <Icon name={p.icon} size={15} />
           <span>{p.name}</span>
         </button>
       ))}
+      <span className="ui-sr-only">{permissionName(mode)}</span>
       <span className="ag-switch-tag">
         <LaterTag />
       </span>
@@ -84,20 +102,59 @@ function Identity(props: { agent: AgentRecord; waiting: ChatSessionRecord[] }) {
         <h2 className="ag-name">{agent.name}</h2>
         <span className="ag-title">{agent.title}</span>
       </div>
-      {waiting.length > 0 ? (
-        <span className="ag-waiting">
-          <span className="ui-count">{waiting.length}</span>
-          {`waiting across ${projects} ${projects === 1 ? "project" : "projects"}`}
-        </span>
-      ) : null}
+      <div className="ag-identity-side">
+        {isOrchestrator(agent) ? (
+          <span className="ag-chip">
+            <Icon name="layers" size={12} />
+            One session per project
+          </span>
+        ) : null}
+        {waiting.length > 0 ? (
+          <span className="ag-waiting">
+            <span className="ui-count">{waiting.length}</span>
+            {`waiting across ${projects} ${projects === 1 ? "project" : "projects"}`}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-function Detail(props: { agent: AgentRecord; waiting: ChatSessionRecord[] }) {
-  const { agent, waiting } = props;
-  const options = Object.entries(agent.runtime_options).map(([id, value]) => `${id}: ${value}`);
-  const billing = agent.runtime_options.billing ?? null;
+/**
+ * 11g's notification card: a solid card, an amber icon tile, the label and its description, the "Later release" tag,
+ * then the switch (off). It stays not built (P1, R5): no call, no focus, `aria-disabled`. It is drawn here, not
+ * with `NotBuilt`'s `row` form, so the page edits no `ui/` component.
+ */
+function Notification() {
+  return (
+    <div className="ag-notify" aria-disabled="true" data-not-built="notify">
+      <span className="ag-notify-tile" aria-hidden="true">
+        <Icon name="chat" size={15} />
+      </span>
+      <span className="ag-notify-text">
+        <span className="ag-notify-label">Send its questions to my phone</span>
+        <span className="ag-notify-description">As push notifications with answer buttons</span>
+      </span>
+      <LaterTag />
+      <span className="ag-notify-switch" aria-hidden="true" />
+    </div>
+  );
+}
+
+/** The Model tile's note: the agent's `billing` when it sets one, else the basis `cost.ts` records for the claude-code runtime (a chat runs the operator's subscription login and is shown in wu), else none. */
+function modelNote(agent: AgentRecord): string | null {
+  const billing = agent.runtime_options.billing;
+  if (billing !== undefined && billing !== "") return billing;
+  return agent.runtime === "claude-code" ? "Anthropic subscription · wu" : null;
+}
+
+function Detail(props: { agent: AgentRecord; waiting: ChatSessionRecord[]; runtimes: ChatRuntimeRecord[] }) {
+  const { agent, waiting, runtimes } = props;
+  // The agent's runtime options stay in the Runtime tile's title (G8), where the page's old "Runtime options" line was.
+  const options = Object.entries(agent.runtime_options)
+    .map(([id, value]) => `${id}: ${value}`)
+    .join(", ");
+  const others = runtimes.filter((r) => r.id !== agent.runtime).map((r) => runtimeName(r.id));
   return (
     <div className="ag-col">
       <Identity agent={agent} waiting={waiting} />
@@ -113,11 +170,16 @@ function Detail(props: { agent: AgentRecord; waiting: ChatSessionRecord[] }) {
       <section className="ag-block">
         <Eyebrow>Brain</Eyebrow>
         <div className="ag-tiles">
-          <Tile label="Runtime" value={agent.runtime} icon="bot" />
-          <Tile label="Model" value={modelName(agent.model)} icon="sparkles" violet note={billing} />
+          <Tile
+            label="Runtime"
+            value={runtimeName(agent.runtime)}
+            icon="bot"
+            note={others.length > 0 ? `or ${others.join(", ")}` : null}
+            title={options === "" ? undefined : options}
+          />
+          <Tile label="Model" value={modelName(agent.model)} icon="sparkles" violet note={modelNote(agent)} />
           <Tile label="Reasoning effort" value={effortName(agent.effort)} icon="zap" bars={effortRank(agent.effort)} />
         </div>
-        {options.length > 0 ? <p className="ag-options">{options.join(", ")}</p> : null}
       </section>
       <section className="ag-block">
         <Eyebrow>Skills</Eyebrow>
@@ -134,13 +196,12 @@ function Detail(props: { agent: AgentRecord; waiting: ChatSessionRecord[] }) {
       <section className="ag-block">
         <Eyebrow>Permissions</Eyebrow>
         <div className="ag-perm">
-          <span className="ag-perm-value">{permissionName(agent.permission_mode)}</span>
-          <PermissionSwitch />
+          <PermissionSwitch mode={agent.permission_mode} />
         </div>
       </section>
       <section className="ag-block">
         <Eyebrow>Notifications</Eyebrow>
-        <NotBuilt as="row" label="Send its questions to my phone" description="As push notifications with answer buttons" />
+        <Notification />
       </section>
     </div>
   );
@@ -287,7 +348,7 @@ export function Agents(_props: { onOpen: (session: string) => void }) {
           <p className="empty">This server lists no agent.</p>
         ) : (
           <div className="ag-grid">
-            <Detail agent={agent} waiting={waiting} />
+            <Detail agent={agent} waiting={waiting} runtimes={chat.list.runtimes} />
             <section className="ag-block ag-sessions-block" aria-labelledby="agent-sessions">
               <div className="ag-sessions-head">
                 <Eyebrow id="agent-sessions">Sessions by project</Eyebrow>
@@ -311,6 +372,11 @@ export function Agents(_props: { onOpen: (session: string) => void }) {
                   ))}
                 </ul>
               )}
+              {isOrchestrator(agent) ? (
+                <span className="ag-footnote">
+                  At most one live Orchestrator session per project. Opening it from a project, from here, or from Needs you lands in the same session.
+                </span>
+              ) : null}
             </section>
           </div>
         )}

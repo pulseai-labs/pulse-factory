@@ -1,12 +1,13 @@
 // The button of the canvas. Only the primary action of a screen is green (`primary`). A default button
 // is the elevated grey one, a ghost has no border, `danger` is red text with no fill, and `locked` is
 // the dashed, disabled button of a function a later release brings: it carries the lock and takes a
-// `title` that says which release (G4).
+// `title` that says which release (G4). `danger-solid` (r1.s6.w2) is the filled red button of 11b's End
+// session confirm; `danger` keeps its look, which Settings' Disconnect and Remove project use.
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { cx } from "./cx";
 import { Icon, type IconName } from "./Icon";
 
-export type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "locked";
+export type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "danger-solid" | "locked";
 /** `sm` 28 px, `md` 30 px (the default), `lg` 32 px, `xl` 40 px and full width (the pair card's). */
 export type ButtonSize = "sm" | "md" | "lg" | "xl";
 

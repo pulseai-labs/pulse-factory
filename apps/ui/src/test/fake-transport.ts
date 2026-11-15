@@ -470,9 +470,12 @@ export class FakeTransport implements Transport {
   async pair(code: string, deviceName: string): Promise<PairedServer> {
     this.pairArgs.push({ code, deviceName });
     this.enter("pair");
-    this.server = { address: ADDRESS, device: device("D-1", deviceName) };
+    this.server = { address: ADDRESS, device: device("D-1", deviceName), ...(this.statusServer ? { server: this.statusServer } : {}) };
     return this.server;
   }
+
+  /** The server `status()` names. `null`: the answer names none, as a server before its name is known. */
+  statusServer: { id: string; name: string } | null = null;
 
   async status(): Promise<ApiStatus> {
     this.enter("status");
@@ -481,6 +484,7 @@ export class FakeTransport implements Transport {
       version: "0.0.0-test",
       key_spki_sha256: "0".repeat(64),
       device: this.server?.device ?? null,
+      ...(this.statusServer ? { server: this.statusServer } : {}),
     };
   }
 

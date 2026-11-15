@@ -2,7 +2,8 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { App } from "../App";
-import { ADDRESS, FakeTransport, device, project } from "./fake-transport";
+import { alpha, bootChat, seeded } from "./chat-helpers";
+import { ADDRESS, FakeTransport, chatSession, device, project } from "./fake-transport";
 
 async function open(fake: FakeTransport) {
   const user = userEvent.setup();
@@ -91,7 +92,8 @@ describe("the shell (2a to 2c)", () => {
 
     await user.click(rail().getByRole("button", { name: "Settings" }));
     expect(titlebar().getByText("Settings")).toBeTruthy();
-    expect(titlebar().queryByText("Projects")).toBeNull();
+    // 11k (r1.s6.w1): the Projects tab stays beside the Settings tab.
+    expect(titlebar().getByRole("button", { name: "Projects" })).toBeTruthy();
     // Settings has no sidebar.
     expect(sidebar()).toBeNull();
 
@@ -127,6 +129,16 @@ describe("the shell (2a to 2c)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("draws the server icon of 11h and 11k on the server menu's tile and on Settings' server tile (NG-22)", async () => {
+    const { user } = await open(new FakeTransport());
+    await user.click(titlebar().getByRole("button", { name: new RegExp(ADDRESS.replaceAll(".", "\\.")) }));
+    expect(screen.getByRole("dialog", { name: "Server menu" }).querySelector(".menu-tile [data-icon=server]")).not.toBeNull();
+    await user.keyboard("{Escape}");
+    await user.click(rail().getByRole("button", { name: "Settings" }));
+    expect(document.querySelector(".st-tile-mint [data-icon=server]")).not.toBeNull();
+    expect(document.querySelector("[data-icon=activity]")).toBeNull();
+  });
+
   it("shows the server on the Settings page: its state row, its Address row and Disconnect this Mac (11k)", async () => {
     const { user } = await open(new FakeTransport());
     await user.click(rail().getByRole("button", { name: "Settings" }));
@@ -152,5 +164,104 @@ describe("the shell (2a to 2c)", () => {
     expect(fake.count("forget")).toBe(1);
     expect(screen.getByText("pulse-factory device revoke D-7")).toBeTruthy();
     expect(screen.queryByRole("navigation")).toBeNull();
+  });
+});
+
+// ---- the title bar on every page (r1.s6.w1, Approach 3; NG-2, NG-3; P3) ----
+
+const beta = () =>
+  chatSession("S-2", { project_id: "P-2", project_name: "beta", worktree_id: "W-2", worktree_dir: "/home/dev/beta" });
+
+/** A booted shell with the chat S-1 open as a tab. */
+async function withChat() {
+  const fake = seeded({ sessions: [alpha(), beta()] });
+  const user = await bootChat(fake, "S-1");
+  return { fake, user };
+}
+
+const closeButton = (name: string) => titlebar().queryByRole("button", { name: `Close ${name}` });
+
+describe("the title bar on the focused pages (11d, 11k)", () => {
+  it.each(["Needs you", "Settings"])(
+    "%s keeps the Projects tab, the chat tabs, New tab and the pill with its toggle, and hides only the sidebar toggle",
+    async (page) => {
+      const { user } = await withChat();
+      expect(titlebar().getByRole("button", { name: "Show or hide the sidebar" })).toBeTruthy();
+      await user.click(rail().getByRole("button", { name: page }));
+
+      expect(titlebar().getByRole("button", { name: "Projects" })).toBeTruthy();
+      expect(titlebar().getByRole("tab", { name: /Orchestrator · alpha/ })).toBeTruthy();
+      expect(titlebar().getByRole("heading", { name: page })).toBeTruthy();
+      expect(titlebar().getByRole("button", { name: "New tab" })).toBeTruthy();
+      expect(titlebar().getByTitle("Show or hide Needs you")).toBeTruthy();
+      expect(titlebar().queryByRole("button", { name: "Show or hide the sidebar" })).toBeNull();
+      expect(titlebar().getByRole("button", { name: "Back" })).toBeTruthy();
+      // NG-3: the active page tab carries its ×.
+      expect(closeButton(page)).not.toBeNull();
+    },
+  );
+
+  it("the pill's toggle still opens and closes the dock state from a focused page", async () => {
+    const { user } = await withChat();
+    await user.click(rail().getByRole("button", { name: "Settings" }));
+    await user.click(titlebar().getByTitle("Show or hide Needs you"));
+    expect(window.localStorage.getItem("pf.dock")).toBe("open");
+  });
+});
+
+describe("the active page tab's × (NG-3; P3)", () => {
+  it("Agents has its ×, and closes to the last chat tab used", async () => {
+    const { user } = await withChat();
+    await user.click(rail().getByRole("button", { name: "Agents" }));
+    // r1.s6.w3 (W1-29): the Agents tab reads "<selected agent> agent".
+    expect(titlebar().getByRole("heading", { name: "Orchestrator agent" })).toBeTruthy();
+    await user.click(closeButton("Orchestrator agent")!);
+    expect(titlebar().getByRole("tab", { name: /Orchestrator · alpha/ }).getAttribute("aria-selected")).toBe("true");
+    expect(titlebar().queryByRole("heading", { name: "Orchestrator agent" })).toBeNull();
+  });
+
+  it.each(["Needs you", "Settings"])("%s closes to the last chat tab the operator used", async (page) => {
+    const { user, fake } = await withChat();
+    // A second chat, used after the first: it is the last one.
+    await user.click(await within(screen.getByRole("region", { name: "Sidebar" })).findByRole("button", { name: /session in beta:/ }));
+    await waitFor(() => expect(fake.current()?.options.session).toBe("S-2"));
+    expect(titlebar().getByRole("tab", { name: /Orchestrator · beta/ }).getAttribute("aria-selected")).toBe("true");
+
+    await user.click(rail().getByRole("button", { name: page }));
+    await user.click(closeButton(page)!);
+    expect(titlebar().getByRole("tab", { name: /Orchestrator · beta/ }).getAttribute("aria-selected")).toBe("true");
+    expect(titlebar().getByRole("tab", { name: /Orchestrator · alpha/ }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it.each(["Needs you", "Settings", "Agents"])("%s closes to Projects when no chat tab is open", async (page) => {
+    const { user } = await open(new FakeTransport());
+    await user.click(rail().getByRole("button", { name: page }));
+    await user.click(closeButton(page)!);
+    expect(titlebar().getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(titlebar().queryByRole("heading", { name: page })).toBeNull();
+  });
+
+  it("closes to Projects when the last chat tab used has been closed", async () => {
+    const { user } = await withChat();
+    await user.click(titlebar().getByRole("button", { name: /^Close Orchestrator · alpha/ }));
+    await user.click(rail().getByRole("button", { name: "Settings" }));
+    await user.click(closeButton("Settings")!);
+    expect(titlebar().getByRole("heading", { name: "Projects" })).toBeTruthy();
+  });
+
+  it("Projects has no × while no chat tab is open", async () => {
+    await open(new FakeTransport());
+    expect(titlebar().getByRole("heading", { name: "Projects" })).toBeTruthy();
+    expect(closeButton("Projects")).toBeNull();
+  });
+
+  it("Projects with a chat tab open shows its ×, and the × shows the last chat tab", async () => {
+    const { user } = await withChat();
+    // The chat is on screen: the Projects tab is not the active one, so it has no ×.
+    expect(closeButton("Projects")).toBeNull();
+    await user.click(titlebar().getByRole("button", { name: "Projects" }));
+    expect(titlebar().getByRole("heading", { name: "Projects" })).toBeTruthy();
+    await user.click(closeButton("Projects")!);
+    expect(titlebar().getByRole("tab", { name: /Orchestrator · alpha/ }).getAttribute("aria-selected")).toBe("true");
   });
 });

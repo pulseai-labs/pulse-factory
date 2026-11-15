@@ -3,7 +3,7 @@
 // this Mac" row with its inline confirm, and four functions of a later release as `NotBuilt` rows. Escape
 // and a click outside `boundary` (the chip and this panel) close it. "Disconnect" calls `forget()`.
 import { useEffect, useState, type RefObject } from "react";
-import { useConnection } from "../state/connection";
+import { useConnection, useServerName } from "../state/connection";
 import { Button, Icon, NotBuilt } from "../ui";
 
 export function ServerMenu(props: { boundary: RefObject<HTMLElement | null>; onClose: () => void }) {
@@ -29,7 +29,7 @@ export function ServerMenu(props: { boundary: RefObject<HTMLElement | null>; onC
   }, [boundary, onClose]);
 
   const up = conn.link.state === "up";
-  const name = conn.server.server?.name ?? conn.server.address;
+  const name = useServerName();
 
   async function disconnect() {
     setBusy(true);
@@ -47,7 +47,7 @@ export function ServerMenu(props: { boundary: RefObject<HTMLElement | null>; onC
       <div className="menu-server">
         <div className="menu-server-head">
           <span className="menu-tile" aria-hidden="true">
-            <Icon name="activity" size={16} />
+            <Icon name="server" size={16} />
           </span>
           <div className="menu-server-text">
             <span className="menu-server-name">{name}</span>

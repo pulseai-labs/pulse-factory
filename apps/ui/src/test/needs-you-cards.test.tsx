@@ -142,14 +142,20 @@ describe("the one press", () => {
     expect("to" in (fake.actArgs[0]?.args ?? {})).toBe(false);
   });
 
-  it("makes no call without a press: a frame, a refresh or a reload asks for no code", async () => {
+  it("makes no call without a press: a frame or a reload (the link coming back) asks for no code", async () => {
     const fake = seeded();
     const user = await open(fake);
     fake.requestRows.push(requestSummary("R-5"));
     await act(async () => fake.requestFrame(requestFrames.request(requestSummary("R-5"))));
     await screen.findByRole("article", { name: "Request R-5" });
     await waitFor(() => expect(fake.showArgs.map((a) => a.id)).toContain("R-5"));
-    await user.click(main().getByRole("button", { name: "Refresh" }));
+    // r1.s6.w3 (W1-33): the header has no Refresh to press. The page reads again when the link comes back.
+    const reads = fake.count("requests");
+    await act(async () => {
+      fake.emit({ event: "closed", error: { kind: "unreachable", message: "the bridge closed the stream" } });
+    });
+    await user.click(await screen.findByRole("button", { name: "Retry now" }));
+    await waitFor(() => expect(fake.count("requests")).toBe(reads + 1));
     expect(fake.count("confirmCode")).toBe(0);
     expect(fake.count("answer") + fake.count("ack") + fake.count("clear")).toBe(0);
   });

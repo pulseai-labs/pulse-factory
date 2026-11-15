@@ -92,7 +92,7 @@ test("start a spine from the Orchestrator chat: card, one press, outcome, reload
     await pairing.fill(code);
     await page.getByLabel("Device name").fill("d23 browser");
     await page.getByRole("button", { name: "Pair" }).click();
-    await expect(page.getByRole("heading", { name: /^Connected to 127\.0\.0\.1:\d+$/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Connected to .+/ })).toBeVisible();
     await page.getByRole("button", { name: "Open Pulse Factory" }).click();
   }
   await expect(nav).toBeVisible();
@@ -149,8 +149,15 @@ test("start a spine from the Orchestrator chat: card, one press, outcome, reload
     await expect(who.getByRole("listitem").nth(i).locator(".role-name")).toHaveText(role.name);
     await expect(who.getByRole("listitem").nth(i)).toContainText(modelName(role.model));
   }
+  // The merge line reads 11c's sentence (r1.s6.w2, P5): each of the two forms the server writes (`arm.rs`) shows as
+  // the frame's words with the base in a chip, and any other sentence shows as the server wrote it.
   for (const merge of plan.merges) {
-    await expect(card().getByRole("group", { name: "Merge line", exact: true })).toContainText(merge.sentence);
+    const shown = merge.sentence.startsWith("item PRs merge into ")
+      ? `Item PRs merge into ${merge.base} without asking.`
+      : merge.sentence.endsWith(" only on the claim's ack")
+        ? `The ${merge.track} PR into ${merge.base} waits for you.`
+        : merge.sentence;
+    await expect(card().getByRole("group", { name: "Merge line", exact: true })).toContainText(shown);
   }
   for (const name of OLD_GROUPS) {
     await expect(card().getByRole("group", { name, exact: true }), name).toHaveCount(0);

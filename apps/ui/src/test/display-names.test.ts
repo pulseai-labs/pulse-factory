@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { effortName, modelName, permissionName } from "../ui";
+import { effortName, modelName, permissionName, runtimeName } from "../ui";
 
 describe("modelName", () => {
   it.each([
@@ -60,6 +60,19 @@ describe("permissionName", () => {
     const modes = [...block.matchAll(/"([A-Za-z]+)"/g)].map((m) => m[1] ?? "");
     expect(modes.length).toBe(6);
     for (const mode of modes) expect(permissionName(mode), mode).not.toBe(mode);
+  });
+});
+
+describe("runtimeName (r1.s6.w3, d17-12)", () => {
+  it.each([
+    ["claude-code", "Claude Code"],
+    ["omp", "OMP"],
+  ])("maps %s to %s", (id, name) => {
+    expect(runtimeName(id)).toBe(name);
+  });
+
+  it.each(["mystery", "Claude-Code", "", "toString", "constructor"])("returns the id %j unchanged", (id) => {
+    expect(runtimeName(id)).toBe(id);
   });
 });
 

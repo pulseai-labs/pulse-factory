@@ -205,7 +205,7 @@ function ItemView(props: { item: ChatItemRecord } & Shared) {
   }
 }
 
-/** What a turn that ended says besides its duration: the failure, or the stop. */
+/** What a turn that ended says besides its duration: the failure, or the stop (with 11b's stop icon, KL-3). */
 function endLine(result: Body<"turn_result">, at: string): string | null {
   if (result.stop === "interrupted") return `You stopped the turn · ${timeText(at)}. The session stays open.`;
   if (result.is_error) return `The turn failed: ${result.stop}`;
@@ -306,10 +306,18 @@ function Turn(props: {
       )}
       {result && resultBody ? (
         hasWork ? (
-          end ? <p className="turn-end">{end}</p> : null
+          end ? (
+            <p className="turn-end">
+              {resultBody.stop === "interrupted" ? <Icon name="square" size={11} /> : null}
+              {end}
+            </p>
+          ) : null
         ) : (
           <Entry label="Turn result" kind="result" seq={result.seq}>
-            <p className="turn-end">{end ?? `Worked for ${durationText(resultBody.duration_ms)}`}</p>
+            <p className="turn-end">
+              {end !== null && resultBody.stop === "interrupted" ? <Icon name="square" size={11} /> : null}
+              {end ?? `Worked for ${durationText(resultBody.duration_ms)}`}
+            </p>
           </Entry>
         )
       ) : null}

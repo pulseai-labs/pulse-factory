@@ -1,17 +1,16 @@
 // The shell (11a): it composes the parts in `src/shell/` (the title bar, the rail, the sidebar, the dock)
 // around the page on screen, and it keeps the page state: the history, the open chats as tabs, and the
-// open state of the sidebar and the dock. The Needs you and Settings pages are focused pages: no sidebar,
-// no dock, no tab strip. The Needs you badge counts the open requests that the one stream's frames
-// brought, with no call (r1.s4.w3).
+// open state of the sidebar and the dock. The Needs you and Settings pages are focused pages: no sidebar
+// and no dock, and the title bar is the same as on every page (r1.s6.w1). The Needs you badge counts the
+// open requests that the one stream's frames brought, with no call (r1.s4.w3).
 //
 // An open chat is a tab. No tab exists until a chat opens. The sidebar and the Projects page open (or
 // focus) a chat's tab. Two things stay in localStorage, per device: the sidebar's open state
 // (`pf.sidebar`) and the dock's (`pf.dock`). Round-3 screens open a page or a chat only through
 // `useNavigation()` (`shell/navigation.ts`), which this component provides.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Banner } from "../components/Banner";
-import { useChat } from "../state/chat";
-import { useConnection } from "../state/connection";
+import { useChat, useNotConnected } from "../state/chat";
 import { Dock, readDock, writeDock } from "../shell/Dock";
 import { back, canBack, canForward, closeTab, currentPage, forward, initialHistory, push, type Page } from "../shell/history";
 import { Navigation, type NavigationApi } from "../shell/navigation";
@@ -36,7 +35,7 @@ function readSidebar(): boolean {
 
 export function Shell() {
   const chat = useChat();
-  const { link } = useConnection();
+  const notConnected = useNotConnected();
   const { follow } = chat;
   const [history, setHistory] = useState(initialHistory);
   const [tabs, setTabs] = useState<string[]>([]);
@@ -45,6 +44,11 @@ export function Shell() {
   const [grouping, setGrouping] = useState<Grouping>("project");
   const page: Page = currentPage(history);
   const chatOnScreen = page.kind === "chat" ? page.session : null;
+  // The last chat tab the operator used: the × of a page tab shows it (P3).
+  const lastChat = useRef<string | null>(null);
+  useEffect(() => {
+    if (chatOnScreen !== null) lastChat.current = chatOnScreen;
+  }, [chatOnScreen]);
 
   useEffect(() => {
     try {
@@ -74,6 +78,13 @@ export function Shell() {
     setTabs((t) => t.filter((id) => id !== session));
     setHistory((h) => closeTab(h, session));
   }, []);
+
+  // P3: the × of the active page tab closes the page and shows the last chat tab used, else Projects.
+  const closePage = useCallback(() => {
+    const last = lastChat.current;
+    if (last !== null && tabs.includes(last)) go({ kind: "chat", session: last });
+    else go({ kind: "projects" });
+  }, [tabs, go]);
 
   const toggleSidebar = useCallback(() => setSidebarOpen((o) => !o), []);
   // The dock's state is written when the operator changes it, not on mount: a device that never opened the dock
@@ -109,13 +120,12 @@ export function Shell() {
 
   return (
     <Navigation.Provider value={navigation}>
-      <div className={`app${link.state === "down" ? " app-down" : ""}`}>
+      <div className={`app${notConnected ? " app-down" : ""}`}>
         <TitleBar
           page={page}
           tabs={tabs}
           hasSidebar={hasSidebar}
           sidebarOpen={sidebarOpen}
-          focused={focused}
           dockOpen={dockOpen}
           canBack={canBack(history)}
           canForward={canForward(history)}
@@ -125,6 +135,8 @@ export function Shell() {
           onToggleDock={toggleDock}
           onOpenTab={openChat}
           onCloseTab={closeChat}
+          onOpenProjects={() => go({ kind: "projects" })}
+          onClosePage={closePage}
           onNewTab={() => go({ kind: "projects" })}
         />
         <Banner />

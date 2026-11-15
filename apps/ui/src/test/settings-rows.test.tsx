@@ -71,6 +71,47 @@ describe("the Server block", () => {
   });
 });
 
+describe("the Server block's layout (r1.s6.w3: NG-25, NG-26, NG-27)", () => {
+  it("draws Disconnect this Mac across the device card, as the card's own last row", async () => {
+    await open(seeded());
+    const button = main().getByRole("button", { name: "Disconnect this Mac" });
+    const span = button.closest(".st-disconnect") as HTMLElement;
+    expect(span).not.toBeNull();
+    expect(span.parentElement?.classList.contains("st-card-device")).toBe(true);
+    const css = readFileSync(resolve(__dirname, "..", "styles", "settings.css"), "utf8");
+    expect(css).toMatch(/\.st-disconnect\s*>\s*\.ui-btn\s*\{[^}]*flex:\s*1/);
+  });
+
+  it("shows a laptop on the This device tile, and the server icon on the server tile", async () => {
+    await open(seeded());
+    const server = screen.getByRole("region", { name: "Server" });
+    const device = server.querySelector(".st-card-device .st-tile") as HTMLElement;
+    expect(device.querySelector("[data-icon='laptop']")).not.toBeNull();
+    expect(device.querySelector("[data-icon='settings']")).toBeNull();
+    expect(server.querySelector(".st-card-server .st-tile [data-icon='server']")).not.toBeNull();
+  });
+
+  it("does not stretch the server card to the height of the device card", () => {
+    const css = readFileSync(resolve(__dirname, "..", "styles", "settings.css"), "utf8");
+    expect(css).toMatch(/\.st-server\s*\{[^}]*align-items:\s*flex-start/);
+    expect(css).not.toMatch(/\.st-server\s*\{[^}]*align-items:\s*stretch/);
+  });
+
+  it("keeps the Disconnect confirm and its calls: the confirm replaces the button, Cancel brings it back, Disconnect calls forget once", async () => {
+    const fake = seeded();
+    const user = await open(fake);
+    await user.click(main().getByRole("button", { name: "Disconnect this Mac" }));
+    expect(main().queryByRole("button", { name: "Disconnect this Mac" })).toBeNull();
+    const confirm = within(screen.getByRole("alertdialog", { name: "Disconnect this Mac" }));
+    await user.click(confirm.getByRole("button", { name: "Cancel" }));
+    expect(main().getByRole("button", { name: "Disconnect this Mac" })).toBeTruthy();
+    expect(fake.count("forget")).toBe(0);
+    await user.click(main().getByRole("button", { name: "Disconnect this Mac" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(fake.count("forget")).toBe(1));
+  });
+});
+
 describe("the Chat policies section", () => {
   it("reads the settings once when the page opens and shows one block for each key the server returns, in its order", async () => {
     const fake = seeded();

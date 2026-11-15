@@ -4,6 +4,7 @@
 // chip names the server with the green dot, and the card says "Connected to <name>".
 import { useState, type FormEvent } from "react";
 import { addressFromCode, hasCodePrefix, normalizeCode } from "../pair-code";
+import { serverNameOf } from "../state/connection";
 import {
   KEY_CHANGED_MESSAGE,
   TransportError,
@@ -94,7 +95,7 @@ export function Pair(props: {
   }
 
   const [copied, setCopied] = useState(false);
-  const serverName = paired ? (paired.server?.name ?? paired.address) : null;
+  const serverName = paired ? serverNameOf(paired) : null;
 
   async function copy() {
     try {
@@ -126,13 +127,10 @@ export function Pair(props: {
           <section className="pair-card" aria-labelledby="pair-done">
             <div className="pair-head">
               <span className="pair-tile" aria-hidden="true">
-                <Icon name="check" size={18} />
+                <Icon name="check" size={22} />
               </span>
-              {/* The heading names the address, not the server's name. The journey lines d19 and d23 (`e2e/chat.spec.ts`,
-                  `e2e/start-card.spec.ts`, `e2e/needs-you.spec.ts`; round-3 owners, AC-13 forbids this item to edit them)
-                  find it as `Connected to 127.0.0.1:<port>`. The canvas (11j) says "Connected to <name>": once those specs
-                  read the name, this line takes `serverName`. The name shows in the lede, the Server fact and the chip. */}
-              <h1 id="pair-done">Connected to {paired.address}</h1>
+              {/* 11j: the heading reads "Connected to <name>" (KL-10). The address shows in its own fact below. */}
+              <h1 id="pair-done">Connected to {serverName}</h1>
               <p className="pair-lede">{`This Mac is paired and trusts ${serverName}’s key. You only do this once.`}</p>
             </div>
             <dl className="pair-facts">
@@ -164,7 +162,7 @@ export function Pair(props: {
           <section className="pair-card" aria-labelledby="pair-title">
             <div className="pair-head">
               <span className="pair-tile" aria-hidden="true">
-                <Icon name="activity" size={18} />
+                <Icon name="activity" size={22} />
               </span>
               <h1 id="pair-title">Connect to your server</h1>
               <p className="pair-lede">Pulse Factory runs on your Linux machine. Pair this Mac with it once.</p>
@@ -241,7 +239,8 @@ export function Pair(props: {
                 </div>
               ) : null}
 
-              <Button variant="primary" size="xl" type="submit" disabled={busy}>
+              {/* 11j: Pair stays grey and disabled until a code is in the field, and while pairing runs. */}
+              <Button variant="primary" size="xl" type="submit" disabled={busy || code.trim() === ""}>
                 {busy ? "Pairing…" : "Pair"}
               </Button>
             </form>

@@ -27,7 +27,8 @@ import { asTransportError, isDownKind, useConnection } from "./connection";
 export type StreamStatus =
   | { state: "idle" }
   | { state: "open" }
-  | { state: "reconnecting"; reason: string }
+  /** `pf-client` waits `retryInMs` and tries again by itself; `at` is when the event came (the banner counts down from it). */
+  | { state: "reconnecting"; reason: string; retryInMs: number; at: number }
   /** The stream ended with a link failure: the 3c banner shows it. */
   | { state: "down" }
   /** The stream ended with a refusal or a server error: one error line and Reconnect. */
@@ -172,6 +173,17 @@ export function useChat(): Chat {
   return c;
 }
 
+/**
+ * The derived display state "not connected" (r1.s6.w1, P2): the link is down, or the open stream is
+ * `reconnecting`. 11i's banner, the dimmed page, the grey pill and the "As of" subtitle all key on it. It
+ * changes no state machine and adds no timer.
+ */
+export function useNotConnected(): boolean {
+  const { link } = useConnection();
+  const { status } = useChat();
+  return link.state === "down" || status.state === "reconnecting";
+}
+
 export function stateLabel(state: ChatSessionRecord["state"]): string {
   return state === "working" ? "Working" : state === "needs_you" ? "Needs you" : "Idle";
 }
@@ -222,7 +234,7 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
           return;
         case "reconnecting":
           // `pf-client` waits and tries again by itself: the UI shows it and does nothing else.
-          setStatus({ state: "reconnecting", reason: event.reason });
+          setStatus({ state: "reconnecting", reason: event.reason, retryInMs: event.retry_in_ms, at: Date.now() });
           return;
         case "closed": {
           const { kind, message } = event.error;

@@ -95,7 +95,7 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   await page.getByLabel("Pairing code").fill(code);
   await page.getByLabel("Device name").fill("d19 browser");
   await page.getByRole("button", { name: "Pair" }).click();
-  await expect(page.getByRole("heading", { name: /^Connected to 127\.0\.0\.1:\d+$/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Connected to .+/ })).toBeVisible();
   await page.getByRole("button", { name: "Open Pulse Factory" }).click();
   await expect(page.getByRole("navigation")).toBeVisible();
   await expect(page.getByRole("region", { name: "Sidebar" }).getByText("alpha", { exact: true })).toBeVisible();
@@ -239,7 +239,8 @@ test("chat with the Orchestrator of two projects: approve, reload, set, switch b
   expect(consoleText.join("\n")).not.toMatch(HEX64);
   expect(answers.length).toBeGreaterThan(0);
   const local = await page.evaluate(() => Object.keys(localStorage));
-  expect(local).toEqual(["pf.sidebar"]);
+  // `pf.server-name` is the last name an answer gave, a label (r1.s6.w1, P1); `pf.dock` is written only when the dock changes.
+  expect([...local].sort()).toEqual(["pf.server-name", "pf.sidebar"]);
   expect(await page.evaluate(() => sessionStorage.length)).toBe(0);
 });
 

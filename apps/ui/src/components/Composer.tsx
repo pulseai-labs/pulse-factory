@@ -1,18 +1,29 @@
-// The composer (11a): one compact box with the text field and, under it, a row of the runtime's option
-// chips, the context ring, the cache-warm time, and Send (a green arrow) or Stop while the agent works.
-// A send happens only from the operator's submit (Q6, `seat-launch-spend`). An ended session shows the
-// ended panel in its place.
+// The composer (11a): one compact box with the text field (one line, growing with its text) and, under it,
+// Attach (not built), the runtime's option controls, the context ring, and Send (a green arrow) or Stop while
+// the agent works. The cache line sits under the box and always shows while the session is live. A send
+// happens only from the operator's submit (Q6, `seat-launch-spend`). An ended session shows the ended panel
+// in its place.
 //
 // The controls render what the runtime declares (Q5, P2). A change applies to that chat only: it is a
-// `sessionSet` of one field, and no code path here calls anything that changes an agent.
+// `sessionSet` of one field, and no code path here calls anything that changes an agent. Each control is as
+// wide as its label (NG-4): the native pop-up lies over the icon, the display name and the chevron, invisible.
+//
+// A typed answer to an open question goes here (ruling P4): while the chat holds exactly one open
+// single-question card (`openQuestion`), Send and Enter call the chat's `AnswerFn`, the one the card used,
+// and not `sessionSend`.
 import type { ChatOptionRecord, ChatSessionRecord, SessionSetArgs } from "@pulse-factory/api-client";
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { asTransportError, useConnection } from "../state/connection";
 import { useChat } from "../state/chat";
+import type { AnswerFn, OpenQuestion } from "./Cards";
 import { parseTime } from "./chat-format";
 import { newCommandId, useCommandId } from "./command-id";
+import { clock } from "./format";
 // The option texts are the display names of `ui/display-names.ts` (G3), through the `ui` index.
-import { Button, Icon, Select, effortName, modelName, permissionName } from "../ui";
+import { Button, Icon, NotBuilt, effortName, modelName, permissionName, type IconName } from "../ui";
+
+/** 11a's icon before each declared option's text. An option the canvas has no icon for shows none. */
+const OPTION_ICONS: Partial<Record<string, IconName>> = { model: "sparkles", effort: "zap", permission_mode: "lock" };
 
 /** The session's value of an option, never the agent's. A pending option shows what was chosen. */
 function optionValue(record: ChatSessionRecord, option: ChatOptionRecord): string {
@@ -105,11 +116,26 @@ function isSwitch(option: ChatOptionRecord): boolean {
   return option.values.length === 2 && option.values.includes("on") && option.values.includes("off");
 }
 
+/** A TTL in words, as 11b's title says it: "1 hour", "5 minutes". */
+function ttlText(seconds: number): string {
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
+  if (seconds % 60 === 0) return plural(seconds / 60, "minute");
+  return plural(seconds, "second");
+}
+
+/** A token count as 11b writes it: `124k` from 1000 up. */
+function tokensText(tokens: number): string {
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
+}
+
 /**
- * The cache-warm text from the last turn's time and TTL: nothing before the first turn. A display
- * timer ticks the minutes once a minute, only while the cache is warm. It calls nothing.
+ * The cache line of a live session: "Cache warm · Nm left" while the last turn's cache is warm, else "Cache
+ * cold", and so before the first turn too, when nothing is cached. A display timer ticks the minutes once a
+ * minute, only while the cache is warm. It calls nothing. The title is 11b's sentence where the record gives
+ * the numbers (the TTL, and for a warm cache the reply time and the context's tokens), else none.
  */
-function useCacheText(record: ChatSessionRecord): string | null {
+function useCacheLine(record: ChatSessionRecord): { warm: boolean; text: string; title: string | null } {
   const last = parseTime(record.last_turn_at);
   const ttl = record.cache_ttl_seconds;
   const end = last !== null && ttl !== null ? last + ttl * 1000 : null;
@@ -123,8 +149,17 @@ function useCacheText(record: ChatSessionRecord): string | null {
     const id = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(id);
   }, [warm]);
-  if (end === null) return null;
-  return warm ? `Cache warm · ${Math.ceil((end - now) / 60_000)}m left` : "Cache cold";
+  if (end === null || ttl === null) return { warm: false, text: "Cache cold", title: null };
+  const stays = `Prompt cache stays warm for ${ttlText(ttl)} after the last reply.`;
+  const reuse =
+    warm && record.context !== null
+      ? ` A reply before ${clock(end)} reuses ${tokensText(record.context.used_tokens)} cached tokens.`
+      : "";
+  return {
+    warm,
+    text: warm ? `Cache warm · ${Math.ceil((end - now) / 60_000)}m left` : "Cache cold",
+    title: stays + reuse,
+  };
 }
 
 function Controls(props: { record: ChatSessionRecord; options: ChatOptionRecord[] }) {
@@ -161,6 +196,9 @@ function Controls(props: { record: ChatSessionRecord; options: ChatOptionRecord[
         if (isSwitch(option)) {
           return (
             <span className="control control-switch" key={option.id}>
+              <span className="control-icon">
+                <Icon name="layers" size={13} />
+              </span>
               <label htmlFor={id}>{option.label}</label>
               <input
                 id={id}
@@ -177,23 +215,36 @@ function Controls(props: { record: ChatSessionRecord; options: ChatOptionRecord[
         }
         // A free option shows its current value even when it is not one of the declared values.
         const values = option.values.includes(value) ? option.values : [value, ...option.values];
+        const icon = OPTION_ICONS[option.id];
         return (
           <span className="control" key={option.id}>
             <label className="ui-sr-only" htmlFor={id}>
               {option.label}
             </label>
-            <Select
-              id={id}
-              value={value}
-              disabled={ended || busy === option.id}
-              onChange={(e) => void change(option, e.target.value)}
-            >
-              {values.map((v) => (
-                <option key={v} value={v}>
-                  {displayValue(option.id, v)}
-                </option>
-              ))}
-            </Select>
+            <span className="control-face">
+              {icon ? (
+                <span className={`control-icon${option.id === "model" ? " control-icon-model" : ""}`}>
+                  <Icon name={icon} size={13} />
+                </span>
+              ) : null}
+              <span className="control-text">{displayValue(option.id, value)}</span>
+              <span className="control-chevron">
+                <Icon name="chevron-down" size={12} />
+              </span>
+              <select
+                id={id}
+                className="control-field"
+                value={value}
+                disabled={ended || busy === option.id}
+                onChange={(e) => void change(option, e.target.value)}
+              >
+                {values.map((v) => (
+                  <option key={v} value={v}>
+                    {displayValue(option.id, v)}
+                  </option>
+                ))}
+              </select>
+            </span>
             {pending}
           </span>
         );
@@ -219,8 +270,12 @@ export function Composer(props: {
   onStart: () => void;
   starting: boolean;
   startError: string | null;
+  /** The chat's one open single-question card, or `null`: while it is set, Send answers it (P4). */
+  openQuestion: OpenQuestion | null;
+  /** The chat's answer call: the one the cards use, with its command-ID rules. */
+  onAnswer: AnswerFn;
 }) {
-  const { record, agentName, onStart, starting, startError } = props;
+  const { record, agentName, onStart, starting, startError, openQuestion, onAnswer } = props;
   const { call } = useConnection();
   const chat = useChat();
   const sendId = useCommandId();
@@ -229,17 +284,30 @@ export function Composer(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ text: string; retry: boolean } | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
 
   const ended = record.ended_at !== null;
   const readOnly = ended || record.context_lost !== null;
   const runtime = chat.list?.runtimes.find((r) => r.id === record.runtime);
-  const cache = useCacheText(record);
-  const hint =
-    record.state !== "working" || !runtime
-      ? null
-      : runtime.mid_turn === "steer"
-        ? "steers the running turn"
-        : "runs as the next turn";
+  const cache = useCacheLine(record);
+  const working = record.state === "working";
+
+  // The field starts at one line and grows with its text, up to the CSS `max-height`.
+  useLayoutEffect(() => {
+    const el = field.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight > 0) el.style.height = `${el.scrollHeight}px`;
+  }, [draft]);
+
+  /** What Send does, in a sentence, for its title: no line of this text is on the screen (NG-7, G8). */
+  const sendTitle = openQuestion
+    ? "Answer the open question"
+    : working && runtime
+      ? runtime.mid_turn === "steer"
+        ? "Steers the running turn"
+        : "Runs as the next turn"
+      : "Send";
 
   async function send() {
     const text = draft.trim();
@@ -247,6 +315,18 @@ export function Composer(props: {
     setBusy(true);
     setError(null);
     setNote(null);
+    if (openQuestion !== null) {
+      // A typed answer (P4): the card's own call, with its seq and the question's text as the key. The command
+      // ID follows the answer, so the same text after `unreachable` is the same answer.
+      try {
+        const failure = await onAnswer(openQuestion.seq, { type: "answers", value: { [openQuestion.text]: text } });
+        if (failure === null) setDraft("");
+        else setError({ text: failure, retry: false });
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     // The same text after `unreachable` is the same send: it reuses the command ID (A7).
     const id = sendId.idFor(text);
     try {
@@ -306,7 +386,17 @@ export function Composer(props: {
     );
   }
 
-  const working = record.state === "working";
+  const sendButton = (
+    <Button
+      variant="primary"
+      aria-label="Send"
+      title={sendTitle}
+      disabled={readOnly || busy || draft.trim() === ""}
+      onClick={() => void send()}
+    >
+      <Icon name="arrow-right" size={16} />
+    </Button>
+  );
   return (
     <div className="composer">
       <div className="composer-box">
@@ -315,8 +405,9 @@ export function Composer(props: {
         </label>
         <textarea
           id={`pf-message-${record.id}`}
+          ref={field}
           className="composer-input"
-          rows={2}
+          rows={1}
           value={draft}
           disabled={readOnly}
           placeholder={readOnly ? "" : `Message ${agentName}`}
@@ -324,6 +415,7 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
         />
         <div className="composer-row">
+          <NotBuilt as="button" label="Attach" icon="paperclip" compact />
           <Controls record={record} options={runtime?.options ?? []} />
           <span className="composer-spacer" />
           <ContextGauge record={record} />
@@ -333,32 +425,24 @@ export function Composer(props: {
             </Button>
           ) : null}
           {working ? (
-            <Button onClick={() => void interrupt()}>
-              <span className="stop-glyph" aria-hidden="true" />
-              Stop
-            </Button>
+            <>
+              <Button onClick={() => void interrupt()}>
+                <span className="stop-glyph" aria-hidden="true" />
+                Stop
+              </Button>
+              {draft.trim() === "" ? null : sendButton}
+            </>
           ) : (
-            <Button
-              variant="primary"
-              aria-label="Send"
-              title="Send"
-              disabled={readOnly || busy || draft.trim() === ""}
-              onClick={() => void send()}
-            >
-              <Icon name="arrow-right" size={16} />
-            </Button>
+            sendButton
           )}
         </div>
       </div>
       <div className="composer-meta">
-        {hint ? <span className="hint">{hint}</span> : null}
         <span className="composer-spacer" />
-        {cache ? (
-          <span className="cache-text">
-            <Icon name="clock" size={12} />
-            {cache}
-          </span>
-        ) : null}
+        <span className={`cache-text${cache.warm ? " cache-warm" : ""}`} {...(cache.title === null ? {} : { title: cache.title })}>
+          <Icon name="clock" size={12} />
+          {cache.text}
+        </span>
       </div>
       {error ? (
         <p className="problem-title" role="alert">

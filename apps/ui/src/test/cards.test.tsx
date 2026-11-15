@@ -135,19 +135,30 @@ describe("a pending approval", () => {
 describe("a pending question (11a)", () => {
   const send = () => questionCard().getByRole("button", { name: "Send answer" }) as HTMLButtonElement;
 
-  it("shows the card as 'Needs you · since <time> · <request ID>', the question and one numbered button per option", async () => {
+  it("shows the head as 'Needs you', 'since <time>' and the request ID chip, the question and one numbered button per option", async () => {
     await bootChat(seeded(), "S-1", [
       frame(1, { kind: "question_request", request_id: "Q-31", items: [question()] }, { created_at: "2026-11-09T14:31:00Z" }),
     ]);
     const card = questionCard();
-    expect(card.getByText(`Needs you · since ${clock(Date.parse("2026-11-09T14:31:00Z"))} · Q-31`)).toBeTruthy();
+    expect(card.getByText("Needs you")).toBeTruthy();
+    expect(card.getByText(`since ${clock(Date.parse("2026-11-09T14:31:00Z"))}`)).toBeTruthy();
+    // The old one-line heading is gone.
+    expect(card.queryByText(/Needs you · since/)).toBeNull();
+    // The request ID is a chip at the right of the head: not built yet (KL-11), tagged, and it copies nothing.
+    const chip = card.getByTitle("Copy as CLI command");
+    expect(within(chip).getByText("Q-31")).toBeTruthy();
+    expect(within(chip).getByText("Later release")).toBeTruthy();
+    expect(chip.querySelector("[data-not-built]")?.getAttribute("aria-disabled")).toBe("true");
     expect(card.getByText("Option")).toBeTruthy();
     expect(card.getByText("Which option do you prefer?")).toBeTruthy();
     const buttons = card.getAllByRole("button").filter((b) => /^\d/.test(b.textContent ?? ""));
     expect(buttons.map((b) => b.textContent)).toEqual(["1Athe first", "2Bthe second", "3Cthe third"]);
     expect(card.getByText("the second")).toBeTruthy();
-    expect(card.getByText("Or type a different answer:")).toBeTruthy();
-    expect(card.getByRole("textbox", { name: "Other answer" })).toBeTruthy();
+    // A typed answer goes in the composer (P4): 11a's sentence, and no field and no Send on the card.
+    expect(card.getByText("Or type a different answer below. You can also answer from your phone or the CLI.")).toBeTruthy();
+    expect(card.queryByText("Or type a different answer:")).toBeNull();
+    expect(card.queryByRole("textbox")).toBeNull();
+    expect(card.queryByRole("button", { name: "Send answer" })).toBeNull();
     // A single-select question has no radio, no checkbox and no toggle.
     expect(card.queryByRole("radio")).toBeNull();
     expect(card.queryByRole("checkbox")).toBeNull();
@@ -173,16 +184,17 @@ describe("a pending question (11a)", () => {
     expect((questionCard().getByRole("button", { name: /^1\s*A/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("sends a typed answer from the Other answer field with its own Send", async () => {
+  it("a multi-select question keeps its Other answer field and its own Send, and a typed answer joins the toggles", async () => {
     const fake = seeded();
-    const user = await bootChat(fake, "S-1", [questionRequest([question()])]);
+    const user = await bootChat(fake, "S-1", [questionRequest([question({ multi_select: true })])]);
     expect(send().disabled).toBe(true);
     await user.type(questionCard().getByRole("textbox", { name: "Other answer" }), "something else");
     expect(send().disabled).toBe(false);
+    await user.click(questionCard().getByRole("button", { name: /^1\s*A/ }));
     await user.click(send());
 
     await waitFor(() => expect(fake.answerArgs).toHaveLength(1));
-    expect(fake.answerArgs[0]?.answer).toEqual({ type: "answers", value: { "Which option do you prefer?": "something else" } });
+    expect(fake.answerArgs[0]?.answer).toEqual({ type: "answers", value: { "Which option do you prefer?": "A, something else" } });
   });
 
   it("shows each option of a multi-select question as a toggle, and joins the chosen ones with a comma and a space", async () => {

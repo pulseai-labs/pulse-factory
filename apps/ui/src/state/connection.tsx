@@ -2,11 +2,12 @@
 // and moves the link between "up" and the four disconnected states (3c).
 //
 // When the UI calls (docs/contracts/ui-transport.md): on start, on opening a page, after an action
-// and on "Retry now". The one timer that makes a call is the retry while the server is
+// and on "Retry now". The provider makes one `status()` call when it mounts, to learn the server's name
+// (r1.s6.w1); it is no timer. The one timer that makes a call is the retry while the server is
 // *unreachable* (no HTTP answer, so no request reaches the server). An HTTP refusal never starts a
 // timer. While connected there is no timer, interval or focus handler that calls. A chat stream's
 // `closed` reaches the same banner through `report`.
-import type { ProjectRecord } from "@pulse-factory/api-client";
+import type { ProjectRecord, ServerRef } from "@pulse-factory/api-client";
 import {
   createContext,
   useCallback,
@@ -40,8 +41,45 @@ export function asTransportError(e: unknown): TransportError {
   return new TransportError("server", e instanceof Error ? e.message : "an unknown error");
 }
 
+/** The last server name an answer gave, kept per device (P1): `{address, name}`. A label only, never trust. */
+const NAME_KEY = "pf.server-name";
+
+function readStoredName(address: string): string | null {
+  try {
+    const raw = window.localStorage.getItem(NAME_KEY);
+    if (raw === null) return null;
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const { address: at, name } = value as { address?: unknown; name?: unknown };
+    return at === address && typeof name === "string" && name !== "" ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredName(address: string, name: string): void {
+  try {
+    window.localStorage.setItem(NAME_KEY, JSON.stringify({ address, name }));
+  } catch {
+    // No storage: the next launch shows the address until an answer names the server.
+  }
+}
+
+/**
+ * What the screens call the server: the name an answer gave this session (`learned`), else the one the
+ * pairing holds, else the last name stored for this address, else the address. The name is a label for the
+ * operator. Never use it for trust, routing or a call (P1).
+ */
+export function serverNameOf(paired: PairedServer, learned?: string | null): string {
+  return learned || paired.server?.name || readStoredName(paired.address) || paired.address;
+}
+
 export interface Connection {
   server: PairedServer;
+  /** The name of the server that the last `status()` answer gave, or `null` before the first. */
+  learnedName: string | null;
+  /** Keeps the `server` of a `status()` answer: the name shows at once at every site that reads it. */
+  noteServer(server: ServerRef | undefined): void;
   link: Link;
   /** The time of the last call in milliseconds, whether it worked or not. */
   lastCallMs: number | null;
@@ -74,6 +112,12 @@ export function useConnection(): Connection {
   return c;
 }
 
+/** The server's name for the screens inside the provider: `serverNameOf` with the name this session learned. */
+export function useServerName(): string {
+  const c = useConnection();
+  return serverNameOf(c.server, c.learnedName);
+}
+
 export function ConnectionProvider(props: {
   transport: Transport;
   server: PairedServer;
@@ -87,6 +131,7 @@ export function ConnectionProvider(props: {
   const [lastReachedAt, setLastReachedAt] = useState<number | null>(null);
   const [epoch, setEpoch] = useState(0);
   const [now, setNow] = useState(() => Date.now());
+  const [learnedName, setLearnedName] = useState<string | null>(null);
   const [projects, setProjectsState] = useState<ProjectRecord[] | null>(null);
   const [projectsAt, setProjectsAt] = useState<number | null>(null);
   const retrying = useRef(false);
@@ -98,6 +143,15 @@ export function ConnectionProvider(props: {
       alive.current = false;
     };
   }, []);
+
+  const noteServer = useCallback(
+    (ref: ServerRef | undefined) => {
+      if (!alive.current || !ref?.name) return;
+      setLearnedName(ref.name);
+      writeStoredName(server.address, ref.name);
+    },
+    [server.address],
+  );
 
   const noteDown = useCallback((err: TransportError) => {
     if (!alive.current || !isDownKind(err.kind)) return;
@@ -149,8 +203,9 @@ export function ConnectionProvider(props: {
     retrying.current = true;
     const t0 = performance.now();
     try {
-      await transport.status();
+      const answer = await transport.status();
       if (!alive.current) return;
+      noteServer(answer.server);
       setLastCallMs(Math.max(0, Math.round(performance.now() - t0)));
       setLastReachedAt(Date.now());
       setLink({ state: "up" });
@@ -182,11 +237,26 @@ export function ConnectionProvider(props: {
     } finally {
       retrying.current = false;
     }
-  }, [transport]);
+  }, [transport, noteServer]);
 
   const retryNow = useCallback(() => {
     void retry();
   }, [retry]);
+
+  // The one `status()` call at mount (not a timer): it names the server, since the pairing read at start holds
+  // no name until `pf-client` has had an answer. It goes through `call`, so a down kind marks the link down as
+  // any call does; it is no `retry`, which would refetch every page.
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (mounted.current) return;
+    mounted.current = true;
+    call((t) => t.status()).then(
+      (answer) => noteServer(answer.server),
+      () => {
+        // A down kind reached `noteDown` already; any other refusal leaves the address as the name.
+      },
+    );
+  }, [call, noteServer]);
 
   const downUnreachable = link.state === "down" && link.kind === "unreachable";
   const nextAt = link.state === "down" ? link.nextAt : null;
@@ -221,6 +291,8 @@ export function ConnectionProvider(props: {
   const value = useMemo<Connection>(
     () => ({
       server,
+      learnedName,
+      noteServer,
       link,
       lastCallMs,
       lastReachedAt,
@@ -235,7 +307,7 @@ export function ConnectionProvider(props: {
       projectsAt,
       setProjects,
     }),
-    [server, link, lastCallMs, lastReachedAt, epoch, now, call, noteDown, retryNow, forget, onPairAgain, projects, projectsAt, setProjects],
+    [server, learnedName, noteServer, link, lastCallMs, lastReachedAt, epoch, now, call, noteDown, retryNow, forget, onPairAgain, projects, projectsAt, setProjects],
   );
 
   return <Ctx.Provider value={value}>{props.children}</Ctx.Provider>;
