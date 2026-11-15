@@ -1,5 +1,7 @@
-// AC-3 of `r1.s5.w1`: each 9a head's body path and eye equal the canvas's values, the four built-in
-// agents use their colour and head, and the avatar's CSS holds no `@keyframes` and no `animation`.
+// AC-3 of `r1.s5.w1`: each 9a head's body path and eye equal the canvas's values, and the four built-in
+// agents use their colour and head. The patch `fix/ui-canvas-motion` (2026-11-15) replaced w1's "no animation"
+// checks with the 9a motion: the avatar's CSS holds the canvas's keyframes and state rules, none at 16 px and
+// none under reduced motion.
 //
 // The expected values are copied from docs/specs/r1/r1.s5-…/canvas/agent-avatars.dc.html (the AI
 // workspace snapshot of the canvas's approved 9a): `rr` is line 153, `BOTS` lines 155–164, `BOT_EYE`
@@ -148,6 +150,14 @@ describe("the avatar's CSS", () => {
   const css = readFileSync(join(__dirname, "..", "ui", "ui.css"), "utf8");
   const start = css.indexOf("/* avatar:start */");
   const end = css.indexOf("/* avatar:end */");
+  /** CSS with no comment, no white space and no `;` before a `}`, and every bare `.5` written `0.5`. */
+  const fold = (text: string) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\s+/g, "")
+      .replace(/;\}/g, "}")
+      .replace(/(^|[^\d])\.(\d)/g, "$10.$2");
+  const block = () => fold(css.slice(start, end));
 
   it("has its own marked block", () => {
     expect(start).toBeGreaterThanOrEqual(0);
@@ -155,16 +165,73 @@ describe("the avatar's CSS", () => {
     expect(css.slice(start, end)).toContain(".ui-avatar");
   });
 
-  it("holds no @keyframes and no animation, in the block or in the file", () => {
-    const block = css.slice(start, end);
-    for (const word of ["@keyframes", "animation"]) {
-      expect(block.includes(word), `the avatar block has ${word}`).toBe(false);
-      expect(css.includes(word), `ui.css has ${word}`).toBe(false);
-    }
+  // r1-screens.dc.html, the style block at the top of the file; agent-avatars.dc.html lines 18-24 write the same
+  // four keyframes for 9a. They are copied here as the canvas writes them.
+  const KEYFRAMES = [
+    "@keyframes lvBlink{0%,93%,100%{transform:scaleY(1)}96%{transform:scaleY(.1)}}",
+    "@keyframes lvPing{0%,100%{opacity:1}50%{opacity:.3}}",
+    "@keyframes lvLook{0%,16%{transform:translate(0,0)}24%,44%{transform:translate(-2.6px,-.8px)}52%,70%{transform:translate(2.6px,.6px)}78%,100%{transform:translate(0,0)}}",
+    "@keyframes lvRead{0%{transform:translate(-2.4px,.8px)}100%{transform:translate(2.4px,.8px)}}",
+  ];
+
+  it.each(KEYFRAMES)("holds the canvas's keyframes %s", (keyframes) => {
+    expect(block()).toContain(fold(keyframes));
   });
 
-  it("the component sets no animation either", () => {
-    const tsx = readFileSync(join(__dirname, "..", "ui", "Avatar.tsx"), "utf8");
-    expect(/<animate|animation|@keyframes/i.test(tsx.replace(/\/\/.*$/gm, ""))).toBe(false);
+  // agent-avatars.dc.html lines 33-36 and 46, and the same rules in r1-screens.dc.html: the canvas's selector, the
+  // app's (the eye group is `.av-eye`, the iris group `.av-iris-group`, the state is `data-state`) and the animation.
+  const STATES: Array<[canvas: string, app: string, animation: string, delayed: boolean]> = [
+    [".k-eye.st-idle .ey-eye", '.ui-avatar[data-state="idle"] .av-eye', "lvBlink 4.6s infinite", true],
+    [".k-eye.st-idle .ey-iris", '.ui-avatar[data-state="idle"] .av-iris-group', "lvLook 8s ease-in-out infinite", true],
+    [".k-eye.st-working .ey-eye", '.ui-avatar[data-state="working"] .av-eye', "lvBlink 6.5s infinite", true],
+    [".k-eye.st-working .ey-iris", '.ui-avatar[data-state="working"] .av-iris-group', "lvRead .8s ease-in-out infinite alternate", true],
+    [".lv-badge", ".ui-avatar .av-badge", "lvPing 1.1s ease-in-out infinite", false],
+  ];
+
+  it.each(STATES)("%s is %s, animated as the canvas animates it", (_canvas, app, animation, delayed) => {
+    // Every rule with exactly this selector, as one list of declarations.
+    const selector = fold(app).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const decls = [...block().matchAll(new RegExp(`(?:^|\\})${selector}\\{([^}]*)\\}`, "g"))].flatMap((m) => (m[1] ?? "").split(";"));
+    expect(decls.length, `${app} has no rule`).toBeGreaterThan(0);
+    expect(decls).toContain(`animation:${fold(animation)}`);
+    // The canvas offsets each avatar's eye by its own delay, so two avatars on one screen do not blink together.
+    if (delayed) expect(decls).toContain("animation-delay:var(--avatar-delay,0s)");
+  });
+
+  it("turns the motion off at 16 px (`.lv.sm`) and under reduced motion (design-decisions.md, 9a)", () => {
+    expect(block()).toContain(".ui-avatar-sm*{animation:none!important}");
+    expect(block()).toContain("@media(prefers-reduced-motion:reduce){.ui-avatar*{animation:none!important}}");
+  });
+
+  it("transforms the eye and the iris about their own centre, as `.lv *` does", () => {
+    expect(block()).toContain(".ui-avatar.av-eye,.ui-avatar.av-iris-group{transform-box:fill-box;transform-origin:center}");
+  });
+
+  it("keeps the motion in the avatar block: no other part of ui.css names an animation", () => {
+    const outside = css.slice(0, start) + css.slice(end);
+    expect(/@keyframes|animation/.test(outside.replace(/\/\*[\s\S]*?\*\//g, ""))).toBe(false);
+  });
+});
+
+describe("the avatar's motion state and delay", () => {
+  it("draws working with no badge, and names the state on the box", () => {
+    const { container } = render(<Avatar agent="orchestrator" size={28} state="working" />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute("data-state")).toBe("working");
+    expect(container.querySelector(".av-badge")).toBeNull();
+  });
+
+  it("sets one delay for one agent at one size, between 0 and -5.9 s in tenths, as 9a's `dl` does", () => {
+    const delay = (agent: "orchestrator" | "autopilot" | "research_partner" | "plain", size: 16 | 24 | 28) => {
+      const view = render(<Avatar agent={agent} size={size} />);
+      const value = (view.container.firstElementChild as HTMLElement).style.getPropertyValue("--avatar-delay");
+      view.unmount();
+      return value;
+    };
+    expect(delay("orchestrator", 24)).toBe(delay("orchestrator", 24));
+    const at24 = (["orchestrator", "autopilot", "research_partner", "plain"] as const).map((a) => delay(a, 24));
+    for (const value of at24) expect(value).toMatch(/^(0|-[0-5](\.\d)?)s$/);
+    // The four built-in agents do not blink together in the sidebar.
+    expect(new Set(at24).size).toBe(4);
   });
 });

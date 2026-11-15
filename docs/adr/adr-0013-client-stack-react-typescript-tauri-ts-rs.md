@@ -887,3 +887,48 @@ This item closes the second gap walk's gaps in the Add a project dialog (11f) an
   **P9:** `RunSummary` carries the spine's ID only, so `<spine>` is the ID, not the spine name that 11e draws
   ("S-1 skeleton spine"). The spine name is a data gap: the run record has no such field, and a field is a
   later spine's change to `pf-api`. The d26 rulings accept it or carry it (constraint 3).
+
+## Amendment, 2026-11-15 (patch `fix/ui-canvas-motion`)
+
+The operator saw on 2026-11-15 that the approved canvas animates the sidebar and the dock opening and closing,
+while the app mounted and unmounted them in one frame, and ruled a canonical patch. A page change has no
+transition: the operator checked, it is instant on the canvas. This section adds the canvas's motion. It changes
+no Rust, no verb, no transport method and no dependency, and it keeps this ADR's decision.
+
+- **The side panels' frames.** `shell/SidePanel.tsx` is the canvas's wrapper of the sidebar and of the dock (11a,
+  11b, 11e): `flex:none; display:flex; overflow:hidden`, its width the panel's when open and 0 when closed, and
+  `transition: width 280ms var(--ease-standard)` (`--dur-slow`); the dock's frame also has
+  `justify-content:flex-end`. The panel stays mounted at its own width and the frame clips it, so the main column
+  reflows as the width moves. A closed frame is `inert` and `aria-hidden`; when it closes with the focus inside,
+  the focus leaves it. Each frame carries its state from its first commit, so a persisted `pf.sidebar` or
+  `pf.dock` draws with no transition on the first paint. The shell drops both frames on a focused page and mounts
+  them again after it, so a page change starts no transition.
+- **A closed panel makes no call.** The sidebar reads `runList` each time it opens, and the dock reads the bodies
+  it lacks each time it opens (`useNeedsYou({ active })`), as each did when it mounted.
+  `docs/contracts/ui-transport.md` says so.
+- **The switch.** 11a's Artifacts switch: `transition: background 120ms` on the track and `transition: left
+  120ms` on the knob, the default curve.
+- **The 9a motion.** `ui.css`'s avatar block holds the canvas's `lvBlink`, `lvLook`, `lvRead` and `lvPing`: idle
+  blinks and looks around, working blinks and reads side to side, needs you pings its badge. Each avatar's
+  eye starts at 9a's `dl` (`--avatar-delay`). None at 16 px, none under reduced motion. The chat header's avatar
+  takes `working` as it took `needs_you`. 9a's wide eye for needs you (`scale(1.12)`) is a still look, not
+  motion, and is not drawn.
+- **Reduced motion.** Under `prefers-reduced-motion: reduce` the frames, the switch and the avatars do not move.
+  d25 keeps its contract (reduced motion, no animation, no transition), so its screenshots show the end states.
+- **The Agents sidebar's head.** Its New agent `+` and "Later release" tag had the shell's `.sb-new` class, the
+  22 px New session button, so the tag ran 35 px past the sidebar, over its border. The frame clips at the
+  sidebar's edge, as the canvas's does, so the group takes its own class, `.ag-new`: 11g's `inline-flex` with a
+  6 px gap, at the 22 px height the head had. `6a-agents-linux.png` changes in that row only.
+
+### Verified claims (`fix/ui-canvas-motion`)
+Checked on draco-desk on 2026-11-15, on the branch cut from `origin/main` at `78fa9fa`:
+- `npx vitest run` in `apps/ui`: 34 files, 918 tests pass. `src/test/motion.test.tsx` failed (25 of the 76 tests
+  in it and the reworked `avatar.test.tsx`) before the change, with a stub that kept the old behaviour.
+- `scripts/demo/ui-screens.sh` (d25) passes three runs in a row: 15 screens, 7 to 8 s each.
+- `e2e/motion.spec.ts` passes in Chromium 1248 (8 tests); against the installed bundle of `main`, 7 of the 8 fail.
+- d12 (`ui-pair.sh`), d19 (`ui-chat.sh`) and d23 (`ui-needs-you.sh`, `card`) pass with `PF_UI_DIR` set to the
+  built bundle and the installed binaries.
+
+### Unverified claims (`fix/ui-canvas-motion`)
+- The Mac app's WebKit runs the transitions and `inert` as Chromium does. No demo line runs `e2e/motion.spec.ts`,
+  and d25 holds Chromium only.

@@ -12,8 +12,11 @@
 .ag-row-name { font-size: var(--text-base); font-weight: var(--weight-medium); line-height: 1; }
 .ag-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-tertiary); font-size: var(--text-meta); line-height: 1; }
 
-/* The sidebar head's New agent `+` with the 11g "Later release" tag beside it (NG-19). */
-.sb-new { display: inline-flex; align-items: center; gap: var(--space-1-5); }
+/* The sidebar head's New agent `+` with the 11g "Later release" tag beside it (NG-19): 11g's `inline-flex` group
+   with a 6 px gap. Its own class: the shell's `.sb-new` is the 22 px New session button, and under that class the
+   tag ran 35 px past the sidebar, which the panel's clipping frame now cuts (patch `fix/ui-canvas-motion`). The
+   group keeps the 22 px height that box gave the head, so the agent list stays where it was. */
+.ag-new { display: inline-flex; align-items: center; gap: var(--space-1-5); height: 22px; }
 
 /* The page: the detail column (1000 px) in two columns, the agent on the left and its sessions on the right. */
 .column:has(> .ag-page) { padding-top: var(--space-7); }

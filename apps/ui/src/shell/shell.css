@@ -64,6 +64,19 @@
 /* The Needs you page and the others read dim while the server cannot be reached (11i). */
 .app-down .main > * { opacity: 0.55; }
 
+/* The side panels' frames (11a, 11b, 11e; patch `fix/ui-canvas-motion`): the canvas's wrapper of the sidebar and of
+   the dock, `flex:none; display:flex; overflow:hidden; width:<open ? W : 0>; transition: width 280ms
+   var(--ease-standard)`, and `justify-content:flex-end` on the dock's. The panel keeps its own width and the frame
+   clips it, so the main column reflows as the frame's width moves. A page change has no transition: the shell drops
+   the frames on a focused page (`shell/SidePanel.tsx`). */
+.panel { flex: none; display: flex; overflow: hidden; transition: width var(--dur-slow) var(--ease-standard); }
+.panel-sidebar { width: var(--sidebar-w); }
+.panel-dock { width: var(--dock-w); justify-content: flex-end; }
+.panel[data-open="false"] { width: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .panel { transition: none; }
+}
+
 /* Sidebar (11a) */
 .sidebar { flex: none; width: var(--sidebar-w); display: flex; flex-direction: column; min-height: 0; border-right: var(--hairline); background: var(--bg-surface); box-sizing: border-box; }
 .sb-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 12px 12px 16px; }

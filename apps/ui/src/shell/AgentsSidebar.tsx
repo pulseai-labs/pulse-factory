@@ -17,7 +17,7 @@ export function AgentsSidebar() {
     <>
       <div className="sb-head">
         <span className="sb-title">Agents</span>
-        <span className="sb-new">
+        <span className="ag-new">
           <NotBuilt as="button" compact icon="plus" label="New agent" />
           <span aria-hidden="true">
             <LaterTag />

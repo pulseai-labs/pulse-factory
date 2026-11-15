@@ -123,7 +123,7 @@ export function Chat(props: { sessionId: string }) {
   return (
     <section className="chat" aria-label="Chat">
       <div className="chat-head" role="group" aria-label="Chat header">
-        <Avatar agent={agentLook(record.agent_id)} size={28} state={record.state === "needs_you" && !ended ? "needs_you" : "idle"} />
+        <Avatar agent={agentLook(record.agent_id)} size={28} state={ended ? "idle" : record.state === "needs_you" || record.state === "working" ? record.state : "idle"} />
         <h2 className="chat-agent">{name}</h2>
         <span className="ui-sr-only" role="group" aria-label="Project">
           {record.project_name}

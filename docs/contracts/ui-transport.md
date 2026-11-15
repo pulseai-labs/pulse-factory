@@ -210,9 +210,11 @@ HTTP/1.1 connections to the bridge, and each stream is one `api.ledger` line (A1
   `pf.server-name` (`r1.s6.w1`, see "The server's name" below).
 
 **The shell (`r1.s5.w2`).** The shell's sidebar holds the Workflow runs group, one row for each run of
-`runList`. The sidebar calls `runList` **once each time it mounts** and **once when the link comes back**
-(`epoch`). It mounts on the Projects, Agents and chat pages and unmounts on the focused pages (Needs you and
-Settings), so a visit to Needs you and back reads the list again. No timer and no focus handler make this call.
+`runList`. The sidebar calls `runList` **once each time it opens** and **once when the link comes back** while
+it is open (`epoch`). It mounts on the Projects, Agents and chat pages and unmounts on the focused pages (Needs
+you and Settings), so a visit to Needs you and back reads the list again. Since the patch `fix/ui-canvas-motion`
+a closed sidebar stays mounted in its frame (it slides shut, as the canvas draws it) and makes no call: it reads
+the list when it opens, as it did when it mounted. No timer and no focus handler make this call.
 A failed call leaves the group as it was, and a disconnect shows the banner. The need-you pill and the dock
 read the requests state, which the stream feeds: they make no call. The dock's open state is kept per device
 in `localStorage` under `pf.dock` (`open` or `closed`, read in a `try`, closed by default), as `pf.sidebar`
@@ -234,7 +236,9 @@ are open), with no call. The page's calls (W9) are:
 - on the operator's **Refresh**: the same;
 - after a replayed `answer`, `clear` or `ack`, and after a `subject_moved` refusal: `requests` once;
 - while the page is on screen, a `request` frame that brings an open request at a revision the page holds no
-  body for: one `show` for it. The dock makes the same `show` calls and no `requests` or `runList` call.
+  body for: one `show` for it. The dock makes the same `show` calls while it is open, and no `requests` or
+  `runList` call. A closed dock stays mounted in its frame (`fix/ui-canvas-motion`) and makes no call: it reads
+  the bodies it lacks when it opens, as it did when it mounted.
 
 Nothing else: no timer, no focus handler, no second stream.
 
@@ -250,7 +254,7 @@ press**: a reload, a reconnect, a frame or a timer never asks. `unreachable` on 
 shows its line and drops the code. The page offers Send, Resume and Approve merge, and no option answer: a
 chat question's option buttons stay in the chat. **Hold** (on a merge card) makes no call: it sets the card
 aside on this Mac, in memory only, and the request stays open on the server. A run that starts waiting or ends
-shows in the sidebar's Workflow runs group, which reads `runList` when it mounts (known limit: there is no run
+shows in the sidebar's Workflow runs group, which reads `runList` when it opens (known limit: there is no run
 frame).
 
 **The Settings rows (`r1.s4.w3`).** The Settings page reads `settingsGet` when it opens, when its scope
