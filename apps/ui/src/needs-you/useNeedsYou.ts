@@ -1,7 +1,8 @@
 // What the page and the dock share (r1.s5.w4): the open requests, the bodies they need, the one-press acts and
 // Hold. The page adds its reads (`requests`, `runList`) and Answered today on top; the dock adds nothing: its
 // requests come from the stream's frames with no call, and its `show` calls fill the bodies the cards read. A
-// closed dock stays mounted (`shell/SidePanel.tsx`) and passes `active: false`: it asks for no body until it opens.
+// closed dock stays mounted (`shell/SidePanel.tsx`) and passes `active: false`: it asks for no body until it opens
+// (`useRequestBodies`, which also asks again, on opening, for a body whose `show` failed on a down link).
 import type { RequestDetail, RequestSummary } from "@pulse-factory/api-client";
 import { useCallback, useMemo } from "react";
 import { answeredRecently, useRequests, type RequestsState } from "../state/requests";
@@ -25,9 +26,6 @@ export interface NeedsYou {
   envOf(request: RequestSummary, compact: boolean): CardEnv;
 }
 
-/** Nothing to read: the surface is mounted but not shown. */
-const NONE: RequestSummary[] = [];
-
 export function useNeedsYou(options: { active?: boolean } = {}): NeedsYou {
   const active = options.active ?? true;
   const { state, open } = useRequests();
@@ -36,11 +34,8 @@ export function useNeedsYou(options: { active?: boolean } = {}): NeedsYou {
   const answered = useMemo(() => answeredRecently(state, Date.now()), [state]);
   // Every open request needs its body (the merge card's PR, From and head SHA come from it, a run question's
   // text too), and every answered row this page did not answer itself needs its detail (the answer, who).
-  const want = useMemo(
-    () => (active ? [...open, ...answered.filter((r) => acts.done[r.id] === undefined)] : NONE),
-    [active, open, answered, acts.done],
-  );
-  const bodies = useRequestBodies(want);
+  const want = useMemo(() => [...open, ...answered.filter((r) => acts.done[r.id] === undefined)], [open, answered, acts.done]);
+  const bodies = useRequestBodies(want, active);
   const { detailOf, errors, retry } = bodies;
 
   const spineOf = useCallback(

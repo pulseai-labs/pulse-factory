@@ -12,10 +12,15 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { RequestSummary } from "@pulse-factory/api-client";
 import { App } from "../App";
+import { useRequestBodies } from "../needs-you/useRequestBodies";
 import { SidePanel } from "../shell/SidePanel";
+import { ChatProvider } from "../state/chat";
+import { ConnectionProvider, useConnection } from "../state/connection";
+import { RequestsProvider } from "../state/requests";
 import { alpha, boot, bootChat, push, seeded } from "./chat-helpers";
-import { FakeTransport, frames, mergeAck, project, requestFrames, requestSummary } from "./fake-transport";
+import { ADDRESS, FakeTransport, device, frames, mergeAck, project, requestFrames, requestSummary } from "./fake-transport";
 
 type PanelName = "sidebar" | "dock";
 
@@ -149,6 +154,112 @@ describe("the dock's frame (11a, 11b, 11e)", () => {
     expectOpen("dock");
     await waitFor(() => expect(fake.count("show")).toBe(2));
     expect(fake.showArgs.map((a) => a.id).sort()).toEqual(["R-1", "R-2"]);
+  });
+});
+
+describe("a body whose `show` failed on a down link (PR #65, round 1)", () => {
+  // A `show` that fails as `unreachable` keeps its key and draws no card error: the banner reports the link. Before
+  // this patch a closed dock unmounted, so its next open read the body again. A dock that stays mounted must ask
+  // again itself: when the link comes back, and when it opens. A closed dock still reads nothing.
+  it("the open dock reads it again when the link comes back", async () => {
+    window.localStorage.setItem("pf.dock", "open");
+    const fake = new FakeTransport();
+    fake.seedRequests([requestSummary("R-1")]);
+    fake.bodies["R-1"] = { stop_text: "Which database do we use?" };
+    fake.fail("show", "unreachable", "the bridge is gone");
+    const user = await boot(fake);
+    await act(async () => {
+      fake.requestFrame(requestFrames.requests([requestSummary("R-1")], null));
+    });
+    await waitFor(() => expect(fake.count("show")).toBe(1));
+    const dock = () => within(screen.getByRole("complementary", { name: "Needs you" }));
+    expect(dock().queryByText("Which database do we use?")).toBeNull();
+
+    fake.heal("show");
+    await user.click(await screen.findByRole("button", { name: "Retry now" }));
+    await waitFor(() => expect(fake.count("show")).toBe(2));
+    expect(await dock().findByText("Which database do we use?")).toBeTruthy();
+  });
+
+  const R1 = requestSummary("R-1");
+  const WANT: RequestSummary[] = [R1];
+
+  function Probe(props: { active: boolean }) {
+    const bodies = useRequestBodies(WANT, props.active);
+    const { link, retryNow } = useConnection();
+    return (
+      <>
+        <span data-testid="body">{bodies.detailOf(R1) ? "held" : "missing"}</span>
+        <span data-testid="link">{link.state}</span>
+        <button type="button" onClick={retryNow}>
+          retry the link
+        </button>
+      </>
+    );
+  }
+
+  function mount(fake: FakeTransport, active: boolean) {
+    const tree = (on: boolean) => (
+      <ConnectionProvider transport={fake} server={{ address: ADDRESS, device: device() }} onForgotten={() => {}} onPairAgain={() => {}}>
+        <ChatProvider transport={fake}>
+          <RequestsProvider>
+            <Probe active={on} />
+          </RequestsProvider>
+        </ChatProvider>
+      </ConnectionProvider>
+    );
+    const view = render(tree(active));
+    return { set: (on: boolean) => view.rerender(tree(on)) };
+  }
+
+  const settle = () => act(async () => {});
+
+  it("an inactive surface reads nothing, and reads when it becomes active", async () => {
+    const fake = new FakeTransport();
+    fake.seedRequests([R1]);
+    const probe = mount(fake, false);
+    await settle();
+    expect(fake.count("show")).toBe(0);
+    probe.set(true);
+    await waitFor(() => expect(screen.getByTestId("body").textContent).toBe("held"));
+    expect(fake.count("show")).toBe(1);
+  });
+
+  it("a link that comes back while the surface is inactive starts no read; the surface reads when it becomes active", async () => {
+    const fake = new FakeTransport();
+    fake.seedRequests([R1]);
+    fake.fail("show", "unreachable", "the bridge is gone");
+    const probe = mount(fake, true);
+    await waitFor(() => expect(fake.count("show")).toBe(1));
+    await settle();
+    probe.set(false);
+    fake.heal("show");
+    await act(async () => {
+      screen.getByRole("button", { name: "retry the link" }).click();
+    });
+    await settle();
+    expect(screen.getByTestId("link").textContent).toBe("up");
+    expect(fake.count("show")).toBe(1);
+
+    probe.set(true);
+    await waitFor(() => expect(screen.getByTestId("body").textContent).toBe("held"));
+    expect(fake.count("show")).toBe(2);
+  });
+
+  it("a surface that opens asks again, even when the link came back without a change it could see", async () => {
+    // The mount's `status()` answers in the same turn as the failed `show`, so the link reads up throughout.
+    const fake = new FakeTransport();
+    fake.seedRequests([R1]);
+    fake.fail("show", "unreachable", "the bridge is gone", 1);
+    const probe = mount(fake, true);
+    await waitFor(() => expect(fake.count("show")).toBe(1));
+    await settle();
+    expect(screen.getByTestId("body").textContent).toBe("missing");
+    probe.set(false);
+    await settle();
+    probe.set(true);
+    await waitFor(() => expect(screen.getByTestId("body").textContent).toBe("held"));
+    expect(fake.count("show")).toBe(2);
   });
 });
 

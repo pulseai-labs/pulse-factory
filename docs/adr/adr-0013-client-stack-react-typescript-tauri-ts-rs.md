@@ -904,8 +904,9 @@ no Rust, no verb, no transport method and no dependency, and it keeps this ADR's
   `pf.dock` draws with no transition on the first paint. The shell drops both frames on a focused page and mounts
   them again after it, so a page change starts no transition.
 - **A closed panel makes no call.** The sidebar reads `runList` each time it opens, and the dock reads the bodies
-  it lacks each time it opens (`useNeedsYou({ active })`), as each did when it mounted.
-  `docs/contracts/ui-transport.md` says so.
+  it lacks each time it opens (`useRequestBodies(want, active)`), as each did when it mounted. A body whose `show`
+  failed on a down link keeps no card error, so the hook asks for it again when the link comes back and when the
+  dock opens; a remount used to do that (PR #65, round 1). `docs/contracts/ui-transport.md` says so.
 - **The switch.** 11a's Artifacts switch: `transition: background 120ms` on the track and `transition: left
   120ms` on the knob, the default curve.
 - **The 9a motion.** `ui.css`'s avatar block holds the canvas's `lvBlink`, `lvLook`, `lvRead` and `lvPing`: idle
@@ -922,8 +923,9 @@ no Rust, no verb, no transport method and no dependency, and it keeps this ADR's
 
 ### Verified claims (`fix/ui-canvas-motion`)
 Checked on draco-desk on 2026-11-15, on the branch cut from `origin/main` at `78fa9fa`:
-- `npx vitest run` in `apps/ui`: 34 files, 918 tests pass. `src/test/motion.test.tsx` failed (25 of the 76 tests
-  in it and the reworked `avatar.test.tsx`) before the change, with a stub that kept the old behaviour.
+- `npx vitest run` in `apps/ui`: 34 files, 922 tests pass. `src/test/motion.test.tsx` failed (25 of the 76 tests
+  in it and the reworked `avatar.test.tsx`) before the change, with a stub that kept the old behaviour. The four
+  round-1 tests of a body whose `show` failed on a down link failed on the first head (`16212f3`).
 - `scripts/demo/ui-screens.sh` (d25) passes three runs in a row: 15 screens, 7 to 8 s each.
 - `e2e/motion.spec.ts` passes in Chromium 1248 (8 tests); against the installed bundle of `main`, 7 of the 8 fail.
 - d12 (`ui-pair.sh`), d19 (`ui-chat.sh`) and d23 (`ui-needs-you.sh`, `card`) pass with `PF_UI_DIR` set to the

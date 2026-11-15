@@ -1,8 +1,10 @@
 // The bodies of the requests a Needs-you surface shows (r1.s5.w4, Approach 4). One `show` for each request
 // it is asked to hold a body for, at the revision the request has now: at open, and when a frame brings a new
 // revision. A body is kept by `<id>@<revision>` in the shared requests state, so the page and the dock never
-// read the same one twice. A failed `show` is tried again only on `retry` (the page's Refresh). No timer, no
-// interval and no stream of its own.
+// read the same one twice. A failed `show` is tried again only on `retry` (the page's Refresh), with one exception:
+// a `show` that failed on a down link draws no card error (the banner reports the link), so it is asked again
+// when the link comes back and when the surface becomes active. An inactive surface (a closed dock, which stays
+// mounted: `shell/SidePanel.tsx`) reads nothing. No timer, no interval and no stream of its own.
 import type { RequestDetail, RequestSummary } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
@@ -17,13 +19,16 @@ export interface RequestBodies {
   retry(): void;
 }
 
-export function useRequestBodies(want: RequestSummary[]): RequestBodies {
-  const { call } = useConnection();
+export function useRequestBodies(want: RequestSummary[], active = true): RequestBodies {
+  const { call, epoch, link } = useConnection();
   const { state, apply } = useRequests();
   const [errors, setErrors] = useState<Record<string, string>>({});
   // A bump asks the effect to try again after a retry.
   const [tick, setTick] = useState(0);
   const requested = useRef(new Set<string>());
+  // The keys whose `show` failed on a down link. They stay in `requested` until the link comes back or the surface
+  // becomes active, so a failure never loops.
+  const down = useRef(new Set<string>());
   const live = useRef(true);
 
   useEffect(() => {
@@ -50,24 +55,51 @@ export function useRequestBodies(want: RequestSummary[]): RequestBodies {
           return rest;
         });
       } catch (e) {
-        // The key stays in `requested`: only `retry` (the page's Refresh) asks again, so a failure never loops.
+        // The key stays in `requested`: only `retry` (the page's Refresh) asks again, so a failure never loops. A
+        // down link's failure is also asked again when the link comes back or the surface becomes active.
         const err = asTransportError(e);
-        if (live.current && !isDownKind(err.kind)) setErrors((m) => ({ ...m, [request.id]: err.message }));
+        if (isDownKind(err.kind)) down.current.add(key);
+        else if (live.current) setErrors((m) => ({ ...m, [request.id]: err.message }));
       }
     },
     [call, apply],
   );
 
   useEffect(() => {
+    if (!active) return;
     for (const r of want) {
       if (!state.bodies[bodyKey(r.id, r.revision)]) void load(r);
     }
-  }, [want, state.bodies, load, tick]);
+  }, [active, want, state.bodies, load, tick]);
+
+  // Forget the keys that failed on a down link, so the effect above asks for them again if the surface is active.
+  // A key still in flight is not among them, so this never doubles a `show`.
+  const askDownAgain = useCallback(() => {
+    if (down.current.size === 0) return;
+    for (const key of down.current) requested.current.delete(key);
+    down.current.clear();
+    setTick((n) => n + 1);
+  }, []);
+
+  // The link came back (`epoch` rose, or the link reads up again), or the surface became active.
+  const lastEpoch = useRef(epoch);
+  const wasUp = useRef(link.state === "up");
+  const wasActive = useRef(active);
+  useEffect(() => {
+    const up = link.state === "up";
+    const cameBack = epoch !== lastEpoch.current || (up && !wasUp.current);
+    const opened = active && !wasActive.current;
+    lastEpoch.current = epoch;
+    wasUp.current = up;
+    wasActive.current = active;
+    if (cameBack || opened) askDownAgain();
+  }, [epoch, link.state, active, askDownAgain]);
 
   const retry = useCallback(() => {
     for (const key of [...requested.current]) {
       if (!state.bodies[key]) requested.current.delete(key);
     }
+    down.current.clear();
     setErrors({});
     setTick((n) => n + 1);
   }, [state.bodies]);

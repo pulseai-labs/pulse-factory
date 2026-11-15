@@ -10,8 +10,10 @@
 // - the avatars' eyes run 9a's loops at 24 px and not at 16 px;
 // - under reduced motion none of this runs.
 //
-//   PF_UI_DIR=apps/ui/dist npm --prefix apps run e2e --workspace ui -- e2e/motion.spec.ts
+//   PF_UI_DIR="$(pwd)/apps/ui/dist" npm --prefix apps run e2e --workspace ui -- e2e/motion.spec.ts
 //
+// Run it from the repository root. `PF_UI_DIR` must be absolute: Playwright runs in `apps/ui`, where a relative
+// path names no bundle.
 // It runs on d25's fixture server (`e2e/screens/server.ts`, the recorded fake `ui-screens-fixture-server`) and
 // reaches nothing beyond it. No demo line runs this file: d25 (`scripts/demo/ui-screens.sh`) keeps its screenshots
 // with motion off, and the journey lines d12, d19 and d23 run on the real controller.
@@ -26,7 +28,7 @@ let foreign: string[] = [];
 
 test.beforeAll(async () => {
   const dir = process.env.PF_UI_DIR;
-  if (!dir) throw new Error("PF_UI_DIR is not set: build the UI and point PF_UI_DIR at apps/ui/dist");
+  if (!dir) throw new Error('PF_UI_DIR is not set: build the UI and set PF_UI_DIR="$(pwd)/apps/ui/dist" from the repository root');
   server = await startFixtureServer(dir);
 });
 

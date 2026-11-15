@@ -238,7 +238,9 @@ are open), with no call. The page's calls (W9) are:
 - while the page is on screen, a `request` frame that brings an open request at a revision the page holds no
   body for: one `show` for it. The dock makes the same `show` calls while it is open, and no `requests` or
   `runList` call. A closed dock stays mounted in its frame (`fix/ui-canvas-motion`) and makes no call: it reads
-  the bodies it lacks when it opens, as it did when it mounted.
+  the bodies it lacks when it opens, as it did when it mounted. A `show` that failed on a down link draws no card
+  error (the banner reports the link); the page and the open dock ask for that body again when the link comes
+  back, and the dock also when it opens. A closed dock asks for nothing, even when the link comes back.
 
 Nothing else: no timer, no focus handler, no second stream.
 
