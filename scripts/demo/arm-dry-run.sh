@@ -69,7 +69,7 @@ want "spine: s1"
 want "items: 3"
 want "workflow: ossify-spine (file version 1)"
 for role in lane implementer verifier close reviewer; do
-  want "role $role: runtime omp, model ollama-daemon/deepseek-v4.1-flash:1017-cloud"
+  want "role $role: runtime omp, model openai-codex/gpt-5.6-luna"
 done
 want "caps: model_sessions 2, cold_builds 1"
 want "caps: seed lane runs at most 12 times"

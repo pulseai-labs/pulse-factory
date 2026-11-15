@@ -125,6 +125,12 @@ The Z.AI quota has since ended, and the shipped `ossify-spine` roles now run
 `ollama-daemon/deepseek-v4.1-flash:1017-cloud` (operator ruling G10). No claim was re-run on that
 model, and no decision here changes. (Superseded in part the same day: see "Qualified versions".)
 
+Note, 2026-11-15: the Ollama quota has ended too (429, "reached your monthly usage limit"). On the
+operator's ruling, the shipped `ossify-spine` roles now run `openai-codex/gpt-5.6-luna`, through the
+operator's Codex login in OMP. One headless `omp -p` call on that model answered on OMP 18.16.0. No
+claim above was re-run on it, `probe::PROBE_MODEL` still names the DeepSeek model the 18.16.0
+qualification used, and no decision here changes.
+
 ### Qualified versions
 - **18.11.3:** the spike of 2026-10-25 and the probes of 2026-11-01, on `zai/glm-5.3-flash`.
 - **18.16.0 (2026-11-11):** the real probes ran on OMP 18.16.0 with

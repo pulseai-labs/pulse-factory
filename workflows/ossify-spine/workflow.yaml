@@ -36,30 +36,32 @@ plugins:
     # 1.30.0: the first close with `--verdict`; it reads a caller's verdict, `agent` key included.
     min_version: 1.30.0
 
-# Cheap models. Every role runs in the OMP runtime, on DeepSeek V4.1 Flash since 2026-11-11 (G10).
+# Every role runs in the OMP runtime, on gpt-5.6-luna through the Codex login since 2026-11-15 (G10).
 roles:
   lane:
     runtime: omp
-    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
+    model: openai-codex/gpt-5.6-luna
     rules: rules/lane.yaml
   implementer:
     runtime: omp
-    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
+    model: openai-codex/gpt-5.6-luna
     rules: rules/implementer.yaml
   verifier:
     runtime: omp
-    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
+    model: openai-codex/gpt-5.6-luna
     rules: rules/verifier.yaml
   close:
     runtime: omp
-    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
+    model: openai-codex/gpt-5.6-luna
     rules: rules/close.yaml
   # The item PR reviewer. It reads the PR and writes one review file. The operator ruled the
   # model (G10): zai/glm-5.3 now, DeepSeek V4.1 Flash when the Z.AI quota ends. The quota ended,
-  # and on 2026-11-11 every role switched to DeepSeek V4.1 Flash through the local Ollama daemon.
+  # and on 2026-11-11 every role switched to DeepSeek V4.1 Flash through the local Ollama daemon. That
+  # quota ended too (429, monthly limit), and on 2026-11-15 the operator moved every role to
+  # gpt-5.6-luna through OMP's openai-codex login.
   reviewer:
     runtime: omp
-    model: ollama-daemon/deepseek-v4.1-flash:1017-cloud
+    model: openai-codex/gpt-5.6-luna
     rules: rules/reviewer.yaml
 
 settings:
