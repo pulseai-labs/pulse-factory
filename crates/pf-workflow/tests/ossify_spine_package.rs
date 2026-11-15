@@ -741,7 +741,7 @@ fn argv_has(cond: &DoneCond, word: &str) -> bool {
 }
 
 #[test]
-fn the_reviewer_role_runs_deepseek_v4_1_flash_under_its_own_read_only_rules() {
+fn the_reviewer_role_runs_gpt_5_6_luna_under_its_own_read_only_rules() {
     let package = load();
     let role = package
         .file
@@ -750,7 +750,7 @@ fn the_reviewer_role_runs_deepseek_v4_1_flash_under_its_own_read_only_rules() {
         .find(|r| r.name == "reviewer")
         .expect("roles.reviewer");
     assert_eq!(role.runtime, "omp");
-    assert_eq!(role.model, "ollama-daemon/deepseek-v4.1-flash:1017-cloud");
+    assert_eq!(role.model, "openai-codex/gpt-5.6-luna");
     assert_eq!(role.rules, "rules/reviewer.yaml");
     assert_eq!(
         package.rules["reviewer"].allow,
