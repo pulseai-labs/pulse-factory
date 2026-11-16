@@ -50,7 +50,8 @@ amendment and the session hosts of ADR-0001 (amendment of 2026-11-16) exist.
   controller checks the host of every session whose last state is live:
   - **survived:** the host's `hello` names the session, the incarnation and the launch-record hash
     that the store holds. The controller rebinds the adapter and reads the output from its last
-    acknowledged cursor. No request is opened;
+    acknowledged cursor. No request is opened. A host whose child already exited answers `hello` with
+    the exit status, and the session is lost (tier 2);
   - **lost:** no host job exists, or its exit file is there. The controller records the exit, and the
     session is lost (tier 2);
   - **unreachable:** the job exists but gives no valid `hello` in time. The controller parks the

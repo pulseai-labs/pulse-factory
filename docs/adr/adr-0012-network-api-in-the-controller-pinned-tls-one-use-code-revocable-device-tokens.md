@@ -498,3 +498,17 @@ server. A device had no read of the server's disk.
 - **`RunSummary` gains `project_id`** (the ninth field), so a device can tell that a run belongs to a
   project before it asks to remove the project. It is the project of the chat that proposed the run.
 - **No other change.** No route, no confirm code and no store change.
+
+## Amendment, 2026-11-16 (Proposed): the grant and plugin verbs, and the chat stream after a controller restart
+
+**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
+2026-11-16 and ADR-0017. Per the allowlist rule, this amendment records each verb it would add.
+
+- **`grant_clear` and `grant_revoke` join the allowlist**, each with a confirm code that binds the
+  device, the project and the verb, as for `answer`. They are claim acts (ADR-0005, amended).
+- **`plugin_list` joins the allowlist. `plugin_add` and `plugin_remove` join it with a confirm code**
+  that binds the package's content hash (ADR-0017).
+- **`settle` does not join the allowlist.** A device acts with the claim, never with the clear grant.
+- **The chat stream after a controller restart.** A chat whose session host survived keeps its process
+  (ADR-0014, amended). A client that reconnects gets the same session, with the output the host kept
+  since the controller's last acknowledged cursor, through the stream's existing reconnect.

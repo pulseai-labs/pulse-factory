@@ -302,6 +302,13 @@ them, so each one waits for the operator. A launched session must still never an
 Each act is an admitted command with a command ID and one ledger line that names the grant, its
 generation, the acting session, the request or unit, and the reason.
 
+**The verb.** The grant acts through one verb of its own, `settle`, which names the request or unit,
+the act and a reason. It is not a claim verb: `answer`, `clear`, `ack`, `arm` and the rest still refuse
+every chat and seat. `settle` refuses every caller except a session that the controller identifies,
+from its host, as the grant's holder for the project of the request or unit. Granting and revoking are
+claim acts: `grant clear` and `grant revoke`, on the CLI and, with a confirm code, on a device
+(ADR-0012, amendment of 2026-11-16).
+
 **Above the line, for the claim only:** the merge ack into a default branch; an answer that changes a
 spec, an ADR, a rule set or a permission, including an implementer's clarification; a raise of a cap
 or a launch budget; `arm`; granting or revoking the clear grant; installing or removing a plugin; every
@@ -317,9 +324,10 @@ project or an agent. It can never widen it.
 - On Linux the controller reads the caller's PID from the socket's peer credentials and its cgroup
   from `/proc`. A cgroup inside a session host's unit names the session, whatever its environment
   says. A double fork stays in the cgroup. So the refusals above get stronger too: a seat or a chat
-  that empties its environment or detaches is still refused on the claim verbs.
-- On macOS there are no cgroups. The check stays the marker and the process ancestry, from the host's
-  PID, until a test run verifies a stronger mechanism.
+  that empties its environment or double-forks is still refused on the claim verbs.
+- On macOS there are no cgroups. The refusals stay the marker and the process ancestry, from the
+  host's PID, until a test run verifies a stronger mechanism. Until then `settle` is refused on macOS:
+  a grant is never given on a marker.
 - **Known limit, unchanged in kind.** A same-user process can leave its cgroup (`systemd-run --user`),
   write the store file, or call the operator's socket as the operator. The clear grant adds no new path:
   a session that poses as the operator already reaches more than the grant. The real boundary is a
@@ -334,6 +342,10 @@ project or an agent. It can never widen it.
   hook, the chat's deny list at launch, and the controller's caller checks. A persona never carries the
   claim. Only built-in personas exist; own personas and own rule sets are later.
 
+**What it changes.** "Only a session that holds the claim can answer a request" becomes "only a
+session that holds the claim can answer a request above the line; the clear grant may settle one
+below it" (ADR-0006, amendment of 2026-11-16). "A session that Pulse Factory launched can never claim",
+the seat denials and the merge rule do not change.
+
 **Consequences.** A mechanical halt no longer waits for the operator once the grant is given. Every
-act of the grant is in the ledger and visible to the operator. The seat floors, the merge rule and the
-claim rule do not change.
+act of the grant is in the ledger and visible to the operator.

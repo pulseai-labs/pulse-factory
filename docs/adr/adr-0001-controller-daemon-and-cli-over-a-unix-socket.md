@@ -85,7 +85,8 @@ launches it as a child of the controller, each must later be moved out again.
   each host over a Unix socket in the operator's runtime directory, mode 0600. The host protocol is
   versioned. A connection starts with `hello`: the protocol version, the session, the incarnation, the
   child's PID and the hash of the launch record the host started from (ADR-0003). The controller
-  supports the current protocol and the one before it.
+  supports the current protocol and the one before it. An install that would drop a protocol a
+  running host still speaks is refused until those hosts end.
 - The host knows no runtime protocol, no workflow and no rule. The adapters stay in the controller and
   read their process through the host (ADR-0011, ADR-0014). An adapter change ships with the
   controller, and a host upgrade stays rare.
