@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use pf_adapter_claude::decode::{Decoder, Out, decode_recording};
+use pf_engine::port::agent::Usage;
 use pf_engine::port::chat::{CAP_BYTES, ChatEvent, InputKind, TaskEnd, TurnCause, check_order};
 use serde_json::{Value, json};
 
@@ -96,23 +97,144 @@ fn per_turn_usage_is_the_difference_of_the_cumulative_totals() {
     );
 }
 
-#[test]
-fn a_resumed_recording_starts_its_baseline_from_zero() {
-    let f = load_fixture("resume");
-    let total = f
+/// The cumulative totals of a recording's last `result`: cost in micros and the four token sums.
+fn last_totals(name: &str) -> [u64; 5] {
+    let f = load_fixture(name);
+    let msg = f
         .body
         .iter()
+        .rev()
         .find(|(to, m)| to == "host" && m["type"] == "result")
-        .map(|(_, m)| (m["total_cost_usd"].as_f64().unwrap() * 1e6).round() as u64)
+        .map(|(_, m)| m.clone())
         .unwrap();
+    let mut t = [
+        (msg["total_cost_usd"].as_f64().unwrap() * 1e6).round() as u64,
+        0,
+        0,
+        0,
+        0,
+    ];
+    for m in msg["modelUsage"].as_object().unwrap().values() {
+        t[1] += m["inputTokens"].as_u64().unwrap_or(0);
+        t[2] += m["outputTokens"].as_u64().unwrap_or(0);
+        t[3] += m["cacheReadInputTokens"].as_u64().unwrap_or(0);
+        t[4] += m["cacheCreationInputTokens"].as_u64().unwrap_or(0);
+    }
+    t
+}
+
+#[test]
+fn a_resumed_recording_charges_its_first_turn_only_its_own_usage() {
+    // `resume` resumed the session `resume_first` recorded, and its first `result` carries that
+    // process's totals over (CLI 2.1.319). Its first turn is charged only what it added.
+    let before = last_totals("resume_first");
+    let after = last_totals("resume");
+    assert!(
+        before[0] > 0 && after[0] > before[0],
+        "the recording carries the earlier total over: {before:?} {after:?}"
+    );
     let first = events("resume")
         .into_iter()
         .find_map(|e| match e {
-            ChatEvent::TurnResult { usage, .. } => Some(usage.cost_micros),
+            ChatEvent::TurnResult { usage, .. } => Some(usage),
             _ => None,
         })
         .unwrap();
-    assert_eq!(first, total);
+    assert_eq!(
+        [
+            first.cost_micros,
+            first.input_tokens,
+            first.output_tokens,
+            first.cache_read_tokens,
+            first.cache_write_tokens,
+        ],
+        [0, 1, 2, 3, 4].map(|i| after[i] - before[i]),
+        "micros and every token class: the turn's own usage"
+    );
+}
+
+/// A `result` with running totals (dollars, input tokens) and, if given, the turn's own usage in
+/// `model_usage_since_last_result`.
+fn result_with_own(cost: f64, input: u64, own: Option<(f64, u64)>) -> Value {
+    let mut r = json!({"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": cost,
+        "modelUsage": {"m": {"inputTokens": input, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}});
+    if let Some((c, i)) = own {
+        r["model_usage_since_last_result"] = json!({"m": {"costUSD": c, "inputTokens": i,
+            "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}});
+    }
+    r
+}
+
+fn usage_of(out: Vec<Out>) -> Usage {
+    match out.into_iter().find(|o| matches!(o, Out::Event(_))) {
+        Some(Out::Event(ChatEvent::TurnResult { usage, .. })) => usage,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_first_result_sets_the_baseline_to_what_the_process_carried_over() {
+    // A resumed process: its first `result` holds totals of 0.9 dollars and 300 input tokens, of
+    // which its own turn added 0.1 and 100 (`model_usage_since_last_result`).
+    let result = result_with_own;
+    let mut d = in_turn_decoder();
+    let first = usage_of(feed(&mut d, result(0.9, 300, Some((0.1, 100)))));
+    assert_eq!((first.cost_micros, first.input_tokens), (100_000, 100));
+    // The next turn counts from the whole carried total.
+    d.note_send("u2", InputKind::Operator);
+    feed(
+        &mut d,
+        json!({"type": "system", "subtype": "init", "apiKeySource": "none", "tools": [],
+        "claude_code_version": "2.1.319", "session_id": "s", "user_message_uuids": ["u2"]}),
+    );
+    let second = usage_of(feed(&mut d, result(1.0, 350, Some((0.1, 50)))));
+    assert_eq!((second.cost_micros, second.input_tokens), (100_000, 50));
+    // With no `model_usage_since_last_result`, a first result counts from zero, as before.
+    let mut d = in_turn_decoder();
+    let whole = usage_of(feed(&mut d, result(0.9, 300, None)));
+    assert_eq!((whole.cost_micros, whole.input_tokens), (900_000, 300));
+}
+
+#[test]
+fn across_a_resume_the_turns_sum_to_the_rounded_total_to_the_micro() {
+    // The first process ends at 0.1000004 dollars (100000 micros, rounded). The resumed one's first
+    // `result` holds 0.2000008 (200001 micros), of which its turn spent 0.1000004. The two turns must
+    // sum to 200001: the baseline is the dollar difference, rounded once, not two rounded totals
+    // subtracted (PR #69, CodeRabbit).
+    let mut first = in_turn_decoder();
+    let a = usage_of(feed(
+        &mut first,
+        result_with_own(0.1000004, 1, Some((0.1000004, 1))),
+    ));
+    let mut resumed = in_turn_decoder();
+    let b = usage_of(feed(
+        &mut resumed,
+        result_with_own(0.2000008, 2, Some((0.1000004, 1))),
+    ));
+    assert_eq!(a.cost_micros, 100_000);
+    assert_eq!(a.cost_micros + b.cost_micros, 200_001);
+    assert_eq!(a.input_tokens + b.input_tokens, 2);
+}
+
+#[test]
+fn a_first_result_outside_a_turn_sets_the_baseline_and_its_spend_lands_in_the_next_turn() {
+    // The process's first `result` comes with no turn open: it is logged, and it still sets the
+    // baseline, so its own spend (0.1, 100) goes into the next turn's usage, as a later stray
+    // result's does.
+    let mut d = Decoder::new("2.1.319", "s", false);
+    let out = feed(&mut d, result_with_own(0.9, 300, Some((0.1, 100))));
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Out::Log(l) if l.contains("outside a turn")))
+    );
+    d.note_send("u1", InputKind::Operator);
+    feed(
+        &mut d,
+        json!({"type": "system", "subtype": "init", "apiKeySource": "none", "tools": [],
+        "claude_code_version": "2.1.319", "session_id": "s", "user_message_uuids": ["u1"]}),
+    );
+    let next = usage_of(feed(&mut d, result_with_own(1.0, 350, Some((0.1, 50)))));
+    assert_eq!((next.cost_micros, next.input_tokens), (200_000, 150));
 }
 
 #[test]

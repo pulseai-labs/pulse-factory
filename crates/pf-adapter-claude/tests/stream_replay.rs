@@ -277,17 +277,32 @@ fn three_turns_give_three_per_turn_usages_that_sum_to_the_last_cumulative_total(
 }
 
 #[test]
-fn a_resumed_process_starts_its_baseline_again_from_zero() {
+fn a_resumed_process_charges_only_its_own_turn_and_the_session_total_holds() {
+    // `resume`'s first `result` carries `resume_first`'s totals over (CLI 2.1.319).
     let first = usages(&drive("resume_first").got);
     let second = usages(&drive("resume").got);
     assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 1);
+    let (before, after) = (last_totals("resume_first"), last_totals("resume"));
     assert_eq!(
         second[0],
-        last_totals("resume"),
-        "the second process counts from zero"
+        Usage {
+            input_tokens: after.input_tokens - before.input_tokens,
+            output_tokens: after.output_tokens - before.output_tokens,
+            cache_read_tokens: after.cache_read_tokens - before.cache_read_tokens,
+            cache_write_tokens: after.cache_write_tokens - before.cache_write_tokens,
+            cost_micros: after.cost_micros - before.cost_micros,
+        },
+        "the resumed process's turn is charged only its own usage"
     );
     assert!(second[0].cost_micros > 0);
+    let mut all = first.clone();
+    all.extend(second);
+    assert_eq!(
+        sum(&all),
+        after,
+        "the session's total is the sum of its turns, across the resume"
+    );
 }
 
 #[test]
