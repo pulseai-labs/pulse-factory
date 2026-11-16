@@ -1,6 +1,7 @@
 # ADR-0017 — Plugin packages add entries to lists
 
-- **Status:** Proposed, 2026-11-16. It is not in force until the operator accepts it.
+- **Status:** Proposed, 2026-11-16; ruled by the operator the same day. It takes effect when the code
+  that builds it lands, and that work's close marks it Accepted.
 - **Date:** 2026-11-16
 
 ## Context

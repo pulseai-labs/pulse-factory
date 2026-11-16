@@ -80,8 +80,8 @@ ADR-0012 adds paired devices.
 
 ## Amendment, 2026-11-16 (Proposed): the claim stays one per store, and the clear grant is one per project
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
-2026-11-16.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16.
 
 - **The claim stays one current claim per store**, across every run and project, as the amendment of
   2026-11-09 states. The claim's holders are the operator's CLI and the operator's paired devices. A

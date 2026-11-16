@@ -65,8 +65,8 @@ The second listener that "Consequences" allowed has come (ADR-0012).
 
 ## Amendment, 2026-11-16 (Proposed): every session runs in its own session host
 
-**Status: Proposed.** It is not in force. The Decision above holds until the operator accepts this
-amendment.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. Until then the Decision above holds.
 
 **Why.** A controller restart stops every seat (ADR-0007), so an upgrade or a crash costs running
 work. More kinds of session are coming, a terminal among them, and each one launches a process. If each

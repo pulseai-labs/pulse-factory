@@ -501,8 +501,9 @@ server. A device had no read of the server's disk.
 
 ## Amendment, 2026-11-16 (Proposed): the grant and plugin verbs, and the chat stream after a controller restart
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
-2026-11-16 and ADR-0017. Per the allowlist rule, this amendment records each verb it would add.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16 and
+ADR-0017. Per the allowlist rule, this amendment records each verb it adds.
 
 - **`grant_clear` and `grant_revoke` join the allowlist**, each with a confirm code that binds the
   device, the project and the verb, as for `answer`. They are claim acts (ADR-0005, amended).

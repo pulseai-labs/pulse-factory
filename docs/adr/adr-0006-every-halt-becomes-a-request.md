@@ -48,8 +48,8 @@ Rejected alternatives:
 
 ## Amendment, 2026-11-16 (Proposed): each park reason and request kind is above or below the line
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
-2026-11-16.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16.
 
 - **Each park reason carries a class**, `below` or `above`, set in code. `below`: a stall, a failed
   launch with a transient cause, a seat lost across a restart, a host that does not answer, a red

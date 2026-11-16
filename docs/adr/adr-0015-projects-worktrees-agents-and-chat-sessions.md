@@ -321,8 +321,9 @@ The chat-lifetime side only. The cap's value comes from ADR-0016's settings laye
 
 ## Amendment, 2026-11-16 (Proposed): a controller restart or stop no longer ends a chat process
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0001's and ADR-0007's
-amendments of 2026-11-16. Until then the rules under "'Live' does not depend on a process" hold.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's and ADR-0007's amendments of
+2026-11-16. Until then the rules under "'Live' does not depend on a process" hold.
 
 - **"A controller restart ends every chat process" no longer holds.** Each chat runs in its own
   session host (ADR-0001, amended). At controller start, a chat whose host survived stays live with its

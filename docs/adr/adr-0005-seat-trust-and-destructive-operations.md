@@ -275,8 +275,9 @@ ADR-0012 adds a second kind of caller beside the operator's OS user and the seat
 
 ## Amendment, 2026-11-16 (Proposed): the clear grant, the caller's session read from its host, and bypass plus personas
 
-**Status: Proposed.** It is not in force. The rules above hold until the operator accepts it. The
-caller check below needs the session hosts of ADR-0001 (amendment of 2026-11-16).
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. Until then the rules above hold. The caller check below
+needs the session hosts of ADR-0001 (amendment of 2026-11-16).
 
 **Why.** Most halts in a run are mechanical: a stall, a failed launch, a seat lost across a restart, a
 flaky check, a merge conflict on a branch that is not the default. Today only the claim can settle

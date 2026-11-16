@@ -220,8 +220,9 @@ The store side only. The layer's rules (scopes, order, merge modes, callers) are
 
 ## Amendment, 2026-11-16 (Proposed): launch records, the host registry and the clear grant
 
-**Status: Proposed.** It is not in force until the operator accepts it with the session hosts of
-ADR-0001 (amendment of 2026-11-16). The rows below are new tables, added by forward-only migration.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It needs the session hosts of ADR-0001 (amendment of
+2026-11-16). The rows below are new tables, added by forward-only migration.
 
 **Decision.**
 - **A launch record** is the row of what a session's next launch must use. The controller writes it

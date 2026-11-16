@@ -146,8 +146,9 @@ project-scoped agent is an `agents` row, and its settings use the scopes above.
 
 ## Amendment, 2026-11-16 (Proposed): a narrowing key for the clear grant, and keys that a resume reads fresh
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's and ADR-0007's
-amendments of 2026-11-16.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's and ADR-0007's amendments of
+2026-11-16.
 
 - **A merge mode `intersect`.** The first value on the chain is cut by every other stored value on
   the chain, so a more specific scope can narrow a list but never add to it. `settings get` shows each

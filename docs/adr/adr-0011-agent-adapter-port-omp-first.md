@@ -213,8 +213,8 @@ case for this (case 20 of the Claude Code chat adapter, ADR-0014).
 
 ## Amendment, 2026-11-16 (Proposed): seats run through a session host, and adapters deliver skills
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0001's amendment of
-2026-11-16.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's amendment of 2026-11-16.
 
 - **The PTY moves into the host.** A seat's process runs in its own session host (ADR-0001, amended).
   The adapter stays in the controller and drives the process through the host's protocol: input,

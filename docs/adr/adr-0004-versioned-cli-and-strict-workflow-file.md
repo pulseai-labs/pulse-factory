@@ -76,8 +76,9 @@ The API and the CLI share one set of verbs (ADR-0012).
 
 ## Amendment, 2026-11-16 (Proposed): the verbs `settle`, `grant` and `plugin`, and a workflow file from a plugin
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
-2026-11-16 and ADR-0017.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16 and
+ADR-0017.
 
 - **`settle`**: the clear grant's one verb. It names a request or a unit, one act of the grant's closed
   list and a reason (ADR-0005, amended). Only the grant's holder may call it.

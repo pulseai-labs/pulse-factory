@@ -42,8 +42,9 @@ Rejected alternatives:
 
 ## Amendment, 2026-11-16 (Proposed): restart survival in two tiers
 
-**Status: Proposed.** It is not in force. "No restart survival" holds until the operator accepts this
-amendment and the session hosts of ADR-0001 (amendment of 2026-11-16) exist.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. "No restart survival" holds until then, and it needs the
+session hosts of ADR-0001 (amendment of 2026-11-16).
 
 **Decision.**
 - **Tier 1: a controller restart stops no session.** On start, before it admits new work, the

@@ -292,8 +292,8 @@ Case 19's required checks are not all met, and the one process is spent. A secon
 
 ## Amendment, 2026-11-16 (Proposed): the chat process runs in a session host, and resumes from its launch record
 
-**Status: Proposed.** It is not in force until the operator accepts it with ADR-0001's amendment of
-2026-11-16.
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's amendment of 2026-11-16.
 
 - **The chat process runs in its own session host** (ADR-0001, amended). The host owns the pipes. The
   adapter stays in the controller and reads stream-json through the host from its last acknowledged
