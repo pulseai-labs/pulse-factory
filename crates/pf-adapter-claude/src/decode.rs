@@ -16,6 +16,8 @@
 //!   result's `user_message_uuids`;
 //! - `result.total_cost_usd` and `result.modelUsage` are cumulative for the process, so a turn's
 //!   usage is the difference to the last totals;
+//! - a resumed process carries the session's totals over into its first `result`, whose
+//!   `model_usage_since_last_result` is that turn's own usage: the rest is the baseline;
 //! - `system/background_tasks_changed` replaces the whole task set.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,6 +93,8 @@ pub struct Decoder {
     started_tasks: BTreeSet<String>,
     tasks: Vec<BackgroundTask>,
     totals: Totals,
+    /// Whether a turn's `result` came yet: the first one sets the baseline.
+    seen_result: bool,
 }
 
 /// The text of a JSON value for an event: the compact JSON text, capped by the caller.
@@ -125,6 +129,21 @@ fn whole(v: &Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// Totals from a cost in dollars and an object of per-model token counts (`modelUsage`'s shape).
+fn totals_of(cost_usd: f64, models: &Value) -> Totals {
+    let mut t = Totals {
+        cost_micros: (cost_usd * 1_000_000.0).round().max(0.0) as u64,
+        ..Totals::default()
+    };
+    for model in models.as_object().into_iter().flat_map(|m| m.values()) {
+        t.input += whole(&model["inputTokens"]);
+        t.output += whole(&model["outputTokens"]);
+        t.cache_read += whole(&model["cacheReadInputTokens"]);
+        t.cache_write += whole(&model["cacheCreationInputTokens"]);
+    }
+    t
+}
+
 impl Decoder {
     /// `expected_version` is what `--version` printed. `artifacts_on` is the option's value: a
     /// mismatch with the tool list is only logged.
@@ -139,6 +158,7 @@ impl Decoder {
             started_tasks: BTreeSet::new(),
             tasks: Vec::new(),
             totals: Totals::default(),
+            seen_result: false,
         }
     }
 
@@ -549,22 +569,35 @@ impl Decoder {
 
     /// The turn's own usage: each running total minus the last one. A total that went down is a
     /// protocol error: it is logged, counts as zero and becomes the new baseline.
+    ///
+    /// The first `result` sets the baseline. A resumed process carries the session's totals over
+    /// (CLI 2.1.319, the `resume` recording), so the baseline is that result's totals minus its
+    /// `model_usage_since_last_result`, the turn's own usage. A new process carries nothing over,
+    /// and a result without that field keeps the zero baseline.
     fn turn_usage(&mut self, msg: &Value, out: &mut Vec<Out>) -> Usage {
-        let mut now = Totals {
-            cost_micros: (msg["total_cost_usd"].as_f64().unwrap_or(0.0) * 1_000_000.0)
-                .round()
-                .max(0.0) as u64,
-            ..Totals::default()
-        };
-        for model in msg["modelUsage"]
-            .as_object()
-            .into_iter()
-            .flat_map(|m| m.values())
-        {
-            now.input += whole(&model["inputTokens"]);
-            now.output += whole(&model["outputTokens"]);
-            now.cache_read += whole(&model["cacheReadInputTokens"]);
-            now.cache_write += whole(&model["cacheCreationInputTokens"]);
+        let now = totals_of(
+            msg["total_cost_usd"].as_f64().unwrap_or(0.0),
+            &msg["modelUsage"],
+        );
+        if !self.seen_result {
+            self.seen_result = true;
+            let own = &msg["model_usage_since_last_result"];
+            if own.is_object() {
+                let cost = own
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                    .filter_map(|m| m["costUSD"].as_f64())
+                    .sum();
+                let own = totals_of(cost, own);
+                self.totals = Totals {
+                    cost_micros: now.cost_micros.saturating_sub(own.cost_micros),
+                    input: now.input.saturating_sub(own.input),
+                    output: now.output.saturating_sub(own.output),
+                    cache_read: now.cache_read.saturating_sub(own.cache_read),
+                    cache_write: now.cache_write.saturating_sub(own.cache_write),
+                };
+            }
         }
         let mut diff = |name: &str, last: u64, total: u64| -> u64 {
             if total < last {

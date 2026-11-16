@@ -96,23 +96,95 @@ fn per_turn_usage_is_the_difference_of_the_cumulative_totals() {
     );
 }
 
-#[test]
-fn a_resumed_recording_starts_its_baseline_from_zero() {
-    let f = load_fixture("resume");
-    let total = f
+/// The cumulative totals of a recording's last `result`: cost in micros and the four token sums.
+fn last_totals(name: &str) -> [u64; 5] {
+    let f = load_fixture(name);
+    let msg = f
         .body
         .iter()
+        .rev()
         .find(|(to, m)| to == "host" && m["type"] == "result")
-        .map(|(_, m)| (m["total_cost_usd"].as_f64().unwrap() * 1e6).round() as u64)
+        .map(|(_, m)| m.clone())
         .unwrap();
+    let mut t = [
+        (msg["total_cost_usd"].as_f64().unwrap() * 1e6).round() as u64,
+        0,
+        0,
+        0,
+        0,
+    ];
+    for m in msg["modelUsage"].as_object().unwrap().values() {
+        t[1] += m["inputTokens"].as_u64().unwrap_or(0);
+        t[2] += m["outputTokens"].as_u64().unwrap_or(0);
+        t[3] += m["cacheReadInputTokens"].as_u64().unwrap_or(0);
+        t[4] += m["cacheCreationInputTokens"].as_u64().unwrap_or(0);
+    }
+    t
+}
+
+#[test]
+fn a_resumed_recording_charges_its_first_turn_only_its_own_usage() {
+    // `resume` resumed the session `resume_first` recorded, and its first `result` carries that
+    // process's totals over (CLI 2.1.319). Its first turn is charged only what it added.
+    let before = last_totals("resume_first");
+    let after = last_totals("resume");
+    assert!(
+        before[0] > 0 && after[0] > before[0],
+        "the recording carries the earlier total over: {before:?} {after:?}"
+    );
     let first = events("resume")
         .into_iter()
         .find_map(|e| match e {
-            ChatEvent::TurnResult { usage, .. } => Some(usage.cost_micros),
+            ChatEvent::TurnResult { usage, .. } => Some(usage),
             _ => None,
         })
         .unwrap();
-    assert_eq!(first, total);
+    assert_eq!(
+        [
+            first.cost_micros,
+            first.input_tokens,
+            first.output_tokens,
+            first.cache_read_tokens,
+            first.cache_write_tokens,
+        ],
+        [0, 1, 2, 3, 4].map(|i| after[i] - before[i]),
+        "micros and every token class: the turn's own usage"
+    );
+}
+
+#[test]
+fn a_first_result_sets_the_baseline_to_what_the_process_carried_over() {
+    // A resumed process: its first `result` holds totals of 0.9 dollars and 300 input tokens, of
+    // which its own turn added 0.1 and 100 (`model_usage_since_last_result`).
+    let result = |cost: f64, input: u64, own: Option<(f64, u64)>| {
+        let mut r = json!({"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": cost,
+            "modelUsage": {"m": {"inputTokens": input, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}});
+        if let Some((c, i)) = own {
+            r["model_usage_since_last_result"] = json!({"m": {"costUSD": c, "inputTokens": i,
+                "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}});
+        }
+        r
+    };
+    let usage_of = |out: Vec<Out>| match out.into_iter().find(|o| matches!(o, Out::Event(_))) {
+        Some(Out::Event(ChatEvent::TurnResult { usage, .. })) => usage,
+        other => panic!("{other:?}"),
+    };
+    let mut d = in_turn_decoder();
+    let first = usage_of(feed(&mut d, result(0.9, 300, Some((0.1, 100)))));
+    assert_eq!((first.cost_micros, first.input_tokens), (100_000, 100));
+    // The next turn counts from the whole carried total.
+    d.note_send("u2", InputKind::Operator);
+    feed(
+        &mut d,
+        json!({"type": "system", "subtype": "init", "apiKeySource": "none", "tools": [],
+        "claude_code_version": "2.1.319", "session_id": "s", "user_message_uuids": ["u2"]}),
+    );
+    let second = usage_of(feed(&mut d, result(1.0, 350, Some((0.1, 50)))));
+    assert_eq!((second.cost_micros, second.input_tokens), (100_000, 50));
+    // With no `model_usage_since_last_result`, a first result counts from zero, as before.
+    let mut d = in_turn_decoder();
+    let whole = usage_of(feed(&mut d, result(0.9, 300, None)));
+    assert_eq!((whole.cost_micros, whole.input_tokens), (900_000, 300));
 }
 
 #[test]

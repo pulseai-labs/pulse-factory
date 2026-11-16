@@ -85,8 +85,9 @@
   for its answer.
 - **Per-turn usage.** `TurnResult.usage` is the turn's own usage. `total_cost_usd` and `modelUsage`
   are cumulative per process, so the adapter keeps the last totals as integers (cost in micros) and
-  subtracts. A new process, a resumed one included, starts at zero. A total that goes down counts
-  zero for that turn and becomes the new baseline. The session's total is the sum of its turns.
+  subtracts. A new process starts at zero. A resumed one starts from the totals it carried over
+  (amended 2026-11-16, patch `fix/resumed-chat-cost`). A total that goes down counts zero for that
+  turn and becomes the new baseline. The session's total is the sum of its turns.
 - **Mid-turn steering** (planner ruling, 2026-11-08). A `send` during a turn goes into the running
   turn (`MidTurn::Steer`). Case 10 showed the CLI folds it in. `NextTurn` stays the declared degrade
   for a CLI that cannot.
@@ -289,3 +290,42 @@ Case 19's required checks are not all met, and the one process is spent. A secon
   (`decode_fixtures.rs`) asserts only that each recorded `Bash` call of the four commands got an error,
   and that at least three exist.
 - The recording holds the hook's text, which names the operator's setup. The scrub leaves it as it is.
+
+## Amendment, 2026-11-16 (patch `fix/resumed-chat-cost`)
+
+On 2026-11-16 a resumed Claude Code process was seen to carry `total_cost_usd` over from before the
+resume, against this ADR's "A new process, a resumed one included, starts at zero". The `resume`
+recording (case 15) already showed it. So a resumed chat's first turn was charged the whole earlier
+cost again. This section corrects the baseline. It keeps this ADR's decision: `TurnResult.usage` is the
+turn's own usage, and the session's total is the sum of its turns.
+
+- **A resumed process carries the session's totals over.** Its first `result` holds `total_cost_usd` and
+  `modelUsage` as the session stood before the resume, plus its own turn. `resume.jsonl`'s first total
+  is 0.00622344 dollars; `resume_first.jsonl`, the process it resumed, ended at 0.00346746.
+- **The first `result` sets the baseline.** A `result` of CLI 2.1.319 carries
+  `model_usage_since_last_result`: the usage since the last `result`, per model, with `costUSD`. The
+  baseline is the first result's totals minus that field, each class on its own (cost in micros and the
+  four token sums), never below zero. A new process carries nothing over, so its baseline stays zero.
+  A first `result` without the field keeps the zero baseline, as before.
+- **Later results are unchanged.** Each subtracts the last totals. A total that goes down still counts
+  zero and becomes the new baseline. `docs/contracts/chat-adapter.md` says the same.
+
+### Verified claims (`fix/resumed-chat-cost`)
+Checked on 2026-11-16, on the branch cut from `origin/main` at `e94773b`. No real CLI
+process ran: the checks read the recordings.
+- Every `result` in the recordings carries `model_usage_since_last_result`, except the error `result` of
+  `resume_missing.jsonl`. Its cost and token counts equal the difference of the totals in every
+  recording but one: the first `result` of `resume.jsonl`. There they equal the resumed totals minus
+  `resume_first.jsonl`'s last: 2756 micros, and 2 input, 4 output, 15078 cache-read and 13015
+  cache-creation tokens.
+- `decode_fixtures.rs` and `stream_replay.rs` (through the replay binary) assert that the resumed turn's
+  usage is `resume` minus `resume_first` in micros and in every token class, and that the two
+  processes' turns sum to `resume`'s last totals. Before the change the turn was charged 6223 micros,
+  the whole carried total, and the tests failed. With the change reverted they fail again.
+- `cargo test -p pf-engine -p pf-adapter-claude`: 363 tests pass, 21 are ignored (the real-CLI recorder).
+
+### Unverified claims (`fix/resumed-chat-cost`)
+- That a resumed process that ran subagents or a background task carries its totals in the same way.
+  The `resume` recording has one plain turn.
+- That a later CLI keeps `model_usage_since_last_result`. Without it, a resumed process's first turn is
+  charged the carried total again. The next qualification must record the field.
