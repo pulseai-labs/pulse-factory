@@ -322,18 +322,25 @@ under an old generation is refused. `halt` does not revoke it, but `halt` stops 
 project or an agent. It can never widen it.
 
 **The caller's session, read from its host.** An environment marker may only refuse; it never grants.
-- On Linux the controller reads the caller's PID from the socket's peer credentials and its cgroup
-  from `/proc`. A cgroup inside a session host's unit names the session, whatever its environment
-  says. A double fork stays in the cgroup. So the refusals above get stronger too: a seat or a chat
-  that empties its environment or double-forks is still refused on the claim verbs.
+- On Linux the controller reads the caller's PID from the socket's peer credentials (a pidfd) and its
+  cgroup from `/proc`. A cgroup inside a session host's unit names the session, whatever its
+  environment says. A double fork stays in the cgroup. So the refusals above get stronger against
+  mistakes: a seat or a chat that empties its environment or double-forks is still refused on the
+  claim verbs. The cgroup is not proof against a hostile session: any process of the user can write
+  itself into another cgroup of the user's own systemd tree, so it can pose as another session, or as
+  the controller to a host.
 - On macOS there are no cgroups. The refusals stay the marker and the process ancestry, from the
   host's PID, until a test run verifies a stronger mechanism. Until then `settle` is refused on macOS:
   a grant is never given on a marker.
 - **Known limit, unchanged in kind.** A same-user process can leave its cgroup (`systemd-run --user`),
-  write the store file, or call the operator's socket as the operator. The clear grant adds no new path:
-  a session that poses as the operator already reaches more than the grant. The real boundary is a
-  separate OS user, or a sandbox that hides the operator's socket and the store from the session. It is
-  the direction, not this amendment.
+  move itself into another cgroup of the user's systemd tree, write the store file, or call the
+  operator's socket as the operator. The clear grant adds no new path: a session that poses as the
+  operator already reaches more than the grant. The real boundary is a separate OS user, a system unit
+  with `User=`, or a `bwrap` sandbox that hides the operator's state directory (its socket, store and
+  claim token) and the user's runtime directory (the systemd user bus) from the session. A user unit's
+  own sandbox options are not enough: on a host whose AppArmor restricts unprivileged user namespaces,
+  they silently do nothing. Inside such a sandbox a seat's hook needs a channel of its own to the
+  controller. It is the direction, not this amendment.
 
 **Bypass plus personas** (operator, 2026-11-08).
 - Every launched session runs with its harness's permission prompts off. No harness prompt ever
@@ -342,6 +349,10 @@ project or an agent. It can never widen it.
   list for a chat, and any grant. Pulse Factory enforces the profile at its own points: the seat's tool
   hook, the chat's deny list at launch, and the controller's caller checks. A persona never carries the
   claim. Only built-in personas exist; own personas and own rule sets are later.
+- **A seat's tool hook fails closed in every harness.** A hook that crashes, times out or answers in a
+  shape the harness does not read must block the call. A harness whose hooks fail open by default is
+  launched with its block-on-failure setting. A seat loads no setting source the project or the
+  operator controls, because such a source can switch hooks off.
 
 **What it changes.** "Only a session that holds the claim can answer a request" becomes "only a
 session that holds the claim can answer a request above the line; the clear grant may settle one

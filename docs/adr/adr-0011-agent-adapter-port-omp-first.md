@@ -225,7 +225,16 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0001's amend
 - **A tenth duty: deliver a skill set.** At launch, the adapter delivers the session's skills
   (ADR-0017) in the harness's own way and returns what it delivered, for the launch record (ADR-0003,
   amended). OMP takes `--plugin-dir` and `--skills=<globs>`, as above. A Claude Code adapter takes a
-  plugin directory generated in the session's launch directory, passed with `--plugin-dir`. No skill is
-  installed in a harness's own home directory.
+  plugin directory generated in the session's launch directory, passed with `--plugin-dir`, with the
+  CLI's own built-in plugins and skills turned off. No skill is installed in a harness's own home
+  directory. A delivered skill never runs shell on load: the adapter turns off a harness's inline
+  skill shell where it has one.
+- **A Claude Code seat** (recorded from a test run of the pinned CLI 2.1.319). It runs headless over
+  stream-json in `bypassPermissions`, under an allowlisted environment, with no setting source loaded
+  (`--setting-sources=` and a settings file the adapter writes), no MCP server
+  (`--strict-mcp-config`), a `--tools` allowlist, empty commit and PR attribution, and a `PreToolUse`
+  hook that answers in the CLI's `permissionDecision` shape with `onFailure: "block"`. Each tool call,
+  a subagent's included, reached the hook; turn end and per-turn usage arrive in the `result` event;
+  `--resume` keeps the session. `pulse-factory hook` gains a mode that answers in that shape.
 - **Every seat runs with its harness's prompts off.** The seat's authority comes from its role's rule
   set, enforced by Pulse Factory's own hook, never from a harness prompt (ADR-0005, amended).

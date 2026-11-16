@@ -79,19 +79,27 @@ launches it as a child of the controller, each must later be moved out again.
   of the output that the controller has not acknowledged, and, for a PTY session, the screen model. It
   holds the child's exit status until the controller reads it.
 - Each host is its own service-manager job. On Linux it is a transient systemd user unit in a slice of
-  its own, outside the controller's cgroup. On macOS it is a launchd job in the operator's GUI domain.
-  A restart of the controller's unit stops no host.
+  its own, outside the controller's cgroup, with `Type=notify` (ready only after its socket is bound)
+  and `KillMode=mixed`. An `ExecStopPost=` step writes the exit file, so a host that is killed still
+  leaves one. On macOS it is a launchd job in the operator's GUI domain. A restart of the controller's
+  unit stops no host. A secret never goes into the unit's properties, which systemd writes to a
+  world-readable file: the host reads it from a 0600 file and deletes the file before it starts the
+  child.
 - The controller is still the one control authority over the store and the sessions. It attaches to
-  each host over a Unix socket in the operator's runtime directory, mode 0600. The host protocol is
-  versioned. A connection starts with `hello`: the protocol version, the session, the incarnation, the
-  child's PID and the hash of the launch record the host started from (ADR-0003). The controller
+  each host over a Unix socket in the unit's runtime directory (`RuntimeDirectory=`, mode 0700), which
+  systemd removes when the host stops. The host accepts a connection only from the controller's
+  cgroup, and the controller checks the host's cgroup and the unit's invocation ID. These checks stop
+  mistakes, not a hostile process of the same user (ADR-0005, amendment of 2026-11-16). The host
+  protocol is versioned. A connection starts with `hello`: the protocol version, the session, the
+  incarnation, the unit's invocation ID, the child's PID and the hash of the launch record the host
+  started from (ADR-0003). The controller
   supports the current protocol and the one before it. An install that would drop a protocol a
   running host still speaks is refused until those hosts end.
 - The host knows no runtime protocol, no workflow and no rule. The adapters stay in the controller and
   read their process through the host (ADR-0011, ADR-0014). An adapter change ships with the
   controller, and a host upgrade stays rare.
 - A host whose child ended keeps the exit status and the unread output for a bounded time (a setting).
-  Then it writes them to an exit file and ends.
+  Then it writes them to an exit file in the persistent state directory and ends.
 
 **What it replaces.** "Seats run as child processes of the controller, each in its own PTY." The
 rejected alternative "one supervised owner process per seat" is now chosen, and widened to every

@@ -57,7 +57,8 @@ the seat floors, the host protocol (ADR-0001, amendment of 2026-11-16) and the c
 **One skill, three harnesses.** A skill is stored once, in the open `SKILL.md` format. Each runtime
 adapter delivers a session's skill set in its harness's own way and returns what it delivered for the
 launch record (ADR-0011, amendment of 2026-11-16). No skill is installed in a harness's home
-directory.
+directory. A skill is data: no delivered skill may run shell when it loads, so the adapter turns off a
+harness's inline skill shell. Without that, a skill's shell would run outside the seat's hook.
 
 **Install, upgrade, remove.**
 - `pulse-factory plugin add <path>` parses the package and shows what it adds: each list and entry,
