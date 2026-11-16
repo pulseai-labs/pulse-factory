@@ -217,3 +217,36 @@ The store side only. The layer's rules (scopes, order, merge modes, callers) are
   arm's critical section) and `run_project` (the link of a new run to its project, committed before
   `run.json` is written, so an arm whose link fails fails whole).
 - Rules and limits: ADR-0015 (the proposals), ADR-0005 (who may arm), ADR-0012 (the wire).
+
+## Amendment, 2026-11-16 (Proposed): launch records, the host registry and the clear grant
+
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It needs the session hosts of ADR-0001 (amendment of
+2026-11-16). The rows below are new tables, added by forward-only migration.
+
+**Decision.**
+- **A launch record** is the row of what a session's next launch must use. The controller writes it
+  before the host starts and never changes it. It holds:
+  - the session, its kind (seat, chat or terminal) and the incarnation;
+  - the host's job name and socket path;
+  - the exact argv and working directory;
+  - the environment, each variable by name and value, except a secret. A seat token or any credential
+    is stored as a hash or a reference, never as a value, and is made again at each launch;
+  - the runtime's ID, version, binary path and SHA-256;
+  - each settings key the launch read, with its resolved value and the scope it came from
+    (ADR-0016);
+  - each plugin's ID, release and content hash, and the skills delivered to the session, by name and
+    hash (ADR-0017);
+  - the rule-set hash of a seat's role, or the deny-list hash of a chat;
+  - for a seat: the run, the unit, the role and the run's pinned manifest hash (ADR-0007);
+  - the runtime's own session ID, where it has one.
+- **Revisions.** A live change that must hold after a resume (a chat's model, effort or permission
+  mode) writes a new revision. The newest revision wins. Old revisions stay.
+- **The host registry** records each host's job name, socket, incarnation, start time and end. The
+  reconciliation of ADR-0007 (amendment of 2026-11-16) reads it.
+- **The clear grant** is a row per project: the agent that holds it, the generation, who granted it,
+  when, and when it was revoked (ADR-0005, amendment of 2026-11-16).
+- Each write passes admission with a command ID, as every state change does.
+
+**Consequences.** A full restart has what it needs to resume each session as it was. No secret value
+enters the store.

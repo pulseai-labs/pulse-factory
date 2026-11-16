@@ -318,3 +318,21 @@ The chat-lifetime side only. The cap's value comes from ADR-0016's settings laye
   of a removed project keeps running.
 - **No archive.** A removed project's sessions and runs stay in the store as they are. The app keeps no
   list of them, and a removed root or name can be added again under a new ID.
+
+## Amendment, 2026-11-16 (Proposed): a controller restart or stop no longer ends a chat process
+
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's and ADR-0007's amendments of
+2026-11-16. Until then the rules under "'Live' does not depend on a process" hold.
+
+- **"A controller restart ends every chat process" no longer holds.** Each chat runs in its own
+  session host (ADR-0001, amended). At controller start, a chat whose host survived stays live with its
+  process, and its pending requests stay pending.
+- **Only a lost chat settles to `idle`.** A chat whose host is gone goes to `idle` with no process, its
+  pending requests are closed as `lost`, and its next message resumes it from its launch record
+  (ADR-0003, ADR-0014, amended).
+- **A controller stop no longer stops sessions.** No host is in the controller's cgroup, so
+  `KillMode=control-group` covers only the controller's own unit. To stop every chat, the operator runs
+  `halt`, which still stops every live chat process, now through its host.
+- **The cap on live chat processes and the 30-minute idle release are unchanged.** They now count hosts
+  that survived a restart too.

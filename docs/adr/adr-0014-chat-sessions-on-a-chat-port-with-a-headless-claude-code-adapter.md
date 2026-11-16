@@ -289,3 +289,19 @@ Case 19's required checks are not all met, and the one process is spent. A secon
   (`decode_fixtures.rs`) asserts only that each recorded `Bash` call of the four commands got an error,
   and that at least three exist.
 - The recording holds the hook's text, which names the operator's setup. The scrub leaves it as it is.
+
+## Amendment, 2026-11-16 (Proposed): the chat process runs in a session host, and resumes from its launch record
+
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's amendment of 2026-11-16.
+
+- **The chat process runs in its own session host** (ADR-0001, amended). The host owns the pipes. The
+  adapter stays in the controller and reads stream-json through the host from its last acknowledged
+  cursor, so a controller restart costs a chat nothing.
+- **A replay gap** (the host's buffer overflowed) shows as "output lost" for that stretch. The CLI
+  transcript in `~/.claude` stays the source of the conversation.
+- **A lost chat resumes from its launch record** (ADR-0003, amended) at the operator's next open: the
+  record's CLI version and SHA-256, its options and its runtime session ID. The six lifetime rules
+  stay. A failed resume still never falls back to a fresh context.
+- **A live option change** (`set_model`, effort, permission mode) writes a new launch-record revision,
+  so a resume keeps it.

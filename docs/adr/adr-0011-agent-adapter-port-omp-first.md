@@ -210,3 +210,31 @@ and now the verb `pulse-factory propose`: the model works out the workflow input
 the controller builds, checks and posts the start card. The adapter's launch does not change. No
 `--plugin-dir` and no skill install in the operator's `~/.claude` is made. The chat records one real
 case for this (case 20 of the Claude Code chat adapter, ADR-0014).
+
+## Amendment, 2026-11-16 (Proposed): seats run through a session host, and adapters deliver skills
+
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0001's amendment of 2026-11-16.
+
+- **The PTY moves into the host.** A seat's process runs in its own session host (ADR-0001, amended).
+  The adapter stays in the controller and drives the process through the host's protocol: input,
+  output from a cursor, resize and signals. The nine duties do not change. The `hook` call already
+  fails closed, so a tool call made while the controller restarts is denied, not allowed. An event
+  the OMP extension sends while the controller is down must be kept and sent again; a test run
+  verifies this before the amendment is accepted.
+- **A tenth duty: deliver a skill set.** At launch, the adapter delivers the session's skills
+  (ADR-0017) in the harness's own way and returns what it delivered, for the launch record (ADR-0003,
+  amended). OMP takes `--plugin-dir` and `--skills=<globs>`, as above. A Claude Code adapter takes a
+  plugin directory generated in the session's launch directory, passed with `--plugin-dir`, with the
+  CLI's own built-in plugins and skills turned off. No skill is installed in a harness's own home
+  directory. A delivered skill never runs shell on load: the adapter turns off a harness's inline
+  skill shell where it has one.
+- **A Claude Code seat** (recorded from a test run of the pinned CLI 2.1.319). It runs headless over
+  stream-json in `bypassPermissions`, under an allowlisted environment, with no setting source loaded
+  (`--setting-sources=` and a settings file the adapter writes), no MCP server
+  (`--strict-mcp-config`), a `--tools` allowlist, empty commit and PR attribution, and a `PreToolUse`
+  hook that answers in the CLI's `permissionDecision` shape with `onFailure: "block"`. Each tool call,
+  a subagent's included, reached the hook; turn end and per-turn usage arrive in the `result` event;
+  `--resume` keeps the session. `pulse-factory hook` gains a mode that answers in that shape.
+- **Every seat runs with its harness's prompts off.** The seat's authority comes from its role's rule
+  set, enforced by Pulse Factory's own hook, never from a harness prompt (ADR-0005, amended).
