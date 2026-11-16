@@ -73,3 +73,19 @@ The API and the CLI share one set of verbs (ADR-0012).
 - **The decision list names the verbs again:** `arm`, `status`, `halt`, `requests`, `show`, `claim`,
   `answer`, `clear`, `ack`, `project`, `device` and `api`, plus the internal `controller` and
   `hook`. No verb waits or watches.
+
+## Amendment, 2026-11-16 (Proposed): the verbs `settle`, `grant` and `plugin`, and a workflow file from a plugin
+
+**Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
+it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16 and
+ADR-0017.
+
+- **`settle`**: the clear grant's one verb. It names a request or a unit, one act of the grant's closed
+  list and a reason (ADR-0005, amended). Only the grant's holder may call it.
+- **`grant clear` and `grant revoke`**: claim acts that give or end a project's clear grant.
+- **`plugin add`, `plugin list` and `plugin remove`** (ADR-0017). `plugin add` and `plugin remove` are
+  claim acts. A seat or a chat cannot call them.
+- Each new verb takes `--json`, and its JSON carries a `schema_version`, as every verb does.
+- **A workflow file can come from an installed plugin.** It is read as strictly as before, and a run
+  pins the plugin's content-hash manifest with it (ADR-0007). The plugins the workflow file declares for
+  its seats are harness plugins, as before; a Pulse Factory plugin does not install them.
