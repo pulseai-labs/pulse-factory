@@ -331,7 +331,7 @@ project or an agent. It can never widen it.
   the controller to a host.
 - On macOS there are no cgroups. The refusals stay the marker and the process ancestry, from the
   host's PID, until a test run verifies a stronger mechanism. Until then `settle` is refused on macOS:
-  a grant is never given on a marker.
+  the grant may be issued there, but none of its acts is admitted on a marker.
 - **Known limit, unchanged in kind.** A same-user process can leave its cgroup (`systemd-run --user`),
   move itself into another cgroup of the user's systemd tree, write the store file, or call the
   operator's socket as the operator. The clear grant adds no new path: a session that poses as the
