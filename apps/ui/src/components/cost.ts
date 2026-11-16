@@ -1,9 +1,9 @@
 // The cost of a chat in weighted units (wu).
 //
-// "wu" is defined by MASTER-SPEC §2 step 7a: "weighted units (input 1, output 5, cache read 0.1,
-// 5-minute write 1.25, 1-hour write 2)". The app brief says: "dollars for API-priced sessions, wu for
-// subscription sessions; the two never add up into one number". The chat runs the operator's
-// subscription login (Q1), so the UI shows wu and keeps the CLI's dollar figure for a tooltip.
+// A weighted unit counts each token class at a fixed weight: input 1, output 5, cache read 0.1,
+// 5-minute cache write 1.25 and 1-hour cache write 2. An API-priced session shows dollars and a
+// subscription session shows wu, and the two are never added into one number. The chat runs on a
+// subscription login, so the UI shows wu and keeps the CLI's dollar figure for a tooltip.
 //
 // Known limit: `ChatUsage` sums the cache writes of all turns without the 5-minute and 1-hour split,
 // so a session whose turns mixed the two is weighted at its last turn's TTL.

@@ -1,6 +1,7 @@
 # ADR-0016 — Scoped settings for behaviour policies
 
-- **Status:** Proposed, 2026-11-09, at `r1.s4.w4`. It becomes Accepted at the `r1.s4` close.
+- **Status:** Accepted, 2026-11-11. It was owed at the `r1.s4` close (proposed 2026-11-09, at
+  `r1.s4.w4`). The line was written at the Release 1 close.
 - **Date:** 2026-11-09
 
 ## Context
