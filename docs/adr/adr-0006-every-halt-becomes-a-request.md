@@ -45,3 +45,19 @@ Rejected alternatives:
 ## Consequences
 - Release 0 sends no notification, so the operator runs `requests` to see what is waiting. The feature
   map has "request notifications" for later.
+
+## Amendment, 2026-11-16 (Proposed): each park reason and request kind is above or below the line
+
+**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
+2026-11-16.
+
+- **Each park reason carries a class**, `below` or `above`, set in code. `below`: a stall, a failed
+  launch with a transient cause, a seat lost across a restart, a host that does not answer, a red
+  check that a re-run may fix. Every other reason is `above`.
+- **Each request kind carries a class.** A core kind is `below` only when every answer it allows is an
+  act of the clear grant's closed list (ADR-0005, amended). Every request kind a plugin adds is
+  `above` (ADR-0017).
+- **A `below` request may be settled by the clear grant** or by the claim. An `above` request is
+  settled by the claim only.
+- **Every halt still becomes a request**, and every end status still carries its reason. A settled
+  request records who settled it: the claim's holder or the clear grant's session.

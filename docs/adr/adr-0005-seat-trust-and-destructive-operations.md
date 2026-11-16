@@ -272,3 +272,68 @@ ADR-0012 adds a second kind of caller beside the operator's OS user and the seat
   Orchestrator chat.** The close needs no claim, so the waiting text no longer names a "claim
   session". The Orchestrator is a chat Pulse Factory launched, not a seat: no `pf-rules` role applies
   to it. Its deny list does, with the known limit of ADR-0014.
+
+## Amendment, 2026-11-16 (Proposed): the clear grant, the caller's session read from its host, and bypass plus personas
+
+**Status: Proposed.** It is not in force. The rules above hold until the operator accepts it. The
+caller check below needs the session hosts of ADR-0001 (amendment of 2026-11-16).
+
+**Why.** Most halts in a run are mechanical: a stall, a failed launch, a seat lost across a restart, a
+flaky check, a merge conflict on a branch that is not the default. Today only the claim can settle
+them, so each one waits for the operator. A launched session must still never answer for the operator.
+
+**Decision: two grants.**
+- **The claim** is unchanged. It carries the operator's decisions. Only the operator's CLI or a paired
+  device holds it. A session that Pulse Factory launched can never claim.
+- **The clear grant** settles halts below the line, and nothing else. The project's Orchestrator agent
+  holds it, on one server. A new session of the same agent (after a handoff) acts under the same grant.
+
+**The clear grant's acts.** A closed list in code. No setting, plugin or workflow adds to it.
+1. Clear a park whose reason has the class `below` (ADR-0006, amendment of 2026-11-16).
+2. Resume a parked unit from its launch record (ADR-0003, amended), inside the run's armed caps.
+3. Re-run a failed check on an item PR.
+4. Dispatch a seat again, inside the dispatch cap and the run's armed launch count. It never raises
+   either.
+5. Send a seat to resolve a merge conflict on an item branch or a spine branch, never on a default
+   branch. If the resolution changes a test or a spec file, the seat's done record says so, and the
+   controller parks the unit with an `above` reason.
+6. Close a request that a newer revision of the same request replaced.
+
+Each act is an admitted command with a command ID and one ledger line that names the grant, its
+generation, the acting session, the request or unit, and the reason.
+
+**Above the line, for the claim only:** the merge ack into a default branch; an answer that changes a
+spec, an ADR, a rule set or a permission, including an implementer's clarification; a raise of a cap
+or a launch budget; `arm`; granting or revoking the clear grant; installing or removing a plugin; every
+settings write; a demo verdict; every request kind a plugin adds.
+
+**Granting.** The grant is off until the operator grants it for a project, on the CLI or with a device
+confirm code. The operator revokes it at any time. A revoke bumps the grant's generation, and an act
+under an old generation is refused. `halt` does not revoke it, but `halt` stops every launch, so acts
+2, 4 and 5 cannot run. The setting `authority.clear_acts` (ADR-0016, amended) can narrow the list for a
+project or an agent. It can never widen it.
+
+**The caller's session, read from its host.** An environment marker may only refuse; it never grants.
+- On Linux the controller reads the caller's PID from the socket's peer credentials and its cgroup
+  from `/proc`. A cgroup inside a session host's unit names the session, whatever its environment
+  says. A double fork stays in the cgroup. So the refusals above get stronger too: a seat or a chat
+  that empties its environment or detaches is still refused on the claim verbs.
+- On macOS there are no cgroups. The check stays the marker and the process ancestry, from the host's
+  PID, until a test run verifies a stronger mechanism.
+- **Known limit, unchanged in kind.** A same-user process can leave its cgroup (`systemd-run --user`),
+  write the store file, or call the operator's socket as the operator. The clear grant adds no new path:
+  a session that poses as the operator already reaches more than the grant. The real boundary is a
+  separate OS user, or a sandbox that hides the operator's socket and the store from the session. It is
+  the direction, not this amendment.
+
+**Bypass plus personas** (operator, 2026-11-08).
+- Every launched session runs with its harness's permission prompts off. No harness prompt ever
+  decides authority.
+- A persona is an agent row (ADR-0015) with an authority profile: a role's rule set for a seat, a deny
+  list for a chat, and any grant. Pulse Factory enforces the profile at its own points: the seat's tool
+  hook, the chat's deny list at launch, and the controller's caller checks. A persona never carries the
+  claim. Only built-in personas exist; own personas and own rule sets are later.
+
+**Consequences.** A mechanical halt no longer waits for the operator once the grant is given. Every
+act of the grant is in the ledger and visible to the operator. The seat floors, the merge rule and the
+claim rule do not change.

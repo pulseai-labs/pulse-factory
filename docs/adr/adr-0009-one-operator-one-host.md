@@ -77,3 +77,18 @@ ADR-0012 adds paired devices.
   stale card cannot start a run after the kill switch.
 - **Known limit, unchanged:** a code proves the device, the freshness and the plan, not that a person
   pressed the button.
+
+## Amendment, 2026-11-16 (Proposed): the claim stays one per store, and the clear grant is one per project
+
+**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's amendment of
+2026-11-16.
+
+- **The claim stays one current claim per store**, across every run and project, as the amendment of
+  2026-11-09 states. The claim's holders are the operator's CLI and the operator's paired devices. A
+  confirm on any request moves it to the device that acted, and the fenced holder is told. This is the
+  intended fence: below-the-line work moves to the clear grant, so no session needs to hold the claim
+  for routine halts.
+- **The clear grant is one per project per server**, held by that project's Orchestrator agent
+  (ADR-0005, amended). It has its own generation and is fenced on its own.
+- Revisit the claim's scope when a server has a second operator, or when a project's claim must go to
+  a session outside Pulse Factory.

@@ -210,3 +210,22 @@ and now the verb `pulse-factory propose`: the model works out the workflow input
 the controller builds, checks and posts the start card. The adapter's launch does not change. No
 `--plugin-dir` and no skill install in the operator's `~/.claude` is made. The chat records one real
 case for this (case 20 of the Claude Code chat adapter, ADR-0014).
+
+## Amendment, 2026-11-16 (Proposed): seats run through a session host, and adapters deliver skills
+
+**Status: Proposed.** It is not in force until the operator accepts it with ADR-0001's amendment of
+2026-11-16.
+
+- **The PTY moves into the host.** A seat's process runs in its own session host (ADR-0001, amended).
+  The adapter stays in the controller and drives the process through the host's protocol: input,
+  output from a cursor, resize and signals. The nine duties do not change. The `hook` call already
+  fails closed, so a tool call made while the controller restarts is denied, not allowed. An event
+  the OMP extension sends while the controller is down must be kept and sent again; a test run
+  verifies this before the amendment is accepted.
+- **A tenth duty: deliver a skill set.** At launch, the adapter delivers the session's skills
+  (ADR-0017) in the harness's own way and returns what it delivered, for the launch record (ADR-0003,
+  amended). OMP takes `--plugin-dir` and `--skills=<globs>`, as above. A Claude Code adapter takes a
+  plugin directory generated in the session's launch directory, passed with `--plugin-dir`. No skill is
+  installed in a harness's own home directory.
+- **Every seat runs with its harness's prompts off.** The seat's authority comes from its role's rule
+  set, enforced by Pulse Factory's own hook, never from a harness prompt (ADR-0005, amended).

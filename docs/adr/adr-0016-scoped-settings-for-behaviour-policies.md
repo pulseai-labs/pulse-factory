@@ -143,3 +143,22 @@ project-scoped agent is an `agents` row, and its settings use the scopes above.
   project and agent. It merges by `override` and applies at the next turn. A call over the bound is
   refused with `propose_rate` before any build, and the over-bound refusals coalesce like a refused
   settings write.
+
+## Amendment, 2026-11-16 (Proposed): a narrowing key for the clear grant, and keys that a resume reads fresh
+
+**Status: Proposed.** It is not in force until the operator accepts it with ADR-0005's and ADR-0007's
+amendments of 2026-11-16.
+
+- **A merge mode `intersect`.** The first value on the chain is cut by every other stored value on
+  the chain, so a more specific scope can narrow a list but never add to it. `settings get` shows each
+  value and its scope, as for `override`.
+- **The key `authority.clear_acts`**: a JSON array of the clear grant's act names (ADR-0005,
+  amended), merge mode `intersect`, built-in: all six acts. It narrows the grant for a project or an
+  agent. The grant itself, its list and its holder are not settings and never become settings.
+- **A registry flag `applies`**, `record` or `current`. A resume from a launch record (ADR-0007,
+  amended) uses the record's value of a `record` key and the current resolved value of a `current`
+  key. `chat.deny_commands`, `chat.self_turn_cap` and every later cap are `current`, so a tighter
+  value the operator set while a session was down holds when it resumes.
+- **Plugin defaults.** A plugin may register keys of its own, named `plugin.<id>.<key>`, with types
+  from a closed set (ADR-0017). Their defaults resolve at a scope just above the built-in. The
+  controller and the engine never read them for their own decisions. A plugin never sets a core key.

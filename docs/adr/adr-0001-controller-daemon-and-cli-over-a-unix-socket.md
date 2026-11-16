@@ -62,3 +62,43 @@ The second listener that "Consequences" allowed has come (ADR-0012).
 - **The rejected alternative "an HTTPS API now" is superseded**, for the reason in ADR-0012: the
   run view and the MacBook app need it, and the login, the pinned key and the revocable devices that
   the Release 0 decision waited for exist now.
+
+## Amendment, 2026-11-16 (Proposed): every session runs in its own session host
+
+**Status: Proposed.** It is not in force. The Decision above holds until the operator accepts this
+amendment.
+
+**Why.** A controller restart stops every seat (ADR-0007), so an upgrade or a crash costs running
+work. More kinds of session are coming, a terminal among them, and each one launches a process. If each
+launches it as a child of the controller, each must later be moved out again.
+
+**Decision.**
+- Every session runs in its own **session host**: a run seat, a chat and a terminal alike. A host is
+  one small process per session. It starts the session's process with the argv, the working directory
+  and the environment it is given. It owns the session's PTY or pipes. It keeps a bounded replay buffer
+  of the output that the controller has not acknowledged, and, for a PTY session, the screen model. It
+  holds the child's exit status until the controller reads it.
+- Each host is its own service-manager job. On Linux it is a transient systemd user unit in a slice of
+  its own, outside the controller's cgroup. On macOS it is a launchd job in the operator's GUI domain.
+  A restart of the controller's unit stops no host.
+- The controller is still the one control authority over the store and the sessions. It attaches to
+  each host over a Unix socket in the operator's runtime directory, mode 0600. The host protocol is
+  versioned. A connection starts with `hello`: the protocol version, the session, the incarnation, the
+  child's PID and the hash of the launch record the host started from (ADR-0003). The controller
+  supports the current protocol and the one before it.
+- The host knows no runtime protocol, no workflow and no rule. The adapters stay in the controller and
+  read their process through the host (ADR-0011, ADR-0014). An adapter change ships with the
+  controller, and a host upgrade stays rare.
+- A host whose child ended keeps the exit status and the unread output for a bounded time (a setting).
+  Then it writes them to an exit file and ends.
+
+**What it replaces.** "Seats run as child processes of the controller, each in its own PTY." The
+rejected alternative "one supervised owner process per seat" is now chosen, and widened to every
+session.
+
+**Consequences.**
+- One more process per session. The existing caps on live sessions bound the number of hosts.
+- Each session gets its own cgroup on Linux, which the caller check uses (ADR-0005, amendment of
+  2026-11-16).
+- The exact launchd form on macOS is open until a test run verifies it.
+- ADR-0007 (amendment of 2026-11-16) says what a restart does now.

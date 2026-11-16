@@ -39,3 +39,42 @@ Rejected alternatives:
   written. On the retry, `origin` already has the branch, so the controller skips the push and no
   ledger line for it is ever written. The park reason is the only record. Revisit it with restart
   survival and ledger durability.
+
+## Amendment, 2026-11-16 (Proposed): restart survival in two tiers
+
+**Status: Proposed.** It is not in force. "No restart survival" holds until the operator accepts this
+amendment and the session hosts of ADR-0001 (amendment of 2026-11-16) exist.
+
+**Decision.**
+- **Tier 1: a controller restart stops no session.** On start, before it admits new work, the
+  controller checks the host of every session whose last state is live:
+  - **survived:** the host's `hello` names the session, the incarnation and the launch-record hash
+    that the store holds. The controller rebinds the adapter and reads the output from its last
+    acknowledged cursor. No request is opened;
+  - **lost:** no host job exists, or its exit file is there. The controller records the exit, and the
+    session is lost (tier 2);
+  - **unreachable:** the job exists but gives no valid `hello` in time. The controller parks the
+    session with the reason "host unreachable" and never launches a second copy.
+- **Tier 2: a lost session comes back from its launch record, never from defaults** (ADR-0003):
+  - **a chat** resumes at the operator's next open, on the record's runtime and runtime session ID. A
+    failed resume shows "context lost", and the operator chooses (ADR-0014);
+  - **a seat** parks with a request, as before. A relaunch from its record needs the claim or the
+    clear grant (ADR-0005, amendment of 2026-11-16), and counts against the run's armed launch
+    budget. The request says whether the relaunch resumes the runtime session or starts fresh with the
+    unit's handoff;
+  - **a terminal** starts a new shell at the next open, in the record's working directory with the
+    record's environment. Its scrollback is lost, and the tab says so.
+- **Settings at a resume.** A resume uses the record's values, except a key whose registry entry
+  says `applies: current` (ADR-0016, amendment of 2026-11-16).
+- **Upgrades.** A host upgrade does not touch running hosts: each keeps its binary until its session
+  ends, and old host binaries stay installed while a live record needs them. A runtime upgrade applies
+  to new sessions. A resume whose recorded runtime copy is gone asks before it uses the new one.
+- Pinned runs, forward-only migrations and the rollback rule above do not change.
+
+**What it replaces.** The rejected alternative "restart survival now" is now chosen. "Nothing
+relaunches by default" stays for seats. "The claim decides each relaunch" becomes "the claim or the
+clear grant".
+
+**Consequences.** A controller crash no longer costs a seat its work. A host crash or a reboot still
+does, and the relaunch is a recorded act. The known limit of the base push with no ledger line stays;
+its revisit comes with ledger durability.
