@@ -196,6 +196,27 @@ fn a_first_result_sets_the_baseline_to_what_the_process_carried_over() {
 }
 
 #[test]
+fn across_a_resume_the_turns_sum_to_the_rounded_total_to_the_micro() {
+    // The first process ends at 0.1000004 dollars (100000 micros, rounded). The resumed one's first
+    // `result` holds 0.2000008 (200001 micros), of which its turn spent 0.1000004. The two turns must
+    // sum to 200001: the baseline is the dollar difference, rounded once, not two rounded totals
+    // subtracted (PR #69, CodeRabbit).
+    let mut first = in_turn_decoder();
+    let a = usage_of(feed(
+        &mut first,
+        result_with_own(0.1000004, 1, Some((0.1000004, 1))),
+    ));
+    let mut resumed = in_turn_decoder();
+    let b = usage_of(feed(
+        &mut resumed,
+        result_with_own(0.2000008, 2, Some((0.1000004, 1))),
+    ));
+    assert_eq!(a.cost_micros, 100_000);
+    assert_eq!(a.cost_micros + b.cost_micros, 200_001);
+    assert_eq!(a.input_tokens + b.input_tokens, 2);
+}
+
+#[test]
 fn a_first_result_outside_a_turn_sets_the_baseline_and_its_spend_lands_in_the_next_turn() {
     // The process's first `result` comes with no turn open: it is logged, and it still sets the
     // baseline, so its own spend (0.1, 100) goes into the next turn's usage, as a later stray

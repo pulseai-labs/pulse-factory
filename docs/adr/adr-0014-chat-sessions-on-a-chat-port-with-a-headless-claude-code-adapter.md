@@ -305,7 +305,9 @@ turn's own usage, and the session's total is the sum of its turns.
 - **The first `result` sets the baseline**, in a turn or not. A `result` of CLI 2.1.319 carries
   `model_usage_since_last_result`: the usage since the last `result`, per model, with `costUSD`. The
   baseline is the first result's totals minus that field, each class on its own (cost in micros and the
-  four token sums), never below zero. A new process carries nothing over, so its baseline stays zero.
+  four token sums), never below zero. The cost is the dollar difference, rounded once, so the turns sum
+  to the rounded total to the micro across the resume. A new process carries nothing over, so its
+  baseline stays zero.
   A first `result` without the field keeps the zero baseline, as before. A first `result` outside a turn
   is logged, and its own spend goes into the next turn, as a later stray `result`'s does.
 - **Later results are unchanged.** Each subtracts the last totals. A total that goes down still counts
@@ -324,7 +326,9 @@ process ran: the checks read the recordings.
   processes' turns sum to `resume`'s last totals. Before the change the turn was charged 6223 micros,
   the whole carried total, and the tests failed. With the change reverted they fail again, and so do
   the two synthetic tests of the first `result` (in a turn, and outside one).
-- `cargo test -p pf-engine -p pf-adapter-claude`: 364 tests pass, 21 are ignored (the real-CLI recorder).
+- A synthetic resume at 0.1000004 and 0.2000008 dollars: the two turns sum to 200001 micros. With the two
+  rounded totals subtracted they summed to 200000, and the test failed.
+- `cargo test -p pf-engine -p pf-adapter-claude`: 365 tests pass, 21 are ignored (the real-CLI recorder).
 
 ### Unverified claims (`fix/resumed-chat-cost`)
 - That a resumed process that ran subagents or a background task carries its totals in the same way.

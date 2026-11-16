@@ -581,19 +581,19 @@ impl Decoder {
         if !own.is_object() {
             return;
         }
-        let now = totals_of(
-            msg["total_cost_usd"].as_f64().unwrap_or(0.0),
-            &msg["modelUsage"],
-        );
-        let cost = own
+        let total_usd = msg["total_cost_usd"].as_f64().unwrap_or(0.0);
+        let now = totals_of(total_usd, &msg["modelUsage"]);
+        let own_usd: f64 = own
             .as_object()
             .into_iter()
             .flat_map(|m| m.values())
             .filter_map(|m| m["costUSD"].as_f64())
             .sum();
-        let own = totals_of(cost, own);
+        let own = totals_of(own_usd, own);
         self.totals = Totals {
-            cost_micros: now.cost_micros.saturating_sub(own.cost_micros),
+            // The dollar difference, rounded once: it is the earlier process's rounded last total,
+            // so the turns sum to the rounded total to the micro across the resume.
+            cost_micros: totals_of(total_usd - own_usd, &Value::Null).cost_micros,
             input: now.input.saturating_sub(own.input),
             output: now.output.saturating_sub(own.output),
             cache_read: now.cache_read.saturating_sub(own.cache_read),
