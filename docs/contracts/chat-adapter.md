@@ -89,8 +89,8 @@ approval's original input for the answer. The runtime's own transcript keeps the
 The Claude Code adapter derives it so: `total_cost_usd` and `modelUsage` of a `result` are cumulative for
 the process. The adapter keeps the last totals per process as integers (cost in micros,
 `round(total_cost_usd × 10⁶)`, and the token sums over `modelUsage`: input, output, cache read and
-cache creation). A turn's usage is each total minus the last. The first `result` of a process sets the
-baseline: its totals minus its `model_usage_since_last_result` (the turn's own usage, per model, with
+cache creation). A turn's usage is each total minus the last. The first `result` of a process, in a turn
+or not, sets the baseline: its totals minus its `model_usage_since_last_result` (the turn's own usage, per model, with
 `costUSD`), each class on its own and never below zero. A new process carries nothing over, so it starts
 at zero. A resumed process carries the session's totals over into its first `result` (CLI 2.1.319), so
 it starts from them. A first `result` without that field starts at zero. A negative difference is a

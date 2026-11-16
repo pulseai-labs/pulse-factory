@@ -302,11 +302,12 @@ turn's own usage, and the session's total is the sum of its turns.
 - **A resumed process carries the session's totals over.** Its first `result` holds `total_cost_usd` and
   `modelUsage` as the session stood before the resume, plus its own turn. `resume.jsonl`'s first total
   is 0.00622344 dollars; `resume_first.jsonl`, the process it resumed, ended at 0.00346746.
-- **The first `result` sets the baseline.** A `result` of CLI 2.1.319 carries
+- **The first `result` sets the baseline**, in a turn or not. A `result` of CLI 2.1.319 carries
   `model_usage_since_last_result`: the usage since the last `result`, per model, with `costUSD`. The
   baseline is the first result's totals minus that field, each class on its own (cost in micros and the
   four token sums), never below zero. A new process carries nothing over, so its baseline stays zero.
-  A first `result` without the field keeps the zero baseline, as before.
+  A first `result` without the field keeps the zero baseline, as before. A first `result` outside a turn
+  is logged, and its own spend goes into the next turn, as a later stray `result`'s does.
 - **Later results are unchanged.** Each subtracts the last totals. A total that goes down still counts
   zero and becomes the new baseline. `docs/contracts/chat-adapter.md` says the same.
 
@@ -321,8 +322,9 @@ process ran: the checks read the recordings.
 - `decode_fixtures.rs` and `stream_replay.rs` (through the replay binary) assert that the resumed turn's
   usage is `resume` minus `resume_first` in micros and in every token class, and that the two
   processes' turns sum to `resume`'s last totals. Before the change the turn was charged 6223 micros,
-  the whole carried total, and the tests failed. With the change reverted they fail again.
-- `cargo test -p pf-engine -p pf-adapter-claude`: 363 tests pass, 21 are ignored (the real-CLI recorder).
+  the whole carried total, and the tests failed. With the change reverted they fail again, and so do
+  the two synthetic tests of the first `result` (in a turn, and outside one).
+- `cargo test -p pf-engine -p pf-adapter-claude`: 364 tests pass, 21 are ignored (the real-CLI recorder).
 
 ### Unverified claims (`fix/resumed-chat-cost`)
 - That a resumed process that ran subagents or a background task carries its totals in the same way.

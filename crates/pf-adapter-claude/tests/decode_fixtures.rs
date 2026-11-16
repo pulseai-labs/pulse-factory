@@ -6,6 +6,7 @@ mod common;
 
 use common::*;
 use pf_adapter_claude::decode::{Decoder, Out, decode_recording};
+use pf_engine::port::agent::Usage;
 use pf_engine::port::chat::{CAP_BYTES, ChatEvent, InputKind, TaskEnd, TurnCause, check_order};
 use serde_json::{Value, json};
 
@@ -152,23 +153,30 @@ fn a_resumed_recording_charges_its_first_turn_only_its_own_usage() {
     );
 }
 
+/// A `result` with running totals (dollars, input tokens) and, if given, the turn's own usage in
+/// `model_usage_since_last_result`.
+fn result_with_own(cost: f64, input: u64, own: Option<(f64, u64)>) -> Value {
+    let mut r = json!({"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": cost,
+        "modelUsage": {"m": {"inputTokens": input, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}});
+    if let Some((c, i)) = own {
+        r["model_usage_since_last_result"] = json!({"m": {"costUSD": c, "inputTokens": i,
+            "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}});
+    }
+    r
+}
+
+fn usage_of(out: Vec<Out>) -> Usage {
+    match out.into_iter().find(|o| matches!(o, Out::Event(_))) {
+        Some(Out::Event(ChatEvent::TurnResult { usage, .. })) => usage,
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_first_result_sets_the_baseline_to_what_the_process_carried_over() {
     // A resumed process: its first `result` holds totals of 0.9 dollars and 300 input tokens, of
     // which its own turn added 0.1 and 100 (`model_usage_since_last_result`).
-    let result = |cost: f64, input: u64, own: Option<(f64, u64)>| {
-        let mut r = json!({"type": "result", "subtype": "success", "is_error": false, "total_cost_usd": cost,
-            "modelUsage": {"m": {"inputTokens": input, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}});
-        if let Some((c, i)) = own {
-            r["model_usage_since_last_result"] = json!({"m": {"costUSD": c, "inputTokens": i,
-                "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}});
-        }
-        r
-    };
-    let usage_of = |out: Vec<Out>| match out.into_iter().find(|o| matches!(o, Out::Event(_))) {
-        Some(Out::Event(ChatEvent::TurnResult { usage, .. })) => usage,
-        other => panic!("{other:?}"),
-    };
+    let result = result_with_own;
     let mut d = in_turn_decoder();
     let first = usage_of(feed(&mut d, result(0.9, 300, Some((0.1, 100)))));
     assert_eq!((first.cost_micros, first.input_tokens), (100_000, 100));
@@ -185,6 +193,27 @@ fn a_first_result_sets_the_baseline_to_what_the_process_carried_over() {
     let mut d = in_turn_decoder();
     let whole = usage_of(feed(&mut d, result(0.9, 300, None)));
     assert_eq!((whole.cost_micros, whole.input_tokens), (900_000, 300));
+}
+
+#[test]
+fn a_first_result_outside_a_turn_sets_the_baseline_and_its_spend_lands_in_the_next_turn() {
+    // The process's first `result` comes with no turn open: it is logged, and it still sets the
+    // baseline, so its own spend (0.1, 100) goes into the next turn's usage, as a later stray
+    // result's does.
+    let mut d = Decoder::new("2.1.319", "s", false);
+    let out = feed(&mut d, result_with_own(0.9, 300, Some((0.1, 100))));
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Out::Log(l) if l.contains("outside a turn")))
+    );
+    d.note_send("u1", InputKind::Operator);
+    feed(
+        &mut d,
+        json!({"type": "system", "subtype": "init", "apiKeySource": "none", "tools": [],
+        "claude_code_version": "2.1.319", "session_id": "s", "user_message_uuids": ["u1"]}),
+    );
+    let next = usage_of(feed(&mut d, result_with_own(1.0, 350, Some((0.1, 50)))));
+    assert_eq!((next.cost_micros, next.input_tokens), (200_000, 150));
 }
 
 #[test]

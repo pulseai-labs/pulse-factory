@@ -93,7 +93,7 @@ pub struct Decoder {
     started_tasks: BTreeSet<String>,
     tasks: Vec<BackgroundTask>,
     totals: Totals,
-    /// Whether a turn's `result` came yet: the first one sets the baseline.
+    /// Whether a `result` came yet: the first one sets the baseline.
     seen_result: bool,
 }
 
@@ -520,6 +520,7 @@ impl Decoder {
     }
 
     fn result(&mut self, msg: &Value, out: &mut Vec<Out>) {
+        self.first_baseline(msg);
         let Some(turn) = self.turn.take() else {
             out.push(Out::Log("result outside a turn".to_string()));
             return;
@@ -567,38 +568,46 @@ impl Decoder {
         );
     }
 
+    /// The first `result` of the process, in a turn or not, sets the baseline. A resumed process
+    /// carries the session's totals over (CLI 2.1.319, the `resume` recording), so the baseline is
+    /// that result's totals minus its `model_usage_since_last_result`, the turn's own usage. A new
+    /// process carries nothing over, and a result without that field keeps the zero baseline.
+    fn first_baseline(&mut self, msg: &Value) {
+        if self.seen_result {
+            return;
+        }
+        self.seen_result = true;
+        let own = &msg["model_usage_since_last_result"];
+        if !own.is_object() {
+            return;
+        }
+        let now = totals_of(
+            msg["total_cost_usd"].as_f64().unwrap_or(0.0),
+            &msg["modelUsage"],
+        );
+        let cost = own
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter_map(|m| m["costUSD"].as_f64())
+            .sum();
+        let own = totals_of(cost, own);
+        self.totals = Totals {
+            cost_micros: now.cost_micros.saturating_sub(own.cost_micros),
+            input: now.input.saturating_sub(own.input),
+            output: now.output.saturating_sub(own.output),
+            cache_read: now.cache_read.saturating_sub(own.cache_read),
+            cache_write: now.cache_write.saturating_sub(own.cache_write),
+        };
+    }
+
     /// The turn's own usage: each running total minus the last one. A total that went down is a
     /// protocol error: it is logged, counts as zero and becomes the new baseline.
-    ///
-    /// The first `result` sets the baseline. A resumed process carries the session's totals over
-    /// (CLI 2.1.319, the `resume` recording), so the baseline is that result's totals minus its
-    /// `model_usage_since_last_result`, the turn's own usage. A new process carries nothing over,
-    /// and a result without that field keeps the zero baseline.
     fn turn_usage(&mut self, msg: &Value, out: &mut Vec<Out>) -> Usage {
         let now = totals_of(
             msg["total_cost_usd"].as_f64().unwrap_or(0.0),
             &msg["modelUsage"],
         );
-        if !self.seen_result {
-            self.seen_result = true;
-            let own = &msg["model_usage_since_last_result"];
-            if own.is_object() {
-                let cost = own
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|m| m.values())
-                    .filter_map(|m| m["costUSD"].as_f64())
-                    .sum();
-                let own = totals_of(cost, own);
-                self.totals = Totals {
-                    cost_micros: now.cost_micros.saturating_sub(own.cost_micros),
-                    input: now.input.saturating_sub(own.input),
-                    output: now.output.saturating_sub(own.output),
-                    cache_read: now.cache_read.saturating_sub(own.cache_read),
-                    cache_write: now.cache_write.saturating_sub(own.cache_write),
-                };
-            }
-        }
         let mut diff = |name: &str, last: u64, total: u64| -> u64 {
             if total < last {
                 out.push(Out::Log(format!(
