@@ -14,10 +14,15 @@ const LIMIT: Duration = Duration::from_secs(120);
 const BASE_LIMIT: Duration = Duration::from_secs(60);
 /// The limit of `seat-tamper.sh`: two runs, about ten paper seats.
 const TAMPER_LIMIT: Duration = Duration::from_secs(60);
+/// The limit of `stranded-close.sh`: the script's own budget is 60 s, so a failure it reports for a
+/// budget overrun arrives before this limit.
+const STRANDED_LIMIT: Duration = Duration::from_secs(75);
 
 /// Two tamper demos never run at once. A test that panicked leaves the mutex poisoned, so each
 /// holder takes the guard with `unwrap_or_else(|e| e.into_inner())`.
 static TAMPER: Mutex<()> = Mutex::new(());
+/// The same for the stranded-close demos: four of them run in this file, each with two runs.
+static STRANDED: Mutex<()> = Mutex::new(());
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -30,6 +35,8 @@ fn script(name: &str) -> PathBuf {
 fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
     let _one_tamper_demo =
         (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
+    let _one_stranded_demo =
+        (name == "stranded-close.sh").then(|| STRANDED.lock().unwrap_or_else(|e| e.into_inner()));
     let mut cmd = Command::new("bash");
     cmd.arg(script(name))
         .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
@@ -97,6 +104,7 @@ fn every_demo_script_exits_0_within_its_limit() {
         ("arm-dry-run.sh", LIMIT),
         ("spine-base.sh", BASE_LIMIT),
         ("seat-tamper.sh", TAMPER_LIMIT),
+        ("stranded-close.sh", STRANDED_LIMIT),
     ] {
         let (out, took) = run(name, &[]);
         assert!(
@@ -299,6 +307,129 @@ fn seat_tamper_fails_when_the_hook_is_not_called() {
         stderr(&out).contains("the audit log of item-1 names no refused git config"),
         "{}",
         stderr(&out)
+    );
+    drop(dir);
+}
+
+/// A copy of `scripts/demo/paper-stranded` that a test may break.
+fn paper_stranded_copy() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-stranded");
+    copy_dir(&root().join("scripts/demo/paper-stranded"), &paper);
+    (dir, paper)
+}
+
+#[test]
+fn stranded_close_reports_what_it_checked() {
+    let (out, took) = run("stranded-close.sh", &[]);
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < STRANDED_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "close: up to 1 nudge on no done signal",
+        "ended: every item merged",
+        "nudged: the seat finished after 1 nudge",
+        "stop request R-1 for item-1: close of item-1 on branch work/item-1: the close seat ended before the item PR opened.",
+        "stranded: the stop named item-1, work/item-1 and both staged files",
+        "stranded-close: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+}
+
+/// Run `stranded-close.sh` on a copy of the package, or with a stand-in `stranded.sh`, that a test
+/// broke. The demo must fail, and its message must name the run that failed.
+fn stranded_fails_with(env: &[(&str, &str)], run_name: &str) -> Output {
+    let (out, took) = run("stranded-close.sh", env);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(took < STRANDED_LIMIT, "{took:?}");
+    assert!(
+        stderr(&out).contains(&format!("stranded-close: FAIL: {run_name}:")),
+        "the failure names {run_name}: {}",
+        stderr(&out)
+    );
+    out
+}
+
+#[test]
+fn stranded_close_fails_when_the_close_stage_drops_no_signal() {
+    // Without `no_signal` the seat's first turn end parks the unit with the generic reason, in run 1.
+    let (dir, paper) = paper_stranded_copy();
+    edit(&paper, "workflow/workflow.yaml", |t| {
+        let start = t
+            .find("        no_signal:\n")
+            .expect("the close stage declares no_signal");
+        let end = t[start..]
+            .find("        stall_minutes:")
+            .expect("a `stall_minutes` follows")
+            + start;
+        format!("{}{}", &t[..start], &t[end..])
+    });
+    let out = stranded_fails_with(&[("PAPER_SRC", paper.to_str().unwrap())], "run 1 (nudged)");
+    assert!(
+        stderr(&out).contains("seat ended with no done signal"),
+        "the park reason is in the failure: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("launch 1: mode=nudged"),
+        "the seat's own log is in the failure: {}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
+fn stranded_close_fails_when_the_paper_seat_ignores_the_nudge_in_run_1() {
+    // The seat reads the nudge and ends its turn again with no PR: `stranded.sh` makes a stop, and
+    // run 1 has no stop to expect.
+    let (dir, paper) = paper_stranded_copy();
+    edit(&paper, "seats/close.sh", |t| {
+        t.replacen(
+            "  finish # after the nudge\n",
+            "  end_turn # ignores the nudge\n",
+            1,
+        )
+    });
+    let out = stranded_fails_with(&[("PAPER_SRC", paper.to_str().unwrap())], "run 1 (nudged)");
+    assert!(
+        stderr(&out).contains("the run is stuck: item-1"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("close of item-1 on branch work/item-1"),
+        "the stop text is in the failure: {}",
+        stderr(&out)
+    );
+    drop(dir);
+}
+
+#[test]
+fn stranded_close_fails_when_stranded_sh_writes_no_stop_file_in_run_2() {
+    // A stand-in that exits 0 and writes nothing: the unit parks with the generic reason, which is a
+    // `park` request, not a `stop`.
+    let dir = tempfile::tempdir().unwrap();
+    let silent = dir.path().join("stranded.sh");
+    std::fs::write(&silent, "#!/bin/sh\nexit 0\n").unwrap();
+    let out = stranded_fails_with(
+        &[("STRANDED_SH", silent.to_str().unwrap())],
+        "run 2 (stranded)",
+    );
+    assert!(
+        stderr(&out).contains("the open request is a park"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains("ended: every item merged"),
+        "run 1 passed: {}",
+        stdout(&out)
     );
     drop(dir);
 }
@@ -628,6 +759,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "arm-dry-run.sh",
         "spine-base.sh",
         "seat-tamper.sh",
+        "stranded-close.sh",
         "pair-api.sh",
         "chat-api.sh",
         "needs-you-api.sh",
