@@ -1526,6 +1526,10 @@ fn the_spine_close_brief_names_the_pr_bodys_required_lines_and_never_a_body_of_t
         "Door: one-way",
         "Door: two-way",
         "--body-file",
+        "--repo <owner/repo>",
+        "--base <base>",
+        "--head <spine branch>",
+        "--title \"merge <spine>\"",
     ] {
         assert!(brief.contains(want), "the brief lacks {want:?}:\n{brief}");
     }

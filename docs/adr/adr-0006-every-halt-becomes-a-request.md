@@ -81,9 +81,11 @@ close passed it.
 - **A stage's `run` commands may turn the park into a stop request.** The controller runs them before
   it parks, each under the bound of any command. A stop file that one of them writes makes the park a
   `stop` request with that text and the stop file's answer hook, even when that command or a later
-  one then fails or times out. A command that fails or times out stops the list and is a note. Only
-  when no stop file was written is the park the one it was before: "seat ended with no done signal",
-  kind `park`.
+  one then fails or times out. A command that fails or times out stops the list and is a note. The
+  controller then reads the stage's signals again in their usual order: the stop file first, then a
+  `park_on` file (a park with that file's kind and reason), then the `done` conditions (the stage is
+  done when they now hold). Only when none of these holds is the park the one it was before: "seat
+  ended with no done signal", kind `park`.
 - **Every halt still becomes a request**, and every end status still carries its reason. A stage with
   no `no_signal` parks as before. The engine knows no nudge and no command: the controller's driver
   carries both out (ADR-0001), and the workflow file declares them (ADR-0004).
