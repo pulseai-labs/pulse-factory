@@ -8,6 +8,10 @@
 //! - `{"push":{"branch":"..","sha":".."}}` is a seat's push;
 //! - `{"turn_end":true}` ends the turn.
 //!
+//! A launch also exports `PF_PAPER_INBOX=<a file for the session>`, which exists and is empty. A
+//! message the controller delivers is appended to it as one JSON line, `{"message":"..."}`, and
+//! starts another turn: the script can wait on the file, run the turn, and write `turn_end` again.
+//!
 //! A line it cannot read is ignored and noted in `out/<unit>/paper-notes.log`. The process
 //! ending is `Ended`. It spends nothing and reaches no network. The scripted `FakeAdapter` stays
 //! for unit tests.
@@ -44,6 +48,7 @@ struct PaperSession {
     child: Child,
     pgid: u32,
     events_path: PathBuf,
+    inbox_path: PathBuf,
     notes_path: PathBuf,
     offset: u64,
     partial: Vec<u8>,
@@ -223,6 +228,9 @@ impl AgentPort for PaperAdapter {
         let events_path = session_dir.join(format!("{id}.events"));
         std::fs::write(&events_path, b"")
             .map_err(|e| failed(format!("cannot write {}: {e}", events_path.display())))?;
+        let inbox_path = session_dir.join(format!("{id}.inbox"));
+        std::fs::write(&inbox_path, b"")
+            .map_err(|e| failed(format!("cannot write {}: {e}", inbox_path.display())))?;
         let notes_dir = run_dir.map_or_else(
             || session_dir.clone(),
             |d| d.join("out").join(&plan.unit_id),
@@ -241,6 +249,7 @@ impl AgentPort for PaperAdapter {
             }
         }
         cmd.env("PF_PAPER_EVENTS", &events_path);
+        cmd.env("PF_PAPER_INBOX", &inbox_path);
         let child = cmd
             .spawn()
             .map_err(|e| failed(format!("cannot start {}: {e}", script.display())))?;
@@ -249,6 +258,7 @@ impl AgentPort for PaperAdapter {
             child,
             pgid,
             events_path,
+            inbox_path,
             notes_path: notes_dir.join("paper-notes.log"),
             offset: 0,
             partial: Vec::new(),
@@ -285,8 +295,29 @@ impl AgentPort for PaperAdapter {
         })
     }
 
-    fn deliver(&self, _: &SessionRef, _: &str) -> Result<(), AgentError> {
-        Err(failed("a paper seat takes no message"))
+    fn deliver(&self, session: &SessionRef, message: &str) -> Result<(), AgentError> {
+        let s = self
+            .find(session)
+            .ok_or_else(|| failed(format!("session {} is unknown", session.0)))?;
+        let mut s = locked(&s);
+        // Read what the script wrote first: a process that ended on its own is seen as ended.
+        s.refresh();
+        if s.exited {
+            return Err(failed(format!(
+                "session {} has ended; a message reaches a live session only",
+                session.0
+            )));
+        }
+        let line = serde_json::json!({ "message": message }).to_string();
+        let mut inbox = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&s.inbox_path)
+            .map_err(|e| failed(format!("cannot open {}: {e}", s.inbox_path.display())))?;
+        writeln!(inbox, "{line}")
+            .map_err(|e| failed(format!("cannot write {}: {e}", s.inbox_path.display())))?;
+        // The message starts a turn: the session works until the script ends it again.
+        s.turn_ended = false;
+        Ok(())
     }
 
     fn interrupt(&self, session: &SessionRef) -> Result<(), AgentError> {

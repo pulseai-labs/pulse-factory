@@ -10,8 +10,14 @@
 //! 3. When every `done` condition holds, the stage is done. Once its session is over, the
 //!    stage's `outcomes` are tried in order, and the first entry whose `when` conditions all hold
 //!    makes the verdict an outcome. No entry that holds leaves the verdict a plain done.
-//! 4. A session whose turn ended, with none of the above, parks with "seat ended with no done signal".
-//! 5. Otherwise the stage keeps waiting.
+//! 4. A session whose turn ended, with none of the above, is handled by the stage's `no_signal`
+//!    key, when it has one. While the stage has nudges left for the session, and the session is
+//!    alive, the verdict is [`StageVerdict::Nudge`]. Once they are spent, or none are declared,
+//!    and the stage has `run` commands that did not run yet, the verdict is
+//!    [`StageVerdict::RunThenPark`]. The driver then runs the commands and evaluates the stage
+//!    again with `no_signal_ran` set, so a stop file a command wrote parks as a stop.
+//! 5. Every other such session parks with "seat ended with no done signal".
+//! 6. Otherwise the stage keeps waiting.
 //!
 //! Every park carries the kind of the request it opens (ADR-0006). The kind comes from the
 //! condition that parked the unit, in code, and never from the reason text: the stop file is
@@ -41,6 +47,10 @@ pub struct SessionState {
     pub turn_ended: bool,
     /// The session's process ended.
     pub ended: bool,
+    /// How many nudges the driver delivered into this session.
+    pub nudges_sent: u32,
+    /// The stage's `no_signal.run` commands ran for this session already.
+    pub no_signal_ran: bool,
 }
 
 /// What a stage's signals say.
@@ -66,6 +76,19 @@ pub enum StageVerdict {
         /// The kind of the request the park opens.
         kind: RequestKind,
     },
+    /// The turn ended with no done signal, and the stage has a nudge left for this session. The
+    /// driver delivers `text` into the session.
+    Nudge {
+        /// The stage's `nudge` template, rendered for the unit.
+        text: String,
+        /// The place of this nudge, counting from 1.
+        number: u32,
+        /// The stage's cap.
+        of: u32,
+    },
+    /// The turn ended with no done signal and no nudge is left. The driver runs the stage's
+    /// `no_signal.run` commands, then evaluates the stage again.
+    RunThenPark,
 }
 
 /// The file name of a `park_on` file that carries a gap list.
@@ -235,13 +258,13 @@ pub fn evaluate(
                 signal.get_or_insert(found);
             }
             // A non-zero exit, a missing file and a PR that is not there yet mean "not yet".
-            Probed::No => return not_done(session),
+            Probed::No => return not_done(stage, ctx, session),
             Probed::Park(verdict) => return verdict,
         }
     }
     let Some(signal) = signal else {
         // A stage with no done condition cannot be done by its signals. The file parser refuses it.
-        return not_done(session);
+        return not_done(stage, ctx, session);
     };
 
     // 4. The outcomes. They are tried when the session is over, because the engine acts on a done
@@ -349,12 +372,36 @@ fn probe_cond(
     }
 }
 
-/// No done condition holds yet: wait, or park when the session is over.
-fn not_done(session: &SessionState) -> StageVerdict {
-    if session.turn_ended || session.ended {
+/// No done condition holds yet: wait while the seat works. When its turn or its process ended,
+/// the stage's `no_signal` key decides, and a stage without one parks.
+fn not_done(stage: &StageSpec, ctx: &RenderContext, session: &SessionState) -> StageVerdict {
+    if !(session.turn_ended || session.ended) {
+        return StageVerdict::Wait;
+    }
+    let Some(no_signal) = stage.no_signal.as_ref().filter(|_| !session.no_signal_ran) else {
+        return park(RequestKind::Park, REASON_NO_DONE_SIGNAL);
+    };
+    // A message reaches a live session only: a session whose process ended goes to the commands.
+    if !session.ended
+        && session.nudges_sent < no_signal.nudges
+        && let Some(template) = &no_signal.nudge
+    {
+        return match render(template, ctx) {
+            Ok(rendered) => StageVerdict::Nudge {
+                text: rendered.text,
+                number: session.nudges_sent + 1,
+                of: no_signal.nudges,
+            },
+            Err(e) => park(
+                RequestKind::Park,
+                format!("stage {} nudge cannot render: {e}", stage.name),
+            ),
+        };
+    }
+    if no_signal.run.is_empty() {
         park(RequestKind::Park, REASON_NO_DONE_SIGNAL)
     } else {
-        StageVerdict::Wait
+        StageVerdict::RunThenPark
     }
 }
 
@@ -376,7 +423,10 @@ pub fn apply(
     verdict: &StageVerdict,
 ) -> Result<ApplyResult, EngineError> {
     match verdict {
-        StageVerdict::Wait => Ok(ApplyResult::Waiting),
+        // A nudge and the commands are the driver's to carry out: the engine has nothing to record.
+        StageVerdict::Wait | StageVerdict::Nudge { .. } | StageVerdict::RunThenPark => {
+            Ok(ApplyResult::Waiting)
+        }
         StageVerdict::Done { pr, signal } => {
             engine.signal(unit_id, stage, signal.clone(), pr.clone())?;
             Ok(ApplyResult::Signalled)
