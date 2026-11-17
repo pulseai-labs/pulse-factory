@@ -28,7 +28,8 @@ use pf_engine::unit::{StallDecision, UnitDetail, stall_decision};
 use pf_engine::{EndStatus, Engine};
 use pf_workflow::CommandSpec;
 use pf_workflow::commands::{
-    AnswerOutcome, HookOutcome, answer_through_hook, exit0, run_after_merge, run_unit_hook,
+    AnswerOutcome, HookOutcome, answer_through_hook, exit0, run_after_merge, run_hook,
+    run_unit_hook,
 };
 use pf_workflow::file::{DoneCond, EndWhen, SeedDef, StageSpec};
 use pf_workflow::package::Package;
@@ -124,6 +125,11 @@ struct DState {
     first_turn_done: BTreeSet<String>,
     turns: BTreeMap<String, TurnTrack>,
     stall_tail: BTreeMap<String, String>,
+    /// How many nudges were delivered into a session. A relaunch is a new session, so it starts
+    /// at 0.
+    nudges: BTreeMap<String, u32>,
+    /// Sessions whose stage's `no_signal.run` commands ran.
+    no_signal_ran: BTreeSet<String>,
 }
 
 pub struct Driver {
@@ -789,17 +795,38 @@ impl Driver {
             let ctx = self.ctx(run_dir, Some((&unit.id, &detail.record.vars)));
             let ended =
                 status.state == AdapterState::Ended || !self.cfg.agent.is_alive(&r).unwrap_or(true);
-            let verdict = evaluate(
-                stage,
-                &ctx,
-                &SystemProbe,
-                &SignalState {
-                    turn_ended: status.turn_ended,
-                    ended,
-                },
-            );
+            let signals = |st: &DState| SignalState {
+                turn_ended: status.turn_ended,
+                ended,
+                nudges_sent: st.nudges.get(&session.id).copied().unwrap_or(0),
+                no_signal_ran: st.no_signal_ran.contains(&session.id),
+            };
+            let mut verdict = evaluate(stage, &ctx, &SystemProbe, &signals(st));
+            if let StageVerdict::Nudge { text, number, of } = &verdict {
+                if self.send_nudge(st, t, session, stage, &r, text, *number, *of) {
+                    continue;
+                }
+                // Not delivered: go on to the commands at once.
+                verdict = StageVerdict::RunThenPark;
+            }
+            if verdict == StageVerdict::RunThenPark {
+                self.run_no_signal(t, unit, stage, &ctx);
+                st.no_signal_ran.insert(session.id.clone());
+                verdict = evaluate(stage, &ctx, &SystemProbe, &signals(st));
+            }
             match &verdict {
+                // Both were carried out above. After the commands ran the stage cannot return
+                // them again, so this arm parks as a stage with no `no_signal` does.
                 StageVerdict::Wait => {}
+                StageVerdict::Nudge { .. } | StageVerdict::RunThenPark => self.park_running(
+                    st,
+                    t,
+                    session,
+                    &r,
+                    RequestKind::Park,
+                    pf_workflow::signals::REASON_NO_DONE_SIGNAL,
+                    None,
+                ),
                 StageVerdict::Park { reason, kind } => {
                     let facts = self.park_facts(stage, &ctx, *kind);
                     self.park_running(st, t, session, &r, *kind, reason, facts.as_ref())
@@ -821,6 +848,70 @@ impl Driver {
                     }
                 }
             }
+        }
+    }
+
+    /// Deliver one nudge into a session whose turn ended with no done signal. Returns true when the
+    /// message went in. Under `halt` nothing is delivered. A failed delivery is a note.
+    #[allow(clippy::too_many_arguments)]
+    fn send_nudge(
+        &self,
+        st: &mut DState,
+        t: &mut Tick,
+        session: &SessionRow,
+        stage: &StageSpec,
+        r: &SessionRef,
+        text: &str,
+        number: u32,
+        of: u32,
+    ) -> bool {
+        let engine = &self.cfg.engine;
+        let unit = &session.unit_id;
+        if engine.view().is_ok_and(|v| v.is_halted()) {
+            t.note(format!(
+                "unit {unit}: no nudge delivered to session {}: the run is halted",
+                session.id
+            ));
+            return false;
+        }
+        if let Err(e) = self.cfg.agent.deliver(r, text) {
+            t.note(format!(
+                "unit {unit}: nudge {number} of {of} was not delivered to session {}: {e}",
+                session.id
+            ));
+            return false;
+        }
+        st.nudges.insert(session.id.clone(), number);
+        // One ledger line for each nudge: the run and the unit lead the line, the rest follows.
+        let (role, model) = engine
+            .view()
+            .ok()
+            .and_then(|v| {
+                v.node(&session.node_id)
+                    .map(|n| (n.role.clone(), n.model.clone()))
+            })
+            .unwrap_or_default();
+        let line = format!(
+            "stage {} role {} model {} session {}: nudge {number} of {of}",
+            stage.name,
+            role.unwrap_or_default(),
+            model.unwrap_or_default(),
+            session.id
+        );
+        let recorded = engine.record_note(unit, &format!("nudge:{}:{number}", session.id), &line);
+        t.absorb("nudge ledger line", recorded);
+        true
+    }
+
+    /// Run the stage's `no_signal.run` commands for a unit whose seat ended with no done signal.
+    /// They run in order, each under its own bound, and the first failure stops them. A failure is
+    /// a note, and the caller parks the unit either way.
+    fn run_no_signal(&self, t: &mut Tick, unit: &NodeRow, stage: &StageSpec, ctx: &RenderContext) {
+        let Some(no_signal) = &stage.no_signal else {
+            return;
+        };
+        if let Err(failure) = run_hook("no_signal.run", &no_signal.run, ctx) {
+            t.note(format!("unit {}: {failure}", unit.id));
         }
     }
 

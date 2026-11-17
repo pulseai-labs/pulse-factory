@@ -147,6 +147,7 @@ Each stage of a track has these fields:
 | `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
 | `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
 | `base_push` | no | `{dir, branch}`, both templates: a branch the controller puts on `origin` before the stage launches, when `origin` lacks it (see "`base_push`"). |
+| `no_signal` | no | `{nudge, nudges, run}`: what the controller does when the seat's turn ends with no done signal. It may deliver a message into the same session, up to a cap, and it may run commands before it parks the unit (see "`no_signal`"). |
 
 `before` holds the checks that cap launches. `after_first_turn` holds the count of dispatches. The
 count runs after a first turn, not after a launch, so a launch that sits at a trust prompt does not
@@ -408,6 +409,68 @@ exit 0, so nothing repairs the line.
 
 `arm` names each base push before the run starts (`cli.md`).
 
+### `no_signal`
+
+`no_signal` is an optional mapping. It says what the controller does when a seat's turn ends, or its
+process ends, and no `done` condition holds. A stage without it parks the unit at once, with the
+reason "seat ended with no done signal".
+
+| Key | Required | Meaning |
+|---|---|---|
+| `nudge` | when `nudges` is above 0 | A template, in the scope of the stage's `message`: the message the controller delivers into the same session. |
+| `nudges` | no | A whole number from 0 to 3. The most times the controller delivers `nudge` into one session. Default 0. |
+| `run` | no | A list of commands, in the form of "Commands": the controller runs them in order before it parks the unit. |
+
+```yaml
+no_signal:
+  nudge: "Finish {unit.id}: open the PR, then end your turn."
+  nudges: 1
+  run:
+    - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+    - [sh, "{run.package}/scripts/explain.sh", "{run.dir}/out/{unit.id}/stop"]
+```
+
+How the controller reads a session whose turn ended:
+
+1. The stop file, a `park_on` file and the `done` conditions come first. A stop file parks the unit.
+   A `park_on` file parks it. When every `done` condition holds, the stage is done. `no_signal` acts
+   only when none of these applies.
+2. **Nudge.** While the session has had fewer than `nudges` nudges, and its process is alive, the
+   controller renders `nudge` and delivers it into the same session. It counts the nudge for that
+   session, writes one ledger line (the run, the unit, the stage, the role, the model, the session
+   and `nudge <n> of <m>`), and keeps waiting for the next turn. A nudge is a turn, not a launch: it
+   adds nothing to the most launches that `arm` shows.
+3. **Run, then park.** When the nudges are spent, or none are declared, or no nudge could be
+   delivered, the controller runs `run` in order, then reads the stage again. A stop file that now
+   exists parks the unit as a `stop` request. Its text is the file's text, and its answer hook is the
+   `stop_file`'s `on_answer`, as for a seat's own stop file. A `done` condition that now holds ends
+   the stage as done. Otherwise the unit parks as before, with the reason "seat ended with no done
+   signal" and the request kind `park`.
+
+Rules:
+
+- The count is per session. A relaunch after a stall starts a new session, so it starts a new count.
+- Under `halt` the controller delivers no nudge. It notes the skip and goes on to `run`.
+- A delivery that fails (the session ended, or the adapter refuses the message) writes a note and
+  goes on to `run` at once. A nudge is never retried.
+- Each command has the usual bounds: 60 seconds by default and at most 600, no retry. The first
+  command that fails, times out or cannot start stops the list and writes a note that names it. The
+  unit then parks as the next step of the list above says. A command never holds the park past its
+  own timeout.
+- The controller knows nothing of what the commands do. A command that writes the stop file is how a
+  workflow explains the park.
+- `arm` and `arm --dry-run` print each stage that declares `nudges` above 0 with its cap, as
+  `<stage>: up to <n> nudge on no done signal` (`nudges` when `<n>` is not 1). The JSON form of the
+  summary does not change (`cli.md`).
+
+The strict reader refuses each of these, and each error names the stage and the key:
+
+- a key other than `nudge`, `nudges` and `run` in the mapping;
+- `nudges` that is not a whole number from 0 to 3;
+- `nudge` missing while `nudges` is above 0, or empty;
+- a mapping with neither a `nudge` that can fire (`nudges` above 0) nor `run` commands;
+- a `run` entry that is not a command, or a placeholder that the stage's scope does not allow.
+
 ### `park_on`
 
 Each entry is `{file, reason}`. When the file exists, the unit parks with the reason. The stop file
@@ -416,7 +479,9 @@ parks with its own text and wins over every other condition.
 The park opens a request (`requests.md`). Its kind comes from the file's name: `gaps.json` opens a
 `gaps` request, `correction.txt` a `red_gate` request, and any other name a `park` request. The
 stop file opens a `stop` request. A turn that ends with no `done`
-condition, no `park_on` file and no stop file parks with "seat ended with no done signal".
+condition, no `park_on` file and no stop file parks with "seat ended with no done signal", unless the
+stage declares `no_signal`, which may nudge the seat first and may turn the park into a `stop`
+request (see "`no_signal`").
 
 ### Answer hooks
 

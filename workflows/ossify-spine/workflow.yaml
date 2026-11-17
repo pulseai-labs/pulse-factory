@@ -292,6 +292,26 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - close
+        # A close seat that ends its turn with the item PR not open, no stop file and no correction
+        # packet gets one nudge into the same session. When that does not finish the stage,
+        # `stranded.sh` writes the stop file: what the seat left in the worktree, and the next step.
+        # The stop then reaches the operator as a `stop` request, and its answer hook is the one
+        # above. Only this stage declares `no_signal`; the other stages park with the generic reason.
+        no_signal:
+          nudge: >-
+            You ended your turn, but {unit.id} is not finished. Read the finish line in
+            {param.briefs}/close.md. Close ends only when the item PR is open (the item's pr_url is
+            recorded), or when you wrote the stop file {run.dir}/out/{unit.id}/stop or the correction
+            packet. Do one of the two now, then end your turn.
+          nudges: 1
+          run:
+            - - sh
+              - "{run.package}/scripts/stranded.sh"
+              - "{unit.vars.worktree_path}"
+              - "{unit.vars.branch}"
+              - "{unit.vars.base_sha}"
+              - "{unit.id}"
+              - "{run.dir}/out/{unit.id}/stop"
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [close]

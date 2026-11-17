@@ -230,6 +230,25 @@ pub fn summary_text(summary: &ArmSummary) -> String {
     t
 }
 
+/// One line for each stage that declares `no_signal` with nudges above 0, such as
+/// `close: up to 1 nudge on no done signal`, each with a final newline. `arm` prints them after
+/// the summary. A nudge is a turn, not a launch, so they never move the most launches.
+pub fn nudge_text(pkg: &Package) -> String {
+    let mut text = String::new();
+    for stage in pkg.file.tracks.iter().flat_map(|t| &t.stages) {
+        let Some(n) = stage.no_signal.as_ref().filter(|n| n.nudges > 0) else {
+            continue;
+        };
+        text.push_str(&format!(
+            "{}: up to {} {} on no done signal\n",
+            stage.name,
+            n.nudges,
+            if n.nudges == 1 { "nudge" } else { "nudges" }
+        ));
+    }
+    text
+}
+
 /// The most launches the plan shows: `2 × (Σ seeds max × launches(track) + Σ unit-source tracks
 /// items × launches(track))`. The 2 is each stall's one relaunch.
 ///
@@ -723,6 +742,7 @@ fn run_inner(args: &ArmArgs) -> Result<i32, String> {
             );
         } else {
             print!("{}", summary_text(&summary));
+            print!("{}", nudge_text(&prepared.package));
             if let Some(n) = &note {
                 println!("{n}");
             }
@@ -737,6 +757,7 @@ fn run_inner(args: &ArmArgs) -> Result<i32, String> {
     // The operator approves a summary they saw: print it, then start.
     if !args.json {
         print!("{}", summary_text(&summary));
+        print!("{}", nudge_text(&prepared.package));
     }
     let resp = pf_ipc::call(
         &state,

@@ -61,3 +61,25 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's amend
   settled by the claim only.
 - **Every halt still becomes a request**, and every end status still carries its reason. A settled
   request records who settled it: the claim's holder or the clear grant's session.
+
+## Amendment, 2026-11-17 (Proposed): a seat that ends with no done signal may be nudged first, and its park may be explained
+
+**Status: Proposed; the operator ruled the calls of spine r2.s1 on 2026-11-17.** It takes effect when
+the code that builds it lands, and that work's close marks it Accepted.
+
+- **The "never end silently" line for a seat that ends with no done signal stands.** A stage may now
+  do two recorded things before the park. Neither lets the seat end silently, and the park still opens
+  a request.
+- **A stage may nudge the seat up to its cap first.** A stage that declares `no_signal` with
+  `nudges` above 0 gets the controller's message in the same session when the turn ends with no done
+  signal. The cap is 3 at most and is counted per session. Each nudge writes one ledger line (run,
+  unit, stage, role, model, session, `nudge <n> of <m>`), and `arm` names the cap before the run
+  starts. Under `halt` no nudge is delivered. A delivery that fails goes on to the park at once.
+- **A stage's `run` commands may turn the park into a stop request.** The controller runs them before
+  it parks, each under the bound of any command. A stop file that one of them writes makes the park a
+  `stop` request with that text and the stop file's answer hook. With no stop file, or when a command
+  fails or times out, the park is the one it was before: "seat ended with no done signal", kind
+  `park`, and a failed command is a note.
+- **Every halt still becomes a request**, and every end status still carries its reason. A stage with
+  no `no_signal` parks as before. The engine knows no nudge and no command: the controller's driver
+  carries both out (ADR-0001), and the workflow file declares them (ADR-0004).

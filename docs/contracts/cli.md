@@ -143,6 +143,11 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   `{track, stage, dir, branch}`. It is additive: `schema_version` stays, and a package with no
   `base_push` has an empty array and prints no such line. A base push does not change the most
   launches.
+  A stage whose `no_signal` declares `nudges` above 0 prints
+  `<stage>: up to <n> nudge on no done signal` (`nudges` when `<n>` is not 1), one line for each such
+  stage, after the lines above. The line is part of the text form only: the JSON form and its
+  `schema_version` do not change, and a package with no such stage prints no such line. A nudge is a
+  turn, not a launch, so it does not change the most launches (`workflow-file.md`, "`no_signal`").
   The most launches is `2 x (seed max x seed-track launches + items x item-track launches)`, summed
   over every seed and track. The launches of one unit of a track are its stages, each counted once
   except a stage with `entered_by: outcome`, which counts 0, plus the `max` of every `outcomes`

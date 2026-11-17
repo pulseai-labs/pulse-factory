@@ -702,6 +702,7 @@ fn every_script_is_posix_sh_and_calls_no_method_tool() {
         "rule.sh",
         "review-prep.sh",
         "stale-pass.sh",
+        "stranded.sh",
         "verdict.sh",
     ] {
         let path = package_dir().join("scripts").join(name);
@@ -1551,4 +1552,154 @@ fn only_the_item_close_stage_has_a_base_push_of_the_spine_branch() {
             );
         }
     }
+}
+
+// ------------------------------------------------------------------ the close stage finishes (r2.s1.w2)
+
+#[test]
+fn the_package_loads_stranded_sh_and_pins_it() {
+    let package = load();
+    let script = PathBuf::from("scripts/stranded.sh");
+    assert!(package.scripts.contains(&script), "{:?}", package.scripts);
+    assert!(package.pinned_files().contains(&script));
+}
+
+#[test]
+fn only_the_item_close_stage_declares_no_signal_with_one_nudge_and_the_stranded_command() {
+    let package = load();
+    let mut declared = Vec::new();
+    for track in &package.file.tracks {
+        for stage in &track.stages {
+            if stage.no_signal.is_some() {
+                declared.push(format!("{}.{}", track.name, stage.name));
+            }
+        }
+    }
+    assert_eq!(
+        declared,
+        ["item.close"],
+        "call Q4: only the item close stage"
+    );
+
+    let close = item_stage(&package.file, "close");
+    let no_signal = close.no_signal.expect("the close stage declares no_signal");
+    assert_eq!(no_signal.nudges, 1);
+    let nudge = no_signal.nudge.expect("a nudge text");
+    // It points to the brief's finish line and names both ways to end.
+    for want in [
+        "{param.briefs}/close.md",
+        "finish line",
+        "item PR",
+        "{run.dir}/out/{unit.id}/stop",
+    ] {
+        assert!(nudge.contains(want), "the nudge lacks {want:?}: {nudge}");
+    }
+    assert_eq!(no_signal.run.len(), 1, "one command");
+    assert_eq!(
+        no_signal.run[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/stranded.sh",
+            "{unit.vars.worktree_path}",
+            "{unit.vars.branch}",
+            "{unit.vars.base_sha}",
+            "{unit.id}",
+            "{run.dir}/out/{unit.id}/stop",
+        ],
+        "each value is a placeholder of its own argv item"
+    );
+}
+
+#[test]
+fn the_close_stage_stop_file_and_its_answer_hook_are_unchanged() {
+    let close = item_stage(&load().file, "close");
+    assert_eq!(close.stop_file, "{run.dir}/out/{unit.id}/stop");
+    assert_eq!(close.stop_on_answer.len(), 1);
+    assert_eq!(
+        close.stop_on_answer[0].argv,
+        [
+            "sh",
+            "{run.package}/scripts/rule.sh",
+            "{run.dir}/out/{unit.id}/rulings.md",
+            "{run.dir}/out/{unit.id}/stop",
+            "{answer.file}",
+            "{answer.request}",
+            "{answer.generation}",
+            "close",
+        ]
+    );
+}
+
+#[test]
+fn stranded_sh_makes_no_git_or_forge_write() {
+    let code = script_code("stranded.sh");
+    for line in code.lines() {
+        // A variable name is not a git verb: drop each `$name` before the words are split.
+        let mut bare = String::new();
+        let mut in_name = false;
+        for c in line.chars() {
+            if c == '$' {
+                in_name = true;
+            } else if in_name && (c.is_ascii_alphanumeric() || c == '_') {
+            } else {
+                in_name = false;
+                bare.push(c);
+            }
+        }
+        let words: Vec<&str> = bare
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .collect();
+        assert!(!words.contains(&"gh"), "stranded.sh calls gh: {line}");
+        if words.contains(&"git") {
+            for bad in [
+                "add",
+                "commit",
+                "push",
+                "fetch",
+                "pull",
+                "checkout",
+                "reset",
+                "stash",
+                "clean",
+                "merge",
+                "rebase",
+                "update-ref",
+            ] {
+                assert!(!words.contains(&bad), "stranded.sh runs git {bad}: {line}");
+            }
+        }
+    }
+    // Its four reads are all there.
+    for read in [
+        "diff --cached --name-only",
+        "status --porcelain",
+        "rev-list",
+        "ls-remote",
+    ] {
+        assert!(code.contains(read), "stranded.sh lacks the read `{read}`");
+    }
+}
+
+#[test]
+fn the_close_brief_states_the_finish_line_and_the_verdict_contract() {
+    let brief = std::fs::read_to_string(package_dir().join("briefs/close.md")).unwrap();
+    // R-12: where the stage ends.
+    for want in [
+        "pr_url",
+        "stop file",
+        "correction packet",
+        "stage_status",
+        "commits, pushes",
+    ] {
+        assert!(brief.contains(want), "the close brief lacks {want:?}");
+    }
+    // R-10: the `--verdict` contract, quoted from the pinned ossify's work-item-close.md.
+    assert!(
+        brief.contains("top-level"),
+        "the close brief states the verdict contract"
+    );
+    assert!(
+        brief.contains("`--verdict` is unchanged"),
+        "it quotes the pinned line"
+    );
 }

@@ -52,6 +52,9 @@ pub struct Options {
     /// Extra keys of the item stage `close`, indented by 8 spaces, each line with a final newline
     /// (for example `base_push:` and `before:`).
     pub close_extra: String,
+    /// The `stop_file:` entry of the item stage `close`, indented by 8 spaces, with a final
+    /// newline. The default is a plain path. A mapping adds an `on_answer` hook.
+    pub close_stop: String,
 }
 
 impl Default for Options {
@@ -72,6 +75,7 @@ impl Default for Options {
             review_loop: false,
             spine_close: false,
             close_extra: String::new(),
+            close_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
         }
     }
 }
@@ -293,8 +297,7 @@ seeds:
         brief: [briefs/common.md]
         message: "Close {{unit.id}}."
         cwd: "{{param.repo}}"
-{close_extra}        stop_file: "{{run.dir}}/out/{{unit.id}}/stop"
-        stall_minutes: 20
+{close_extra}{close_stop}        stall_minutes: 20
         first_turn_seconds: 180
         settings:
           push_dir: "{{unit.vars.worktree_path}}"
@@ -330,6 +333,7 @@ seeds:
         cold_builds = o.cold_builds,
         implement_stall = o.implement_stall,
         close_extra = o.close_extra,
+        close_stop = o.close_stop,
         review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
         review_stages = if o.review_loop { REVIEW_STAGES } else { "" },
     )
