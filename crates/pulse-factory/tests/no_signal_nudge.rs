@@ -4,7 +4,8 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use common::rig::*;
@@ -228,20 +229,31 @@ fn a_stage_that_declares_no_run_command_parks_with_the_generic_reason_once_the_n
     assert_eq!(r.unit(UNIT).0, Status::Parked);
 }
 
-/// The fake adapter, except that a message never reaches the session.
-struct NoDeliver {
+type DeliverFn = Box<dyn Fn(&SessionRef, &str) -> Result<(), AgentError> + Send + Sync>;
+
+/// The fake adapter, except that `deliver` does what the test says.
+struct OnDeliver {
     inner: Arc<FakeAdapter>,
+    deliver: DeliverFn,
 }
 
-impl AgentPort for NoDeliver {
+/// The fake adapter, except that a message never reaches the session.
+fn no_deliver(fake: Arc<FakeAdapter>) -> Arc<dyn AgentPort> {
+    Arc::new(OnDeliver {
+        inner: fake,
+        deliver: Box::new(|_, _| Err(AgentError::Failed("the session has ended".to_string()))),
+    })
+}
+
+impl AgentPort for OnDeliver {
     fn launch(&self, p: &LaunchPlan) -> Result<SessionRef, AgentError> {
         self.inner.launch(p)
     }
     fn status(&self, s: &SessionRef) -> Result<SessionStatus, AgentError> {
         self.inner.status(s)
     }
-    fn deliver(&self, _: &SessionRef, _: &str) -> Result<(), AgentError> {
-        Err(AgentError::Failed("the session has ended".to_string()))
+    fn deliver(&self, s: &SessionRef, m: &str) -> Result<(), AgentError> {
+        (self.deliver)(s, m)
     }
     fn interrupt(&self, s: &SessionRef) -> Result<(), AgentError> {
         self.inner.interrupt(s)
@@ -277,11 +289,7 @@ impl AgentPort for NoDeliver {
 
 #[test]
 fn a_failed_delivery_writes_a_note_and_goes_straight_to_the_run_command() {
-    let rig = Rig::build(
-        &options(2, WRITES_STOP),
-        |_| {},
-        |fake| Arc::new(NoDeliver { inner: fake }),
-    );
+    let rig = Rig::build(&options(2, WRITES_STOP), |_| {}, no_deliver);
     let (r, s) = at_close(rig, 2);
     r.fake.advance(&s, 1);
     let notes = r.tick();
@@ -422,4 +430,45 @@ fn a_relaunch_after_a_stall_starts_a_new_count() {
     assert_eq!(r.fake.delivered(&s).len(), 1);
     assert_eq!(nudge_lines(&r).len(), 2, "{}", r.ledger_text());
     assert!(nudge_lines(&r)[1].contains("nudge 1 of 1"));
+}
+
+#[test]
+fn a_nudge_delivered_late_in_a_tick_restarts_the_stall_clock() {
+    // Once armed, each delivery moves the driver's clock 30 minutes on, as a tick that ran long
+    // would: past the close stage's 20-minute stall limit.
+    let clock: Arc<OnceLock<Arc<AtomicU64>>> = Arc::default();
+    let armed = clock.clone();
+    let rig = Rig::build(
+        &options(1, WRITES_STOP),
+        |_| {},
+        move |fake| {
+            let inner = fake.clone();
+            Arc::new(OnDeliver {
+                inner: fake,
+                deliver: Box::new(move |s, m| {
+                    inner.deliver(s, m)?;
+                    if let Some(now) = armed.get() {
+                        now.fetch_add(30 * 60, Ordering::SeqCst);
+                    }
+                    Ok(())
+                }),
+            })
+        },
+    );
+    let (r, s) = at_close(rig, 2);
+    clock.set(r.now.clone()).unwrap();
+    r.fake.advance(&s, 1);
+    r.tick();
+    assert_eq!(r.fake.delivered(&s).len(), 1);
+
+    // The seat answers the nudge between two samples: its next turn opens the PR and ends. The
+    // stall rule must not take the seat that just answered.
+    r.close(UNIT, 1);
+    let attempts = r.stage_node(UNIT, "close");
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the stall rule relaunched a seat that had just answered its nudge: {attempts:?}"
+    );
+    assert_eq!(r.unit(UNIT).0, Status::Done, "ledger: {}", r.ledger_text());
 }

@@ -882,6 +882,12 @@ impl Driver {
             return false;
         }
         st.nudges.insert(session.id.clone(), number);
+        // A delivered nudge is new work: the stall rule counts from it. A seat can start and end
+        // its answer between two samples, and then its turn track shows no change. The time is the
+        // clock's now, not the tick's start: a long tick must not age the delivery.
+        if let Some(turn) = st.turns.get_mut(&session.id) {
+            turn.changed_at = (self.cfg.clock)();
+        }
         // One ledger line for each nudge: the run and the unit lead the line, the rest follows.
         let (role, model) = engine
             .view()
