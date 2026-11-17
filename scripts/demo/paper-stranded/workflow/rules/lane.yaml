@@ -1,0 +1,5 @@
+version: 1
+role: lane
+allow:
+  - delete_own_scratch
+  - write_own_report_and_run_files

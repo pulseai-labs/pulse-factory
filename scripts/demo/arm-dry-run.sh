@@ -78,6 +78,10 @@ want "caps: loop review -> fix at most 2 times per item unit"
 want "caps: loop review -> review at most 2 times per item unit"
 want "caps: loop fix -> review at most 2 times per item unit"
 want "caps: one relaunch per stage"
+# The close stage nudges a seat that ended with no done signal, once. A nudge is a turn, not a
+# launch, so the most-launches count below stays as it was. No other stage declares `no_signal`.
+want "close: up to 1 nudge on no done signal"
+[ "$(printf '%s\n' "$out" | grep -c 'on no done signal')" = 1 ] || fail "more than the close stage names a nudge cap"
 # Per item: implement, verify, close and review once (4), `fix` counts 0, and the three loop caps
 # 2 + 2 + 2 (6): 10. The spine track has one stage, and its seed runs once: 1.
 # 2 x (12 lane launches + 3 items x 10 + 1 spine close)
