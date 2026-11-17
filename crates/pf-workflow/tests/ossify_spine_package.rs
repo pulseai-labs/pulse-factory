@@ -1513,6 +1513,32 @@ fn the_spine_close_brief_stops_after_the_pr_opens() {
 }
 
 #[test]
+fn the_spine_close_brief_names_the_pr_bodys_required_lines_and_never_a_body_of_the_seats_own() {
+    // A spine-close seat whose `gh pr create --body $'…'` was refused wrote the body itself and
+    // dropped the lines the close's record pass reads (sandbox, r2.s1). The brief names them, and
+    // the way to pass the close's own body when a command is refused.
+    let brief = std::fs::read_to_string(package_dir().join("briefs/spine-close.md")).unwrap();
+    for want in [
+        "spine close <spine> -> <base> in <repo>",
+        "pushed-tip:",
+        "## Merge bar",
+        "## Merge danger",
+        "Door: one-way",
+        "Door: two-way",
+        "--body-file",
+    ] {
+        assert!(brief.contains(want), "the brief lacks {want:?}:\n{brief}");
+    }
+    let lower = brief.to_lowercase();
+    for rule in [
+        "never write or shorten the body yourself",
+        "never open the pr with a different body",
+    ] {
+        assert!(lower.contains(rule), "the brief lacks {rule:?}:\n{brief}");
+    }
+}
+
+#[test]
 fn the_spine_close_role_may_push_its_branch_and_nothing_else_is_added_to_its_rules() {
     let package = load();
     assert_eq!(
