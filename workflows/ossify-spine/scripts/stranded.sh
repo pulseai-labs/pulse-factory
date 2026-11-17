@@ -9,10 +9,18 @@
 #
 # It reads the worktree with four git reads and writes nothing but the stop file:
 #   git diff --cached --name-only   the staged files
-#   git status --porcelain          unstaged and untracked paths (without an optional lock)
+#   git status --porcelain          unstaged and untracked paths (without an optional lock, and
+#                                   with every untracked file, whatever the repo's config says)
 #   git rev-list <base>..HEAD       the commits past the base
 #   git ls-remote origin <ref>      whether `origin` holds the branch
-# It never runs `git add`, commit or push, and never calls the forge.
+# It never runs `git add`, commit or push, and never calls the forge. A read that fails is named in
+# the stop text with the first line of git's error, and the text then claims nothing about it.
+#
+# `ls-remote` is bounded: a remote that has not answered in 20 s (or STRANDED_LS_REMOTE_SECONDS) is
+# killed with the processes git started for it (`ssh`, a remote helper), and the stop text says
+# `origin not read: no answer in <n> s`. So a stalled remote still lets the script write the stop
+# file before the controller's own command timeout (60 s by default) kills it. The bound uses `sleep`,
+# `kill` and `ps` only: no `timeout`, which macOS lacks, and no temp file.
 #
 # Exit 0 when it wrote the stop file. Exit 1 when it cannot read the worktree or cannot write the
 # stop file; the controller's own park for the stage then applies. The stop file's answer hook is
@@ -62,17 +70,28 @@ join_first() {
 }
 
 # ---- Staged files.
-staged=$(git -C "$worktree" diff --cached --name-only 2>/dev/null) || staged=
+staged_note=
 staged_count=0
-[ -z "$staged" ] || staged_count=$(printf '%s\n' "$staged" | wc -l | tr -d ' ')
+if staged=$(git -C "$worktree" diff --cached --name-only 2>&1); then
+    [ -z "$staged" ] || staged_count=$(printf '%s\n' "$staged" | wc -l | tr -d ' ')
+else
+    staged_note="staged files not read: $(first_line "$staged")"
+fi
 
 # ---- Unstaged and untracked paths. `--no-optional-locks` keeps `status` from refreshing the index.
-status_out=$(git --no-optional-locks -C "$worktree" status --porcelain 2>/dev/null) || status_out=
-# A line is `XY path`. A path counts here when its worktree column (Y) is not blank, or it is
-# untracked (`??`). The path starts at column 4.
-unstaged=$(printf '%s\n' "$status_out" | awk 'length($0) > 3 && (substr($0, 2, 1) != " " || substr($0, 1, 2) == "??") { print substr($0, 4) }')
+# `--untracked-files=all` lists every untracked file, even where `status.showUntrackedFiles` hides
+# them.
+unstaged_note=
+unstaged=
 unstaged_count=0
-[ -z "$unstaged" ] || unstaged_count=$(printf '%s\n' "$unstaged" | wc -l | tr -d ' ')
+if status_out=$(git --no-optional-locks -C "$worktree" status --porcelain --untracked-files=all 2>&1); then
+    # A line is `XY path`. A path counts here when its worktree column (Y) is not blank, or it is
+    # untracked (`??`). The path starts at column 4.
+    unstaged=$(printf '%s\n' "$status_out" | awk 'length($0) > 3 && (substr($0, 2, 1) != " " || substr($0, 1, 2) == "??") { print substr($0, 4) }')
+    [ -z "$unstaged" ] || unstaged_count=$(printf '%s\n' "$unstaged" | wc -l | tr -d ' ')
+else
+    unstaged_note="unstaged paths not read: $(first_line "$status_out")"
+fi
 
 # ---- Commits past the base. A base that is not a hex SHA never reaches git: it could be an option.
 commits_note=
@@ -90,12 +109,64 @@ esac
 
 # ---- Does origin hold the branch? The full ref name is matched exactly, because `ls-remote` matches
 # the tail of a ref and a tag named like the branch would answer.
+ls_remote_seconds=${STRANDED_LS_REMOTE_SECONDS:-20}
+case $ls_remote_seconds in
+'' | *[!0-9]* | 0*) ls_remote_seconds=20 ;;
+esac
+
+# descendants <pid>: the process IDs under <pid>, at every depth, one per line.
+descendants() {
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+        { parent[$1] = $2 }
+        END {
+            under[root] = 1
+            do {
+                grown = 0
+                for (p in parent) if (!(p in under) && (parent[p] in under)) { under[p] = 1; grown = 1 }
+            } while (grown)
+            for (p in under) if (p != root) print p
+        }'
+}
+
+# ls_remote: `git ls-remote` under the bound; its output on stdout, its exit status as the status.
+# A watchdog kills git and every process under it when the bound passes: a child such as `ssh`
+# holds git's stderr, and the command substitution would wait for it. The watchdog's own output goes
+# to /dev/null for the same reason. It is killed once git ends; its last `sleep 1` may outlive it by
+# under a second, holding no file of the script.
+ls_remote() {
+    GIT_TERMINAL_PROMPT=0 git -C "$worktree" ls-remote origin "refs/heads/$branch" 2>&1 &
+    git_pid=$!
+    (
+        i=0
+        while [ "$i" -lt "$ls_remote_seconds" ]; do
+            sleep 1
+            kill -0 "$git_pid" 2>/dev/null || exit 0
+            i=$((i + 1))
+        done
+        # The list is split on purpose: one argument for each process ID.
+        # shellcheck disable=SC2046
+        kill $(descendants "$git_pid") "$git_pid"
+    ) >/dev/null 2>&1 &
+    watchdog=$!
+    ls_rc=0
+    wait "$git_pid" || ls_rc=$?
+    kill "$watchdog" 2>/dev/null || :
+    return "$ls_rc"
+}
+
 origin_note=
 origin_has=no
-if ls_out=$(GIT_TERMINAL_PROMPT=0 git -C "$worktree" ls-remote origin "refs/heads/$branch" 2>&1); then
+ls_rc=0
+# git's own stderr is in the output. The stderr dropped here is the shell's: a `Terminated` report
+# when the watchdog ended git.
+ls_out=$(ls_remote 2>/dev/null) || ls_rc=$?
+if [ "$ls_rc" -eq 0 ]; then
     if printf '%s\n' "$ls_out" | awk -v ref="refs/heads/$branch" '$2 == ref { found = 1 } END { exit !found }'; then
         origin_has=yes
     fi
+elif [ "$ls_rc" -eq 143 ]; then
+    # 143 is 128 + SIGTERM: the watchdog ended it.
+    origin_note="origin not read: no answer in $ls_remote_seconds s"
 else
     origin_note="origin not read: $(first_line "$ls_out")"
 fi
@@ -105,17 +176,22 @@ compose() {
     printf 'close of %s on branch %s: the close seat ended before the item PR opened.\n' "$unit" "$branch"
 
     if [ "$staged_count" -eq 0 ] && [ "$unstaged_count" -eq 0 ] && [ "$commits" -eq 0 ] \
+        && [ -z "$staged_note" ] && [ -z "$unstaged_note" ] \
         && [ -z "$commits_note" ] && [ "$origin_has" = no ] && [ -z "$origin_note" ]; then
         printf 'nothing staged, no commit past the base, no branch on origin\n'
     else
-        if [ "$staged_count" -eq 0 ]; then
+        if [ -n "$staged_note" ]; then
+            printf '%s\n' "$staged_note"
+        elif [ "$staged_count" -eq 0 ]; then
             printf 'nothing staged\n'
         elif [ "$staged_count" -le 10 ]; then
             printf 'staged: %s: %s\n' "$(plural "$staged_count" file)" "$(join_first 10 "$staged")"
         else
             printf 'staged: %s; the first 10: %s\n' "$(plural "$staged_count" file)" "$(join_first 10 "$staged")"
         fi
-        if [ "$unstaged_count" -eq 0 ]; then
+        if [ -n "$unstaged_note" ]; then
+            printf '%s\n' "$unstaged_note"
+        elif [ "$unstaged_count" -eq 0 ]; then
             printf 'no unstaged change\n'
         elif [ "$unstaged_count" -le 10 ]; then
             printf 'unstaged: %s: %s\n' "$(plural "$unstaged_count" path)" "$(join_first 10 "$unstaged")"

@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 const UNIT: &str = "r9.s9.w9";
 const BRANCH: &str = "work/r9.s9.w9-close-demo";
@@ -106,6 +107,10 @@ impl Rig {
     }
 
     fn run_with(&self, worktree: &Path, base: &str) -> Output {
+        self.run_with_env(worktree, base, &[])
+    }
+
+    fn run_with_env(&self, worktree: &Path, base: &str, env: &[(&str, &str)]) -> Output {
         Command::new("sh")
             .arg(script())
             .arg(worktree)
@@ -116,6 +121,7 @@ impl Rig {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .envs(env.iter().copied())
             .output()
             .expect("sh runs")
     }
@@ -142,7 +148,11 @@ impl Rig {
             git(&self.worktree, &["for-each-ref"]),
             std::fs::read(self.worktree.join(".git/index")).unwrap_or_default(),
             git(&self.origin, &["for-each-ref"]),
-            git(&self.worktree, &["status", "--porcelain"]),
+            // `--no-optional-locks`: a plain `status` may refresh and write the index by itself.
+            git(
+                &self.worktree,
+                &["--no-optional-locks", "status", "--porcelain"],
+            ),
         )
     }
 }
@@ -342,4 +352,76 @@ fn a_base_that_is_not_a_sha_is_named_and_the_script_goes_on() {
         "{text}"
     );
     assert!(text.contains("alpha.txt"), "{text}");
+}
+
+#[test]
+fn a_failed_read_of_the_staged_files_or_the_unstaged_paths_is_named_and_claims_nothing() {
+    let r = rig();
+    // A corrupted index: `git diff --cached` and `git status` both fail on it.
+    std::fs::write(r.worktree.join(".git/index"), b"not an index").unwrap();
+    let text = r.stop_text();
+    for want in ["staged files not read: ", "unstaged paths not read: "] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(want))
+            .unwrap_or_else(|| panic!("no line starts with {want:?}:\n{text}"));
+        assert!(
+            line.len() > want.len(),
+            "the line names git's error: {line}"
+        );
+    }
+    for claim in ["nothing staged", "no unstaged change"] {
+        assert!(
+            !text.contains(claim),
+            "a failed read claims {claim:?}:\n{text}"
+        );
+    }
+    assert!(text.contains("no commit past the base"), "{text}");
+}
+
+#[test]
+fn untracked_files_are_named_when_the_repo_hides_them_from_status() {
+    let r = rig();
+    git(&r.worktree, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::create_dir_all(r.worktree.join("new")).unwrap();
+    std::fs::write(r.worktree.join("new/loose.txt"), "x\n").unwrap();
+    let text = r.stop_text();
+    assert!(text.contains("unstaged: 1 path: new/loose.txt"), "{text}");
+    assert!(!text.contains("nothing staged, no commit"), "{text}");
+}
+
+#[test]
+fn an_origin_that_does_not_answer_in_time_is_named_and_the_stop_file_is_still_written() {
+    let r = rig();
+    r.stage(&["alpha.txt"]);
+    // `origin` stays a local path, but its upload-pack sleeps first: the remote does not answer
+    // in time. The sleeper is a child of git and holds git's stderr, as `ssh` would.
+    git(
+        &r.worktree,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            "sleep 15; git-upload-pack",
+        ],
+    );
+    let started = Instant::now();
+    let out = r.run_with_env(&r.worktree, &r.base, &[("STRANDED_LS_REMOTE_SECONDS", "1")]);
+    let took = started.elapsed();
+    assert!(
+        out.status.success(),
+        "exit {:?}: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        took < Duration::from_secs(10),
+        "the script waited {took:?} for a remote that did not answer"
+    );
+    let text = std::fs::read_to_string(&r.stop).expect("the stop file exists");
+    assert!(text.contains("origin not read: no answer in 1 s"), "{text}");
+    assert!(
+        !text.contains("no branch on origin") && !text.contains("origin has the branch"),
+        "a read that timed out claims nothing about origin:\n{text}"
+    );
+    assert!(text.contains("alpha.txt"), "the other facts stay:\n{text}");
 }
