@@ -16,7 +16,7 @@ use pf_engine::port::store::RequestKind;
 use pf_engine::render::{RenderContext, UnitView};
 use pf_engine::unit::Signal;
 use pf_workflow::commands::{CommandFailure, CommandSpec};
-use pf_workflow::file::{DoneCond, OutcomeSpec, ParkOn, PrTest, StageSpec};
+use pf_workflow::file::{DoneCond, NoSignal, OutcomeSpec, ParkOn, PrTest, StageSpec};
 use pf_workflow::signals::{
     ApplyResult, Probe, SessionState, StageVerdict, SystemProbe, apply, evaluate, parse_pr,
 };
@@ -43,6 +43,7 @@ fn stage(dir: &Path, done: Vec<DoneCond>, park_on: Vec<ParkOn>) -> StageSpec {
         outcomes: Vec::new(),
         entered_by_outcome: false,
         base_push: None,
+        no_signal: None,
     }
 }
 
@@ -58,10 +59,14 @@ fn write(dir: &Path, unit: &str, name: &str, text: &str) {
 const WAITING: SessionState = SessionState {
     turn_ended: false,
     ended: false,
+    nudges_sent: 0,
+    no_signal_ran: false,
 };
 const TURN_ENDED: SessionState = SessionState {
     turn_ended: true,
     ended: false,
+    nudges_sent: 0,
+    no_signal_ran: false,
 };
 
 fn params() -> BTreeMap<String, String> {
@@ -361,7 +366,9 @@ fn a_turn_end_with_no_done_condition_parks() {
             &SystemProbe,
             &SessionState {
                 turn_ended: false,
-                ended: true
+                ended: true,
+                nudges_sent: 0,
+                no_signal_ran: false,
             }
         ),
         expected
@@ -597,6 +604,8 @@ fn an_outcome_is_tried_only_when_the_session_is_over() {
     let ended = SessionState {
         turn_ended: false,
         ended: true,
+        nudges_sent: 0,
+        no_signal_ran: false,
     };
     assert!(matches!(
         v(&s, &probe, &ended),
@@ -727,4 +736,284 @@ fn applying_an_outcome_sends_a_real_unit_to_the_stage_it_names() {
     let detail = view.unit_detail(view.node("u1").unwrap()).unwrap();
     assert_eq!(detail.stages_done, 1);
     assert_eq!(detail.visits.get("build#0"), Some(&1));
+}
+
+// ------------------------------------------------------------------ no_signal (r2.s1.w1)
+
+/// A stage that is done when `a.done` exists and declares `no_signal`.
+fn nudging_stage(dir: &Path, nudges: u32, run: &[&str]) -> StageSpec {
+    let mut s = stage(dir, vec![file(dir, "a.done")], vec![]);
+    s.no_signal = Some(NoSignal {
+        nudge: (nudges > 0).then(|| "Finish {unit.id}.".to_string()),
+        nudges,
+        run: run.iter().map(|p| CommandSpec::new(&[p])).collect(),
+    });
+    s
+}
+
+fn state(turn_ended: bool, ended: bool, nudges_sent: u32, no_signal_ran: bool) -> SessionState {
+    SessionState {
+        turn_ended,
+        ended,
+        nudges_sent,
+        no_signal_ran,
+    }
+}
+
+const NO_SIGNAL_REASON: &str = "seat ended with no done signal";
+
+#[test]
+fn with_nudges_left_a_turn_end_with_no_signal_gets_the_nudge_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 2, &["explain"]);
+    // The text is the template, rendered for the unit. The verdict counts the nudge: 1 of 2.
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 0, false)),
+        StageVerdict::Nudge {
+            text: "Finish u1.".to_string(),
+            number: 1,
+            of: 2,
+        }
+    );
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 1, false)),
+        StageVerdict::Nudge {
+            text: "Finish u1.".to_string(),
+            number: 2,
+            of: 2,
+        }
+    );
+}
+
+#[test]
+fn a_seat_that_still_works_is_never_nudged() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 2, &["explain"]);
+    assert_eq!(v(&s, &SystemProbe, &WAITING), StageVerdict::Wait);
+}
+
+#[test]
+fn with_no_nudges_left_the_verdict_is_run_then_park() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 2, &["explain"]);
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 2, false)),
+        StageVerdict::RunThenPark
+    );
+    // A stage that declares no nudge, only `run`, goes to the commands at once.
+    let run_only = nudging_stage(dir.path(), 0, &["explain"]);
+    assert_eq!(
+        v(&run_only, &SystemProbe, &TURN_ENDED),
+        StageVerdict::RunThenPark
+    );
+}
+
+#[test]
+fn a_session_whose_process_ended_is_not_nudged() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 2, &["explain"]);
+    // A message reaches a live session only, so the commands run at once.
+    assert_eq!(
+        v(&s, &SystemProbe, &state(false, true, 0, false)),
+        StageVerdict::RunThenPark
+    );
+}
+
+#[test]
+fn once_the_commands_ran_the_stage_parks_as_it_did_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 1, &["explain"]);
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 1, true)),
+        StageVerdict::Park {
+            reason: NO_SIGNAL_REASON.to_string(),
+            kind: RequestKind::Park,
+        }
+    );
+    // Even with nudges left in the count: the commands ran, so there is no second chance.
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 0, true)),
+        StageVerdict::Park {
+            reason: NO_SIGNAL_REASON.to_string(),
+            kind: RequestKind::Park,
+        }
+    );
+}
+
+#[test]
+fn a_stage_that_declares_a_nudge_and_no_commands_parks_when_the_nudges_are_spent() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 1, &[]);
+    assert!(matches!(
+        v(&s, &SystemProbe, &state(true, false, 0, false)),
+        StageVerdict::Nudge { .. }
+    ));
+    assert_eq!(
+        v(&s, &SystemProbe, &state(true, false, 1, false)),
+        StageVerdict::Park {
+            reason: NO_SIGNAL_REASON.to_string(),
+            kind: RequestKind::Park,
+        }
+    );
+}
+
+#[test]
+fn a_stage_without_no_signal_parks_with_the_generic_reason_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![]);
+    assert_eq!(s.no_signal, None);
+    for st in [
+        state(true, false, 0, false),
+        state(false, true, 0, false),
+        state(true, false, 3, false),
+    ] {
+        assert_eq!(
+            v(&s, &SystemProbe, &st),
+            StageVerdict::Park {
+                reason: NO_SIGNAL_REASON.to_string(),
+                kind: RequestKind::Park,
+            }
+        );
+    }
+}
+
+#[test]
+fn a_stop_file_a_park_file_and_a_done_signal_win_over_every_no_signal_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = nudging_stage(dir.path(), 2, &["explain"]);
+    s.park_on = vec![ParkOn {
+        file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
+        reason: "gaps".to_string(),
+        on_answer: Vec::new(),
+    }];
+    let states = [
+        state(true, false, 0, false),
+        state(true, false, 2, false),
+        state(true, false, 2, true),
+        state(false, true, 0, false),
+    ];
+
+    // The done signal wins.
+    write(dir.path(), "u1", "a.done", "");
+    for st in &states {
+        assert!(
+            matches!(v(&s, &SystemProbe, st), StageVerdict::Done { .. }),
+            "{st:?}"
+        );
+    }
+    std::fs::remove_file(dir.path().join("u1/a.done")).unwrap();
+
+    // The park file wins over the nudge and over the commands.
+    write(dir.path(), "u1", "gaps.json", "[]");
+    for st in &states {
+        assert_eq!(
+            v(&s, &SystemProbe, st),
+            StageVerdict::Park {
+                reason: "gaps".to_string(),
+                kind: RequestKind::Gaps,
+            },
+            "{st:?}"
+        );
+    }
+
+    // The stop file wins over every other file, with its text as the reason.
+    write(dir.path(), "u1", "stop", "the seat says stop");
+    for st in &states {
+        assert_eq!(
+            v(&s, &SystemProbe, st),
+            StageVerdict::Park {
+                reason: "the seat says stop".to_string(),
+                kind: RequestKind::Stop,
+            },
+            "{st:?}"
+        );
+    }
+}
+
+#[test]
+fn the_stop_file_a_command_wrote_parks_as_a_stop_after_the_commands_ran() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = nudging_stage(dir.path(), 1, &["explain"]);
+    let ran = state(true, false, 1, true);
+    assert_eq!(
+        v(&s, &SystemProbe, &ran),
+        StageVerdict::Park {
+            reason: NO_SIGNAL_REASON.to_string(),
+            kind: RequestKind::Park,
+        }
+    );
+    write(
+        dir.path(),
+        "u1",
+        "stop",
+        "stranded: the PR was never opened",
+    );
+    assert_eq!(
+        v(&s, &SystemProbe, &ran),
+        StageVerdict::Park {
+            reason: "stranded: the PR was never opened".to_string(),
+            kind: RequestKind::Stop,
+        }
+    );
+}
+
+#[test]
+fn an_exit0_that_says_not_yet_is_nudged_at_the_turn_end_and_waits_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = nudging_stage(dir.path(), 1, &["explain"]);
+    s.done = vec![exit0_cond("false")];
+    assert_eq!(v(&s, &SystemProbe, &WAITING), StageVerdict::Wait);
+    assert!(matches!(
+        v(&s, &SystemProbe, &TURN_ENDED),
+        StageVerdict::Nudge {
+            number: 1,
+            of: 1,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_nudge_that_cannot_render_parks_with_the_stage_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = nudging_stage(dir.path(), 1, &["explain"]);
+    s.no_signal.as_mut().unwrap().nudge = Some("Finish {unit.vars.missing}.".to_string());
+    let StageVerdict::Park { reason, kind } = v(&s, &SystemProbe, &TURN_ENDED) else {
+        panic!("a park")
+    };
+    assert_eq!(kind, RequestKind::Park);
+    assert!(
+        reason.contains("stage build") && reason.contains("nudge"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn applying_a_nudge_or_run_verdict_changes_nothing_in_the_engine() {
+    let wf = item_workflow(&["build"], false);
+    let e = env(wf);
+    e.engine
+        .ingest(&mut TrackedSource {
+            track: "item".into(),
+            records: vec![unit("u1", "g1", 1)],
+        })
+        .unwrap();
+    e.engine.start_stage("u1").unwrap();
+    for verdict in [
+        StageVerdict::Nudge {
+            text: "x".to_string(),
+            number: 1,
+            of: 1,
+        },
+        StageVerdict::RunThenPark,
+    ] {
+        assert_eq!(
+            apply(&e.engine, "u1", "build", &verdict).unwrap(),
+            ApplyResult::Waiting
+        );
+    }
+    assert_eq!(
+        e.engine.view().unwrap().node("u1").unwrap().status,
+        Status::Running
+    );
 }

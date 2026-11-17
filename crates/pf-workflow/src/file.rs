@@ -140,6 +140,27 @@ pub struct StageSpec {
     /// `base_push`: a branch the controller puts on `origin` before the stage launches, when
     /// `origin` lacks it.
     pub base_push: Option<BasePush>,
+    /// `no_signal`: what the controller does when the stage's seat ends a turn with no done
+    /// signal. `None` declares nothing: the unit parks at once.
+    pub no_signal: Option<NoSignal>,
+}
+
+/// The most nudges a stage may declare.
+pub const MAX_NUDGES: u32 = 3;
+
+/// The `no_signal` key of a stage. When the seat's turn ends and no done signal holds, the
+/// controller delivers `nudge` into the same session, up to `nudges` times, and then runs `run`
+/// before it parks the unit. A file a command writes can turn the park into a `stop` request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoSignal {
+    /// A template over the unit, in the scope of the stage's `message`. It is `Some` whenever
+    /// `nudges` is above 0.
+    pub nudge: Option<String>,
+    /// How many times the controller delivers `nudge` into one session: from 0 to
+    /// [`MAX_NUDGES`]. The default is 0.
+    pub nudges: u32,
+    /// Commands the controller runs in order before it parks the unit, bounded as every command.
+    pub run: Vec<CommandSpec>,
 }
 
 /// The `base_push` key of a stage. Both fields are templates in the stage's scope.
@@ -994,6 +1015,7 @@ const STAGE_FIELDS: &[&str] = &[
     "outcomes",
     "entered_by",
     "base_push",
+    "no_signal",
 ];
 
 /// A stage, and the `to` of each of its outcomes with the place it was written. The track checks
@@ -1128,6 +1150,10 @@ fn read_stage(
         None => None,
         Some(n) => Some(read_base_push(n, check, scope)?),
     };
+    let no_signal = match f.get("no_signal") {
+        None => None,
+        Some(n) => Some(read_no_signal(n, &name, check, scope)?),
+    };
     let spec = StageSpec {
         name,
         role,
@@ -1148,8 +1174,65 @@ fn read_stage(
         outcomes,
         entered_by_outcome,
         base_push,
+        no_signal,
     };
     Ok((spec, targets))
+}
+
+/// The `no_signal` mapping of a stage: `{nudge, nudges, run}`. Each error names the stage and the
+/// key. `nudges` is from 0 to [`MAX_NUDGES`] and defaults to 0. `nudge` is required while
+/// `nudges` is above 0. The block must declare a nudge that can fire, or `run` commands, or both:
+/// a block that does neither has no use.
+fn read_no_signal(
+    node: &Node,
+    stage: &str,
+    check: &Checker,
+    scope: Scope,
+) -> Result<NoSignal, ParseError> {
+    let f = Fields::new(
+        node,
+        &format!("`no_signal` of stage `{stage}`"),
+        &["nudge", "nudges", "run"],
+    )?;
+    let nudges = match f.get("nudges") {
+        None => 0,
+        Some(n) => {
+            let what = format!("`nudges` of stage `{stage}`");
+            let count = uint_of(n, &what)?;
+            if count > u64::from(MAX_NUDGES) {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!("{what} must be from 0 to {MAX_NUDGES}, not {count}"),
+                ));
+            }
+            u32::try_from(count).expect("a count of at most 3 fits a u32")
+        }
+    };
+    let nudge = match f.get("nudge") {
+        None => None,
+        Some(n) => Some(check.text_node(n, &format!("`nudge` of stage `{stage}`"), scope)?),
+    };
+    if nudges > 0 && nudge.is_none() {
+        return Err(ParseError::new(
+            node.pos,
+            format!(
+                "stage `{stage}` sets `nudges` above 0 in `no_signal`, so it needs a `nudge` message"
+            ),
+        ));
+    }
+    let run = match f.get("run") {
+        None => Vec::new(),
+        Some(n) => check.commands(n, &format!("`run` of stage `{stage}`"), scope)?,
+    };
+    if nudges == 0 && run.is_empty() {
+        return Err(ParseError::new(
+            node.pos,
+            format!(
+                "`no_signal` of stage `{stage}` does nothing: it needs a `nudge` with `nudges` above 0, or `run` commands"
+            ),
+        ));
+    }
+    Ok(NoSignal { nudge, nudges, run })
 }
 
 /// The `base_push` mapping of a stage: `{dir, branch}`, both templates, both required.

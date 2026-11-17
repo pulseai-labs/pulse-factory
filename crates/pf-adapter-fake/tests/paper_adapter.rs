@@ -267,3 +267,134 @@ fn parse_pr_reads_a_file_url_and_refuses_a_relative_one() {
     assert_eq!((pr.repo.as_str(), pr.number), ("/a/b", 3));
     assert!(pf_workflow::signals::parse_pr("file://a/b#3").is_none());
 }
+
+// ------------------------------------------------------------------ deliver (r2.s1.w1)
+
+/// The lines of a file as JSON values. A missing file holds none.
+fn json_lines(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("`{l}` is not JSON: {e}")))
+        .collect()
+}
+
+#[test]
+fn a_launch_exports_the_inbox_path_and_the_file_exists_for_the_script_to_wait_on() {
+    let (dir, a) = setup(Some(
+        "echo \"$PF_PAPER_INBOX\" > \"$OUT/inbox-path.txt\"\nif [ -f \"$PF_PAPER_INBOX\" ]; then echo yes > \"$OUT/inbox-exists.txt\"; fi\n",
+    ));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let s = a
+        .launch(&plan(dir.path(), &[("env.OUT", out.to_str().unwrap())]))
+        .unwrap();
+    wait_until("the script to end", || {
+        a.status(&s).unwrap().state == SessionState::Ended
+    });
+    let path = std::fs::read_to_string(out.join("inbox-path.txt")).unwrap();
+    assert!(
+        path.trim().ends_with(".inbox") && path.contains(&s.0),
+        "the inbox file is named for the session: {path}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("inbox-exists.txt"))
+            .unwrap()
+            .trim(),
+        "yes",
+        "the file exists at launch"
+    );
+}
+
+#[test]
+fn deliver_appends_one_json_line_to_the_inbox_and_starts_another_turn() {
+    // The seat ends a turn, waits for a message, and ends a second turn when one came.
+    let body = r#"echo '{"turn_end":true}' >> "$PF_PAPER_EVENTS"
+while [ ! -s "$PF_PAPER_INBOX" ]; do sleep 0.02; done
+cp "$PF_PAPER_INBOX" "$OUT/seen-inbox.txt"
+echo '{"turn_end":true}' >> "$PF_PAPER_EVENTS"
+sleep 600
+"#;
+    let (dir, a) = setup(Some(body));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let run_dir = dir.path().join("run");
+    let s = a
+        .launch(&plan(
+            dir.path(),
+            &[
+                ("env.OUT", out.to_str().unwrap()),
+                ("run_dir", run_dir.to_str().unwrap()),
+            ],
+        ))
+        .unwrap();
+    wait_until("the first turn to end", || a.status(&s).unwrap().turn_ended);
+
+    let message = "Finish u1: open the PR.\nSay \"done\" when it is open.";
+    a.deliver(&s, message).unwrap();
+    // The message starts a turn: the session is working until its next turn end.
+    let st = a.status(&s).unwrap();
+    assert!(
+        !st.turn_ended && st.state == SessionState::Working,
+        "{st:?}"
+    );
+
+    wait_until("the seat to read the message", || {
+        out.join("seen-inbox.txt").exists()
+    });
+    let seen = json_lines(&out.join("seen-inbox.txt"));
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["message"], message);
+    assert_eq!(
+        seen[0].as_object().unwrap().len(),
+        1,
+        "the line is {{\"message\": ...}} and nothing else"
+    );
+    wait_until("the second turn to end", || {
+        a.status(&s).unwrap().turn_ended
+    });
+
+    // A second message is a second line.
+    a.deliver(&s, "again").unwrap();
+    let inbox: Vec<PathBuf> = std::fs::read_dir(run_dir.join("paper"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "inbox"))
+        .collect();
+    assert_eq!(inbox.len(), 1, "one inbox file for the session");
+    let lines = json_lines(&inbox[0]);
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| l["message"].clone())
+            .collect::<Vec<_>>(),
+        vec![serde_json::json!(message), serde_json::json!("again")]
+    );
+    a.stop(&s).unwrap();
+}
+
+#[test]
+fn a_delivery_to_an_ended_session_is_refused_and_writes_nothing() {
+    let (dir, a) = setup(Some("exit 0\n"));
+    let run_dir = dir.path().join("run");
+    let s = a
+        .launch(&plan(dir.path(), &[("run_dir", run_dir.to_str().unwrap())]))
+        .unwrap();
+    wait_until("the script to end", || {
+        a.status(&s).unwrap().state == SessionState::Ended
+    });
+    let err = a.deliver(&s, "too late").unwrap_err();
+    assert!(matches!(err, AgentError::Failed(_)), "{err:?}");
+    assert!(err.to_string().contains("ended"), "{err}");
+    let inbox = run_dir.join("paper").join(format!("{}.inbox", s.0));
+    assert!(json_lines(&inbox).is_empty(), "nothing was appended");
+
+    // A stopped session is an ended one too.
+    let (dir, a) = setup(Some("sleep 600\n"));
+    let s = a.launch(&plan(dir.path(), &[])).unwrap();
+    a.stop(&s).unwrap();
+    assert!(a.deliver(&s, "too late").is_err());
+
+    // So is a session the adapter does not know.
+    assert!(a.deliver(&SessionRef("paper-99".into()), "x").is_err());
+}
