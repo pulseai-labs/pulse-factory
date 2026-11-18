@@ -1,0 +1,22 @@
+[package]
+name = "pf-host"
+description = "The session host: one small process per session that keeps the session's child and its output outside the controller (ADR-0001, docs/contracts/session-host.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "pf_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pf-host"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+portable-pty.workspace = true
+libc.workspace = true

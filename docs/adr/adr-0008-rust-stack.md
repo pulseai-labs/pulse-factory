@@ -11,6 +11,7 @@
   except where the amendment says.
 - **Amended:** 2026-11-09, at `r1.s3.w3`: `tokio-tungstenite`, axum's `ws` feature, the new dependencies of
   `pulse-factory` and the `pf-stream-reader` binary.
+- **Amended:** 2026-11-18, at `r2.s2.w1`: the new member `crates/pf-host` and its direct `libc` dependency.
 
 ## Context
 - The architecture spec chose Rust, Tokio, SQLite through rusqlite, portable-pty as the first PTY
@@ -202,3 +203,31 @@ The pinned client takes the stream's async client and one new direct dependency.
   (`client_async_with_config`) runs the WebSocket upgrade on the pinned TLS stream. The version and the
   features (`handshake`) do not change.
 - **`rt-multi-thread`** is a dev-dependency feature of `tokio` in `pf-client`, for its stream tests.
+
+## Amendment, 2026-11-18 (`r2.s2.w1`)
+
+The session host (ADR-0001, amendment of 2026-11-16) adds one workspace member and one direct dependency.
+
+- **`crates/pf-host`** is a new workspace member: the library `pf_host` and the binary `pf-host`. Its
+  dependencies are `serde`, `serde_json` and `portable-pty`, at the workspace pins, and `libc`. It uses
+  no Tokio, no `pf-engine`, `pf-workflow`, `pf-rules` or adapter crate, and no hashing crate: it runs on
+  standard threads, and the SHA-256 of a launch record is a short function in the crate with the
+  standard test vectors. `crates/pf-host/tests/host_is_dumb.rs` holds the dependency list.
+- **`libc`**, pinned with `=0.2.191`, is a workspace dependency, used by `pf-host` only. The host needs
+  what the standard library does not give: `SO_PEERCRED` and `SO_PEERPIDFD` (who is on the other end of
+  a socket), `poll` and a wake-up pipe (one thread per connection that waits for the socket and for new
+  output), process-group signals, `waitpid` (the child's exit status, with the signal that ended it),
+  and `setsid` with `fork` (a host that outlives its launcher). The controller's own `peer_check`
+  reads `SO_PEERPIDFD` through the same crate.
+- **First-use check.** `0.2.191` is the version `Cargo.lock` already held, through other crates, so the
+  lock gains no package. It builds on draco-desk (`cargo build -p pf-host`, 2026-11-18), the constants
+  `SO_PEERPIDFD` and `SO_PEERCRED` are in it, and `cargo test -p pf-host` and `cargo clippy -p pf-host
+  --all-targets -- -D warnings` pass. Its yank status was not checked: the seat that built this item had
+  no network.
+- **Not taken.** `nix` (0.28.0) and `rustix` (1.1.6) are in the lock through other crates. Each is a
+  larger surface than the dozen calls the host makes. `libc` is the smaller surface (SPINE.md r2.s2,
+  Q2). Both stay open if the host grows past these calls.
+- **Reversibility.** The calls sit in one module (`crates/pf-host/src/peer.rs`) and in the host's
+  start-up, so a swap for `nix` touches those two files.
+- **`Cargo.lock`** gains the one member and its four edges (`libc`, `portable-pty`, `serde`,
+  `serde_json`), and no other package. `apps/desktop/src-tauri/Cargo.lock` does not change.

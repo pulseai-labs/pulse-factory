@@ -1,0 +1,43 @@
+{"scenario":"main","session":"g1","incarnation":1,"record":"{\"argv\":[\"/bin/sh\",\"-c\",\"echo ready; read l; echo \\\"echo:$l\\\"; read l2\"],\"cwd\":\"/\",\"env\":{\"PATH\":\"/usr/bin:/bin\"},\"transport\":{\"kind\":\"pipes\"}}","replay_bytes":1048576,"wait_exit":false,"key":"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3"}
+{"c":0,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3\"}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"hello\",\"proto\":1,\"session\":\"g1\",\"incarnation\":1,\"invocation_id\":\"\",\"child_pid\":0,\"record_sha256\":\"5519ae501c23287f0740e272e100cc0b0dc7497972f9786e026ba12441efafdb\"}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"read\",\"from\":0}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"out\",\"at\":0,\"n\":6}","data_hex":"72656164790a"}
+{"c":0,"d":"c","head":"{\"t\":\"input\",\"n\":3}","data_hex":"68690a"}
+{"c":0,"d":"h","head":"{\"t\":\"out\",\"at\":6,\"n\":8}","data_hex":"6563686f3a68690a"}
+{"c":0,"d":"c","head":"{\"t\":\"ack\",\"to\":14}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"snapshot\"}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"error\",\"code\":\"unsupported\",\"text\":\"version 1 has no screen snapshot\"}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"resize\",\"rows\":30,\"cols\":100}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"error\",\"code\":\"not_pty\",\"text\":\"the child is on pipes\"}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"signal\",\"sig\":\"interrupt\"}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"exit\",\"code\":null,\"signal\":2,\"at\":14}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"exit_ack\"}","data_hex":""}
+{"scenario":"overflow","session":"g2","incarnation":1,"record":"{\"argv\":[\"/bin/sh\",\"-c\",\"printf 0123456789abcdefghij\"],\"cwd\":\"/\",\"env\":{\"PATH\":\"/usr/bin:/bin\"},\"transport\":{\"kind\":\"pipes\"}}","replay_bytes":8,"wait_exit":true,"key":"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3"}
+{"c":0,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3\"}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"hello\",\"proto\":1,\"session\":\"g2\",\"incarnation\":1,\"invocation_id\":\"\",\"child_pid\":0,\"record_sha256\":\"384c3e0b90413f03dedb765cf21d745ceab9ef69c52cdd4e724fe651b905db28\",\"exit\":{\"code\":0,\"signal\":null,\"at\":20}}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"read\",\"from\":0}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"gap\",\"from\":0,\"to\":12}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"out\",\"at\":12,\"n\":8}","data_hex":"636465666768696a"}
+{"c":0,"d":"h","head":"{\"t\":\"exit\",\"code\":0,\"signal\":null,\"at\":20}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"ack\",\"to\":20}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"exit_ack\"}","data_hex":""}
+{"scenario":"refusals","session":"g3","incarnation":1,"record":"{\"argv\":[\"/bin/sh\",\"-c\",\"sleep 30\"],\"cwd\":\"/\",\"env\":{\"PATH\":\"/usr/bin:/bin\"},\"transport\":{\"kind\":\"pipes\"}}","replay_bytes":1048576,"wait_exit":false,"key":"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3"}
+{"c":0,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":0,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"0000000000000000000000000000000000000000000000000000000000000000\"}","data_hex":""}
+{"c":0,"d":"h","head":"{\"t\":\"error\",\"code\":\"key\",\"text\":\"the attach key is wrong or missing\"}","data_hex":""}
+{"c":1,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":1,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"\"}","data_hex":""}
+{"c":1,"d":"h","head":"{\"t\":\"error\",\"code\":\"key\",\"text\":\"the attach key is wrong or missing\"}","data_hex":""}
+{"c":2,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":2,"d":"c","head":"{\"t\":\"attach\",\"proto\":2,\"key\":\"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3\"}","data_hex":""}
+{"c":2,"d":"h","head":"{\"t\":\"error\",\"code\":\"version\",\"text\":\"the host speaks protocol 1 to 1, not 2\"}","data_hex":""}
+{"c":3,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":3,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3\"}","data_hex":""}
+{"c":3,"d":"h","head":"{\"t\":\"hello\",\"proto\":1,\"session\":\"g3\",\"incarnation\":1,\"invocation_id\":\"\",\"child_pid\":0,\"record_sha256\":\"d00bf541fa13406a8ef0ee6f2f85d80d61725c308067dc12f3614d639e4119c7\"}","data_hex":""}
+{"c":4,"d":"h","head":"{\"t\":\"version\",\"proto_min\":1,\"proto_max\":1}","data_hex":""}
+{"c":4,"d":"c","head":"{\"t\":\"attach\",\"proto\":1,\"key\":\"5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3\"}","data_hex":""}
+{"c":4,"d":"h","head":"{\"t\":\"hello\",\"proto\":1,\"session\":\"g3\",\"incarnation\":1,\"invocation_id\":\"\",\"child_pid\":0,\"record_sha256\":\"d00bf541fa13406a8ef0ee6f2f85d80d61725c308067dc12f3614d639e4119c7\"}","data_hex":""}
+{"c":3,"d":"h","head":"{\"t\":\"error\",\"code\":\"superseded\",\"text\":\"another controller attached\"}","data_hex":""}
