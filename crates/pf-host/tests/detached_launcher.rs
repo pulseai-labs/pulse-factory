@@ -343,11 +343,13 @@ fn a_host_that_must_be_killed_takes_its_childs_group_with_it() {
     // A stopped host takes no `SIGTERM`, so `stop` has to fall back on `SIGKILL`.
     unsafe { libc::kill(s.pid as i32, libc::SIGSTOP) };
     let result = rig.launcher.stop(&s.unit);
-    let child_left = pid_alive(hello.child_pid);
-    if child_left {
+    // `stop` sends the child's group its `SIGKILL` before the host's, and a process ends some time
+    // after its signal: the host can be gone while the child still shows as alive for a moment.
+    let child_gone = wait_until(Duration::from_secs(5), || !pid_alive(hello.child_pid));
+    if !child_gone {
         unsafe { libc::kill(-(hello.child_pid as i32), libc::SIGKILL) };
     }
     result.unwrap();
     assert!(!pid_alive(s.pid), "the host survived the stop");
-    assert!(!child_left, "the child outlived the host that stop killed");
+    assert!(child_gone, "the child outlived the host that stop killed");
 }
