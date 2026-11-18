@@ -9,5 +9,6 @@ pub mod controller;
 pub mod forge;
 pub mod format;
 pub mod hook;
+pub mod store_verbs;
 
 pub use cli::run;

@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 use pf_engine::port::store::{
     ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatItemKind,
     ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect,
-    LedgerLine, NEW_ID, NewChatItem, NewChatSession, NewDevice, NewProject, NewRequest, NodeKind,
-    NodeRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT,
-    RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree,
-    SettingRow, SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID,
-    WorktreeCreatedBy, WorktreeRow,
+    HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NewChatItem, NewChatSession, NewDevice, NewHost,
+    NewLaunchRecord, NewProject, NewRequest, NodeKind, NodeRow, ORCHESTRATOR_AGENT, ProjectKind,
+    ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow,
+    RunState, SessionRow, SessionWorktree, SettingRow, SettingScope, Store, StoreError,
+    TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -900,8 +900,209 @@ fn set_run_project(
     }
 }
 
+// ------------------------------------------------------------------ launch records and hosts
+
+const LAUNCH_RECORD_COLUMNS: &str = "session_kind, session_id, incarnation, revision, launcher, \
+     host_unit, host_socket, record, record_sha256, command_id, created_at";
+
+fn to_u32(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn launch_record_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaunchRecordRow> {
+    Ok(LaunchRecordRow {
+        session_kind: r.get(0)?,
+        session_id: r.get(1)?,
+        incarnation: to_u32(r.get(2)?),
+        revision: to_u32(r.get(3)?),
+        launcher: r.get(4)?,
+        host_unit: r.get(5)?,
+        host_socket: r.get(6)?,
+        record: r.get(7)?,
+        record_sha256: r.get(8)?,
+        command_id: r.get(9)?,
+        created_at: r.get(10)?,
+    })
+}
+
+const HOST_COLUMNS: &str = "unit, session_kind, session_id, incarnation, launched_revision, \
+     launched_record_sha256, launcher, socket, invocation_id, host_binary, host_sha256, protocol, \
+     started_at, ended_at, exit, command_id";
+
+fn host_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
+    Ok(HostRow {
+        unit: r.get(0)?,
+        session_kind: r.get(1)?,
+        session_id: r.get(2)?,
+        incarnation: to_u32(r.get(3)?),
+        launched_revision: to_u32(r.get(4)?),
+        launched_record_sha256: r.get(5)?,
+        launcher: r.get(6)?,
+        socket: r.get(7)?,
+        invocation_id: r.get(8)?,
+        host_binary: r.get(9)?,
+        host_sha256: r.get(10)?,
+        protocol: to_u32(r.get(11)?),
+        started_at: r.get(12)?,
+        ended_at: r.get(13)?,
+        exit: r.get(14)?,
+        command_id: r.get(15)?,
+    })
+}
+
+/// Write one revision of a launch record. The port checks come first: the kind, the launcher, the
+/// secret values and the hash of the body. Then the revision and the incarnation must be the next
+/// ones. The constraints and triggers of migration 0009 are the backstop.
+fn launch_record_write(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    n: &NewLaunchRecord,
+) -> Result<(), EffectError> {
+    let canonical = n.check().map_err(EffectError::Rejected)?;
+    let (kind, session, incarnation) = (&n.session_kind, &n.session_id, i64::from(n.incarnation));
+    let newest_revision: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(revision), 0) FROM launch_records \
+         WHERE session_kind = ?1 AND session_id = ?2 AND incarnation = ?3",
+        params![kind, session, incarnation],
+        |r| r.get(0),
+    )?;
+    if i64::from(n.revision) != newest_revision + 1 {
+        return Err(EffectError::Rejected(format!(
+            "revision {} is not the next revision of incarnation {} of {kind} {session}: revision {} is next",
+            n.revision,
+            n.incarnation,
+            newest_revision + 1
+        )));
+    }
+    if n.revision == 1 {
+        let newest_incarnation: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(incarnation), 0) FROM launch_records \
+             WHERE session_kind = ?1 AND session_id = ?2",
+            params![kind, session],
+            |r| r.get(0),
+        )?;
+        if incarnation != newest_incarnation + 1 {
+            return Err(EffectError::Rejected(format!(
+                "incarnation {} is not the next incarnation of {kind} {session}: incarnation {} is next",
+                n.incarnation,
+                newest_incarnation + 1
+            )));
+        }
+    }
+    tx.execute(
+        &format!(
+            "INSERT INTO launch_records ({LAUNCH_RECORD_COLUMNS}) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+        ),
+        params![
+            kind,
+            session,
+            incarnation,
+            i64::from(n.revision),
+            n.launcher,
+            n.host_unit,
+            n.host_socket,
+            canonical,
+            n.record_sha256,
+            command_id,
+            n.created_at
+        ],
+    )
+    .map_err(backstop)?;
+    Ok(())
+}
+
+/// Register a host. The launched revision must exist for the same incarnation, and the launched
+/// hash must be that revision's own.
+fn host_started(tx: &Transaction<'_>, command_id: &str, n: &NewHost) -> Result<(), EffectError> {
+    n.check().map_err(EffectError::Rejected)?;
+    let launched: Option<String> = tx
+        .query_row(
+            "SELECT record_sha256 FROM launch_records \
+             WHERE session_kind = ?1 AND session_id = ?2 AND incarnation = ?3 AND revision = ?4",
+            params![
+                n.session_kind,
+                n.session_id,
+                i64::from(n.incarnation),
+                i64::from(n.launched_revision)
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match launched {
+        None => {
+            return Err(EffectError::Rejected(format!(
+                "launched revision {} of incarnation {} of {} {} does not exist",
+                n.launched_revision, n.incarnation, n.session_kind, n.session_id
+            )));
+        }
+        Some(hash) if hash != n.launched_record_sha256 => {
+            return Err(EffectError::Rejected(format!(
+                "launched_record_sha256 is not the hash of revision {} of incarnation {} of {} {}",
+                n.launched_revision, n.incarnation, n.session_kind, n.session_id
+            )));
+        }
+        Some(_) => {}
+    }
+    tx.execute(
+        &format!(
+            "INSERT INTO hosts ({HOST_COLUMNS}) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL, NULL, ?14)"
+        ),
+        params![
+            n.unit,
+            n.session_kind,
+            n.session_id,
+            i64::from(n.incarnation),
+            i64::from(n.launched_revision),
+            n.launched_record_sha256,
+            n.launcher,
+            n.socket,
+            n.invocation_id,
+            n.host_binary,
+            n.host_sha256,
+            i64::from(n.protocol),
+            n.started_at,
+            command_id
+        ],
+    )
+    .map_err(backstop)?;
+    Ok(())
+}
+
+/// End a live host with its exit. The end and the exit are set once, together.
+fn host_ended(
+    tx: &Transaction<'_>,
+    unit: &str,
+    ended_at: &str,
+    exit: &str,
+) -> Result<(), EffectError> {
+    if serde_json::from_str::<serde_json::Value>(exit).is_err() {
+        return Err(EffectError::Rejected(format!(
+            "the exit of host {unit} is not JSON"
+        )));
+    }
+    let ended: Option<Option<String>> = tx
+        .query_row("SELECT ended_at FROM hosts WHERE unit = ?1", [unit], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match ended {
+        None => Err(EffectError::Rejected(format!("no host {unit}"))),
+        Some(Some(_)) => Err(EffectError::Rejected(format!("host {unit} ended already"))),
+        Some(None) => {
+            tx.execute(
+                "UPDATE hosts SET ended_at = ?2, exit = ?3 WHERE unit = ?1 AND ended_at IS NULL",
+                params![unit, ended_at, exit],
+            )
+            .map_err(backstop)?;
+            Ok(())
+        }
+    }
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
-fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError> {
+fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
         Effect::PutRun(r) => put_run(tx, r)?,
         Effect::PutNode(n) => put_node(tx, n)?,
@@ -963,6 +1164,13 @@ fn apply(tx: &Transaction<'_>, effect: &Effect) -> Result<Assigned, EffectError>
         Effect::SetSetting(row) => set_setting(tx, row)?,
         Effect::UnsetSetting { scope, key } => unset_setting(tx, scope, key)?,
         Effect::SetRunProject { run_id, project_id } => set_run_project(tx, run_id, project_id)?,
+        Effect::LaunchRecordWrite(n) => launch_record_write(tx, command_id, n)?,
+        Effect::HostStarted(n) => host_started(tx, command_id, n)?,
+        Effect::HostEnded {
+            unit,
+            ended_at,
+            exit,
+        } => host_ended(tx, unit, ended_at, exit)?,
     }
     Ok(Assigned::default())
 }
@@ -998,10 +1206,25 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
             "a run's project is set only in an admission under @controller".to_string(),
         ));
     }
+    // A launch record and a host row are the controller's to write: the effects are refused in any
+    // other scope, and the admission rolls back with them.
+    if c.run_id != CONTROLLER_SCOPE
+        && c.effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::LaunchRecordWrite(_) | Effect::HostStarted(_) | Effect::HostEnded { .. }
+            )
+        })
+    {
+        return Ok(Committed::Rejected(
+            "a launch record or a host row is written only in an admission under @controller"
+                .to_string(),
+        ));
+    }
     let mut assigned: Option<String> = None;
     let mut worktree_assigned: Option<String> = None;
     for effect in &c.effects {
-        match apply(&tx, effect) {
+        match apply(&tx, &c.command_id, effect) {
             Ok(got) => {
                 if got.new_id.is_some() {
                     assigned = got.new_id;
@@ -1902,5 +2125,74 @@ impl Store for SqliteStore {
 
     fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError> {
         self.call(move |conn| append_item(conn, &item))?
+    }
+
+    fn launch_record(
+        &self,
+        session_kind: &str,
+        session_id: &str,
+        incarnation: u32,
+        revision: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        let (kind, session) = (session_kind.to_string(), session_id.to_string());
+        self.call(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {LAUNCH_RECORD_COLUMNS} FROM launch_records \
+                     WHERE session_kind = ?1 AND session_id = ?2 AND incarnation = ?3 AND revision = ?4"
+                ),
+                params![kind, session, i64::from(incarnation), i64::from(revision)],
+                launch_record_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn newest_launch_record(
+        &self,
+        session_kind: &str,
+        session_id: &str,
+        incarnation: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        let (kind, session) = (session_kind.to_string(), session_id.to_string());
+        self.call(move |conn| {
+            conn.query_row(
+                &format!(
+                    "SELECT {LAUNCH_RECORD_COLUMNS} FROM launch_records \
+                     WHERE session_kind = ?1 AND session_id = ?2 AND incarnation = ?3 \
+                     ORDER BY revision DESC LIMIT 1"
+                ),
+                params![kind, session, i64::from(incarnation)],
+                launch_record_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn live_hosts(&self) -> Result<Vec<HostRow>, StoreError> {
+        self.call(|conn| {
+            collect(
+                conn,
+                &format!("SELECT {HOST_COLUMNS} FROM hosts WHERE ended_at IS NULL ORDER BY rowid"),
+                [],
+                host_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn host(&self, unit: &str) -> Result<Option<HostRow>, StoreError> {
+        let unit = unit.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                &format!("SELECT {HOST_COLUMNS} FROM hosts WHERE unit = ?1"),
+                [&unit],
+                host_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
     }
 }

@@ -2,12 +2,13 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has eighteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has nineteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
 `add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
 `session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
 runtime it needs, `settings` (`r1.s4`), which reads and sets how a chat behaves, per server,
-project or agent, and `propose` (`r1.s4`), which posts a start card into the calling chat.
+project or agent, `propose` (`r1.s4`), which posts a start card into the calling chat, and `store`
+(`r2.s2`), which lists the store's backups, restores one and checks an upgrade, with no controller.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -82,12 +83,13 @@ project or agent, and `propose` (`r1.s4`), which posts a start card into the cal
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
   `systemctl --user status pulse-factory`.
-- **`--json`.** Each verb except `hook` and `controller` takes `--json`. Its JSON holds
+- **`--json`.** Each verb except `hook`, `controller` and `store restore` takes `--json`. Its JSON holds
   `schema_version` (now `1`). A change that removes or renames a field raises the version.
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
-  `--yes`, and a command line that clap refuses.
+  `--yes`, and a command line that clap refuses. 3 is `store check-upgrade` when the upgrade must not
+  start.
 - **A seat cannot spend.** `arm`, `propose`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
-  `project remove`, `device pair`, `device revoke` and the state-changing `session` verbs (`start`,
+  `project remove`, `device pair`, `device revoke`, every `store` verb and the state-changing `session` verbs (`start`,
   `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
@@ -865,6 +867,89 @@ Shows the state of the network API listener. It is a read: it needs no claim and
   <addr or null>, "key_spki_sha256": <hex or null>, "error": <text or null>}`.
 - The hash is the one a pairing code carries. A client pins it. A new key (the key files were
   removed) shows a new hash, and every paired client then fails closed (`api.md`, "Key loss").
+
+## `store`
+
+```
+pulse-factory store backups [--json]
+pulse-factory store restore <file>
+pulse-factory store check-upgrade [--json]
+```
+
+The three verbs work on the store file, `<state>/store.sqlite`, with no controller (ADR-0003,
+ADR-0007). They are CLI only: none is on the device allowlist (ADR-0012). Each refuses with exit 1
+when `PF_SEAT_TOKEN` or `PULSE_FACTORY_CHAT` is in the environment (ADR-0005).
+
+**The read path.** `backups` and `check-upgrade` open the live file with a normal connection and
+`PRAGMA query_only = ON`, `wal_autocheckpoint = 0` and `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`. They read
+the frames in the `-wal`, they share the WAL index with a running controller, and they never write or
+checkpoint the store. They never open it with `immutable=1`, which would skip the `-wal`. A reader that
+finds no read mark at the last frame can move one in the `-shm`; that is the only byte SQLite lets a
+reader change.
+
+**The offline host probe.** After a crash every `hosts` row can read live, so no verb trusts a row. The
+probe lists `systemctl --user list-units --all 'pf-host-<server>-*'` and reads
+`<XDG_RUNTIME_DIR>/pf-hosts/<server>/`, where a `host.pid` whose PID and start time match a live process
+is a live host. `<server>` is the server id: the SHA-256 of the SPKI of the API key, read from
+`<state>/api/cert.pem` (the key itself is never read, and the probe creates nothing). With no
+certificate and no key the probe finds no host and says `no server key`. When `systemctl --user` cannot
+answer, or a detached host's `host.pid` cannot be read, the probe says so, and the verb that asked
+refuses with that reason. It does not guess.
+
+### `store backups`
+
+Lists the backups beside the store, newest first: path, `from_version`, `to_version`, time and size.
+The text form prints one line for each backup, or `no backups beside <store>`. The JSON is
+`{"schema_version": 1, "backups": [{"path", "from_version", "to_version", "time", "size_bytes"}]}`.
+
+A backup is written by the store before it applies a migration, after the active-run check and before
+the first pending migration. Its name is `store.sqlite.v<from>-v<to>.<utc>.bak`, its mode is 0600, and
+it passes `PRAGMA integrity_check` or the open fails with a backup error and applies nothing. The store
+keeps the newest `PF_STORE_BACKUP_KEEP` backups (1 to 20, default 3; a value outside the range prints one
+line to stderr and uses 3). A new store and an up-to-date store write none.
+
+### `store restore <file>`
+
+Puts a backup back as the store. It takes no `--json`. It is refused (exit 1, the reason on stderr):
+
+- while the controller answers on its socket;
+- while the offline probe finds a live host, or cannot tell whether one lives;
+- for a backup that fails `PRAGMA integrity_check`;
+- for a backup whose schema version is newer than the binary supports.
+
+A `hosts` row that reads live while no unit or process exists does not refuse a restore.
+
+Otherwise it moves the store file and its `-wal` and `-shm` aside as
+`store.sqlite.replaced.<utc>{,-wal,-shm}`, copies the backup in at mode 0600 (it writes nothing into
+the backup), and runs `PRAGMA integrity_check` on the copy. Only then does it print success, with the
+backup's path and the paths of the replaced files, and exit 0. A copy that fails its check is removed,
+the replaced files go back, and the verb says so and exits 1.
+
+### `store check-upgrade`
+
+Run it with the new binary, before an install. It reports the store's schema version and the highest
+version this binary supports, this binary's version and host protocol range, the pending migrations,
+the active runs and the live hosts. A host counts as live only when its `hosts` row has no end **and**
+the probe finds its unit or process. The probe runs only when a row reads live, so a first upgrade into
+the host world (a store with no `hosts` table) needs no `systemctl` and lists no host. A machine with
+no store has nothing to check and exits 0.
+
+For each live host it prints the unit, the protocol, the host binary path and the managed CLI copy
+paths its launch records name (`runtime.binary_path` of every revision of the host's incarnation). An
+install must keep those files.
+
+The upgrade must not start (exit 3, each cause named) when a run is active and a migration is pending
+(`run_active_migration_pending`), or when this binary's protocol range drops a live host's protocol
+(`protocol_dropped`). Any other failure exits 1, and so does a probe that cannot tell.
+`scripts/install.sh` runs this verb with `--json` before it installs any file.
+
+The JSON is `{"schema_version": 1, "store_version": <n>, "supported_store_version": <n>,
+"binary_version": "<v>", "protocol": {"min": <n>, "max": <n>}, "pending_migrations": [{"version",
+"name"}], "active_runs": ["<run>"], "live_hosts": [{"unit", "session_kind", "session", "incarnation",
+"launcher", "protocol", "host_binary", "cli_copies"}], "host_binaries": ["<path>"], "cli_copies":
+["<path>"], "probe_note": <text or null>, "refusals": [{"kind", ...}], "can_start": <bool>}`. A
+`run_active_migration_pending` refusal holds `runs` and `pending`. A `protocol_dropped` refusal holds
+`unit`, `protocol`, `min` and `max`.
 
 ## `hook`
 

@@ -8,6 +8,38 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 share="${PF_SHARE_DIR:-$HOME/.local/share/pulse-factory}"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
+# The upgrade guard. Before this script installs or replaces any file, the new binary checks the store
+# (ADR-0003, ADR-0007). With a run active and a migration pending, or with a live session host whose
+# protocol the new binary drops, the controller would refuse to start, and every seat's hook would be
+# denied. So the script stops here and the old controller keeps running. The build goes into the shared
+# target, so the `cargo install` below finds most of it built. A guard that cannot answer stops the install too.
+state="${PF_STATE_DIR:-$HOME/.local/state/pulse-factory}"
+built="$(nice -n 10 ionice -c3 cargo build --release --locked -p pulse-factory --bin pulse-factory --message-format=json-render-diagnostics)"
+guard_bin="$(printf '%s\n' "$built" | grep '"kind":\["bin"\]' | grep '"name":"pulse-factory"' |
+  sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)"
+if [ -z "$guard_bin" ] || [ ! -x "$guard_bin" ]; then
+  echo "the build did not name the pulse-factory binary, so the upgrade check cannot run." >&2
+  echo "nothing is installed and the old controller keeps running." >&2
+  exit 1
+fi
+if report="$(PF_STATE_DIR="$state" "$guard_bin" store check-upgrade --json)"; then
+  guard_rc=0
+else
+  guard_rc=$?
+fi
+if [ "$guard_rc" -eq 3 ]; then
+  echo "the upgrade must not start. The store check names:" >&2
+  printf '%s\n' "$report" >&2
+  echo "end or halt the runs, or let the hosts end, then install again." >&2
+  echo "nothing is installed and the old controller keeps running." >&2
+  exit 3
+elif [ "$guard_rc" -ne 0 ]; then
+  echo "pulse-factory store check-upgrade failed (exit $guard_rc), so the install stops." >&2
+  printf '%s\n' "$report" >&2
+  echo "nothing is installed and the old controller keeps running." >&2
+  exit 1
+fi
+
 # The binary goes to ~/.local/bin. The build is niced, because it writes a lot.
 nice -n 10 ionice -c3 cargo install --path "$root/crates/pulse-factory" --locked --root "$HOME/.local"
 

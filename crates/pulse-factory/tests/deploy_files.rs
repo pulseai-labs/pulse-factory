@@ -203,6 +203,7 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
             "chat-runtime",
             "device",
             "api",
+            "store",
             "hook",
             "controller"
         ]

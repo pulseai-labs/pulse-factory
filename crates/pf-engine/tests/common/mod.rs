@@ -193,7 +193,10 @@ impl Store for FakeStore {
                 | Effect::SetChatSessionRuntime { .. }
                 | Effect::RedactChatItem { .. }
                 | Effect::SetSetting(_)
-                | Effect::UnsetSetting { .. } => {}
+                | Effect::UnsetSetting { .. }
+                | Effect::LaunchRecordWrite(_)
+                | Effect::HostStarted(_)
+                | Effect::HostEnded { .. } => {}
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
@@ -441,6 +444,34 @@ impl Store for FakeStore {
         Err(StoreError(
             "the engine's test store holds no chat items".to_string(),
         ))
+    }
+
+    // The engine tests carry no launch records and no hosts: the engine writes none.
+    fn launch_record(
+        &self,
+        _session_kind: &str,
+        _session_id: &str,
+        _incarnation: u32,
+        _revision: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn newest_launch_record(
+        &self,
+        _session_kind: &str,
+        _session_id: &str,
+        _incarnation: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn live_hosts(&self) -> Result<Vec<HostRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn host(&self, _unit: &str) -> Result<Option<HostRow>, StoreError> {
+        Ok(None)
     }
 }
 
