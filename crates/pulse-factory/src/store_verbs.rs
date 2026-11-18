@@ -3,10 +3,13 @@
 //! Each refuses a caller with `PF_SEAT_TOKEN` or the chat marker in its environment, and each runs
 //! without the controller.
 //!
-//! They read the store through the read path of `pf_store_sqlite::offline`: a query-only connection
-//! that reads the frames in the `-wal` and never writes or checkpoints. They never trust a `hosts`
-//! row for liveness. After a crash every row can read live, so the offline probe asks the user
-//! manager for the units of this server, and reads the detached hosts' directory.
+//! `check-upgrade` reads the store through the read path of `pf_store_sqlite::offline`: a query-only
+//! connection that reads the frames in the `-wal` and never writes or checkpoints. `backups` only
+//! lists the backup files beside the store and never opens it. `restore` is a writer by design: it
+//! moves the store aside and writes a new file, and opens a backup and its copy read-only to check
+//! them. No verb trusts a `hosts` row for liveness. After a crash every row can read live, so the
+//! offline probe asks the user manager for the units of this server, and reads the detached hosts'
+//! directory.
 
 use std::collections::BTreeSet;
 use std::io::Write;

@@ -14,7 +14,7 @@ unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 # denied. So the script stops here and the old controller keeps running. The build goes into the shared
 # target, so the `cargo install` below finds most of it built. A guard that cannot answer stops the install too.
 state="${PF_STATE_DIR:-$HOME/.local/state/pulse-factory}"
-built="$(nice -n 10 ionice -c3 cargo build --release --locked -p pulse-factory --bin pulse-factory --message-format=json-render-diagnostics)"
+built="$(nice -n 10 ionice -c3 cargo build --release --locked --manifest-path "$root/Cargo.toml" -p pulse-factory --bin pulse-factory --message-format=json-render-diagnostics)"
 guard_bin="$(printf '%s\n' "$built" | grep '"kind":\["bin"\]' | grep '"name":"pulse-factory"' |
   sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -n 1)"
 if [ -z "$guard_bin" ] || [ ! -x "$guard_bin" ]; then

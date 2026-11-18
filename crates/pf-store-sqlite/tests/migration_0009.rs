@@ -171,8 +171,10 @@ fn the_two_tables_and_their_triggers_exist() {
     for t in [
         "launch_records_never_update",
         "launch_records_never_delete",
+        "launch_records_never_replace",
         "hosts_end_once",
         "hosts_never_delete",
+        "hosts_never_replace",
     ] {
         assert!(triggers.contains(t), "trigger {t} in {triggers:?}");
     }
@@ -238,6 +240,80 @@ fn a_launch_record_keeps_its_key_unique_and_its_command_id_unique() {
             "({incarnation}, {revision}, {hash}, {body}) must be refused"
         );
     }
+}
+
+#[test]
+fn insert_or_replace_cannot_rewrite_a_launch_record_or_a_host_row() {
+    let (_d, path) = migrated();
+    let conn = Connection::open(&path).unwrap();
+    insert_record(&conn, "S-1", 1, "cmd-1");
+    insert_host(&conn, "pf-host-s-S-1-1", "cmd-h1");
+    let other_hash = "f".repeat(64);
+    let record_before: (String, String) = conn
+        .query_row(
+            "SELECT record, record_sha256 FROM launch_records",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    // A launch record: the same key, the same command ID, each with a new body.
+    for (revision, command_id) in [(1, "cmd-2"), (2, "cmd-1")] {
+        let why = refusal(
+            &conn,
+            &format!(
+                "INSERT OR REPLACE INTO launch_records (session_kind, session_id, incarnation, \
+                 revision, launcher, host_unit, host_socket, record, record_sha256, command_id, \
+                 created_at) VALUES ('chat', 'S-1', 1, {revision}, 'detached', 'u', 's', \
+                 '{{\"x\":1}}', '{other_hash}', '{command_id}', 't9')"
+            ),
+        );
+        assert!(why.contains("write-once"), "{revision}/{command_id}: {why}");
+    }
+    // A host row: the same unit, the same incarnation under another unit, the same command ID.
+    for (unit, incarnation, command_id) in [
+        ("pf-host-s-S-1-1", 1, "cmd-h2"),
+        ("pf-host-s-S-1-1b", 1, "cmd-h3"),
+        ("pf-host-s-S-1-2", 2, "cmd-h1"),
+    ] {
+        let why = refusal(
+            &conn,
+            &format!(
+                "INSERT OR REPLACE INTO hosts (unit, session_kind, session_id, incarnation, \
+                 launched_revision, launched_record_sha256, launcher, socket, invocation_id, \
+                 host_binary, host_sha256, protocol, started_at, command_id) \
+                 VALUES ('{unit}', 'chat', 'S-1', {incarnation}, 1, '{other_hash}', 'detached', \
+                 '/elsewhere', 'inv-9', '/bin/other', '{other_hash}', 1, 't9', '{command_id}')"
+            ),
+        );
+        assert!(why.contains("never replaced"), "{unit}/{command_id}: {why}");
+    }
+
+    // Nothing changed.
+    let record_after: (String, String) = conn
+        .query_row(
+            "SELECT record, record_sha256 FROM launch_records",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(record_after, record_before);
+    assert_eq!(count(&conn, "launch_records"), 1);
+    let socket: String = conn
+        .query_row("SELECT socket FROM hosts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(socket, "/run/s.sock");
+    assert_eq!(count(&conn, "hosts"), 1);
+
+    // The control: a statement that replaces nothing still goes through.
+    conn.execute(
+        "INSERT OR REPLACE INTO launch_records (session_kind, session_id, incarnation, revision, \
+         launcher, host_unit, host_socket, record, record_sha256, command_id, created_at) \
+         VALUES ('chat', 'S-2', 1, 1, 'detached', 'u', 's', '{}', ?1, 'cmd-new', 't')",
+        [HASH],
+    )
+    .unwrap();
+    assert_eq!(count(&conn, "launch_records"), 2);
 }
 
 #[test]

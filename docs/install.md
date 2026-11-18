@@ -28,7 +28,8 @@ scripts/install.sh
 The script does these steps and no others:
 
 1. The upgrade guard. It builds the release binary into the shared target
-   (`nice -n 10 ionice -c3 cargo build --release --locked -p pulse-factory --bin pulse-factory`), then
+   (`nice -n 10 ionice -c3 cargo build --release --locked --manifest-path <checkout>/Cargo.toml -p pulse-factory
+   --bin pulse-factory`), then
    runs that binary's `store check-upgrade --json` against `$PF_STATE_DIR` (default
    `~/.local/state/pulse-factory`). On exit 3 it stops before it installs any file, prints what the JSON
    names and `end or halt the runs, or let the hosts end, then install again`. The old controller keeps

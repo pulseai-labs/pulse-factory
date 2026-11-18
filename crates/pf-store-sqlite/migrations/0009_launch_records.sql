@@ -38,6 +38,16 @@ BEGIN SELECT RAISE(ABORT, 'a launch record is write-once'); END;
 CREATE TRIGGER launch_records_never_delete BEFORE DELETE ON launch_records
 BEGIN SELECT RAISE(ABORT, 'a launch record is write-once'); END;
 
+-- `INSERT OR REPLACE` deletes the row it replaces without firing a delete trigger (`recursive_triggers`
+-- is off), so it would rewrite a record past the two triggers above. This trigger refuses an insert
+-- whose primary key or `command_id` is in use, before SQLite resolves the conflict.
+CREATE TRIGGER launch_records_never_replace BEFORE INSERT ON launch_records
+WHEN EXISTS (SELECT 1 FROM launch_records
+             WHERE (session_kind = NEW.session_kind AND session_id = NEW.session_id
+                    AND incarnation = NEW.incarnation AND revision = NEW.revision)
+                OR command_id = NEW.command_id)
+BEGIN SELECT RAISE(ABORT, 'a launch record is write-once'); END;
+
 CREATE TABLE hosts (
     unit                  TEXT NOT NULL PRIMARY KEY,
     session_kind          TEXT NOT NULL,
@@ -87,3 +97,13 @@ BEGIN SELECT RAISE(ABORT, 'a host row changes only when it ends, once, with its 
 
 CREATE TRIGGER hosts_never_delete BEFORE DELETE ON hosts
 BEGIN SELECT RAISE(ABORT, 'a host row is never deleted'); END;
+
+-- The same for `INSERT OR REPLACE` on a host: it refuses an insert whose `unit`, session incarnation or
+-- `command_id` is in use.
+CREATE TRIGGER hosts_never_replace BEFORE INSERT ON hosts
+WHEN EXISTS (SELECT 1 FROM hosts
+             WHERE unit = NEW.unit
+                OR (session_kind = NEW.session_kind AND session_id = NEW.session_id
+                    AND incarnation = NEW.incarnation)
+                OR command_id = NEW.command_id)
+BEGIN SELECT RAISE(ABORT, 'a host row is never replaced'); END;

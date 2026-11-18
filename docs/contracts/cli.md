@@ -880,12 +880,13 @@ The three verbs work on the store file, `<state>/store.sqlite`, with no controll
 ADR-0007). They are CLI only: none is on the device allowlist (ADR-0012). Each refuses with exit 1
 when `PF_SEAT_TOKEN` or `PULSE_FACTORY_CHAT` is in the environment (ADR-0005).
 
-**The read path.** `backups` and `check-upgrade` open the live file with a normal connection and
-`PRAGMA query_only = ON`, `wal_autocheckpoint = 0` and `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`. They read
-the frames in the `-wal`, they share the WAL index with a running controller, and they never write or
-checkpoint the store. They never open it with `immutable=1`, which would skip the `-wal`. A reader that
-finds no read mark at the last frame can move one in the `-shm`; that is the only byte SQLite lets a
-reader change.
+**The read path.** `check-upgrade` opens the live file with a normal connection and
+`PRAGMA query_only = ON`, `wal_autocheckpoint = 0` and `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`. It reads
+the frames in the `-wal`, it shares the WAL index with a running controller, and it never writes or
+checkpoints the store. It never opens the file with `immutable=1`, which would skip the `-wal`. A reader
+that finds no read mark at the last frame can move one in the `-shm`; that is the only byte SQLite lets
+a reader change. `backups` never opens the store: it lists the backup files beside it. `restore` is a
+writer by design (see below); it opens a backup and its copy read-only to check them.
 
 **The offline host probe.** After a crash every `hosts` row can read live, so no verb trusts a row. The
 probe lists `systemctl --user list-units --all 'pf-host-<server>-*'` and reads
