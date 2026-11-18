@@ -308,10 +308,13 @@ fn a_launch_exports_the_inbox_path_and_the_file_exists_for_the_script_to_wait_on
 
 #[test]
 fn deliver_appends_one_json_line_to_the_inbox_and_starts_another_turn() {
-    // The seat ends a turn, waits for a message, and ends a second turn when one came.
+    // The seat ends a turn and waits for a message. When one came it copies the inbox, marks the
+    // copy done, and ends a second turn only once the test releases it: the test reads the status
+    // and the copy at points it chooses, not when the scheduler lets it.
     let body = r#"echo '{"turn_end":true}' >> "$PF_PAPER_EVENTS"
 while [ ! -s "$PF_PAPER_INBOX" ]; do sleep 0.02; done
-cp "$PF_PAPER_INBOX" "$OUT/seen-inbox.txt"
+cp "$PF_PAPER_INBOX" "$OUT/seen-inbox.txt" && : > "$OUT/seen-inbox.done"
+while [ ! -e "$OUT/release" ]; do sleep 0.02; done
 echo '{"turn_end":true}' >> "$PF_PAPER_EVENTS"
 sleep 600
 "#;
@@ -339,8 +342,10 @@ sleep 600
         "{st:?}"
     );
 
-    wait_until("the seat to read the message", || {
-        out.join("seen-inbox.txt").exists()
+    // `cp` creates the file before it has written it: wait for the seat's mark that the copy is
+    // whole.
+    wait_until("the seat to copy the message", || {
+        out.join("seen-inbox.done").exists()
     });
     let seen = json_lines(&out.join("seen-inbox.txt"));
     assert_eq!(seen.len(), 1);
@@ -350,8 +355,16 @@ sleep 600
         1,
         "the line is {{\"message\": ...}} and nothing else"
     );
+    // The seat still works: its turn ends only on the release.
+    let st = a.status(&s).unwrap();
+    assert!(
+        !st.turn_ended && st.state == SessionState::Working,
+        "{st:?}"
+    );
+    std::fs::write(out.join("release"), "").unwrap();
     wait_until("the second turn to end", || {
-        a.status(&s).unwrap().turn_ended
+        let st = a.status(&s).unwrap();
+        st.turn_ended && st.state == SessionState::Idle
     });
 
     // A second message is a second line.
