@@ -118,6 +118,40 @@ pub fn start_time(pid: u32) -> Option<u64> {
     fields.nth(18)?.parse().ok()
 }
 
+/// The direct children of a process, from `/proc/<pid>/stat` of every process. A host has one: the
+/// session's child.
+pub fn children_of(pid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Some(child) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{child}/stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rsplit_once(')').map(|p| p.1) else {
+            continue;
+        };
+        // After the command name: the state, then the parent's PID.
+        if rest
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<u32>().ok())
+            == Some(pid)
+        {
+            out.push(child);
+        }
+    }
+    out
+}
+
 /// Send `sig` to a whole process group.
 pub fn kill_group(pgid: u32, sig: i32) {
     // SAFETY: `kill` with a negative PID signals a process group; a stale group gives ESRCH.

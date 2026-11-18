@@ -274,3 +274,80 @@ fn a_child_that_ignores_sigterm_is_killed_after_five_seconds() {
     let file = rig.wait_exit_file(&s.unit, Duration::from_secs(5));
     assert_eq!(file["exit"]["signal"], libc::SIGKILL);
 }
+
+/// Run `pf-host run` in the foreground with a host directory that cannot take `host.pid`: the
+/// child has started when the host fails.
+#[test]
+fn a_start_up_failure_after_the_child_started_ends_the_child_and_writes_the_exit_file() {
+    let rig = Rig::new();
+    let marker = rig.tmp.path.join("child.pid");
+    let script = format!("echo $$ > {}; exec sleep 300", marker.display());
+    let rec = rig.write_record("sf", &record(&["/bin/sh", "-c", &script], pipes()));
+    let dir = rig.rt.join("sf-dir");
+    // A directory in the place of `host.pid.tmp` makes the write of `host.pid` fail.
+    std::fs::create_dir_all(dir.join("host.pid.tmp")).unwrap();
+    let secrets = rig.tmp.path.join("sf-secrets.json");
+    std::fs::write(&secrets, format!("{{\"attach_key\":\"{KEY}\"}}")).unwrap();
+    let unit = "pf-host-t-sf-1";
+    let status = Command::new(common::host_bin())
+        .args(["run", "--record"])
+        .arg(&rec)
+        .args(["--session", "sf", "--incarnation", "1", "--unit", unit])
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .arg("--dir")
+        .arg(&dir)
+        .arg("--secrets")
+        .arg(&secrets)
+        .args([
+            "--replay-bytes",
+            "1024",
+            "--attach-wait-ms",
+            "1000",
+            "--exit-hold-ms",
+            "1000",
+            "--launcher",
+            "detached",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success(), "the host reported success");
+    // The child may be killed before it writes its marker; when it did write it, it must be gone.
+    let child = wait_until(Duration::from_secs(2), || marker.exists())
+        .then(|| std::fs::read_to_string(&marker).unwrap_or_default())
+        .and_then(|t| t.trim().parse::<u32>().ok());
+    if let Some(pid) = child {
+        let gone = wait_until(Duration::from_secs(5), || !pid_alive(pid));
+        if !gone {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        assert!(gone, "the child {pid} still runs after the host failed");
+    }
+    let file = rig.exit_file(unit);
+    let body: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).expect("an exit file")).unwrap();
+    assert_eq!(body["reason"], "start_failed");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("host.pid"),
+        "{body}"
+    );
+    assert!(!secrets.exists(), "the secrets file stays on disk");
+}
+
+#[test]
+fn a_host_that_must_be_killed_takes_its_childs_group_with_it() {
+    let rig = Rig::new();
+    let s = rig.start("d8", &record(&["/bin/sh", "-c", "sleep 300"], pipes()));
+    let (_conn, hello) = client::connect(&s.socket, KEY).unwrap();
+    assert!(pid_alive(s.pid) && pid_alive(hello.child_pid));
+    // A stopped host takes no `SIGTERM`, so `stop` has to fall back on `SIGKILL`.
+    unsafe { libc::kill(s.pid as i32, libc::SIGSTOP) };
+    let result = rig.launcher.stop(&s.unit);
+    let child_left = pid_alive(hello.child_pid);
+    if child_left {
+        unsafe { libc::kill(-(hello.child_pid as i32), libc::SIGKILL) };
+    }
+    result.unwrap();
+    assert!(!pid_alive(s.pid), "the host survived the stop");
+    assert!(!child_left, "the child outlived the host that stop killed");
+}

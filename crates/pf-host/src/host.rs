@@ -355,15 +355,6 @@ fn notify_ready(child_pid: u32) {
 /// Run a host to its end. Returns when the host should exit. `Err` is a start-up failure that has
 /// already been written to the exit file.
 pub fn run(args: &RunArgs) -> Result<(), String> {
-    // The host's own directory at mode 0700, whatever made it.
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&args.dir)
-        .map_err(|e| format!("cannot make {}: {e}", args.dir.display()))?;
-    std::fs::set_permissions(&args.dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("cannot set the mode of {}: {e}", args.dir.display()))?;
-
     let fail = |why: String| -> String {
         let body = json!({
             "written_by": "host",
@@ -375,11 +366,26 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
             "written_at": exitfile::now_secs(),
         });
         let _ = exitfile::write(&args.state_dir, &args.unit, &body, false);
+        // A secrets file the host did not read yet must not stay on disk.
+        let _ = std::fs::remove_file(&args.secrets);
         if args.launcher == LauncherKind::Detached {
             let _ = std::fs::remove_dir_all(&args.dir);
         }
         why
     };
+
+    // The host's own directory at mode 0700, whatever made it.
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&args.dir)
+        .map_err(|e| fail(format!("cannot make {}: {e}", args.dir.display())))?;
+    std::fs::set_permissions(&args.dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        fail(format!(
+            "cannot set the mode of {}: {e}",
+            args.dir.display()
+        ))
+    })?;
 
     let secrets = read_secrets(&args.secrets).map_err(&fail)?;
     let raw = std::fs::read(&args.record).map_err(|e| {
@@ -392,6 +398,12 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
     let record_sha256 = sha256_hex(&raw);
     let child = start_child(&record, &secrets.env).map_err(&fail)?;
     drop(secrets.env);
+    // From here a failure also ends the child's group: no host is left to find or stop it.
+    let child_pgid = child.pid;
+    let fail_and_end_child = |why: String| -> String {
+        peer::kill_group(child_pgid, libc::SIGKILL);
+        fail(why)
+    };
 
     let (tx, rx) = channel::<Vec<u8>>();
     let input_pending = Arc::new(AtomicUsize::new(0));
@@ -442,7 +454,7 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
     let pid_tmp = args.dir.join("host.pid.tmp");
     std::fs::write(&pid_tmp, pid_text)
         .and_then(|_| std::fs::rename(&pid_tmp, args.dir.join("host.pid")))
-        .map_err(|e| format!("cannot write host.pid: {e}"))?;
+        .map_err(|e| fail_and_end_child(format!("cannot write host.pid: {e}")))?;
 
     let socket = args.dir.join("host.sock");
     let _ = std::fs::remove_file(&socket);
@@ -453,9 +465,10 @@ pub fn run(args: &RunArgs) -> Result<(), String> {
     unsafe {
         libc::umask(old);
     }
-    let listener = bound.map_err(|e| format!("cannot bind {}: {e}", socket.display()))?;
+    let listener =
+        bound.map_err(|e| fail_and_end_child(format!("cannot bind {}: {e}", socket.display())))?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("cannot set the mode of the socket: {e}"))?;
+        .map_err(|e| fail_and_end_child(format!("cannot set the mode of the socket: {e}")))?;
     notify_ready(child.pid);
 
     let accepting = Arc::clone(&shared);

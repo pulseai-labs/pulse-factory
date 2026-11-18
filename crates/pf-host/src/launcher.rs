@@ -222,6 +222,15 @@ fn write_secrets(runtime: &Path, unit: &str, spec: &StartSpec) -> Result<PathBuf
     Ok(path)
 }
 
+/// `SIGKILL` for a host that did not end. A host killed this way cannot end its child, so the
+/// child's group goes first (each child of the host leads a group of its own).
+fn kill_host_and_its_child(pid: u32) {
+    for child in peer::children_of(pid) {
+        peer::kill_group(child, libc::SIGKILL);
+    }
+    peer::kill_pid(pid, libc::SIGKILL);
+}
+
 fn check_socket_len(socket: &Path) -> Result<(), LaunchError> {
     let len = socket.as_os_str().len();
     if len > SOCKET_PATH_MAX {
@@ -396,7 +405,7 @@ impl Launcher for Detached {
                 if let Some((pid, start)) = Self::read_pid(&dir)
                     && peer::start_time(pid) == Some(start)
                 {
-                    peer::kill_pid(pid, libc::SIGKILL);
+                    kill_host_and_its_child(pid);
                 }
                 let _ = std::fs::remove_dir_all(&dir);
                 return Err(LaunchError(format!(
@@ -432,7 +441,7 @@ impl Launcher for Detached {
             std::thread::sleep(Duration::from_millis(20));
         }
         if live() {
-            peer::kill_pid(pid, libc::SIGKILL);
+            kill_host_and_its_child(pid);
             let end = Instant::now() + Duration::from_secs(2);
             while live() && Instant::now() < end {
                 std::thread::sleep(Duration::from_millis(20));
@@ -711,16 +720,22 @@ impl Launcher for Systemd {
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
+        // From here a unit runs: an `Err` must not leave it behind, with nothing to find it.
+        let unit_runs = |e: LaunchError| {
+            let _ = self.stop(&unit);
+            let _ = std::fs::remove_file(&secrets);
+            e
+        };
         let props = self.show(&unit).ok_or_else(|| {
-            LaunchError(format!(
+            unit_runs(LaunchError(format!(
                 "systemd-run started {unit}, but systemctl show cannot read it"
-            ))
+            )))
         })?;
         let pid = props
             .get("MainPID")
             .and_then(|p| p.parse::<u32>().ok())
             .filter(|p| *p > 0)
-            .ok_or_else(|| LaunchError(format!("{unit} has no main process")))?;
+            .ok_or_else(|| unit_runs(LaunchError(format!("{unit} has no main process"))))?;
         Ok(Started {
             unit,
             socket,

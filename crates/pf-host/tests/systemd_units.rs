@@ -400,3 +400,37 @@ fn stop_post_writes_an_exit_file_when_none_exists_and_leaves_an_existing_one_alo
         .collect();
     assert_eq!(names.len(), 1);
 }
+
+#[test]
+fn a_start_that_cannot_read_the_unit_back_stops_it_and_leaves_no_secrets_file() {
+    let tmp = Tmp::new();
+    let rt = tmp.path.join("rt");
+    std::fs::create_dir_all(&rt).unwrap();
+    let log = tmp.path.join("calls.log");
+    let run = script(&tmp.path, "systemd-run", "exit 0");
+    // `systemd-run` succeeds, so a unit runs; `systemctl show` then fails.
+    let ctl = script(
+        &tmp.path,
+        "systemctl",
+        &format!(
+            "echo \"$@\" >> {log}\n\
+             case \"$2\" in\n\
+               show) echo 'bus gone' >&2; exit 1 ;;\n\
+             esac",
+            log = log.display()
+        ),
+    );
+    let launcher = Systemd::new(rt.clone()).with_programs(&run, &ctl);
+    assert!(launcher.start(&spec(&tmp)).is_err());
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        calls.contains("--user stop pf-host-srv-S-1-3.service"),
+        "an Err left a live unit: {calls}"
+    );
+    assert_eq!(
+        std::fs::read_dir(rt.join("pulse-factory/secrets"))
+            .unwrap()
+            .count(),
+        0
+    );
+}

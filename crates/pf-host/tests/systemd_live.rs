@@ -48,6 +48,23 @@ fn property(unit: &str, name: &str) -> String {
         .to_string()
 }
 
+/// What the user journal holds for a unit, for a failure message: a collected unit has no status
+/// left to ask for.
+fn unit_journal(unit: &str) -> String {
+    let out = Command::new("journalctl")
+        .args(["--user", "--no-pager", "-o", "cat", "-u"])
+        .arg(format!("{unit}.service"))
+        .output();
+    match out {
+        Ok(o) => format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => format!("(journalctl did not run: {e})"),
+    }
+}
+
 /// A test's setup: a state directory, the real launcher, and the units to stop at the end.
 struct Live {
     tmp: Tmp,
@@ -314,8 +331,12 @@ fn systemd_live_kill_leaves_an_exit_file_from_stop_post_and_no_process_of_the_un
         .join(format!("{}.json", s.unit));
     assert!(
         wait_until(Duration::from_secs(5), || file.exists()),
-        "no exit file at {}",
-        file.display()
+        "no exit file at {}\nthe exits directory holds: {:?}\nthe unit's journal:\n{}",
+        file.display(),
+        std::fs::read_dir(file.parent().unwrap())
+            .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .map_err(|e| e.to_string()),
+        unit_journal(&s.unit)
     );
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(body["written_by"], "stop-post");
