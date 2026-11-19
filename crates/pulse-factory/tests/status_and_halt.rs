@@ -447,7 +447,11 @@ mod launcher {
 
     #[test]
     fn status_names_the_launcher_and_the_default_is_detached_with_no_warning() {
-        let live = Live::start();
+        // A fixed `proc_root`: the real `/proc/self/cgroup` is a service's cgroup on a CI
+        // runner, and that adds the group-kill warning this test says is absent.
+        let scope = proc_with("0::/user.slice/user-1000.slice/session-3.scope");
+        let path = scope.path().to_path_buf();
+        let live = Live::start_config(BIN.into(), move |cfg| cfg.proc_root = path);
         let run = live.arm();
         let v = status(&live.sb, &[&run]);
         assert_eq!(v["launcher"], "detached", "{v}");
