@@ -13,8 +13,9 @@ only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers
 `controller`, the verbs of requests and the claim: `requests`, `show`, `claim`, `answer`, `clear`
 and `ack`, `project`, which lists the operator's projects, `session`, which chats with a project's
 Orchestrator, `settings`, which reads and sets the chat policies, `chat-runtime`, which installs the
-runtime that chat needs, and `device` and `api`, which pair and revoke the devices that reach the
-controller over the network.
+runtime that chat needs, `device` and `api`, which pair and revoke the devices that reach the
+controller over the network, and `store`, which lists and restores the store's backups and checks an
+upgrade (CLI only: a seat's call is refused).
 
 ## Arm a run
 

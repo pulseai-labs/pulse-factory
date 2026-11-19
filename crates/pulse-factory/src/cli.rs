@@ -1,6 +1,6 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `project`, `session`, `settings`, `chat-runtime`, `device`, `api`, `hook` and
-//! `controller`.
+//! `clear`, `ack`, `project`, `session`, `settings`, `chat-runtime`, `device`, `api`, `store`, `hook`
+//! and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -56,6 +56,8 @@ pub enum Verb {
     Device(DeviceArgs),
     /// Show whether the network API is off, waiting for its address or listening.
     Api(ApiArgs),
+    /// Back up, restore and check the store with no controller running (CLI only).
+    Store(StoreArgs),
     /// Judge one tool call of a seat (the extension runs this; stdin holds the call).
     Hook,
     /// Run the controller in the foreground.
@@ -613,6 +615,43 @@ pub struct ApiStatusArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct StoreArgs {
+    #[command(subcommand)]
+    pub verb: StoreVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum StoreVerb {
+    /// List the backups beside the store: path, versions, time and size.
+    Backups(StoreBackupsArgs),
+    /// Put a backup back as the store. It refuses while the controller answers or a host is live.
+    Restore(StoreRestoreArgs),
+    /// Report what an upgrade needs to know, and exit 3 when it must not start. Run it with the new
+    /// binary, before an install.
+    CheckUpgrade(StoreCheckUpgradeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StoreBackupsArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StoreRestoreArgs {
+    /// The backup file, such as `store.sqlite.v8-v9.<utc>.bak`.
+    pub file: PathBuf,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct StoreCheckUpgradeArgs {
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct ControllerArgs {
     /// Milliseconds between two ticks.
     #[arg(long, default_value_t = 2000)]
@@ -674,6 +713,11 @@ pub fn run(args: Vec<OsString>) -> i32 {
         },
         Verb::Api(a) => match a.verb {
             ApiVerb::Status(a) => crate::controller::client::api_status(&a),
+        },
+        Verb::Store(a) => match a.verb {
+            StoreVerb::Backups(a) => crate::store_verbs::backups(&a),
+            StoreVerb::Restore(a) => crate::store_verbs::restore(&a),
+            StoreVerb::CheckUpgrade(a) => crate::store_verbs::check_upgrade(&a),
         },
         Verb::Hook => crate::hook::run(),
         Verb::Controller(a) => crate::controller::run(&a),
