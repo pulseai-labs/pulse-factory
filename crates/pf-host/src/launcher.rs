@@ -13,6 +13,11 @@
 //! - **a stop-post step.** A host killed with `SIGKILL` leaves no exit file, so liveness is the PID
 //!   and its start time from `/proc`.
 //!
+//! The systemd launcher's stop-post step writes the exit file when the unit ends. A kill of the
+//! unit's whole cgroup (for example `systemctl kill` with its default `--kill-whom=all`) also
+//! kills the stop-post step, so it leaves no exit file. A gone unit with no exit file then means
+//! "ended, cause unknown".
+//!
 //! A failed `systemd-run` is an error naming its stderr. There is no fallback to the detached
 //! launcher (SPINE.md Q6): a fallback would hide the failure.
 

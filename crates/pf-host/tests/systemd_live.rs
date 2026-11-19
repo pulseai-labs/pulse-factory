@@ -318,7 +318,16 @@ fn systemd_live_kill_leaves_an_exit_file_from_stop_post_and_no_process_of_the_un
     );
     let (_, hello) = client::connect(&s.socket, KEY).unwrap();
     let child = hello.child_pid;
-    sctl(&["kill", "-s", "KILL", &format!("{}.service", s.unit)]);
+    // `--kill-whom=main`: the host process dies by SIGKILL (an OOM kill, a `kill -9` of its PID),
+    // then the stop-post step runs. The default `--kill-whom=all` kills the unit's whole cgroup,
+    // and that also kills the stop-post step, so no exit file would be written.
+    sctl(&[
+        "kill",
+        "--kill-whom=main",
+        "-s",
+        "KILL",
+        &format!("{}.service", s.unit),
+    ]);
     assert!(
         wait_until(Duration::from_secs(15), || live.launcher.state(&s.unit)
             == HostState::Gone),
