@@ -202,4 +202,18 @@ pub trait SessionHosts: Send + Sync {
     /// The body of the launch record the host of `unit` was launched from, or `None` when the
     /// registry names no such host. It attaches to nothing.
     fn launched_record(&self, unit: &str) -> Result<Option<Value>, HostError>;
+    /// The last position an adapter saved for the host of `unit` (a JSON value the adapter owns),
+    /// or `None` when it saved none. After a restart, a rebound adapter reads on from it. The
+    /// default answers `None`: a host service that keeps no positions.
+    fn position(&self, _unit: &str) -> Result<Option<Value>, HostError> {
+        Ok(None)
+    }
+    /// Keep a position for the host of `unit`. An adapter that reads a file its session writes saves
+    /// how far it read, and what it took from there, before it hands any of it to the engine. The
+    /// default refuses: a host service that keeps no positions cannot keep one.
+    fn save_position(&self, _unit: &str, _position: Value) -> Result<(), HostError> {
+        Err(HostError(
+            "this host service keeps no positions".to_string(),
+        ))
+    }
 }

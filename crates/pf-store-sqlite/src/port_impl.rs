@@ -8,11 +8,12 @@ use std::collections::BTreeMap;
 use pf_engine::port::store::{
     ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatItemKind,
     ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect,
-    HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NewChatItem, NewChatSession, NewDevice, NewHost,
-    NewLaunchRecord, NewProject, NewRequest, NodeKind, NodeRow, ORCHESTRATOR_AGENT, ProjectKind,
-    ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow,
-    RunState, SessionRow, SessionWorktree, SettingRow, SettingScope, Store, StoreError,
-    TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
+    HostPositionRow, HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NewChatItem, NewChatSession,
+    NewDevice, NewHost, NewLaunchRecord, NewProject, NewRequest, NodeKind, NodeRow,
+    ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
+    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow,
+    SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy,
+    WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -1101,6 +1102,58 @@ fn host_ended(
     }
 }
 
+/// Save the position of a host. The unit must have a host row, live or ended, and `seq` must be the
+/// stored one plus 1 (1 when none). The triggers of migration 0010 are the backstop.
+fn host_position_write(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    unit: &str,
+    seq: u64,
+    position: &str,
+    updated_at: &str,
+) -> Result<(), EffectError> {
+    if serde_json::from_str::<serde_json::Value>(position).is_err() {
+        return Err(EffectError::Rejected(format!(
+            "the position of host {unit} is not JSON"
+        )));
+    }
+    let has_host: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM hosts WHERE unit = ?1)",
+        [unit],
+        |r| r.get(0),
+    )?;
+    if !has_host {
+        return Err(EffectError::Rejected(format!("no host {unit}")));
+    }
+    let stored: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM host_positions WHERE unit = ?1",
+            [unit],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let next = stored.map_or(1, |s| to_u64(s) + 1);
+    if seq != next {
+        return Err(EffectError::Rejected(format!(
+            "seq {seq} is not the next seq of the position of host {unit}: seq {next} is next"
+        )));
+    }
+    match stored {
+        None => tx.execute(
+            "INSERT INTO host_positions (unit, seq, position, command_id, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![unit, to_i64(seq), position, command_id, updated_at],
+        ),
+        Some(_) => tx.execute(
+            "UPDATE host_positions SET seq = ?2, position = ?3, command_id = ?4, updated_at = ?5 \
+             WHERE unit = ?1",
+            params![unit, to_i64(seq), position, command_id, updated_at],
+        ),
+    }
+    .map_err(backstop)?;
+    Ok(())
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
 fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
@@ -1171,6 +1224,12 @@ fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assi
             ended_at,
             exit,
         } => host_ended(tx, unit, ended_at, exit)?,
+        Effect::HostPositionWrite {
+            unit,
+            seq,
+            position,
+            updated_at,
+        } => host_position_write(tx, command_id, unit, *seq, position, updated_at)?,
     }
     Ok(Assigned::default())
 }
@@ -1206,18 +1265,21 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
             "a run's project is set only in an admission under @controller".to_string(),
         ));
     }
-    // A launch record and a host row are the controller's to write: the effects are refused in any
-    // other scope, and the admission rolls back with them.
+    // A launch record, a host row and a host position are the controller's to write: the effects
+    // are refused in any other scope, and the admission rolls back with them.
     if c.run_id != CONTROLLER_SCOPE
         && c.effects.iter().any(|e| {
             matches!(
                 e,
-                Effect::LaunchRecordWrite(_) | Effect::HostStarted(_) | Effect::HostEnded { .. }
+                Effect::LaunchRecordWrite(_)
+                    | Effect::HostStarted(_)
+                    | Effect::HostEnded { .. }
+                    | Effect::HostPositionWrite { .. }
             )
         })
     {
         return Ok(Committed::Rejected(
-            "a launch record or a host row is written only in an admission under @controller"
+            "a launch record, a host row or a host position is written only in an admission under @controller"
                 .to_string(),
         ));
     }
@@ -2190,6 +2252,28 @@ impl Store for SqliteStore {
                 &format!("SELECT {HOST_COLUMNS} FROM hosts WHERE unit = ?1"),
                 [&unit],
                 host_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn host_position(&self, unit: &str) -> Result<Option<HostPositionRow>, StoreError> {
+        let unit = unit.to_string();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT unit, seq, position, command_id, updated_at FROM host_positions \
+                 WHERE unit = ?1",
+                [&unit],
+                |r| {
+                    Ok(HostPositionRow {
+                        unit: r.get(0)?,
+                        seq: to_u64(r.get(1)?),
+                        position: r.get(2)?,
+                        command_id: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                },
             )
             .optional()
             .map_err(sql_error)

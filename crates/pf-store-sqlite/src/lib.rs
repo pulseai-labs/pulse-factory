@@ -32,8 +32,8 @@ pub struct Migration {
 /// Migration `0005` adds the project hierarchy: the project kind and remote key, worktrees, agents,
 /// chat sessions and chat items. Migration `0006` adds the session's own runtime options. Migration
 /// `0007` adds the scoped settings. Migration `0008` links a run to a project. Migration `0009` adds
-/// the launch records and the host registry. `RunActive` covers every migration, `0009` too: the
-/// store never migrates under an active run. Before it applies a pending migration, the store writes
+/// the launch records and the host registry. Migration `0010` adds the host positions. `RunActive`
+/// covers every migration, `0010` too: the store never migrates under an active run. Before it applies a pending migration, the store writes
 /// a checked backup of the file (see [`backup_keep`]).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -80,6 +80,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 9,
         name: "launch_records",
         sql: include_str!("../migrations/0009_launch_records.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "host_positions",
+        sql: include_str!("../migrations/0010_host_positions.sql"),
     },
 ];
 

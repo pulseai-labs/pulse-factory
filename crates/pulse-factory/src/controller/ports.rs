@@ -87,7 +87,10 @@ impl Ports for LivePorts {
         router
             .register(
                 "omp",
-                Arc::new(pf_adapter_omp::OmpAdapter::new(omp_config(spec))),
+                Arc::new(pf_adapter_omp::OmpAdapter::new(
+                    omp_config(spec),
+                    spec.hosts.clone(),
+                )),
             )
             .map_err(|e| e.to_string())?;
         let forge = pf_forge_github::GithubForge::new(&spec.forge_repo)

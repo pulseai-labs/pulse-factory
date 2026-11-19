@@ -270,8 +270,11 @@ fn on_a_version_eight_store_with_no_hosts_table_it_reports_no_hosts_and_exits_ze
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let v = report(&out);
     assert_eq!(v["store_version"], 8);
-    assert_eq!(v["supported_store_version"], 9);
-    assert_eq!(v["pending_migrations"].as_array().unwrap().len(), 1);
+    assert_eq!(v["supported_store_version"], 10);
+    // Migrations 9 (launch records) and 10 (host positions) are pending on a version 8 store.
+    assert_eq!(v["pending_migrations"].as_array().unwrap().len(), 2);
+    assert_eq!(v["pending_migrations"][1]["version"], 10);
+    assert_eq!(v["pending_migrations"][1]["name"], "host_positions");
     assert_eq!(v["active_runs"], serde_json::json!([]));
     assert_eq!(v["live_hosts"], serde_json::json!([]));
     assert_eq!(v["can_start"], true);
