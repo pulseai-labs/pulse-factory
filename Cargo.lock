@@ -940,6 +940,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-host"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pf-ipc"
 version = "0.1.0"
 dependencies = [

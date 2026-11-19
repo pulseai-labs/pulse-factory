@@ -22,8 +22,26 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The session host's live tests start real transient systemd user units (r2.s2.w1, ADR-0001's
+      # amendment of 2026-11-16). A runner has no user manager until lingering starts one. This step
+      # is not `continue-on-error`: a runner that cannot reach a user manager fails the PR, and that
+      # failure is the land gate for the real launcher.
+      - name: User manager for the live systemd tests
+        run: |
+          sudo loginctl enable-linger "$USER"
+          xdg="/run/user/$(id -u)"
+          for _ in $(seq 1 60); do
+            [ -S "$xdg/bus" ] && break
+            sleep 1
+          done
+          [ -S "$xdg/bus" ] || { echo "no user manager bus at $xdg/bus"; exit 1; }
+          echo "XDG_RUNTIME_DIR=$xdg" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --workspace --locked
+      # The `#[ignore]`d tests of the host crate: a real transient unit per host. After `r2.s2.w5`
+      # lands, this step also runs `scripts/demo/host-restart.sh` (w5 adds that line).
+      - name: systemd live
+        run: cargo test -p pf-host --test systemd_live --locked -- --ignored
       # The binary run standalone: a dry arm with no model and no spend. `community-edition.sh` (d14)
       # looks for this step by its name.
       - name: Smoke
