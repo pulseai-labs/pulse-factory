@@ -114,6 +114,21 @@ pub enum DialogAnswer {
     Unknown,
 }
 
+/// The cause an adapter with no session host gives for `rebind`. The engine reads it as "this
+/// adapter cannot say": `is_alive` decides, as it did before hosts (ADR-0007).
+pub const NO_SESSION_HOST: &str = "no session host";
+
+/// What `rebind` found for one running session after a controller restart (ADR-0007, ADR-0011).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RebindOutcome {
+    /// The session's host runs and the adapter attached to it. The unit stays running.
+    Survived,
+    /// The session's host is gone. `cause` says what it left.
+    Lost { cause: String },
+    /// The host may run, but the adapter could not attach with every check passing.
+    Unreachable { why: String },
+}
+
 /// Why an adapter call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentError {
@@ -163,6 +178,14 @@ pub trait AgentPort: Send + Sync {
     ) -> Result<SessionRef, AgentError>;
     /// Is this session's process alive? A reference the adapter does not know is `Ok(false)`.
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError>;
+    /// After a controller restart: attach to the session's host again. `Survived` means the
+    /// adapter rebuilt its state and may be called as before. The default answers `Lost` with the
+    /// cause [`NO_SESSION_HOST`]: an adapter that runs no host keeps its `is_alive`.
+    fn rebind(&self, _session: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        Ok(RebindOutcome::Lost {
+            cause: NO_SESSION_HOST.to_string(),
+        })
+    }
     /// End the session's process and its children. It is safe to repeat. A reference the
     /// adapter does not know, or that has no runtime tag, is `Ok(())`. Reads (`usage`,
     /// `drain_events`) still work after a stop.
@@ -309,6 +332,11 @@ impl AgentPort for AgentRouter {
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
         let (_, adapter, inner) = self.route(session)?;
         adapter.is_alive(&inner)
+    }
+
+    fn rebind(&self, session: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        let (_, adapter, inner) = self.route(session)?;
+        adapter.rebind(&inner)
     }
 
     fn process_id(&self, session: &SessionRef) -> Option<u32> {

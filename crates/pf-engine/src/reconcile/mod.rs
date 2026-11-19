@@ -1,16 +1,25 @@
-//! Reconcile at start-up (ADR-0007), after ledger recovery.
+//! Reconcile at start-up (ADR-0007), after ledger recovery. This is tier 1.
 //!
-//! Every unit in `running`, which includes a unit that waits on a seat's next signal, whose
-//! session process the agent port reports as gone becomes `parked`, with the reason "seat lost
-//! across a controller restart", and a `seat_lost` request opens in the same commit. A live
-//! session, and a unit already done, failed, stopped or parked, is left alone. Nothing is
+//! Every unit in `running`, which includes a unit that waits on a seat's next signal, has its open
+//! session rebound: the agent port's `rebind` says whether the session's host survived, is lost
+//! or cannot be reached.
+//!
+//! - **Survived:** the unit stays running, and no request opens.
+//! - **Lost:** the unit becomes `parked`, with the reason "seat lost across a controller
+//!   restart", and a `seat_lost` request opens in the same commit. The session ends.
+//! - **Unreachable:** the same, with the reason "host unreachable: <why>". Nothing is relaunched,
+//!   so no second host starts for the seat.
+//!
+//! An adapter with no host answers `Lost` with the cause "no session host". Then `is_alive`
+//! decides, as it did before hosts: a live process stays running, and a gone one parks the unit.
+//! A live session, and a unit already done, failed, stopped or parked, is left alone. Nothing is
 //! relaunched: the claim decides each relaunch (ADR-0007), with `clear`.
 
 use crate::admission::EngineError;
 use crate::engine::Engine;
-use crate::port::agent::SessionRef;
+use crate::port::agent::{NO_SESSION_HOST, RebindOutcome, SessionRef};
 use crate::port::store::RequestKind;
-use crate::status::{EndStatus, REASON_SEAT_LOST, Status};
+use crate::status::{EndStatus, REASON_HOST_UNREACHABLE, REASON_SEAT_LOST, Status};
 
 /// What `reconcile` found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,28 +48,46 @@ impl Engine {
             else {
                 continue;
             };
-            let alive = match &session.process_ref {
-                None => false,
-                Some(handle) => self
-                    .agent
-                    .is_alive(&SessionRef(handle.clone()))
-                    .map_err(|e| {
-                        EngineError::Port(format!(
-                            "cannot tell whether the session of unit {} is alive: {e}",
-                            unit.id
-                        ))
-                    })?,
+            let reason = match &session.process_ref {
+                // A launch that never got a process handle counts as gone.
+                None => Some(REASON_SEAT_LOST.to_string()),
+                Some(handle) => self.tier1_verdict(&unit.id, &SessionRef(handle.clone()))?,
             };
-            if alive {
+            let Some(reason) = reason else {
                 report.alive.push(unit.id.clone());
                 continue;
-            }
+            };
             // Park first: a stop between the two leaves a parked unit, never a running unit with
             // no session.
-            self.park_as(&unit.id, RequestKind::SeatLost, REASON_SEAT_LOST)?;
-            self.end(&session.id, EndStatus::Failed, REASON_SEAT_LOST)?;
+            self.park_as(&unit.id, RequestKind::SeatLost, &reason)?;
+            self.end(&session.id, EndStatus::Failed, &reason)?;
             report.parked.push(unit.id.clone());
         }
         Ok(report)
+    }
+
+    /// `None` when the session lives. Otherwise the reason the unit parks with.
+    fn tier1_verdict(
+        &self,
+        unit_id: &str,
+        session: &SessionRef,
+    ) -> Result<Option<String>, EngineError> {
+        let cannot_tell = |e: &dyn std::fmt::Display| {
+            EngineError::Port(format!(
+                "cannot tell whether the session of unit {unit_id} is alive: {e}"
+            ))
+        };
+        match self.agent.rebind(session).map_err(|e| cannot_tell(&e))? {
+            RebindOutcome::Survived => Ok(None),
+            RebindOutcome::Unreachable { why } => {
+                Ok(Some(format!("{REASON_HOST_UNREACHABLE}{why}")))
+            }
+            // The adapter runs no host: its own liveness check decides.
+            RebindOutcome::Lost { cause } if cause == NO_SESSION_HOST => {
+                let alive = self.agent.is_alive(session).map_err(|e| cannot_tell(&e))?;
+                Ok((!alive).then(|| REASON_SEAT_LOST.to_string()))
+            }
+            RebindOutcome::Lost { .. } => Ok(Some(REASON_SEAT_LOST.to_string())),
+        }
     }
 }

@@ -40,8 +40,15 @@ jobs:
         run: cargo test --workspace --locked
       # The `#[ignore]`d tests of the host crate: a real transient unit per host. After `r2.s2.w5`
       # lands, this step also runs `scripts/demo/host-restart.sh` (w5 adds that line).
+      #
+      # `r2.s2.w3` adds the controller's live tests: `PF_HOST_LAUNCHER=systemd`, the controller as a
+      # transient unit, a paper seat in a host unit of its own. They start the `pf-host` binary, so it
+      # is built first. This step is the land gate of AC-23.
       - name: systemd live
-        run: cargo test -p pf-host --test systemd_live --locked -- --ignored
+        run: |
+          cargo build -p pf-host --locked
+          cargo test -p pf-host --test systemd_live --locked -- --ignored
+          cargo test -p pulse-factory --test systemd_live_hosts --locked -- --ignored
       # The binary run standalone: a dry arm with no model and no spend. `community-edition.sh` (d14)
       # looks for this step by its name.
       - name: Smoke

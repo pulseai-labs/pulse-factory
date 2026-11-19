@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The barrier check of the session host's real launcher (r2.s2.w1, SPINE.md Q7, audit 13).
+# The barrier check of the session host's real launcher (r2.s2.w1, r2.s2.w3; SPINE.md Q7, audit 13).
 #
 # Run it OUTSIDE the seat fence, where a systemd user manager answers, with XDG_RUNTIME_DIR set.
 # A baton seat inside `seat-fence` reaches no user bus, so the seat skips the `systemd_live_*` tests
@@ -7,11 +7,15 @@
 #
 #   nice -n 10 ionice -c3 cargo build -p pf-host && scripts/check-hosts-systemd.sh
 #
-# It builds nothing itself. PF_HOST_BIN names the `pf-host` binary the live tests start as a unit
+# It builds no `pf-host` itself. PF_HOST_BIN names the `pf-host` binary the live tests start as a unit
 # (default `target/debug/pf-host`, under CARGO_TARGET_DIR when that is set; pass PF_HOST_BIN when a
-# cargo config puts the target elsewhere). It checks that a user manager answers, runs the
-# `systemd_live` tests with `--ignored`, then lists the `pf-host-pfcheck*` units and fails if any is
-# left. It prints `check-hosts-systemd: ok` and exits 0 only when all of that held.
+# cargo config puts the target elsewhere). It checks that a user manager answers, then runs two sets
+# of tests with `--ignored`: the host's own (`pf-host --test systemd_live`) and the controller's
+# (`pulse-factory --test systemd_live_hosts`, where `PF_HOST_LAUNCHER=systemd` and a paper seat run in
+# a unit of their own). Cargo builds the `pulse-factory` binary the second set starts. It then lists
+# the units of the test servers (`pf-host-pfcheck*` for the first set, `pf-host-c0ffe*` for the
+# second, and the controller units `pfc-c0ffe*`) and fails if any is left. It prints
+# `check-hosts-systemd: ok` and exits 0 only when all of that held.
 #
 # Exit 1: no user manager, no binary, a failed test or a unit left behind. The message says which.
 
@@ -33,13 +37,25 @@ command -v systemctl >/dev/null 2>&1 || fail "no systemctl on PATH"
 manager_err="$(systemctl --user show-environment 2>&1 >/dev/null)" ||
   fail "no systemd user manager answers: ${manager_err:-systemctl --user failed} (run outside the seat fence)"
 
-left_before="$(systemctl --user list-units --all --plain --no-legend --no-pager 'pf-host-pfcheck*' 2>/dev/null | awk 'NF { print $1 }')"
+# The units of the test servers: the host tests' `pfcheck`, the controller tests' `c0ffee` and
+# `c0ffed` (a second server in one test), and the controller units `pfc-c0ffee*`.
+leftover_units() {
+  local pattern
+  for pattern in 'pf-host-pfcheck*' 'pf-host-c0ffe*' 'pfc-c0ffe*'; do
+    systemctl --user list-units --all --plain --no-legend --no-pager "$pattern" 2>/dev/null | awk 'NF { print $1 }'
+  done
+}
+
+left_before="$(leftover_units)"
 [ -z "$left_before" ] || fail "units from an earlier run are still there: $(echo "$left_before" | tr '\n' ' ')(stop them: systemctl --user stop <unit>)"
 
 nice -n 10 ionice -c3 cargo test -p pf-host --test systemd_live -- --ignored ||
-  fail "the systemd_live tests failed"
+  fail "the pf-host systemd_live tests failed"
 
-left="$(systemctl --user list-units --all --plain --no-legend --no-pager 'pf-host-pfcheck*' 2>/dev/null | awk 'NF { print $1 }')"
+nice -n 10 ionice -c3 cargo test -p pulse-factory --test systemd_live_hosts -- --ignored ||
+  fail "the systemd_live_hosts tests failed"
+
+left="$(leftover_units)"
 [ -z "$left" ] || fail "units left behind: $(echo "$left" | tr '\n' ' ')"
 
 echo "check-hosts-systemd: ok"

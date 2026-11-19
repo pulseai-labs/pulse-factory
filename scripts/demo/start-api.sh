@@ -58,6 +58,7 @@ export PF_BIN PF_REPLAY_BIN PF_STREAM_BIN
 tmp="$(mktemp -d)"
 pid=""
 readers=()
+. "$here/lib/hosts.sh"
 stop_controller() {
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
@@ -69,6 +70,7 @@ stop_controller() {
 cleanup() {
   for r in ${readers[@]+"${readers[@]}"}; do kill "$r" 2>/dev/null || true; done
   stop_controller
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

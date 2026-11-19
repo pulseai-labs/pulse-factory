@@ -27,10 +27,11 @@ use serde_json::{Value, json};
 use crate::cli::{StoreBackupsArgs, StoreCheckUpgradeArgs, StoreRestoreArgs};
 use crate::controller::requests::CHAT_MARKER;
 
-/// The host protocol versions this binary's controller speaks: the current one and the one before.
-/// Version 1 is the first, so the range holds one version. `check-upgrade` exits 3 when a live host
-/// speaks a version outside it. `r2.s2.w3` replaces this with the constant of the host client.
-pub const HOST_PROTOCOLS: std::ops::RangeInclusive<u32> = 1..=1;
+/// The host protocol versions this binary's controller speaks: the current one and the one before,
+/// as the host client names them (`pf_host::protocol`). `check-upgrade` exits 3 when a live host
+/// speaks a version outside it.
+pub const HOST_PROTOCOLS: std::ops::RangeInclusive<u32> =
+    pf_host::protocol::PROTO_MIN..=pf_host::protocol::PROTO_MAX;
 
 fn print_json(v: &Value) {
     println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
@@ -137,7 +138,7 @@ fn certificate_spki(cert: &[u8]) -> Option<&[u8]> {
 /// certificate beside it carries its public half, so this reads the certificate and never the private
 /// key. It creates nothing. `None` when the API never made a key: no host of this server can exist
 /// under a name that carries one.
-fn server_id(state: &Path) -> Result<Option<String>, String> {
+pub(crate) fn server_id(state: &Path) -> Result<Option<String>, String> {
     let api = state.join("api");
     let cert = api.join("cert.pem");
     let pem = match std::fs::read(&cert) {
@@ -172,12 +173,6 @@ fn server_id(state: &Path) -> Result<Option<String>, String> {
         )
     })?;
     Ok(Some(pf_engine::claim::sha256_hex(spki)))
-}
-
-/// The name a host's units carry for a server: `pf-host-<server>-<session>-<incarnation>` (G9).
-/// `r2.s2.w3` fixes the short form a unit name needs, and changes this one function.
-fn host_server_name(server_id: &str) -> String {
-    server_id.to_string()
 }
 
 /// The start time of a process, field 22 of `/proc/<pid>/stat`, in clock ticks. A zombie, a dead
@@ -290,16 +285,18 @@ fn detached_units(server: &str) -> Result<BTreeSet<String>, String> {
 /// manager's units and the detached directory. When `systemctl --user` cannot answer, the answer is
 /// the reason, and a caller refuses with it rather than guess.
 pub fn probe_hosts(state: &Path) -> Result<Probe, String> {
-    let Some(id) = server_id(state)? else {
+    // The host server name is the one the controller made (`<state>/hosts/server`, G9). It is not
+    // the API key's id, so a state directory that never ran the API has one all the same. This reads
+    // it and makes nothing: with no file, no host of this server can exist.
+    let Some(server) = crate::controller::hosts::read_host_server_name(state)? else {
         return Ok(Probe {
             live: BTreeSet::new(),
             note: Some(format!(
-                "no server key in {}: the API never made one, so no host of this server can exist",
-                state.join("api").display()
+                "no host server name in {}: the controller never made one, so no host of this server can exist",
+                state.join("hosts").join("server").display()
             )),
         });
     };
-    let server = host_server_name(&id);
     let mut live = systemd_units(&server)?;
     live.extend(detached_units(&server)?);
     Ok(Probe { live, note: None })

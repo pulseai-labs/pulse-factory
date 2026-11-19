@@ -32,6 +32,7 @@ pf-client = { path = "../pf-client" }
 pf-engine = { path = "../pf-engine" }
 pf-forge-bare = { path = "../pf-forge-bare" }
 pf-forge-github = { path = "../pf-forge-github" }
+pf-host = { path = "../pf-host" }
 pf-ipc = { path = "../pf-ipc" }
 pf-rules = { path = "../pf-rules" }
 pf-store-sqlite = { path = "../pf-store-sqlite" }

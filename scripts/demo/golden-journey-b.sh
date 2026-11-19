@@ -22,6 +22,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/lib/status.sh"
 PF_BIN="${PF_BIN:-pulse-factory}"
 src="${PAPER_SRC:-$here/paper-b}"
 shipped_scripts="$here/../../workflows/ossify-spine/scripts"
@@ -34,11 +35,13 @@ command -v "$PF_BIN" >/dev/null || [ -x "$PF_BIN" ] || fail "PF_BIN=$PF_BIN is n
 
 tmp="$(mktemp -d)"
 controller_pid=""
+. "$here/lib/hosts.sh"
 cleanup() {
   if [ -n "$controller_pid" ]; then
     kill "$controller_pid" 2>/dev/null || true
     wait "$controller_pid" 2>/dev/null || true
   fi
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -94,7 +97,7 @@ run="$(printf '%s\n' "$arm_out" | sed -n 's/^run: //p' | head -n 1)"
 status=""
 waiting_for=""
 refresh() {
-  status="$("$PF_BIN" status "$run" --json)" || fail "status failed"
+  status="$(status_json "$run")" || fail "status failed 4 times"
   local stuck
   stuck="$(printf '%s' "$status" | jq -r '[(.units[] | select(.status == "parked" and (.reason | test("gaps surfaced for item-1|waits on the claim.s ack") | not)) | .id + ": " + .reason), (.halted_reason // empty | "run halted: " + .)] | join("; ")')"
   [ -z "$stuck" ] || fail "the run is stuck: $stuck"

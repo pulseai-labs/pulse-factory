@@ -254,6 +254,21 @@ micro-dollars, shown as dollars. An unknown run exits 1 and names it. `status --
 controller's `runs` list carry `project_id` (`r1.s4.w2`): the project of the chat that proposed the
 run, or null for a run that the CLI armed.
 
+`status --json` also carries two fields from `r2.s2.w3`:
+
+- `launcher` is `systemd` or `detached`: the launcher that starts session hosts (see
+  `PF_HOST_LAUNCHER` under `controller`).
+- `warnings` is a list of texts, empty when there is nothing to say. There is one warning when the
+  launcher is `detached` and the controller's own cgroup (`/proc/self/cgroup`) ends in `.service`: the
+  controller's hosts then share a service's cgroup, and a group kill of that service ends them, so set
+  `PF_HOST_LAUNCHER=systemd`. There is one more, `orphan sweep skipped: <why>`, when the sweep at the
+  controller's start could not list the hosts (no user manager answered).
+
+A failed store read is an error, never an empty list. `status` reads the run, its nodes, sessions,
+admissions and requests, and when one read fails the controller answers `cannot read run <id> from the
+store: <cause>`, and the CLI exits 1 with that text and prints no unit list. A run whose units the
+store really holds none of still prints an empty list.
+
 ## `halt`
 
 ```
@@ -676,15 +691,38 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly three in this release. Any other key is refused: `unknown setting <key>; the
-  settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min`. The confirm code, the caller checks and the
-  claim are authority floors, not settings, and never become keys.
+- **The keys.** Exactly seven in this release. Any other key is refused: `unknown setting <key>; the
+  settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
+  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds`. The confirm code, the
+  caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
   |---|---|---|---|---|
   | `chat.self_turn_cap` | a JSON integer, 0 to 100; `0` is off | `3` | `override` | at the next turn the chat starts on its own, with no relaunch |
   | `chat.deny_commands` | a JSON array of 0 to 32 command patterns, no duplicates | the fifteen patterns below | `override` | at the chat's next launch (`chat.ledger` `open`, `deny=`, `deny_from=`) |
   | `chat.propose_per_min` | a JSON integer, 0 to 60; `0` is off | `4` | `override` | at the next `propose`, with no relaunch |
+  | `session.replay_bytes` | a JSON integer, 65536 to 67108864 | `4194304` | `override` | at the next seat launch |
+  | `session.exit_hold_minutes` | a JSON integer, 1 to 10080 | `1440` | `override` | at the next seat launch |
+  | `session.attach_wait_ms` | a JSON integer, 100 to 30000 | `3000` | `override` | at the next seat launch |
+  | `session.hook_wait_seconds` | a JSON integer, 1 to 120 | `15` | `override` | at the next seat launch |
+
+  The four `session.*` keys set how a session host serves a seat (`r2.s2.w3`, ADR-0016's amendment
+  of 2026-11-16). `session.replay_bytes` is the size of the host's output buffer: the host keeps that
+  many bytes of the child's output until the controller acknowledges them. `session.exit_hold_minutes`
+  is how long a host stays after its child ends when no controller consumed the exit and the last
+  output. `session.attach_wait_ms` is how long the controller waits for a host's `hello`, at a launch
+  and at tier 1 after a restart; a host that does not answer in time is unreachable.
+  `session.hook_wait_seconds` is how long the `hook` verb retries when no controller answers (see
+  `hook`). A seat launch resolves the four keys for the run's project and writes each, with its value
+  and scope, into the launch record, and the seat's record `env` carries `PF_HOOK_WAIT_SECONDS`. A
+  chat or a seat still cannot set any key: the caller check above refuses it.
+
+  **The resume flag.** Each key in the registry has a flag that says what a resume does with it:
+  `record` means a resume uses the value the launch record holds, and `current` means a resume reads
+  the value now. The four `session.*` keys are `record`. `chat.deny_commands`, `chat.self_turn_cap`
+  and `chat.propose_per_min` are `current`. The code names the flag `at_resume`, because
+  `SettingApplies` of the API already names when a change takes effect (`applies`, below). `settings
+  get` and the API's `SettingRecord` do not show the flag yet.
 
   `chat.propose_per_min` bounds the plans one chat session builds in a minute (see `propose`). It
   is read for the session's project and agent, and every `propose` call counts as a build, a refused
@@ -699,7 +737,7 @@ settings" in the common rules).
   `git push --delete`, `git push * --delete`, `git push -d`, `git push * -d`, `git branch -D`,
   `git branch * -D`, `gh pr merge`, `gh -R * pr merge`, `gh --repo * pr merge` and
   `gh --repo=* pr merge`. The list is a speed bump, not a boundary (`chat-adapter.md`).
-- **The merge mode.** Each key declares how the rows of its scope chain combine. Both keys are
+- **The merge mode.** Each key declares how the rows of its scope chain combine. Every key is
   `override` now: the first row on the chain wins whole, and every other stored row on the chain is
   masked. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
   migration, because the store keeps every scope's row as it is. A stored value that this binary
@@ -751,7 +789,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (`chat.self_turn_cap`, `chat.deny_commands`, `chat.propose_per_min`, or `other` for an unknown key
+  (one of the seven keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -764,8 +802,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, eight
-  across the four buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, sixteen
+  across the eight buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
@@ -965,6 +1003,14 @@ session key (`PF_SESSION_KEY`), the tool and the command or path to the controll
 `{"decision":"allow"|"deny","reason":..}` and exits 0. Every failure is a deny: no key, an unknown
 key, no controller, unreadable input. This is the extension's protocol, not `--json`.
 
+A controller that restarts is not a reason to deny. When `hook` cannot reach a controller, it tries
+again every 200 ms, until `PF_HOOK_WAIT_SECONDS` seconds have passed since its first attempt, and then
+denies with "no controller answers: …". The seat's record `env` carries the variable, set from
+`session.hook_wait_seconds`; an absent value, or one outside 1 to 120, means 15. A controller's answer,
+a deny included, is final and is never tried again. The wait covers a restart: the new controller
+binds its socket only after tier 1 has rebuilt the seat key table, so a call that waits is answered
+from the whole table.
+
 ## `controller`
 
 ```
@@ -980,3 +1026,25 @@ no one answers is stale, and the controller removes it.
 With neither, the API is off, no key is made and nothing listens. The unit reads
 `~/.config/pulse-factory/controller.env` as an optional environment file, so the operator sets
 `PF_API_LISTEN` there (`docs/install.md`).
+
+**Session hosts (`r2.s2.w3`).** A seat runs in a session host, a process outside the controller
+(`session-host.md`), so a controller restart keeps it. Two environment variables choose how:
+
+- `PF_HOST_LAUNCHER` names the launcher: `systemd` starts each host as a transient user unit in its
+  own cgroup, and `detached` starts it as a detached process under `$XDG_RUNTIME_DIR/pf-hosts/`. Unset
+  means `detached`. Any other value stops the controller at start, with a reason that names the value,
+  before it takes the lock. The installed unit sets `PF_HOST_LAUNCHER=systemd`. A failed `systemd-run`
+  never falls back to the detached launcher. `status` names the launcher.
+- `PF_HOST_BIN` names the `pf-host` binary. When it is unset, the controller uses `pf-host` beside its
+  own binary, with symlinks resolved, so the installed link finds the content-hash path
+  (`docs/install.md`). With no binary, a launch fails with a reason that says so.
+
+At start the controller takes `controller.lock`, opens the store, runs **tier 1** for every running
+seat, and only then binds its socket. A second controller refuses at the lock while tier 1 runs. Tier
+1 attaches to each seat's host again (`rebind`, `agent-adapter.md`). A seat is survived, lost,
+unreachable or an orphan, and each outcome writes one `controller.ledger` line (`host_tier1 … survived`,
+`lost` or `unreachable`; `host_orphan … orphan`). A survived seat's hook calls are answered again,
+because the seat key table is rebuilt from the launch records. A lost or unreachable seat parks its
+unit with `seat_lost`. The orphan sweep then stops every host of this server that no live row names,
+and removes stale host directories, key files and record files. It never touches a host of another
+server.

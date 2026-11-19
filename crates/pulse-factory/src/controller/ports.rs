@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use pf_engine::port::agent::{AgentPort, AgentRouter};
 use pf_engine::port::forge::ForgePort;
+use pf_engine::port::host::SessionHosts;
 
 /// What the ports of one run are built from.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunSpec {
     pub run_id: String,
     pub run_dir: PathBuf,
@@ -17,6 +18,21 @@ pub struct RunSpec {
     pub plugin_roots: Vec<PathBuf>,
     pub paper: Option<PathBuf>,
     pub forge_repo: String,
+    /// The controller's host service: an adapter that runs its session in a host launches and
+    /// rebinds through it.
+    pub hosts: Arc<dyn SessionHosts>,
+}
+
+impl std::fmt::Debug for RunSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunSpec")
+            .field("run_id", &self.run_id)
+            .field("run_dir", &self.run_dir)
+            .field("runtimes", &self.runtimes)
+            .field("paper", &self.paper)
+            .field("forge_repo", &self.forge_repo)
+            .finish()
+    }
 }
 
 /// The OMP adapter's config for a run: its sessions under the run directory, the plugin roots of
@@ -50,6 +66,7 @@ impl Ports for LivePorts {
         if let Some(paper) = &spec.paper {
             let adapter = Arc::new(pf_adapter_fake::PaperAdapter::new(
                 pf_adapter_fake::PaperConfig::new(paper.clone(), spec.plugin_roots.clone()),
+                spec.hosts.clone(),
             ));
             let mut names = spec.runtimes.clone();
             names.sort();

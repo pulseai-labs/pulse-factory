@@ -6,11 +6,46 @@
 //! content never reaches the 1 MiB limit of the socket.
 
 use std::io::Read;
+use std::time::{Duration, Instant};
 
+use pf_ipc::ClientError;
 use serde_json::{Value, json};
 
 /// The most stdin the hook reads. A write call carries a whole file.
 const STDIN_MAX: u64 = 64 << 20;
+
+/// How long the hook waits for a controller to answer when none does, if `PF_HOOK_WAIT_SECONDS` is
+/// absent or out of range (`session.hook_wait_seconds`, Q8).
+pub const DEFAULT_WAIT_SECONDS: u64 = 15;
+
+/// The gap between two attempts to reach the controller.
+const RETRY_GAP: Duration = Duration::from_millis(200);
+
+/// The seconds the hook waits for a controller: the value of `PF_HOOK_WAIT_SECONDS` when it is a
+/// whole number from 1 to 120, else 15. The seat's launch record carries the resolved
+/// `session.hook_wait_seconds` in that variable.
+pub fn wait_seconds(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| (1..=120).contains(n))
+        .unwrap_or(DEFAULT_WAIT_SECONDS)
+}
+
+/// Call the controller. When none answers the socket, try again every 200 ms until `wait` has
+/// passed since the first attempt: a controller that restarts takes a moment to bind its socket
+/// (tier 1 runs first). An answer, a deny included, is final, and so is any failure after the
+/// controller was reached.
+fn call_waiting(req: &Value, wait: Duration) -> Result<pf_ipc::Response, ClientError> {
+    let first = Instant::now();
+    loop {
+        match pf_ipc::call(&pf_ipc::state_dir(), "hook", req.clone()) {
+            Err(ClientError::NoController { .. }) if first.elapsed() < wait => {
+                std::thread::sleep(RETRY_GAP.min(wait.saturating_sub(first.elapsed())));
+            }
+            other => return other,
+        }
+    }
+}
 
 fn deny(reason: &str) -> Value {
     json!({ "decision": "deny", "reason": reason })
@@ -67,7 +102,10 @@ fn answer() -> Value {
         Ok(r) => r,
         Err(why) => return deny(&why),
     };
-    match pf_ipc::call(&pf_ipc::state_dir(), "hook", req) {
+    let wait = Duration::from_secs(wait_seconds(
+        std::env::var("PF_HOOK_WAIT_SECONDS").ok().as_deref(),
+    ));
+    match call_waiting(&req, wait) {
         Ok(resp) if resp.ok => {
             let decision = resp.result["decision"].as_str().unwrap_or("deny");
             if decision == "allow" {

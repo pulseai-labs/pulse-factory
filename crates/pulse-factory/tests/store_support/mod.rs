@@ -61,7 +61,7 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// A sandbox with a server key, so the verbs can name the units of this server. The stub
+    /// A sandbox with a host server name, so the verbs can name the units of this server. The stub
     /// `systemctl` lists no unit until a test sets some.
     pub fn new() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
@@ -86,25 +86,30 @@ impl Sandbox {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let key = pf_api::tls::load_or_create(
-            &pf_api::tls::api_dir(&state),
-            &"127.0.0.1:7443".parse().unwrap(),
-        )
-        .unwrap();
+        // The host server name (`r2.s2.w3`, G9): 12 hex digits in `<state>/hosts/server`, made by the
+        // controller. It is not the API key's id, and the sandbox makes no API key.
+        let name = pf_host::sha256::sha256_hex(dir.path().display().to_string().as_bytes())[..12]
+            .to_string();
+        std::fs::create_dir_all(state.join("hosts")).unwrap();
+        std::fs::write(state.join("hosts/server"), format!("{name}\n")).unwrap();
         Sandbox {
             dir,
             state,
             runtime,
             stub,
-            server_id: key.spki_sha256_hex(),
+            server_id: name,
         }
     }
 
-    /// A sandbox with no server key: the API never ran here.
-    pub fn without_key() -> Sandbox {
-        let s = Sandbox::new();
-        std::fs::remove_dir_all(pf_api::tls::api_dir(&s.state)).unwrap();
-        s
+    /// Make the API key of this state directory, as `controller --api-listen` does. Its server id
+    /// is the SHA-256 of the key's public half, and it is not the host server name.
+    pub fn make_api_key(&self) -> String {
+        pf_api::tls::load_or_create(
+            &pf_api::tls::api_dir(&self.state),
+            &"127.0.0.1:7443".parse().unwrap(),
+        )
+        .unwrap()
+        .spki_sha256_hex()
     }
 
     pub fn store_path(&self) -> PathBuf {

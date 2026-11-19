@@ -24,6 +24,7 @@ command -v "$PF_BIN" >/dev/null || [ -x "$PF_BIN" ] || fail "PF_BIN=$PF_BIN is n
 
 tmp="$(mktemp -d)"
 pid=""
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosts.sh"
 stop_controller() {
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
@@ -32,7 +33,7 @@ stop_controller() {
   wait "$pid" 2>/dev/null || true
   pid=""
 }
-cleanup() { stop_controller; rm -rf "$tmp"; }
+cleanup() { stop_controller; stop_hosts; rm -rf "$tmp"; }
 trap cleanup EXIT
 
 unset PF_SEAT_TOKEN

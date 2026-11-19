@@ -32,14 +32,85 @@ fn script(name: &str) -> PathBuf {
     root().join("scripts/demo").join(name)
 }
 
+/// The runtime directory of one demo script run: a short path, so the host sockets under it stay
+/// under 107 bytes, and the script's own, so the hosts of two scripts that run at once never mix.
+/// A script that leaves a detached host live under it is a failure (r2.s2.w3, AC-15): a controller
+/// stop ends no seat now, so each script stops its own hosts in its exit trap.
+struct Runtime(PathBuf);
+
+static RUNTIMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Runtime {
+    fn new() -> Runtime {
+        let n = RUNTIMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("pfd{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Runtime(dir)
+    }
+
+    /// The live hosts under this directory: the `host.pid` of every `pf-hosts/<server>/<unit>`
+    /// whose PID still has its recorded start time.
+    fn live_hosts(&self) -> Vec<(PathBuf, u32)> {
+        let mut out = Vec::new();
+        let Ok(servers) = std::fs::read_dir(self.0.join("pf-hosts")) else {
+            return out;
+        };
+        for server in servers.flatten() {
+            let Ok(units) = std::fs::read_dir(server.path()) else {
+                continue;
+            };
+            for unit in units.flatten() {
+                let Ok(text) = std::fs::read_to_string(unit.path().join("host.pid")) else {
+                    continue;
+                };
+                let mut it = text.split_whitespace();
+                let (Some(Ok(pid)), Some(Ok(start))) = (
+                    it.next().map(str::parse::<u32>),
+                    it.next().map(str::parse::<u64>),
+                ) else {
+                    continue;
+                };
+                if pf_host::peer::start_time(pid) == Some(start) {
+                    out.push((unit.path(), pid));
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Drop for Runtime {
+    /// A host that a failed script left is stopped here, so one failure leaves no process behind.
+    fn drop(&mut self) {
+        for (_, pid) in self.live_hosts() {
+            pf_host::peer::kill_group(pid, 9);
+            pf_host::peer::kill_pid(pid, 9);
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Fail when a script left a detached host of its own server live.
+fn assert_no_host_left(name: &str, rt: &Runtime) {
+    let left = rt.live_hosts();
+    assert!(
+        left.is_empty(),
+        "{name} left {} detached host(s) live: {left:?}",
+        left.len()
+    );
+}
+
 fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
     let _one_tamper_demo =
         (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
     let _one_stranded_demo =
         (name == "stranded-close.sh").then(|| STRANDED.lock().unwrap_or_else(|e| e.into_inner()));
     let mut cmd = Command::new("bash");
+    let rt = Runtime::new();
     cmd.arg(script(name))
         .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
+        .env("XDG_RUNTIME_DIR", &rt.0)
         .env_remove("PF_SEAT_TOKEN")
         .env_remove("PF_STATE_DIR")
         .env_remove("PF_SHARE_DIR");
@@ -48,7 +119,9 @@ fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
     }
     let start = Instant::now();
     let out = cmd.output().expect("bash starts");
-    (out, start.elapsed())
+    let took = start.elapsed();
+    assert_no_host_left(name, &rt);
+    (out, took)
 }
 
 fn stderr(o: &Output) -> String {
@@ -94,6 +167,136 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
     let new = f(text.clone());
     assert_ne!(new, text, "the edit of {rel} changed nothing");
     std::fs::write(&path, new).unwrap();
+}
+
+/// Run a paper demo whose every seat hangs, wait until a detached host is live, then send the script
+/// `SIGTERM` (an interrupted demo, or one that fails with a seat still running). The script's exit
+/// trap must stop its own server's hosts: a controller stop ends no seat now (G6). The test fails when a
+/// host of the script is still live 15 s after the script ended.
+fn interrupted_demo_leaves_no_host(name: &str, package: &str) {
+    let _tamper =
+        (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
+    let _stranded =
+        (name == "stranded-close.sh").then(|| STRANDED.lock().unwrap_or_else(|e| e.into_inner()));
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join(package);
+    copy_dir(&root().join("scripts/demo").join(package), &paper);
+    for entry in std::fs::read_dir(paper.join("seats")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "sh") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let (shebang, rest) = text.split_once('\n').expect("a seat has a shebang line");
+            std::fs::write(&path, format!("{shebang}\nsleep 600\n{rest}\n")).unwrap();
+        }
+    }
+    let rt = Runtime::new();
+    let mut child = Command::new("bash")
+        .arg(script(name))
+        .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
+        .env("XDG_RUNTIME_DIR", &rt.0)
+        .env("PAPER_SRC", &paper)
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("bash starts");
+    let start = Instant::now();
+    while rt.live_hosts().is_empty() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{name} ended before a seat host was live"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(40),
+            "{name} started no host in 40 s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    pf_host::peer::kill_pid(child.id(), 15);
+    child.wait().unwrap();
+    let end = Instant::now();
+    while !rt.live_hosts().is_empty() && end.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_no_host_left(name, &rt);
+}
+
+#[test]
+fn every_demo_script_that_starts_a_controller_stops_its_hosts_in_its_exit_trap() {
+    // The five tests below run the paper demos. The chat and UI demos start no paper seat, so they
+    // cannot be made to leave a host here: this test holds them to the same helper by text.
+    let mut starters = 0;
+    for entry in std::fs::read_dir(root().join("scripts/demo")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "sh") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let starts = text.lines().any(|l| {
+            let l = l.trim_start();
+            !l.starts_with('#')
+                && (l.contains("\"$PF_BIN\" controller") || l.contains("\"$pf_bin\" controller"))
+        });
+        if !starts {
+            continue;
+        }
+        starts_one(&path, &text);
+        starters += 1;
+    }
+    assert!(
+        starters >= 14,
+        "found only {starters} scripts that start a controller"
+    );
+}
+
+fn starts_one(path: &Path, text: &str) {
+    let name = path.file_name().unwrap().to_string_lossy();
+    assert!(
+        text.contains("lib/hosts.sh"),
+        "{name} does not source lib/hosts.sh"
+    );
+    let cleanup = text
+        .lines()
+        .skip_while(|l| !l.starts_with("cleanup() "))
+        .take_while(|l| !l.starts_with('}') || l.starts_with("cleanup()"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cleanup.contains("stop_hosts"),
+        "{name}: its cleanup does not call stop_hosts"
+    );
+    assert!(
+        text.contains("trap cleanup EXIT"),
+        "{name} has no exit trap named cleanup"
+    );
+}
+
+#[test]
+fn an_interrupted_golden_journey_a_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("golden-journey-a.sh", "paper");
+}
+
+#[test]
+fn an_interrupted_golden_journey_b_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("golden-journey-b.sh", "paper-b");
+}
+
+#[test]
+fn an_interrupted_spine_base_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("spine-base.sh", "paper-base");
+}
+
+#[test]
+fn an_interrupted_seat_tamper_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("seat-tamper.sh", "paper-tamper");
+}
+
+#[test]
+fn an_interrupted_stranded_close_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("stranded-close.sh", "paper-stranded");
 }
 
 #[test]
@@ -676,10 +879,12 @@ fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
         bin_dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    let rt = Runtime::new();
     let start = Instant::now();
     let out = Command::new("bash")
         .arg(script("start-api.sh"))
         .env("PATH", path)
+        .env("XDG_RUNTIME_DIR", &rt.0)
         .env_remove("PF_BIN")
         .env_remove("PF_REPLAY_BIN")
         .env_remove("PF_STREAM_BIN")
@@ -689,6 +894,7 @@ fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
         .output()
         .expect("bash starts");
     let took = start.elapsed();
+    assert_no_host_left("start-api.sh", &rt);
     let _ = std::fs::remove_dir_all(&bin_dir);
     assert!(
         out.status.success(),

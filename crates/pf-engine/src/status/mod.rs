@@ -394,3 +394,7 @@ pub const REASON_RUN_HALTED: &str = "run halted";
 
 /// Reason a unit gets when its seat was lost across a controller restart.
 pub const REASON_SEAT_LOST: &str = "seat lost across a controller restart";
+
+/// The start of the reason a unit gets when its seat's host may run but could not be attached
+/// after a controller restart. The cause follows it.
+pub const REASON_HOST_UNREACHABLE: &str = "host unreachable: ";

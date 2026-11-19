@@ -835,6 +835,7 @@ name = "pf-adapter-fake"
 version = "0.1.0"
 dependencies = [
  "pf-engine",
+ "pf-host",
  "pf-store-sqlite",
  "pf-workflow",
  "serde_json",
@@ -1089,6 +1090,7 @@ dependencies = [
  "pf-engine",
  "pf-forge-bare",
  "pf-forge-github",
+ "pf-host",
  "pf-ipc",
  "pf-rules",
  "pf-store-sqlite",

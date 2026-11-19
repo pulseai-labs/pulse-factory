@@ -35,6 +35,7 @@ fixture="$repo_root/crates/pf-adapter-claude/fixtures/permissions.jsonl"
 tmp="$(mktemp -d)"
 pid=""
 readers=()
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosts.sh"
 stop_controller() {
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
@@ -46,6 +47,7 @@ stop_controller() {
 cleanup() {
   for r in "${readers[@]:-}"; do [ -z "$r" ] || kill "$r" 2>/dev/null || true; done
   stop_controller
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

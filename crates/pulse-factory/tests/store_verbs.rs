@@ -199,6 +199,40 @@ fn restore_is_refused_while_a_host_unit_of_this_server_is_live() {
 }
 
 #[test]
+fn the_probe_reads_the_host_server_name_file_and_not_the_api_certificate() {
+    let (sb, backup) = with_backup();
+    // The API made a key, whose id is not the host server name.
+    let api_id = sb.make_api_key();
+    assert_ne!(api_id[..12], sb.server_id);
+    // A live unit under the API key's id is another server's as far as the probe is concerned.
+    sb.list_units(&[format!(
+        "pf-host-{api_id}-S-1-1.service loaded active running Pulse Factory session host"
+    )]);
+    let out = sb.run(&["store", "restore", backup.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // A live unit under the host server name stops it, with the API key there or not.
+    let (sb, backup) = with_backup();
+    sb.make_api_key();
+    sb.list_units(&[sb.active_unit_line("S-1", 1)]);
+    let out = sb.run(&["store", "restore", backup.to_str().unwrap()]);
+    assert_refused(&out, &sb.unit("S-1", 1));
+}
+
+#[test]
+fn with_no_host_server_name_no_host_can_exist_and_the_probe_asks_nobody() {
+    let (sb, backup) = with_backup();
+    std::fs::remove_file(sb.state.join("hosts/server")).unwrap();
+    // Even a live unit named like a host is not this server's: there is no name to match.
+    sb.list_units(&[
+        "pf-host-0123456789ab-S-1-1.service loaded active running Pulse Factory session host"
+            .to_string(),
+    ]);
+    let out = sb.run(&["store", "restore", backup.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(sb.systemctl_calls(), "", "the probe asked the user manager");
+}
+
+#[test]
 fn a_unit_of_another_server_and_a_dead_unit_do_not_stop_a_restore() {
     let (sb, backup) = with_backup();
     sb.list_units(&[
