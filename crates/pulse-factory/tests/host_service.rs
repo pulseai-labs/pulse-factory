@@ -626,9 +626,11 @@ fn a_consumed_exit_ends_the_row_and_the_host_at_once_and_removes_the_files() {
 #[test]
 fn an_unconsumed_exit_holds_for_the_hold_and_then_the_host_ends() {
     let rig = Rig::detached();
-    // The smallest setting is one minute; the test shortens the host's hold to one second.
+    // The smallest setting is one minute; the test shortens the host's hold.
+    // The hold runs from the exit, and a launch on a loaded runner can take a second, so it is
+    // four seconds.
     rig.probe
-        .set_tweak(|spec| spec.exit_hold = Duration::from_secs(1));
+        .set_tweak(|spec| spec.exit_hold = Duration::from_secs(4));
     let h = rig.launch(KEY, "exit 0").unwrap();
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
@@ -637,8 +639,46 @@ fn an_unconsumed_exit_holds_for_the_hold_and_then_the_host_ends() {
         "the host did not hold"
     );
     assert!(
-        rig.wait_gone(&h.unit, Duration::from_secs(10)),
+        rig.wait_gone(&h.unit, Duration::from_secs(20)),
         "the host did not end after its hold"
+    );
+}
+
+// ------------------------------------------------------------------ the orphan sweep
+
+#[test]
+fn a_failed_store_read_skips_the_sweep_and_stops_no_live_host() {
+    // No session row claims this seat's host, so a sweep that reads the store whole stops it. A
+    // failed read is not "no session claims it": the sweep is skipped with the cause, the host
+    // keeps running and its row and files stay.
+    let rig = Rig::detached();
+    let h = rig.launch(KEY, "sleep 60").unwrap();
+    let (record_file, key_file) = rig.files(&h.unit);
+    let db = rusqlite::Connection::open(rig.state().join("store.sqlite")).unwrap();
+    db.execute_batch("ALTER TABLE sessions RENAME TO sessions_hidden")
+        .unwrap();
+
+    rig.hosts().sweep_orphans();
+    let skipped = rig.hosts().sweep_skipped().expect("the sweep was skipped");
+    assert!(skipped.contains("cannot read the sessions"), "{skipped}");
+    assert_eq!(rig.host_state(&h.unit), HostState::Live, "the host stopped");
+    let row = rig.live.controller.store().host(&h.unit).unwrap().unwrap();
+    assert!(row.ended_at.is_none(), "the row ended");
+    assert!(record_file.exists() && key_file.exists(), "a file went");
+    assert!(
+        rig.lines("host_orphan")
+            .iter()
+            .all(|l| l.contains("skipped"))
+    );
+
+    // The same sweep with the table back finds no claim and stops the host: the failed read was
+    // the only thing that kept it.
+    db.execute_batch("ALTER TABLE sessions_hidden RENAME TO sessions")
+        .unwrap();
+    rig.hosts().sweep_orphans();
+    assert!(
+        rig.wait_gone(&h.unit, Duration::from_secs(10)),
+        "the sweep with the store whole did not stop the host"
     );
 }
 

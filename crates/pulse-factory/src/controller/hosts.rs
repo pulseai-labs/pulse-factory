@@ -1023,8 +1023,14 @@ impl HostService {
         // the units handled here are not handled again below.
         let mut handled: Vec<String> = Vec::new();
         for row in &rows {
-            if self.claimed(&ctl, row) {
-                continue;
+            // A failed read is not "no session claims the host": the sweep stops, it never guesses.
+            match self.claimed(&ctl, row) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    self.skip(&ctl, &format!("cannot read the sessions: {e}"));
+                    return;
+                }
             }
             self.stop_orphan(
                 &ctl,
@@ -1034,13 +1040,15 @@ impl HostService {
             );
             handled.push(row.unit.clone());
         }
-        let live_after: Vec<String> = ctl
-            .store()
-            .live_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| r.unit)
-            .collect();
+        // The rows after the orphans above ended. A failed read is not an empty registry: with an
+        // empty list every listed host would stop as row-less and every key file would go.
+        let live_after: Vec<String> = match ctl.store().live_hosts() {
+            Ok(r) => r.into_iter().map(|r| r.unit).collect(),
+            Err(e) => {
+                self.skip(&ctl, &format!("cannot read the registry: {e}"));
+                return;
+            }
+        };
         for host in &listed {
             if live_after.contains(&host.unit) || handled.contains(&host.unit) {
                 continue;
@@ -1072,13 +1080,6 @@ impl HostService {
             }
         }
         // Key files and record files that no live row names.
-        let live_units: Vec<String> = ctl
-            .store()
-            .live_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|r| r.unit)
-            .collect();
         if let Ok(entries) = std::fs::read_dir(self.files_dir()) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -1095,7 +1096,7 @@ impl HostService {
                 let Ok(unit) = names::unit_name(&self.server, session, inc) else {
                     continue;
                 };
-                if !live_units.contains(&unit) {
+                if !live_after.contains(&unit) {
                     let _ = std::fs::remove_file(entry.path());
                     self.orphan_line(&ctl, &unit, session, inc, &format!("removed {name}"));
                 }
@@ -1144,33 +1145,32 @@ impl HostService {
         );
     }
 
-    /// Whether a live live seat session (or chat session) claims the host of this row.
-    fn claimed(&self, ctl: &Controller, row: &HostRow) -> bool {
+    /// Whether a live live seat session (or chat session) claims the host of this row. A failed
+    /// read is an `Err`, never `false`: `false` stops the host.
+    fn claimed(&self, ctl: &Controller, row: &HostRow) -> Result<bool, String> {
         match row.session_kind.as_str() {
             "seat" => {
                 let Some((run, unit_id)) = row.session_id.split_once('/') else {
-                    return false;
+                    return Ok(false);
                 };
-                ctl.store()
-                    .sessions(run)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|s| {
-                        !s.ended
-                            && s.unit_id == unit_id
-                            && s.process_ref.as_deref().is_some_and(|r| {
-                                // The router tags a reference as `<runtime>:<unit>`.
-                                r.split_once(':').map_or(r, |(_, inner)| inner) == row.unit
-                            })
-                    })
+                let sessions = ctl.store().sessions(run).map_err(|e| e.to_string())?;
+                Ok(sessions.iter().any(|s| {
+                    !s.ended
+                        && s.unit_id == unit_id
+                        && s.process_ref.as_deref().is_some_and(|r| {
+                            // The router tags a reference as `<runtime>:<unit>`.
+                            r.split_once(':').map_or(r, |(_, inner)| inner) == row.unit
+                        })
+                }))
             }
-            "chat" => ctl
-                .store()
-                .live_chat_sessions()
-                .unwrap_or_default()
-                .iter()
-                .any(|c| c.id == row.session_id),
-            _ => false,
+            "chat" => {
+                let chats = ctl
+                    .store()
+                    .live_chat_sessions()
+                    .map_err(|e| e.to_string())?;
+                Ok(chats.iter().any(|c| c.id == row.session_id))
+            }
+            _ => Ok(false),
         }
     }
 
