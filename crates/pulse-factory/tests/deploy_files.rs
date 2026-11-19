@@ -43,6 +43,50 @@ fn unit_problems(unit: &str) -> Vec<String> {
     if !unit.lines().any(|l| l.trim() == "KillMode=control-group") {
         p.push("no KillMode=control-group".into());
     }
+    // Seats run in session hosts, each in a unit of its own, outside this unit's cgroup (r2.s2.w3,
+    // Q6): the installed controller starts them through the user manager.
+    if !unit
+        .lines()
+        .any(|l| l.trim() == "Environment=PF_HOST_LAUNCHER=systemd")
+    {
+        p.push("no Environment=PF_HOST_LAUNCHER=systemd".into());
+    }
+    p
+}
+
+/// What `install.sh` must do for the session hosts (r2.s2.w3, G8): check for `jq` before it builds,
+/// build `pf-host` (release, niced), and call `install-hosts.sh` after `store check-upgrade --json`.
+fn install_hosts_problems(script: &str) -> Vec<String> {
+    let mut p = Vec::new();
+    let code: Vec<&str> = script
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect();
+    let at = |needle: &str| code.iter().position(|l| l.contains(needle));
+    let first_build = at("cargo build");
+    match (at("command -v jq"), first_build) {
+        (Some(jq), Some(build)) if jq < build => {}
+        (None, _) => p.push("no check for jq".into()),
+        _ => p.push("the jq check comes after the first build".into()),
+    }
+    if !code
+        .iter()
+        .any(|l| l.contains("cargo build") && l.contains("--release") && l.contains("-p pf-host"))
+    {
+        p.push("no release build of -p pf-host".into());
+    }
+    if !code
+        .iter()
+        .any(|l| l.contains("cargo build") && l.contains("nice -n 10 ionice -c3"))
+    {
+        p.push("the build is not niced".into());
+    }
+    match (at("check-upgrade --json"), at("install-hosts.sh")) {
+        (Some(check), Some(install)) if check < install => {}
+        (_, None) => p.push("no call of install-hosts.sh".into()),
+        (None, _) => p.push("no store check-upgrade --json".into()),
+        _ => p.push("install-hosts.sh runs before store check-upgrade --json".into()),
+    }
     p
 }
 
@@ -212,6 +256,14 @@ fn the_skill_names_every_verb_and_waits_for_nothing() {
     assert_eq!(skill_problems(&skill, &verbs), Vec::<String>::new());
 }
 
+#[test]
+fn install_sh_installs_the_hosts_after_the_guard_and_checks_for_jq_first() {
+    assert_eq!(
+        install_hosts_problems(&read("scripts/install.sh")),
+        Vec::<String>::new()
+    );
+}
+
 // ---- each check fires on a bad sample
 
 #[test]
@@ -238,8 +290,42 @@ fn each_check_fires_on_a_bad_sample() {
             good_unit.replace("KillMode=control-group", "KillMode=process"),
             "KillMode",
         ),
+        (
+            good_unit.replace("Environment=PF_HOST_LAUNCHER=systemd\n", ""),
+            "PF_HOST_LAUNCHER",
+        ),
+        (
+            good_unit.replace("PF_HOST_LAUNCHER=systemd", "PF_HOST_LAUNCHER=detached"),
+            "PF_HOST_LAUNCHER",
+        ),
     ] {
         let p = unit_problems(&bad);
+        assert!(
+            p.iter().any(|m| m.contains(want)),
+            "{want} must fire: {p:?}"
+        );
+    }
+    let good_install = read("scripts/install.sh");
+    for (bad, want) in [
+        (
+            good_install.replace("command -v jq", "command -v sed"),
+            "jq",
+        ),
+        (
+            good_install.replace("install-hosts.sh", "install-ui.sh"),
+            "install-hosts.sh",
+        ),
+        (good_install.replace("-p pf-host", "-p pf-ipc"), "pf-host"),
+        (
+            good_install.replace("check-upgrade --json", "check-upgrade"),
+            "check-upgrade",
+        ),
+        (
+            good_install.replace("nice -n 10 ionice -c3 cargo build", "cargo build"),
+            "niced",
+        ),
+    ] {
+        let p = install_hosts_problems(&bad);
         assert!(
             p.iter().any(|m| m.contains(want)),
             "{want} must fire: {p:?}"

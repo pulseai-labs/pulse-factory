@@ -12,6 +12,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/lib/status.sh"
 PF_BIN="${PF_BIN:-pulse-factory}"
 src="${PAPER_SRC:-$here/paper-base}"
 limit_seconds=60
@@ -22,11 +23,13 @@ command -v "$PF_BIN" >/dev/null || [ -x "$PF_BIN" ] || fail "PF_BIN=$PF_BIN is n
 
 tmp="$(mktemp -d)"
 controller_pid=""
+. "$here/lib/hosts.sh"
 cleanup() {
   if [ -n "$controller_pid" ]; then
     kill "$controller_pid" 2>/dev/null || true
     wait "$controller_pid" 2>/dev/null || true
   fi
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -85,7 +88,7 @@ run="$(printf '%s\n' "$arm_out" | sed -n 's/^run: //p' | head -n 1)"
 start=$(date +%s)
 status=""
 while :; do
-  status="$("$PF_BIN" status "$run" --json)" || fail "status failed"
+  status="$(status_json "$run")" || fail "status failed 4 times"
   state="$(printf '%s' "$status" | jq -r '.state')"
   [ "$state" = "ended" ] && break
   # A parked unit or a halted run waits for a person, so the journey cannot finish: fail at once.

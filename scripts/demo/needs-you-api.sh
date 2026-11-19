@@ -59,6 +59,7 @@ PF_REPLAY_BIN="$(abs "$PF_REPLAY_BIN")"
 
 tmp="$(mktemp -d)"
 pid=""
+. "$here/lib/hosts.sh"
 stop_controller() {
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
@@ -69,6 +70,7 @@ stop_controller() {
 }
 cleanup() {
   stop_controller
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

@@ -92,6 +92,8 @@ fn status_json_holds_every_field_and_the_total_is_the_fixed_number() {
         "sessions",
         "total",
         "end_reason",
+        "launcher",
+        "warnings",
     ] {
         assert!(v.get(key).is_some(), "status --json lacks {key}: {v}");
     }
@@ -413,4 +415,186 @@ fn a_second_controller_refuses_and_a_stale_socket_does_not_stop_one() {
     let third = Ctl::start(&sb, 3_600_000);
     assert!(pf_ipc::call(&sb.state, "runs", json!({})).is_ok());
     drop(third);
+}
+
+// ------------------------------------------------------------------ r2.s2.w3, AC-12: the launcher
+
+mod launcher {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use common::restart::Restart;
+    use pf_host::launcher::Systemd;
+    use pulse_factory::controller::hosts::HostLauncher;
+
+    fn warnings(v: &Value) -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("status has no warnings list: {v}"))
+            .iter()
+            .map(|w| w.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A `proc_root` whose `self/cgroup` holds `line`.
+    fn proc_with(line: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("self")).unwrap();
+        std::fs::write(dir.path().join("self/cgroup"), format!("{line}\n")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn status_names_the_launcher_and_the_default_is_detached_with_no_warning() {
+        // A fixed `proc_root`: the real `/proc/self/cgroup` is a service's cgroup on a CI
+        // runner, and that adds the group-kill warning this test says is absent.
+        let scope = proc_with("0::/user.slice/user-1000.slice/session-3.scope");
+        let path = scope.path().to_path_buf();
+        let live = Live::start_config(BIN.into(), move |cfg| cfg.proc_root = path);
+        let run = live.arm();
+        let v = status(&live.sb, &[&run]);
+        assert_eq!(v["launcher"], "detached", "{v}");
+        assert!(warnings(&v).is_empty(), "{v}");
+    }
+
+    #[test]
+    fn a_detached_launcher_in_a_service_cgroup_warns_and_in_any_other_does_not() {
+        let service = proc_with(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/pulse-factory.service",
+        );
+        let path = service.path().to_path_buf();
+        let live = Live::start_config(BIN.into(), move |cfg| cfg.proc_root = path);
+        let run = live.arm();
+        let v = status(&live.sb, &[&run]);
+        assert_eq!(v["launcher"], "detached");
+        let w = warnings(&v);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("detached") && w[0].contains("service"),
+            "{}",
+            w[0]
+        );
+        assert!(w[0].contains("group kill"), "{}", w[0]);
+
+        let scope = proc_with("0::/user.slice/user-1000.slice/session-3.scope");
+        let path = scope.path().to_path_buf();
+        let live = Live::start_config(BIN.into(), move |cfg| cfg.proc_root = path);
+        let run = live.arm();
+        assert!(warnings(&status(&live.sb, &[&run])).is_empty());
+    }
+
+    #[test]
+    fn a_skipped_orphan_sweep_is_a_status_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("systemctl-stub");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\necho 'no user manager here' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let text = stub.display().to_string();
+        let rt = dir.path().join("rt");
+        std::fs::create_dir_all(&rt).unwrap();
+        let live = Live::start_config(BIN.into(), move |cfg| {
+            cfg.runtime_dir = rt.clone();
+            cfg.host_launcher = HostLauncher::Custom(std::sync::Arc::new(
+                Systemd::new(rt).with_programs(&text, &text),
+            ));
+        });
+        let run = live.arm();
+        let v = status(&live.sb, &[&run]);
+        assert_eq!(v["launcher"], "systemd", "{v}");
+        let w = warnings(&v);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("orphan sweep skipped"), "{}", w[0]);
+        assert!(w[0].contains("no user manager here"), "{}", w[0]);
+    }
+
+    #[test]
+    fn the_launcher_variable_names_systemd_or_detached_and_anything_else_is_an_error() {
+        assert!(matches!(
+            HostLauncher::from_env_value(None),
+            Ok(HostLauncher::Detached)
+        ));
+        assert!(matches!(
+            HostLauncher::from_env_value(Some("detached")),
+            Ok(HostLauncher::Detached)
+        ));
+        assert!(matches!(
+            HostLauncher::from_env_value(Some("systemd")),
+            Ok(HostLauncher::Systemd)
+        ));
+        let Err(why) = HostLauncher::from_env_value(Some("bogus")) else {
+            panic!("bogus is not a launcher");
+        };
+        assert!(why.contains("bogus"), "{why}");
+    }
+
+    #[test]
+    fn a_controller_with_pf_host_launcher_bogus_stops_at_start_and_names_the_value() {
+        let sb = Sandbox::new();
+        let mut child = sb
+            .cmd(&["controller"])
+            .env("PF_HOST_LAUNCHER", "bogus")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            if let Some(s) = child.try_wait().unwrap() {
+                break Some(s);
+            }
+            if Instant::now() >= end {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let status = status.expect("the controller did not stop on a bad PF_HOST_LAUNCHER");
+        assert!(!status.success());
+        let mut err = String::new();
+        std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+        assert!(err.contains("bogus"), "{err}");
+        assert!(err.contains("PF_HOST_LAUNCHER"), "{err}");
+        // It stopped before it made a socket.
+        assert!(!sb.state.join("controller.sock").exists());
+    }
+
+    #[test]
+    fn after_a_halt_no_host_starts() {
+        let mut rig = Restart::new();
+        rig.start_controller();
+        rig.arm();
+        // The control: before the halt, a queued unit gets its seat in a host.
+        rig.queue("u0", 1);
+        rig.wait_seat("u0");
+        rig.unit_of_seat("u0");
+        assert_eq!(rig.host_rows().len(), 1);
+        let out = rig.cli(&["halt", "--reason", "test", "--json"]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        rig.queue("u1", 2);
+        // Give the controller many ticks (100 ms each): a launch would have happened by now.
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(
+            rig.host_rows().len(),
+            1,
+            "a host started after the halt: {:?}",
+            rig.host_rows()
+        );
+        assert!(
+            rig.seat_pid("u1").is_none(),
+            "a seat started after the halt"
+        );
+        assert_eq!(rig.ledger_lines("host_record").len(), 1);
+        let v = rig.status();
+        assert!(v["halted_reason"].is_string(), "{v}");
+    }
 }

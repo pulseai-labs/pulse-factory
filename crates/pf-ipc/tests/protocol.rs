@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pf_ipc::{
-    ClientError, Handler, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, Response, bind, call,
+    ClientError, Handler, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, Request, Response, bind, call, lock,
     socket_path, state_dir_from,
 };
 use serde_json::{Value, json};
@@ -194,6 +194,40 @@ fn a_second_controller_refuses_and_a_stale_socket_does_not_stop_one() {
     // The first is gone, but its socket file stays: it is stale.
     assert!(socket_path(tmp.path()).exists());
     let _again = bind(tmp.path()).expect("a stale socket is removed");
+}
+
+/// `r2.s2.w3`, Approach 7: the controller takes the lock, builds its state (tier 1), and only then
+/// binds. The lock alone refuses a second controller and makes no socket.
+#[test]
+fn the_lock_refuses_a_second_controller_and_binds_nothing_until_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let locked = lock(tmp.path()).expect("take the lock");
+    assert!(!socket_path(tmp.path()).exists(), "the lock made a socket");
+    // A second lock and a second bind both refuse while the first lock lives.
+    let Err(second) = lock(tmp.path()) else {
+        panic!("a second lock refuses");
+    };
+    assert!(second.to_string().contains("already"), "{second}");
+    let Err(third) = bind(tmp.path()) else {
+        panic!("a bind refuses while another controller holds the lock");
+    };
+    assert!(third.to_string().contains("already"), "{third}");
+    assert!(!socket_path(tmp.path()).exists());
+    // Bound from the lock, the socket exists with mode 0600 and the lock still refuses.
+    let bound = locked.bind().expect("bind from the lock");
+    let mode = std::fs::metadata(socket_path(tmp.path()))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert!(lock(tmp.path()).is_err());
+    drop(bound);
+    // A stale socket from a controller that is gone is removed by the next bind from a lock.
+    assert!(socket_path(tmp.path()).exists());
+    lock(tmp.path())
+        .unwrap()
+        .bind()
+        .expect("a stale socket is removed");
 }
 
 #[test]

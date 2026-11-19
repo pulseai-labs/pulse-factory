@@ -53,6 +53,60 @@ pub const DEFAULT_SELF_TURN_CAP: u64 = 3;
 /// The most the cap may be set to.
 pub const SELF_TURN_CAP_MAX: u64 = 100;
 
+/// The key of the replay buffer a session host keeps, in bytes (`r2.s2.w3`).
+pub const SESSION_REPLAY_BYTES: &str = "session.replay_bytes";
+
+/// The key of how long a host holds an exit nobody consumed, in minutes.
+pub const SESSION_EXIT_HOLD_MINUTES: &str = "session.exit_hold_minutes";
+
+/// The key of how long a host waits for its first attach, and the controller waits for a `hello`,
+/// in milliseconds.
+pub const SESSION_ATTACH_WAIT_MS: &str = "session.attach_wait_ms";
+
+/// The key of how long the `hook` verb waits for a controller, in seconds.
+pub const SESSION_HOOK_WAIT_SECONDS: &str = "session.hook_wait_seconds";
+
+/// The four `session.*` keys, with their range and built-in value, in the order `settings get`
+/// lists them: (key, lowest, highest, built-in).
+pub const SESSION_KEYS: [(&str, u64, u64, u64); 4] = [
+    (SESSION_REPLAY_BYTES, 65_536, 67_108_864, 4_194_304),
+    (SESSION_EXIT_HOLD_MINUTES, 1, 10_080, 1_440),
+    (SESSION_ATTACH_WAIT_MS, 100, 30_000, 3_000),
+    (SESSION_HOOK_WAIT_SECONDS, 1, 120, 15),
+];
+
+/// What a resume does with a key's value (ADR-0016's amendment of 2026-11-16, which calls the flag
+/// `applies`; `SettingApplies` of `pf-api` already names when a change takes effect, so the code
+/// names this flag `at_resume` and leaves the wire type alone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtResume {
+    /// A resume uses the value the launch record holds.
+    Record,
+    /// A resume reads the current value.
+    Current,
+}
+
+impl AtResume {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AtResume::Record => "record",
+            AtResume::Current => "current",
+        }
+    }
+}
+
+/// The resume flag of a known key: `record` for the four `session.*` keys, `current` for the
+/// three `chat.*` keys. An unknown key has none.
+pub fn at_resume_of(key: &str) -> Option<AtResume> {
+    if SESSION_KEYS.iter().any(|(k, ..)| *k == key) {
+        Some(AtResume::Record)
+    } else if KEYS.contains(&key) {
+        Some(AtResume::Current)
+    } else {
+        None
+    }
+}
+
 /// The built-in deny patterns, in order (ruling 9 of `r1.s4.w4`): the common spellings of a forced
 /// push, a remote branch delete, a local branch delete, and a merge by `gh pr merge`. A deny rule
 /// matches the command text the model writes: a speed bump, not a boundary (ADR-0014).
@@ -75,7 +129,23 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 3] = [DENY_COMMANDS, SELF_TURN_CAP, PROPOSE_PER_MIN];
+const KEYS: [&str; 7] = [
+    DENY_COMMANDS,
+    SELF_TURN_CAP,
+    PROPOSE_PER_MIN,
+    SESSION_REPLAY_BYTES,
+    SESSION_EXIT_HOLD_MINUTES,
+    SESSION_ATTACH_WAIT_MS,
+    SESSION_HOOK_WAIT_SECONDS,
+];
+
+/// The range and the built-in value of a `session.*` key.
+fn session_key(key: &str) -> Option<(u64, u64, u64)> {
+    SESSION_KEYS
+        .iter()
+        .find(|(k, ..)| *k == key)
+        .map(|(_, lo, hi, d)| (*lo, *hi, *d))
+}
 
 /// The setting names that a refusal bucket can take. Any other name is bucket `other`.
 const OTHER_BUCKET: &str = "other";
@@ -89,6 +159,7 @@ fn unknown_key(key: &str) -> String {
 
 /// When a change of `key` applies.
 fn applies_of(key: &str) -> SettingApplies {
+    // A session key reaches a host when it starts, so a change applies at the next launch.
     if key == SELF_TURN_CAP || key == PROPOSE_PER_MIN {
         SettingApplies::NextTurn
     } else {
@@ -103,7 +174,9 @@ fn merge_of(_key: &str) -> SettingMerge {
 
 /// The built-in value of a known key.
 fn built_in(key: &str) -> SettingValue {
-    if key == SELF_TURN_CAP {
+    if let Some((_, _, default)) = session_key(key) {
+        SettingValue::Number(default)
+    } else if key == SELF_TURN_CAP {
         SettingValue::Number(DEFAULT_SELF_TURN_CAP)
     } else if key == PROPOSE_PER_MIN {
         SettingValue::Number(DEFAULT_PROPOSE_PER_MIN)
@@ -115,6 +188,14 @@ fn built_in(key: &str) -> SettingValue {
 /// Check a value against the rule of its key, and give it back as a typed value. A value that
 /// fails is refused with the rule.
 fn check_value(key: &str, value: &Value) -> Result<SettingValue, String> {
+    if let Some((lo, hi, _)) = session_key(key) {
+        return match value.as_u64() {
+            Some(n) if (lo..=hi).contains(&n) => Ok(SettingValue::Number(n)),
+            _ => Err(format!(
+                "{key} is a whole number from {lo} to {hi}, not {value}"
+            )),
+        };
+    }
     match key {
         SELF_TURN_CAP => match value.as_u64() {
             Some(n) if n <= SELF_TURN_CAP_MAX => Ok(SettingValue::Number(n)),
@@ -188,6 +269,30 @@ pub struct Resolved {
     pub layers: Vec<SettingLayer>,
     /// The rows the resolved value hides.
     pub masked: Vec<SettingLayer>,
+}
+
+/// The four `session.*` values a host's launch resolved, each with the scope it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSettings {
+    pub replay_bytes: (u64, String),
+    pub exit_hold_minutes: (u64, String),
+    pub attach_wait_ms: (u64, String),
+    pub hook_wait_seconds: (u64, String),
+}
+
+impl SessionSettings {
+    /// The record's `settings` entries: each key with its value and scope.
+    pub fn as_record(&self) -> Vec<(&'static str, Value)> {
+        [
+            (SESSION_REPLAY_BYTES, &self.replay_bytes),
+            (SESSION_EXIT_HOLD_MINUTES, &self.exit_hold_minutes),
+            (SESSION_ATTACH_WAIT_MS, &self.attach_wait_ms),
+            (SESSION_HOOK_WAIT_SECONDS, &self.hook_wait_seconds),
+        ]
+        .into_iter()
+        .map(|(k, (v, scope))| (k, serde_json::json!({ "value": v, "scope": scope })))
+        .collect()
+    }
 }
 
 /// Who called a settings write.
@@ -423,6 +528,33 @@ impl Controller {
                     "built_in".to_string(),
                 )
             }
+        }
+    }
+
+    /// The four `session.*` keys resolved for a project: each with its value and the scope it came
+    /// from. A seat has no agent, so the chain is the project's, then the server's. A resolver
+    /// failure is the built-in, with one stderr line: a launch is never held by a settings read.
+    pub(super) fn session_settings(&self, project: Option<&str>) -> SessionSettings {
+        let one = |key: &str, default: u64| -> (u64, String) {
+            match self.resolve_setting(key, project, None) {
+                Ok(Resolved {
+                    value: SettingValue::Number(n),
+                    from_text,
+                    ..
+                }) => (n, from_text),
+                Ok(_) => (default, "built_in".to_string()),
+                Err(why) => {
+                    eprintln!("pulse-factory: {key} is not read: {why}");
+                    (default, "built_in".to_string())
+                }
+            }
+        };
+        let [replay, hold, wait, hook] = SESSION_KEYS.map(|(k, _, _, d)| one(k, d));
+        SessionSettings {
+            replay_bytes: replay,
+            exit_hold_minutes: hold,
+            attach_wait_ms: wait,
+            hook_wait_seconds: hook,
         }
     }
 

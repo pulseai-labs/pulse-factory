@@ -492,6 +492,7 @@ fn the_omp_adapter_gets_its_roots_and_the_live_forge_has_hosts() {
         plugin_roots: vec![PathBuf::from("/plugins")],
         paper: None,
         forge_repo: "acme/widgets".into(),
+        hosts: common::no_hosts(),
     };
     let cfg = omp_config(&spec);
     assert_eq!(cfg.plugin_roots, vec![PathBuf::from("/plugins")]);
@@ -576,6 +577,7 @@ fn the_paper_forge_has_api_hosts_too() {
         plugin_roots: vec![],
         paper: Some(dir.path().to_path_buf()),
         forge_repo: bare.display().to_string(),
+        hosts: common::no_hosts(),
     };
     let built = LivePorts.build(&spec).unwrap();
     assert_eq!(built.forge_api_hosts, "forge.invalid");

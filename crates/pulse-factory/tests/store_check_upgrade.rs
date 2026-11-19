@@ -317,3 +317,19 @@ fn it_exits_one_on_a_store_it_cannot_read() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!text(&out.stderr).is_empty());
 }
+
+/// `r2.s2.w3`: the range the verb reports and enforces is the host client's, not a constant of the
+/// verb's own.
+#[test]
+fn the_protocol_range_is_the_host_clients() {
+    let sb = Sandbox::new();
+    let out = sb.run(&["store", "check-upgrade", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let v = report(&out);
+    assert_eq!(v["protocol"]["min"], pf_host::protocol::PROTO_MIN, "{v}");
+    assert_eq!(v["protocol"]["max"], pf_host::protocol::PROTO_MAX, "{v}");
+    assert_eq!(
+        pulse_factory::store_verbs::HOST_PROTOCOLS,
+        pf_host::protocol::PROTO_MIN..=pf_host::protocol::PROTO_MAX
+    );
+}

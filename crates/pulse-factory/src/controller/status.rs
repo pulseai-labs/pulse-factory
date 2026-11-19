@@ -13,19 +13,41 @@ use crate::format::dollars;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-pub fn build(c: &Controller, h: &RunHandle) -> Value {
+/// The answer for one run. A store read that fails is an error that names the run and the cause:
+/// it is never an empty list, which would read as a run with no units (the debt line of
+/// `r2.s2.w3`, audit 10).
+pub fn build(c: &Controller, h: &RunHandle) -> Result<Value, String> {
     let id = &h.info.run_id;
-    let run = c.store.run(id).ok().flatten();
-    let nodes = c.store.nodes(id).unwrap_or_default();
-    let sessions = c.store.sessions(id).unwrap_or_default();
-    let admissions = c.store.admissions(id).unwrap_or_default();
+    let cannot =
+        |e: pf_engine::port::store::StoreError| format!("cannot read run {id} from the store: {e}");
+    let run = c.store.run(id).map_err(cannot)?;
+    let nodes = c.store.nodes(id).map_err(cannot)?;
+    let sessions = c.store.sessions(id).map_err(cannot)?;
+    let admissions = c.store.admissions(id).map_err(cannot)?;
     let open_requests: Vec<_> = c
         .store
         .requests(id)
-        .unwrap_or_default()
+        .map_err(cannot)?
         .into_iter()
         .filter(|r| r.status == RequestStatus::Open)
         .collect();
+    // What an operator should know about the hosts (`r2.s2.w3`, audit 9 and 12).
+    let mut warnings: Vec<String> = Vec::new();
+    if c.hosts.launcher_name() == "detached"
+        && c.hosts
+            .own_cgroup()
+            .is_some_and(|cg| cg.ends_with(".service"))
+    {
+        warnings.push(
+            "the controller runs in a service's cgroup with the detached launcher, so its hosts \
+             share that cgroup and a group kill of the service ends them: set \
+             PF_HOST_LAUNCHER=systemd"
+                .to_string(),
+        );
+    }
+    if let Some(why) = c.hosts.sweep_skipped() {
+        warnings.push(format!("orphan sweep skipped: {why}"));
+    }
     let end_reason = admissions
         .iter()
         .rev()
@@ -103,7 +125,7 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
         })
         .collect();
 
-    json!({
+    Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "run": h.info.run_id,
         "spine": h.info.spine,
@@ -112,6 +134,8 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
         // The project of the chat that proposed the run; null for a CLI arm (`r1.s4.w2`).
         "project_id": run.as_ref().and_then(|r| r.project_id.clone()),
         "state": run.as_ref().map_or("unknown", |r| r.state.as_str()),
+        "launcher": c.hosts.launcher_name(),
+        "warnings": warnings,
         "driven": h.driven.load(Ordering::SeqCst),
         "halted_reason": run.as_ref().and_then(|r| r.halted_reason.clone()),
         "degraded": h.engine.degraded(),
@@ -127,7 +151,7 @@ pub fn build(c: &Controller, h: &RunHandle) -> Value {
             "cost_micros": total[4],
             "cost": dollars(total[4]),
         },
-    })
+    }))
 }
 
 fn runtime_of(h: &RunHandle, role: &str) -> String {

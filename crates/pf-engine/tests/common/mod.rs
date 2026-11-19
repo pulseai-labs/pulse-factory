@@ -484,6 +484,11 @@ pub struct FakeAgent {
     pub dead: Mutex<HashSet<String>>,
     pub interrupts: AtomicU64,
     next: AtomicU64,
+    /// What `rebind` answers, by session reference. A reference with no entry gets the default
+    /// of an adapter with no `rebind` of its own.
+    pub rebinds: Mutex<HashMap<String, RebindOutcome>>,
+    /// Every `rebind` and `is_alive` call, in order, as `rebind:<ref>` and `alive:<ref>`.
+    pub calls: Mutex<Vec<String>>,
 }
 
 impl FakeAgent {
@@ -501,6 +506,18 @@ impl FakeAgent {
 
     pub fn launch_count(&self) -> usize {
         self.launches.lock().unwrap().len()
+    }
+
+    /// Script the answer of `rebind` for one session reference.
+    pub fn script_rebind(&self, process_ref: &str, outcome: RebindOutcome) {
+        self.rebinds
+            .lock()
+            .unwrap()
+            .insert(process_ref.to_string(), outcome);
+    }
+
+    pub fn call_log(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
     }
 }
 
@@ -546,7 +563,26 @@ impl AgentPort for FakeAgent {
         self.launch(successor)
     }
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("alive:{}", session.0));
         Ok(!self.dead.lock().unwrap().contains(&session.0))
+    }
+    fn rebind(&self, session: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("rebind:{}", session.0));
+        Ok(self
+            .rebinds
+            .lock()
+            .unwrap()
+            .get(&session.0)
+            .cloned()
+            .unwrap_or(RebindOutcome::Lost {
+                cause: NO_SESSION_HOST.to_string(),
+            }))
     }
     fn stop(&self, _session: &SessionRef) -> Result<(), AgentError> {
         Ok(())

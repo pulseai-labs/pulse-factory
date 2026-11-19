@@ -3,19 +3,55 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pf_adapter_fake::{PaperAdapter, PaperConfig};
 use pf_engine::port::agent::*;
+use pf_engine::port::host::SessionHosts;
 
-fn setup(script: Option<&str>) -> (tempfile::TempDir, PaperAdapter) {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("seats")).unwrap();
-    if let Some(body) = script {
-        std::fs::write(dir.path().join("seats/implementer.sh"), body).unwrap();
+mod hosts_support;
+use hosts_support::{Dirs, Guard, TestHosts};
+
+/// A paper env directory, a host service on a detached launcher, and the guard that stops every
+/// host when the test ends, pass or fail.
+struct Fx {
+    _guard: Guard,
+    _dirs: Dirs,
+    tmp: tempfile::TempDir,
+    hosts: Arc<TestHosts>,
+}
+
+impl Fx {
+    fn path(&self) -> &Path {
+        self.tmp.path()
     }
-    let adapter = PaperAdapter::new(PaperConfig::new(dir.path().to_path_buf(), vec![]));
-    (dir, adapter)
+
+    /// A new adapter over the same paper env and the same host files: a controller that started again.
+    fn adapter(&self) -> PaperAdapter {
+        PaperAdapter::new(
+            PaperConfig::new(self.tmp.path().to_path_buf(), vec![]),
+            self.hosts.clone() as Arc<dyn SessionHosts>,
+        )
+    }
+}
+
+fn setup(script: Option<&str>) -> (Fx, PaperAdapter) {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("seats")).unwrap();
+    if let Some(body) = script {
+        std::fs::write(tmp.path().join("seats/implementer.sh"), body).unwrap();
+    }
+    let dirs = Dirs::new();
+    let hosts = TestHosts::new(&dirs);
+    let fx = Fx {
+        _guard: Guard(hosts.clone()),
+        _dirs: dirs,
+        tmp,
+        hosts,
+    };
+    let adapter = fx.adapter();
+    (fx, adapter)
 }
 
 fn plan(cwd: &Path, extra: &[(&str, &str)]) -> LaunchPlan {
@@ -242,10 +278,11 @@ fn resolve_plugin_reads_the_plugin_roots() {
         "{\"version\":\"1.26.1\"}",
     )
     .unwrap();
-    let a = PaperAdapter::new(PaperConfig::new(
-        dir.path().to_path_buf(),
-        vec![dir.path().join("plugins")],
-    ));
+    let dirs = Dirs::new();
+    let a = PaperAdapter::new(
+        PaperConfig::new(dir.path().to_path_buf(), vec![dir.path().join("plugins")]),
+        TestHosts::new(&dirs) as Arc<dyn SessionHosts>,
+    );
     let found = a.resolve_plugin("methodkit", "1.26.0").unwrap();
     assert_eq!(
         (found.version.as_str(), PathBuf::from(&found.path)),
@@ -410,4 +447,310 @@ fn a_delivery_to_an_ended_session_is_refused_and_writes_nothing() {
 
     // So is a session the adapter does not know.
     assert!(a.deliver(&SessionRef("paper-99".into()), "x").is_err());
+}
+
+// ------------------------------------------------------------------ hosts (r2.s2.w3)
+
+fn read(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_default()
+}
+
+/// The names the paper adapter takes from the controller's own environment.
+const INHERITED: [&str; 13] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "TMPDIR",
+    "PF_STATE_DIR",
+    "PF_SHARE_DIR",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
+];
+
+#[test]
+fn a_launch_starts_the_script_in_a_host_on_pipes_with_the_listed_environment_and_nothing_else() {
+    // The script stays alive, so the host and its launch record are still there to read.
+    let (dir, a) = setup(Some(
+        "env > \"$OUT/env.tmp\" && mv \"$OUT/env.tmp\" \"$OUT/env.txt\"\nsleep 600\n",
+    ));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let s = a
+        .launch(&plan(
+            dir.path(),
+            &[("env.OUT", out.to_str().unwrap()), ("env.GREETING", "hi")],
+        ))
+        .unwrap();
+    wait_until("the script to list its environment", || {
+        out.join("env.txt").exists()
+    });
+    let names: Vec<String> = read(&out.join("env.txt"))
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.to_string()))
+        .collect();
+    // The shell adds a few variables of its own.
+    let shell = ["PWD", "OLDPWD", "SHLVL", "_"];
+    let allowed = |n: &str| {
+        INHERITED.contains(&n)
+            || shell.contains(&n)
+            || ["OUT", "GREETING", "PF_PAPER_EVENTS", "PF_PAPER_INBOX"].contains(&n)
+    };
+    let stray: Vec<&String> = names.iter().filter(|n| !allowed(n)).collect();
+    assert!(
+        stray.is_empty(),
+        "the host leaked {stray:?} (all: {names:?})"
+    );
+    assert!(names.contains(&"GREETING".to_string()), "{names:?}");
+    assert!(names.contains(&"PF_PAPER_EVENTS".to_string()), "{names:?}");
+    // The test process itself runs under cargo, so these are in its own environment.
+    for inherited_by_cargo in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME"] {
+        if std::env::var_os(inherited_by_cargo).is_some() {
+            assert!(
+                !names.contains(&inherited_by_cargo.to_string()),
+                "{inherited_by_cargo} must not reach the child"
+            );
+        }
+    }
+    // The script ran in a host, on pipes.
+    let unit = &s.0;
+    let record = dir.hosts.launched_record(unit).unwrap().unwrap();
+    assert_eq!(record["transport"], serde_json::json!({"kind": "pipes"}));
+    assert_eq!(record["argv"][0], "/bin/sh");
+    assert_eq!(record["runtime"], serde_json::json!({"id": "paper"}));
+    assert!(record["runtime"].get("binary_path").is_none(), "{record}");
+    assert!(
+        a.process_id(&s).is_some(),
+        "a live session has a process ID"
+    );
+    a.stop(&s).unwrap();
+    assert!(a.process_id(&s).is_none(), "a stopped session has none");
+}
+
+#[test]
+fn the_session_key_reaches_the_child_and_the_record_holds_only_its_hash() {
+    let secret = "pfk_0123456789abcdef0123456789abcdef";
+    let (dir, a) = setup(Some(
+        "echo \"$PF_SESSION_KEY\" > \"$OUT/key.tmp\" && mv \"$OUT/key.tmp\" \"$OUT/key.txt\"\nsleep 600\n",
+    ));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let s = a
+        .launch(&plan(
+            dir.path(),
+            &[
+                ("env.OUT", out.to_str().unwrap()),
+                ("env.PF_SESSION_KEY", secret),
+            ],
+        ))
+        .unwrap();
+    wait_until("the script to write the key", || {
+        out.join("key.txt").exists()
+    });
+    assert_eq!(read(&out.join("key.txt")).trim(), secret);
+    let record_text = dir
+        .hosts
+        .launched_record(&s.0)
+        .unwrap()
+        .unwrap()
+        .to_string();
+    assert!(!record_text.contains(secret), "the record holds the key");
+    let want = format!("sha256:{}", pf_host::sha256::sha256_hex(secret.as_bytes()));
+    let record: serde_json::Value = serde_json::from_str(&record_text).unwrap();
+    assert_eq!(record["env"]["PF_SESSION_KEY"], want);
+    assert_eq!(record["settings"]["env.PF_SESSION_KEY"], want);
+    assert_eq!(
+        record["secret_names"],
+        serde_json::json!(["PF_SESSION_KEY"])
+    );
+}
+
+const TWO_USAGES_A_PUSH_AND_A_TURN_END: &str = r#"echo '{"usage":{"input_tokens":3,"output_tokens":1,"cache_read_tokens":0,"cache_write_tokens":0,"cost_micros":30}}' >> "$PF_PAPER_EVENTS"
+echo '{"usage":{"input_tokens":4,"output_tokens":2,"cache_read_tokens":5,"cache_write_tokens":6,"cost_micros":70}}' >> "$PF_PAPER_EVENTS"
+echo '{"push":{"branch":"work/u1","sha":"abc123"}}' >> "$PF_PAPER_EVENTS"
+echo '{"turn_end":true}' >> "$PF_PAPER_EVENTS"
+sleep 600
+"#;
+
+fn pushes(events: &[SessionEvent]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::Push {
+                id, branch, sha, ..
+            } => Some((id.clone(), branch.clone(), sha.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn after_a_rebind_usage_is_the_same_sum_each_push_comes_once_and_the_turn_rule_holds() {
+    let (dir, a) = setup(Some(TWO_USAGES_A_PUSH_AND_A_TURN_END));
+    let s = a.launch(&plan(dir.path(), &[])).unwrap();
+    wait_until("the turn to end", || a.status(&s).unwrap().turn_ended);
+    let before = a.usage(&s).unwrap();
+    let first_pushes = pushes(&a.drain_events(&s).unwrap());
+    assert_eq!(first_pushes.len(), 1, "{first_pushes:?}");
+
+    // The controller stops: a new adapter over the same host files rebinds the same unit.
+    drop(a);
+    let b = dir.adapter();
+    assert_eq!(b.rebind(&s).unwrap(), RebindOutcome::Survived);
+    assert!(b.is_alive(&s).unwrap());
+    assert_eq!(b.usage(&s).unwrap(), before, "the usage is the same sum");
+    assert_eq!(
+        before,
+        Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            cache_read_tokens: 5,
+            cache_write_tokens: 6,
+            cost_micros: 100
+        }
+    );
+    let again = pushes(&b.drain_events(&s).unwrap());
+    assert_eq!(again, first_pushes, "the push comes once, with the same ID");
+    assert!(
+        b.drain_events(&s).unwrap().is_empty(),
+        "a drain takes the events once"
+    );
+    assert!(b.status(&s).unwrap().turn_ended);
+    assert!(b.process_id(&s).is_some());
+
+    // A message delivered after the last turn_end reads as working, also to the next controller.
+    b.deliver(&s, "go on").unwrap();
+    let st = b.status(&s).unwrap();
+    assert!(
+        !st.turn_ended && st.state == SessionState::Working,
+        "{st:?}"
+    );
+    drop(b);
+    let c = dir.adapter();
+    assert_eq!(c.rebind(&s).unwrap(), RebindOutcome::Survived);
+    let st = c.status(&s).unwrap();
+    assert!(
+        !st.turn_ended && st.state == SessionState::Working,
+        "one turn_end and one message: still working: {st:?}"
+    );
+    c.stop(&s).unwrap();
+}
+
+#[test]
+fn a_gone_host_is_lost_after_a_rebind() {
+    let (dir, a) = setup(Some("sleep 600\n"));
+    let s = a.launch(&plan(dir.path(), &[])).unwrap();
+    a.stop(&s).unwrap();
+    wait_until("the host to end", || !dir.hosts.is_live(&s.0));
+    let b = dir.adapter();
+    assert!(
+        matches!(b.rebind(&s).unwrap(), RebindOutcome::Lost { .. }),
+        "a gone host is lost"
+    );
+    assert!(!b.is_alive(&s).unwrap());
+}
+
+#[test]
+fn a_seat_that_ended_while_the_controller_was_down_is_survived_and_reads_as_ended() {
+    // The script waits for a release, so the first adapter sees no exit: the seat ends while no
+    // controller is attached.
+    let body = "echo $$ > \"$OUT/self.pid\"\nwhile [ ! -e \"$OUT/release\" ]; do sleep 0.02; done\necho '{\"usage\":{\"input_tokens\":9}}' >> \"$PF_PAPER_EVENTS\"\nexit 0\n";
+    let (dir, a) = setup(Some(body));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let s = a
+        .launch(&plan(dir.path(), &[("env.OUT", out.to_str().unwrap())]))
+        .unwrap();
+    wait_until("the script to start", || out.join("self.pid").exists());
+    let pid: u32 = read(&out.join("self.pid")).trim().parse().unwrap();
+    // The first controller is gone: it reads nothing more.
+    std::mem::forget(a);
+    std::fs::write(out.join("release"), "").unwrap();
+    wait_until("the child to end", || !alive(pid));
+    let b = dir.adapter();
+    assert_eq!(b.rebind(&s).unwrap(), RebindOutcome::Survived);
+    wait_until("the session to read as ended", || {
+        b.status(&s).unwrap().state == SessionState::Ended
+    });
+    assert!(!b.is_alive(&s).unwrap());
+    assert_eq!(b.usage(&s).unwrap().input_tokens, 9);
+    wait_until("the host to end after the exit ack", || {
+        !dir.hosts.is_live(&s.0)
+    });
+}
+
+#[test]
+fn the_childs_exit_ends_the_session_and_the_host_is_gone_after_the_exit_ack() {
+    let (dir, a) = setup(Some(
+        "echo '{\"usage\":{\"input_tokens\":5}}' >> \"$PF_PAPER_EVENTS\"\nexit 3\n",
+    ));
+    let s = a.launch(&plan(dir.path(), &[])).unwrap();
+    wait_until("the session to end", || {
+        a.status(&s).unwrap().state == SessionState::Ended
+    });
+    assert!(!a.is_alive(&s).unwrap());
+    assert_eq!(a.usage(&s).unwrap().input_tokens, 5, "the last line counts");
+    wait_until("the host to end after the exit ack", || {
+        !dir.hosts.is_live(&s.0)
+    });
+}
+
+#[test]
+fn stop_ends_the_childs_group_the_host_goes_and_a_second_stop_is_safe() {
+    let (dir, a) = setup(Some(
+        "(trap '' HUP; exec sleep 600) &\necho $! > \"$OUT/child.pid\"\nwait\n",
+    ));
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let s = a
+        .launch(&plan(dir.path(), &[("env.OUT", out.to_str().unwrap())]))
+        .unwrap();
+    wait_until("the child to start", || out.join("child.pid").exists());
+    let child: u32 = read(&out.join("child.pid")).trim().parse().unwrap();
+    assert!(alive(child));
+    a.stop(&s).unwrap();
+    a.stop(&s).unwrap();
+    wait_until("the group to end", || !alive(child));
+    wait_until("the host to end", || !dir.hosts.is_live(&s.0));
+    assert!(!a.is_alive(&s).unwrap());
+}
+
+#[test]
+fn two_launches_in_two_adapters_never_share_an_events_file_or_a_push_id() {
+    let body = "echo '{\"push\":{\"branch\":\"work/u1\",\"sha\":\"abc123\"}}' >> \"$PF_PAPER_EVENTS\"\nsleep 600\n";
+    let (dir, a) = setup(Some(body));
+    let first = a.launch(&plan(dir.path(), &[])).unwrap();
+    let mut first_events = Vec::new();
+    wait_until("the first push", || {
+        first_events.extend(a.drain_events(&first).unwrap());
+        !pushes(&first_events).is_empty()
+    });
+    // A second controller lifetime: its adapter counts from the start again.
+    let b = dir.adapter();
+    let second = b.launch(&plan(dir.path(), &[])).unwrap();
+    let mut second_events = Vec::new();
+    wait_until("the second push", || {
+        second_events.extend(b.drain_events(&second).unwrap());
+        !pushes(&second_events).is_empty()
+    });
+    assert_ne!(first, second, "the unit never repeats");
+    let (id1, id2) = (
+        pushes(&first_events)[0].0.clone(),
+        pushes(&second_events)[0].0.clone(),
+    );
+    assert_ne!(id1, id2, "a push ID is never reused");
+    assert!(id1.starts_with(&first.0) && id2.starts_with(&second.0));
+    let files = |unit: &str| {
+        (
+            dir.path().join("paper").join(format!("{unit}.events")),
+            dir.path().join("paper").join(format!("{unit}.inbox")),
+        )
+    };
+    let (e1, e2) = (files(&first.0), files(&second.0));
+    assert_ne!(e1.0, e2.0);
+    assert!(e1.0.exists() && e2.0.exists());
 }
