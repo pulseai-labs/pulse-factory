@@ -6,13 +6,14 @@
 use std::collections::BTreeMap;
 
 use pf_engine::port::store::{
-    ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatItemKind,
-    ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit, Committed, DeviceRow, Effect,
-    HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NewChatItem, NewChatSession, NewDevice, NewHost,
-    NewLaunchRecord, NewProject, NewRequest, NodeKind, NodeRow, ORCHESTRATOR_AGENT, ProjectKind,
-    ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow,
-    RunState, SessionRow, SessionWorktree, SettingRow, SettingScope, Store, StoreError,
-    TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
+    ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatHostCursor,
+    ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit,
+    Committed, DeviceRow, Effect, HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NewChatItem,
+    NewChatSession, NewDevice, NewHost, NewLaunchRecord, NewProject, NewRequest, NodeKind, NodeRow,
+    ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
+    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow,
+    SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy,
+    WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -507,7 +508,7 @@ fn worktree_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRow> {
 
 const CHAT_SESSION_COLUMNS: &str = "id, project_id, worktree_id, agent_id, runtime, runtime_session_ref, \
      state, model, effort, permission_mode, input_tokens, output_tokens, cache_read_tokens, \
-     cache_write_tokens, cost_micros, created_at, updated_at, ended_at, runtime_options";
+     cache_write_tokens, cost_micros, created_at, updated_at, ended_at, runtime_options, host_cursor";
 
 /// A JSON object of text values, read from a row. Any other shape fails the read.
 fn option_map(json: &str) -> rusqlite::Result<BTreeMap<String, String>> {
@@ -542,7 +543,76 @@ fn chat_session_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSessionRow> 
         updated_at: r.get(16)?,
         ended_at: r.get(17)?,
         runtime_options: option_map(&r.get::<_, String>(18)?)?,
+        host_cursor: r
+            .get::<_, Option<String>>(19)?
+            .map(|text| {
+                serde_json::from_str::<ChatHostCursor>(&text).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        19,
+                        rusqlite::types::Type::Text,
+                        format!("the host cursor is not a cursor object: {e}").into(),
+                    )
+                })
+            })
+            .transpose()?,
     })
+}
+
+/// Write the mark into the session's cursor, in the open transaction. The rules: a mark of another
+/// unit or incarnation replaces the cursor (the new host counts its output from 0, and nothing of
+/// the old one was acknowledged to it); within one host `committed` never moves back, and a
+/// checkpoint sets `acked` and the state only when it is not older than the one held.
+fn write_host_mark(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    mark: &ChatHostMark,
+) -> Result<(), StoreError> {
+    let held: Option<String> = tx
+        .query_row(
+            "SELECT host_cursor FROM chat_sessions WHERE id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
+    let held = held
+        .map(|text| {
+            serde_json::from_str::<ChatHostCursor>(&text)
+                .map_err(|e| store_err(format!("the host cursor of {session_id} is bad: {e}")))
+        })
+        .transpose()?;
+    let next = match held {
+        Some(c) if c.unit == mark.unit && c.incarnation == mark.incarnation => {
+            let committed = c.committed.max(mark.at);
+            match &mark.checkpoint {
+                Some(state) if mark.at >= c.acked => ChatHostCursor {
+                    committed,
+                    acked: mark.at,
+                    checkpoint: Some(state.clone()),
+                    ..c
+                },
+                _ => ChatHostCursor { committed, ..c },
+            }
+        }
+        _ => ChatHostCursor {
+            unit: mark.unit.clone(),
+            incarnation: mark.incarnation,
+            committed: mark.at,
+            acked: if mark.checkpoint.is_some() {
+                mark.at
+            } else {
+                0
+            },
+            checkpoint: mark.checkpoint.clone(),
+        },
+    };
+    let text = serde_json::to_string(&next)
+        .map_err(|e| store_err(format!("cannot encode the host cursor: {e}")))?;
+    tx.execute(
+        "UPDATE chat_sessions SET host_cursor = ?2 WHERE id = ?1",
+        params![session_id, text],
+    )
+    .map_err(sql_error)?;
+    Ok(())
 }
 
 const CHAT_ITEM_COLUMNS: &str = "session_id, seq, kind, payload, tool_input, tool_input_bytes, \
@@ -1573,6 +1643,9 @@ fn append_item(conn: &mut Connection, item: &NewChatItem) -> Result<ChatItemRow,
         )
         .map_err(sql_error)?;
     }
+    if let Some(mark) = &item.host {
+        write_host_mark(&tx, &item.session_id, mark)?;
+    }
     let row = tx
         .query_row(
             &format!(
@@ -1584,6 +1657,29 @@ fn append_item(conn: &mut Connection, item: &NewChatItem) -> Result<ChatItemRow,
         .map_err(sql_error)?;
     tx.commit().map_err(sql_error)?;
     Ok(row)
+}
+
+/// Write a mark that comes with no item, in one transaction.
+fn set_host_mark(
+    conn: &mut Connection,
+    session_id: &str,
+    mark: &ChatHostMark,
+) -> Result<(), StoreError> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_error)?;
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?1)",
+            [session_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_error)?;
+    if !known {
+        return Err(store_err(format!("no chat session {session_id}")));
+    }
+    write_host_mark(&tx, session_id, mark)?;
+    tx.commit().map_err(sql_error)
 }
 
 fn collect<T>(
@@ -2125,6 +2221,11 @@ impl Store for SqliteStore {
 
     fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError> {
         self.call(move |conn| append_item(conn, &item))?
+    }
+
+    fn set_chat_host_mark(&self, session_id: &str, mark: ChatHostMark) -> Result<(), StoreError> {
+        let session_id = session_id.to_string();
+        self.call(move |conn| set_host_mark(conn, &session_id, &mark))?
     }
 
     fn launch_record(

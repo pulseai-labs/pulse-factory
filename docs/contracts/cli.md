@@ -49,9 +49,11 @@ project or agent, `propose` (`r1.s4`), which posts a start card into the calling
   `field()`, and no line holds a message, a tool text, a token or a key:
 
   ```
-  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in>
+  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in> [unit=<host unit> incarnation=<n> binary_sha256=<hex>]
   <UTC> chat turn session=S-1 cause=operator input_tokens=9 output_tokens=12 cache_read_tokens=0 cache_write_tokens=13006 cost_micros=3465 duration_ms=1042 stop=end_turn is_error=false
-  <UTC> chat stop session=S-1 reason=end|idle|halt|exited|shutdown|option [code=<n>]
+  <UTC> chat stop session=S-1 reason=end|idle|halt|exited|option [code=<n>]
+  <UTC> chat detach session=S-1
+  <UTC> chat rebind session=S-1 unit=<host unit> incarnation=<n> outcome=survived|lost|unreachable
   <UTC> chat stop session=S-1 reason=self_turn_cap self_turns=<n> cap=<n> from=<scope|built_in>
   ```
 
@@ -643,10 +645,25 @@ stream (`api.md`).
   released early to make room, and the refusal names every live chat and why it holds its process:
   `the chat process cap (4) is reached: S-3 waits for an answer since <t>; S-5 holds background task
   <id> since <t>; S-7 runs a turn since <t>; S-8 is idle until <t>; end one with pulse-factory
-  session end`. A pending card keeps its process live, so it counts against the cap. `halt`, `end` and
-  a controller stop (`chat stop reason=shutdown`) stop the processes, and the unit states
-  `KillMode=control-group` so that systemd ends any child left. A controller start sets each live
-  session `idle` and closes its pending requests as `lost`; the next `send` resumes it.
+  session end`. A pending card keeps its process live, so it counts against the cap. A chat process
+  that survived a controller restart is live too: it counts against the cap, and its idle clock
+  starts at the rebind. `halt`, `end` and `project remove --end-sessions` stop each chat's process
+  through its session host. A controller stop stops no chat: each adapter drops its connection
+  (`chat detach session=S-1`), the host keeps the process, and the unit states
+  `KillMode=control-group` for the controller's own unit only.
+- **A controller start and a chat.** Before the socket binds, the controller rebinds each live chat
+  session to its newest live `chat` host (tier 1). A host that answers keeps its process and its
+  pending requests: the session stays live, the output the host kept is read again from the last
+  acknowledged position, and no item is stored twice. A host that is gone sets the session `idle`,
+  closes each pending request as `lost` and adds a `host_lost` notice. A host that does not answer
+  does the same with a `host_unreachable` notice and nothing starts; the next `send` stops it first.
+  A session with no host row is set `idle` as before. Each outcome is one `chat rebind` line. The next
+  `send` of a lost session resumes it from the newest revision of its launch record: a `current` key
+  (`chat.deny_commands`, `chat.self_turn_cap`, `chat.propose_per_min`) is read now, a `record` key
+  (`session.*`) comes from the record, and the CLI copy the chat was launched with must still be in
+  place with the same SHA-256, or the resume fails with `RuntimeNotReady` and starts nothing. A
+  `session set` writes the next revision of the record. A host that dropped output before the
+  controller read it shows an `output_lost` notice.
 - **Context lost.** When the runtime cannot resume a session (its transcript is missing), the
   session is marked `context lost: <why>`, a `notice` item says so, and `send` is refused at once.
   Nothing opens a fresh context for a session that has had a message (an `operator_message` item).

@@ -418,3 +418,78 @@ fn the_engine_check_fires_on_the_chat_runtime_names_on_inline_bad_samples() {
         Vec::<String>::new()
     );
 }
+
+// ------------------------------------------------------------------ the chat port names no host crate
+
+/// What names a launcher or a host crate in this text: the launcher words as whole words or
+/// identifier parts, and the host and replay crates by name. The chat port names a unit, a cursor
+/// and a checkpoint, never what starts the host (r2.s2.w5, ADR-0002).
+fn launcher_or_host_crate_in(text: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for part in parts(text) {
+        if matches!(
+            part.as_str(),
+            "systemd" | "launchd" | "journald" | "systemctl"
+        ) {
+            hits.push(part);
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    for name in ["pf-host", "pf_host", "pf-claude", "pf_claude"] {
+        if lower.contains(name) {
+            hits.push(name.to_string());
+        }
+    }
+    hits
+}
+
+#[test]
+fn the_chat_port_names_no_launcher_and_no_host_crate() {
+    let path = engine_dir().join("src/port/chat.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut findings = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        for hit in launcher_or_host_crate_in(line) {
+            findings.push(format!("{}:{}: {hit}", path.display(), n + 1));
+        }
+    }
+    assert!(findings.is_empty(), "{}", findings.join("\n"));
+    // The new calls are there, so the scan reads the file that holds them.
+    for word in [
+        "ChatDelivery",
+        "OutputLost",
+        "set_hosts",
+        "rebind",
+        "detach",
+        "ack",
+    ] {
+        assert!(text.contains(word), "port/chat.rs does not hold {word}");
+    }
+}
+
+#[test]
+fn the_launcher_scan_fires_on_an_inline_bad_sample_and_passes_the_port_words() {
+    for sample in [
+        "use pf_host::Detached;",
+        "// started under systemd",
+        "let unit = \"pf-host-x\";",
+        "fn systemctl_stop() {}",
+        "// launchd job",
+    ] {
+        assert!(
+            !launcher_or_host_crate_in(sample).is_empty(),
+            "the sample must fire: {sample}"
+        );
+    }
+    for sample in [
+        "pub fn rebind(&self, unit: &str, point: &ChatResumePoint) -> ChatRebind;",
+        "// the cursor after the last output line",
+        "pub struct ChatHost { pub unit: String, pub incarnation: u32 }",
+    ] {
+        assert_eq!(
+            launcher_or_host_crate_in(sample),
+            Vec::<String>::new(),
+            "{sample}"
+        );
+    }
+}

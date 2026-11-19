@@ -1,4 +1,5 @@
-//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
+//! AC-14 and AC-15 of `r2.s2.w5` (d30's guard and its static checks, and the chat and start demos that
+//! leave no host: `run` asserts it for each script it runs), AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
 //! AC-9 (`r1.s2.w4`), AC-14 (`r1.s3.w3`) and AC-27 (`r1.s4.w4`): the demo scripts run against the built binary, and each fails when its journey is
 //! broken. The scripts run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`,
 //! and no build. d14 (`community-edition.sh`) is the exception that the five tests at the end cover: it
@@ -272,6 +273,141 @@ fn starts_one(path: &Path, text: &str) {
         text.contains("trap cleanup EXIT"),
         "{name} has no exit trap named cleanup"
     );
+}
+
+/// d30 (`host-restart.sh`, `r2.s2.w5`, AC-14 and AC-15): the script needs a real systemd user
+/// manager, so a seat inside the fence cannot run it. A runtime directory and a bus that do not exist
+/// stop it at its guard, in a fenced seat and in CI alike: one line on stderr, exit 1, at once.
+#[test]
+fn host_restart_with_no_user_manager_exits_1_within_5_s_with_the_guard_text() {
+    let start = Instant::now();
+    let out = Command::new("bash")
+        .arg(script("host-restart.sh"))
+        .env("XDG_RUNTIME_DIR", "/nonexistent")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .output()
+        .expect("bash starts");
+    let took = start.elapsed();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{:?}\n{}",
+        out.status,
+        stderr(&out)
+    );
+    assert_eq!(
+        stderr(&out).trim_end(),
+        "host-restart: no systemd user manager (run outside the seat fence)"
+    );
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+/// The code lines of a script: no blank line and no comment.
+fn code_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn host_restart_builds_nothing_makes_a_temp_directory_and_takes_its_binaries_by_variable() {
+    let text = std::fs::read_to_string(script("host-restart.sh")).unwrap();
+    for bad in [
+        "cargo build",
+        "cargo run",
+        "cargo install",
+        "gh pr",
+        "gh api",
+    ] {
+        assert!(!text.contains(bad), "host-restart.sh holds {bad:?}");
+    }
+    assert!(
+        text.contains("mktemp -d"),
+        "host-restart.sh makes a temp directory"
+    );
+    for var in ["PF_BIN", "PF_HOST_BIN", "PF_REPLAY_BIN", "PF_STREAM_BIN"] {
+        assert!(
+            text.contains(&format!("{var}=\"${{{var}:-")),
+            "host-restart.sh takes {var} with a default"
+        );
+    }
+    // The guard comes first: before the binaries, the tools and the temp directory.
+    let code = code_lines(&text);
+    assert_eq!(code[0], "set -euo pipefail");
+    assert!(
+        code[1].starts_with("if ! systemctl --user show-environment"),
+        "the guard is the first command: {}",
+        code[1]
+    );
+    // The budget is one wall-time limit of 60 s.
+    assert!(
+        text.contains("BUDGET=60"),
+        "host-restart.sh has no 60 s budget"
+    );
+}
+
+#[test]
+fn host_restart_stops_its_hosts_in_its_exit_trap() {
+    let path = script("host-restart.sh");
+    let text = std::fs::read_to_string(&path).unwrap();
+    starts_one(&path, &text);
+    // It also stops the units themselves, and fails a run that leaves one.
+    let cleanup = text
+        .lines()
+        .skip_while(|l| !l.starts_with("cleanup() "))
+        .take_while(|l| !l.starts_with('}') || l.starts_with("cleanup()"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cleanup.contains("pf-host-$server-"),
+        "the trap stops no host unit"
+    );
+    assert!(
+        cleanup.contains("pfc-$server"),
+        "the trap stops no controller unit"
+    );
+    assert!(
+        cleanup.contains("units left behind"),
+        "the trap checks for left units"
+    );
+}
+
+#[test]
+fn host_restart_calls_systemctl_only_on_its_own_units() {
+    let text = std::fs::read_to_string(script("host-restart.sh")).unwrap();
+    assert!(
+        !text.contains("pulse-factory.service"),
+        "host-restart.sh names the installed controller's unit"
+    );
+    let mut calls = 0;
+    for line in code_lines(&text) {
+        if line.contains("systemctl --user") {
+            calls += 1;
+            assert!(
+                [
+                    "show-environment",
+                    "list-units",
+                    "pfc-$server",
+                    "pf-host-$server-"
+                ]
+                .iter()
+                .any(|ok| line.contains(ok)),
+                "a systemctl call that names no unit of this script's server: {line}"
+            );
+        }
+        if line.contains("--unit=") {
+            assert!(
+                line.contains("--unit=\"pfc-$server\""),
+                "a unit of another name: {line}"
+            );
+        }
+    }
+    assert!(calls >= 8, "found only {calls} systemctl calls");
 }
 
 /// A stand-in for a detached host: a bash process in its own session and group. Its first argument

@@ -151,7 +151,7 @@ fn insert_project(
 #[test]
 fn the_migration_list_has_projects_as_version_three() {
     // Migration 0004 (devices) follows it.
-    assert_eq!(MIGRATIONS.len(), 9);
+    assert_eq!(MIGRATIONS.len(), 10);
     assert_eq!(MIGRATIONS[2].version, 3);
     assert_eq!(MIGRATIONS[2].name, "projects");
 }
@@ -164,11 +164,11 @@ fn a_version_two_store_migrates_to_the_latest_and_keeps_every_row() {
     let before = dump(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert_eq!(dump(&conn), before, "no row of version 2 changed");
     assert_eq!(count(&conn, "projects"), 0);
     // The columns are those of migration 0003, and the two that migration 0005 adds.
@@ -198,10 +198,10 @@ fn a_fresh_file_opens_at_the_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     assert_eq!(count(&conn, "projects"), 0);
 }
 
@@ -219,7 +219,7 @@ fn a_version_two_store_with_an_active_run_refuses_and_stays_at_two() {
         err,
         OpenError::RunActive {
             current: 2,
-            pending: 9
+            pending: 10
         }
     );
 

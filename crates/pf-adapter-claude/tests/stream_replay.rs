@@ -180,8 +180,8 @@ fn drive(name: &str) -> Driven {
     };
     pump(&mut opened, &mut got, want.len());
     std::thread::sleep(Duration::from_millis(50));
-    while let Ok(e) = opened.events.try_recv() {
-        got.push(e);
+    while let Ok(d) = opened.events.try_recv() {
+        got.push(d.event);
     }
     let exited = stop_and_drain(chat, &mut opened);
     Driven { got, want, exited }
@@ -368,7 +368,8 @@ fn first_times(
             Instant::now() < end,
             "the awaited event did not come in {secs} s: {seen:?}"
         );
-        while let Ok(e) = opened.events.try_recv() {
+        while let Ok(d) = opened.events.try_recv() {
+            let e = d.event;
             let stop = stop_at(&e);
             seen.push((e, Instant::now()));
             if stop {
@@ -735,7 +736,13 @@ fn a_process_that_exits_before_initialize_answers_is_resume_failed_for_a_resume(
     s.resume = Some(SessionRef(SESSION_ID.into()));
     let err = c.open(&s).expect_err("exits at once");
     assert!(matches!(err, ChatError::ResumeFailed(_)), "{err}");
-    assert!(err.to_string().contains("No conversation found"), "{err}");
+    // The host keeps the child's error output (the unit's journal), so the reason names the early
+    // end and not the stderr text.
+    assert!(
+        err.to_string()
+            .contains("ended before it answered initialize"),
+        "{err}"
+    );
     // The same exit in a new session is Failed, not ResumeFailed.
     let err = c.open(&spec(work.path())).expect_err("exits at once");
     assert!(matches!(err, ChatError::Failed(_)), "{err}");
@@ -831,4 +838,272 @@ fn a_receiver_dropped_mid_turn_fails_no_later_call_and_stop_still_works() {
         .expect("another send");
     r.chat.stop(&chat_id).expect("stop works");
     assert!(!r.chat.is_alive(&chat_id).unwrap());
+}
+
+// ------------------------------------------------------------------ the replay's gates and progress (r2.s2.w5)
+
+/// A running `pf-claude-replay` on `plain_turn.jsonl`, with its stdout read on a thread.
+struct Replay {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    rx: std::sync::mpsc::Receiver<String>,
+    lines: Vec<String>,
+}
+
+impl Replay {
+    /// Start the replay with `extra` flags, send `initialize` and the first user message, and keep
+    /// stdin open when `keep_stdin` is true. The replay then plays the first turn of the fixture.
+    fn start(extra: &[String], keep_stdin: bool) -> Replay {
+        use std::io::{BufRead, Write};
+        use std::process::{Command, Stdio};
+        let fixture = fixtures_dir().join("plain_turn.jsonl");
+        let mut child = Command::new(REPLAY)
+            .arg("--fixture")
+            .arg(&fixture)
+            .args(["--session-id", "11111111-2222-4333-8444-555555555555"])
+            .args(extra)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the replay starts");
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"type": "control_request", "request_id": "init-1", "request": {"subtype": "initialize"}})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"type": "user", "uuid": "u-1", "message": {"role": "user", "content": "one"}})
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Replay {
+            child,
+            stdin: keep_stdin.then_some(stdin),
+            rx,
+            lines: Vec::new(),
+        }
+    }
+
+    /// Read stdout until `done` accepts the lines so far, up to `secs`. True when it did.
+    fn until(&mut self, secs: u64, done: impl Fn(&[String]) -> bool) -> bool {
+        let end = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < end {
+            if done(&self.lines) {
+                return true;
+            }
+            if let Ok(line) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                self.lines.push(line);
+            }
+        }
+        done(&self.lines)
+    }
+
+    /// Read whatever else comes in `ms`.
+    fn settle(&mut self, ms: u64) {
+        let end = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < end {
+            if let Ok(line) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                self.lines.push(line);
+            }
+        }
+    }
+
+    fn types(&self) -> Vec<String> {
+        types_of(&self.lines)
+    }
+
+    fn has(&self, ty: &str) -> bool {
+        self.types().iter().any(|t| t == ty)
+    }
+
+    /// Close stdin and read to the end of the replay.
+    fn finish(mut self) -> Vec<String> {
+        drop(self.stdin.take());
+        self.until(15, |_| false);
+        let _ = self.child.wait();
+        std::mem::take(&mut self.lines)
+    }
+}
+
+impl Drop for Replay {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn types_of(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["type"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
+}
+
+fn has_type(lines: &[String], ty: &str) -> bool {
+    types_of(lines).iter().any(|t| t == ty)
+}
+
+fn gate(ty: &str, file: &std::path::Path) -> Vec<String> {
+    vec!["--gate".to_string(), format!("{ty}:{}", file.display())]
+}
+
+#[test]
+fn a_gate_holds_the_replay_before_the_first_line_of_its_type_until_its_file_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let g1 = dir.path().join("g1");
+    let mut r = Replay::start(&gate("assistant", &g1), true);
+    // The lines before the reply come: the init, the deltas. The reply does not.
+    assert!(
+        r.until(10, |l| l.len() >= 10),
+        "the lines before the gate come: {:?}",
+        r.lines.len()
+    );
+    r.settle(400);
+    assert!(r.has("stream_event"), "the deltas came: {:?}", r.types());
+    assert!(
+        !r.has("assistant"),
+        "the gate holds the reply: {:?}",
+        r.types()
+    );
+    assert!(!r.has("result"), "and the result behind it");
+    let held = r.lines.len();
+    r.settle(300);
+    assert_eq!(
+        r.lines.len(),
+        held,
+        "nothing is written while the gate holds"
+    );
+    // The file opens the gate: the reply and the lines after it come.
+    std::fs::write(&g1, b"").unwrap();
+    assert!(
+        r.until(5, |l| has_type(l, "assistant") && has_type(l, "result")),
+        "the gate opened: {:?}",
+        r.types()
+    );
+}
+
+#[test]
+fn two_gates_hold_in_order_each_before_its_own_type() {
+    let dir = tempfile::tempdir().unwrap();
+    let (g1, g2) = (dir.path().join("g1"), dir.path().join("g2"));
+    let mut args = gate("assistant", &g1);
+    args.extend(gate("result", &g2));
+    let mut r = Replay::start(&args, true);
+    r.until(10, |l| l.len() >= 10);
+    r.settle(300);
+    assert!(!r.has("assistant"));
+    // The second gate's file exists first. It does not release the first gate.
+    std::fs::write(&g2, b"").unwrap();
+    r.settle(300);
+    assert!(
+        !r.has("assistant"),
+        "the first gate holds until its own file exists"
+    );
+    std::fs::write(&g1, b"").unwrap();
+    assert!(r.until(5, |l| has_type(l, "assistant")), "{:?}", r.types());
+    assert!(
+        r.until(5, |l| has_type(l, "result")),
+        "g2 exists, so the result follows at once: {:?}",
+        r.types()
+    );
+}
+
+#[test]
+fn the_second_gate_holds_the_result_after_the_first_reply_went_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (g1, g2) = (dir.path().join("g1"), dir.path().join("g2"));
+    let mut args = gate("assistant", &g1);
+    args.extend(gate("result", &g2));
+    let mut r = Replay::start(&args, true);
+    r.until(10, |l| l.len() >= 10);
+    std::fs::write(&g1, b"").unwrap();
+    assert!(r.until(5, |l| has_type(l, "assistant")), "{:?}", r.types());
+    r.settle(500);
+    assert!(
+        !r.has("result"),
+        "the result waits for the second gate: {:?}",
+        r.types()
+    );
+    std::fs::write(&g2, b"").unwrap();
+    assert!(r.until(5, |l| has_type(l, "result")), "{:?}", r.types());
+}
+
+#[test]
+fn progress_holds_the_count_of_host_lines_written_after_each_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let (g1, p) = (dir.path().join("g1"), dir.path().join("progress"));
+    let mut args = gate("assistant", &g1);
+    args.extend(["--progress".to_string(), p.display().to_string()]);
+    let mut r = Replay::start(&args, true);
+    r.until(10, |l| l.len() >= 10);
+    r.settle(300);
+    let n = r.lines.len();
+    let read = || {
+        std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| t.trim().parse::<usize>().ok())
+    };
+    assert_eq!(
+        read(),
+        Some(n),
+        "while the gate holds, the file counts what was written"
+    );
+    std::fs::write(&g1, b"").unwrap();
+    assert!(r.until(5, |l| has_type(l, "result")), "{:?}", r.types());
+    r.settle(300);
+    assert_eq!(read(), Some(r.lines.len()));
+    assert!(r.lines.len() > n);
+}
+
+#[test]
+fn a_fixture_with_gates_and_progress_plays_byte_for_byte_as_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (g1, g2) = (dir.path().join("g1"), dir.path().join("g2"));
+    std::fs::write(&g1, b"").unwrap();
+    std::fs::write(&g2, b"").unwrap();
+    let plain = Replay::start(&[], false).finish();
+    let mut args = gate("assistant", &g1);
+    args.extend(gate("result", &g2));
+    args.extend([
+        "--progress".to_string(),
+        dir.path().join("progress").display().to_string(),
+    ]);
+    let flagged = Replay::start(&args, false).finish();
+    assert!(plain.len() > 20, "the first turn is long: {}", plain.len());
+    assert_eq!(flagged, plain, "the same bytes, line for line");
+    // The checks the replay makes of the fixture are the same: a bad gate is an error, not a skip.
+    let bad = std::process::Command::new(REPLAY)
+        .args(["--fixture"])
+        .arg(fixtures_dir().join("plain_turn.jsonl"))
+        .args(["--gate", "no-colon-here"])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&bad.stderr).contains("--gate"),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
 }

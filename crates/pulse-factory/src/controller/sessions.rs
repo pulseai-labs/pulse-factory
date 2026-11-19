@@ -362,13 +362,16 @@ impl Controller {
         Ok(ChatItemRedacted { replayed, item })
     }
 
-    /// At controller start (Q2 rule 4, C3). A restart has ended every chat process (ADR-0007: no
-    /// restart survival), so a live chat session is a session that waits for `--resume`: its state
-    /// goes to `idle`, and `ended_at`, the runtime ref, the model, the effort and the permission
-    /// mode stay. Each pending request gets an answer item with the outcome `lost`, so the app shows
-    /// no card that can never be answered. None of this is a command: the state and the closing
-    /// answers are writes outside admission (ADR-0003).
-    pub(super) fn settle_live_chat_sessions(&self) {
+    /// At controller start, tier 1 for chats (Q2 rule 4, C3; ADR-0007's and ADR-0015's amendments).
+    /// A live chat session whose newest live `chat` host row answers keeps its process and its
+    /// pending requests: its adapter rebinds, a `LiveChat` is rebuilt and a pump reads on. A session
+    /// whose host is gone, or does not answer, waits for `--resume`: its state goes to `idle` and
+    /// each pending request gets an answer item with the outcome `lost`, so the app shows no card
+    /// that can never be answered. A session with no host row (a fake adapter, or a session from
+    /// before hosts) is settled the same way, as before. None of this is a command: the state and
+    /// the closing answers are writes outside admission (ADR-0003). It runs before the runs start
+    /// and before the orphan sweep.
+    pub(super) fn reconcile_live_chat_sessions(&self) {
         let sessions = match self.store.live_chat_sessions() {
             Ok(s) => s,
             Err(e) => {
@@ -376,50 +379,106 @@ impl Controller {
                 return;
             }
         };
-        for s in sessions {
-            if let Err(e) = self.store.set_chat_session_state(
-                &s.id,
-                pf_engine::port::store::ChatSessionState::Idle,
-                &now(),
-            ) {
+        if sessions.is_empty() {
+            return;
+        }
+        // A failed read of the registry is not "no host": the sessions stay as they are.
+        let hosts = match self.store.live_hosts() {
+            Ok(h) => h,
+            Err(e) => {
                 eprintln!(
-                    "pulse-factory: chat session {} is not set to idle: {e}",
-                    s.id
+                    "pulse-factory: the host registry is not read; chat sessions stay as they are: {e}"
                 );
+                return;
             }
-            let pending = match self.store.pending_requests(&s.id) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!(
-                        "pulse-factory: the requests of chat session {} are not read: {e}",
-                        s.id
+        };
+        for s in sessions {
+            let newest = hosts
+                .iter()
+                .filter(|h| h.session_kind == "chat" && h.session_id == s.id)
+                .max_by_key(|h| h.incarnation);
+            let Some(host) = newest else {
+                self.settle_chat_session(&s, "the controller restarted");
+                continue;
+            };
+            let (unit, incarnation) = (host.unit.as_str(), host.incarnation);
+            let outcome = match self.rebind_chat(&s, unit, incarnation) {
+                super::chats::ChatRebindOutcome::Survived => "survived",
+                super::chats::ChatRebindOutcome::Lost(reason) => {
+                    self.settle_chat_session(&s, &format!("the chat process was lost: {reason}"));
+                    self.notice(
+                        &s.id,
+                        "host_lost",
+                        &format!(
+                            "the chat's session host ended while the controller was down ({reason}); the next message resumes this chat"
+                        ),
                     );
-                    continue;
+                    "lost"
+                }
+                super::chats::ChatRebindOutcome::Unreachable(why) => {
+                    self.settle_chat_session(&s, &format!("host unreachable: {why}"));
+                    self.notice(
+                        &s.id,
+                        "host_unreachable",
+                        &format!(
+                            "the chat's session host did not answer ({why}); the next message stops it and resumes this chat"
+                        ),
+                    );
+                    "unreachable"
                 }
             };
-            for request in pending {
-                let Some(answer) =
-                    ChatItemKind::parse(&request.kind).and_then(ChatItemKind::answered_by)
-                else {
-                    continue;
-                };
-                let lost = NewChatItem {
-                    session_id: s.id.clone(),
-                    kind: answer,
-                    payload: "{\"outcome\":\"lost\",\"reason\":\"the controller restarted\"}"
-                        .to_string(),
-                    tool_input: None,
-                    tool_output: None,
-                    answers_seq: Some(request.seq),
-                    usage: None,
-                    created_at: now(),
-                };
-                if let Err(e) = self.store.append_chat_item(lost) {
-                    eprintln!(
-                        "pulse-factory: request {} of chat session {} is not closed: {e}",
-                        request.seq, s.id
-                    );
-                }
+            self.chats.ledger.append(&format!(
+                "rebind session={} unit={unit} incarnation={incarnation} outcome={outcome}",
+                field(&s.id)
+            ));
+        }
+    }
+
+    /// Set a live chat session to wait for `--resume`: `idle`, and each pending request closed
+    /// `lost` with `reason`.
+    fn settle_chat_session(&self, s: &ChatSessionRow, reason: &str) {
+        if let Err(e) = self.store.set_chat_session_state(
+            &s.id,
+            pf_engine::port::store::ChatSessionState::Idle,
+            &now(),
+        ) {
+            eprintln!(
+                "pulse-factory: chat session {} is not set to idle: {e}",
+                s.id
+            );
+        }
+        let pending = match self.store.pending_requests(&s.id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "pulse-factory: the requests of chat session {} are not read: {e}",
+                    s.id
+                );
+                return;
+            }
+        };
+        for request in pending {
+            let Some(answer) =
+                ChatItemKind::parse(&request.kind).and_then(ChatItemKind::answered_by)
+            else {
+                continue;
+            };
+            let lost = NewChatItem {
+                session_id: s.id.clone(),
+                kind: answer,
+                payload: serde_json::json!({"outcome": "lost", "reason": reason}).to_string(),
+                tool_input: None,
+                tool_output: None,
+                answers_seq: Some(request.seq),
+                usage: None,
+                host: None,
+                created_at: now(),
+            };
+            if let Err(e) = self.store.append_chat_item(lost) {
+                eprintln!(
+                    "pulse-factory: request {} of chat session {} is not closed: {e}",
+                    request.seq, s.id
+                );
             }
         }
     }

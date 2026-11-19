@@ -324,9 +324,23 @@ fn a_fresh_controller_on_the_same_state_finds_the_session_idle_and_a_send_resume
     let (_, s) = started(&live, "alpha");
     cli_json(&live, &["session", "send", &s, "fake:approval"]);
     wait_state(&live, &s, ChatSessionState::NeedsYou);
-    // A controller stop ends the processes first.
-    live.controller.shutdown_chats();
-    assert_eq!(stops(&live, "shutdown"), 1);
+    // A controller stop stops no process: each adapter drops its connection (`detach`), and the
+    // ledger says so (r2.s2.w5, Approach 10).
+    live.controller.detach_chats();
+    assert_eq!(
+        stops(&live, "shutdown"),
+        0,
+        "a controller stop stops no chat"
+    );
+    assert_eq!(
+        chat_ledger(&live)
+            .iter()
+            .filter(|l| l.contains(&format!(" chat detach session={s}")))
+            .count(),
+        1,
+        "{:?}",
+        chat_ledger(&live)
+    );
 
     let mut cfg = Config::new(live.sb.state.clone(), 3_600_000, BIN.into());
     cfg.chat_runtimes.insert(RUNTIME.to_string(), rec.clone());
@@ -367,7 +381,7 @@ fn a_fresh_controller_on_the_same_state_finds_the_session_idle_and_a_send_resume
         "the resume names the stored ref"
     );
     assert_eq!(second.live_chat_sessions(), [s.as_str()]);
-    second.shutdown_chats();
+    second.detach_chats();
 }
 
 #[test]

@@ -221,7 +221,7 @@ fn a_platform_with_no_pin_is_not_ready_and_starts_nothing() {
     ] {
         let mut cfg = config(&m);
         cfg.pin = pin;
-        let msg = not_ready(open_in(&ClaudeChat::new(cfg)));
+        let msg = not_ready(open_in(&hosted_with(cfg)));
         assert!(msg.contains("pin"), "{msg}");
         assert!(recorded_calls(&m).is_empty());
     }
@@ -319,7 +319,7 @@ fn an_override_runs_with_no_hash_check_and_is_marked_unqualified() {
         let bin = override_script(other.path(), &format!("{version} (Claude Code)"));
         let mut cfg = config(&m);
         cfg.claude_bin_override = Some(bin);
-        let c = ClaudeChat::new(cfg);
+        let c = hosted_with(cfg);
         let opened = open_in(&c).unwrap_or_else(|e| panic!("{version}: {e}"));
         assert!(
             !opened.qualified,
@@ -340,10 +340,10 @@ fn an_override_whose_version_cannot_be_read_is_failed() {
     write_exec(&bin, "#!/bin/sh\necho 'no version here'\n");
     let mut cfg: ClaudeConfig = config(&m);
     cfg.claude_bin_override = Some(bin);
-    let err = open_in(&ClaudeChat::new(cfg)).expect_err("no readable version");
+    let err = open_in(&hosted_with(cfg)).expect_err("no readable version");
     assert!(matches!(err, ChatError::Failed(_)), "{err}");
     let mut cfg = config(&m);
     cfg.claude_bin_override = Some(other.path().join("does-not-exist"));
-    let err = open_in(&ClaudeChat::new(cfg)).expect_err("cannot run");
+    let err = open_in(&hosted_with(cfg)).expect_err("cannot run");
     assert!(matches!(err, ChatError::Failed(_)), "{err}");
 }

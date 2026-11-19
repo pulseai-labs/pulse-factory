@@ -19,6 +19,11 @@
 //! - a resumed process carries the session's totals over into its first `result`, whose
 //!   `model_usage_since_last_result` is that turn's own usage: the rest is the baseline;
 //! - `system/background_tasks_changed` replaces the whole task set.
+//!
+//! The chat runs in a session host, and a controller restart makes the adapter read part of the
+//! output again. The decoder serves that: [`Decoder::checkpoint`] is its state at a quiet point,
+//! [`Decoder::restore`] builds it again, [`Decoder::set_reread`] marks the lines the store holds
+//! already, and [`Decoder::after_gap`] says some output was lost (r2.s2.w5).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,6 +69,9 @@ pub struct OpenRequest {
     pub kind: RequestKind,
     /// The tool's original input, uncapped: an answer is written from it.
     pub input: Value,
+    /// True for a request seeded from a stored input that was cut: it can be denied, and an allow
+    /// has no input to hand back.
+    pub cut: bool,
 }
 
 /// The running totals of the process, as integers.
@@ -95,6 +103,10 @@ pub struct Decoder {
     totals: Totals,
     /// Whether a `result` came yet: the first one sets the baseline.
     seen_result: bool,
+    /// The lines now fed are ones the store holds already.
+    reread: bool,
+    /// Output was lost: the first message that belongs in a turn opens one.
+    gap: bool,
 }
 
 /// The text of a JSON value for an event: the compact JSON text, capped by the caller.
@@ -159,6 +171,144 @@ impl Decoder {
             tasks: Vec::new(),
             totals: Totals::default(),
             seen_result: false,
+            reread: false,
+            gap: false,
+        }
+    }
+
+    // ------------------------------------------------------------- restart support
+
+    /// Nothing is in flight: no turn and no request is open. The adapter writes a checkpoint only
+    /// at such a point, so a restart can start from it.
+    pub fn is_quiet(&self) -> bool {
+        self.turn.is_none() && self.requests.is_empty()
+    }
+
+    /// The decoder's state as JSON text: the process totals and whether a `result` came (the
+    /// per-turn cost baseline), the background tasks, the messages sent and not yet taken by a
+    /// turn, and the runtime's session id. It is small, and only the decoder reads it.
+    pub fn checkpoint(&self) -> String {
+        let tasks: Vec<Value> = self
+            .tasks
+            .iter()
+            .map(|t| {
+                json!({"id": t.id, "kind": t.kind, "description": t.description, "ambient": t.ambient})
+            })
+            .collect();
+        let sends: BTreeMap<&str, &str> = self
+            .sends
+            .iter()
+            .map(|(u, k)| {
+                (
+                    u.as_str(),
+                    match k {
+                        InputKind::Operator => "operator",
+                        InputKind::Notice => "notice",
+                    },
+                )
+            })
+            .collect();
+        json!({
+            "v": 1,
+            "session": self.session,
+            "seen_result": self.seen_result,
+            "totals": {
+                "cost_micros": self.totals.cost_micros,
+                "input": self.totals.input,
+                "output": self.totals.output,
+                "cache_read": self.totals.cache_read,
+                "cache_write": self.totals.cache_write,
+            },
+            "tasks": tasks,
+            "started_tasks": self.started_tasks,
+            "sends": sends,
+        })
+        .to_string()
+    }
+
+    /// Build the decoder a checkpoint describes. A text that is no checkpoint gives `None`.
+    pub fn restore(
+        expected_version: &str,
+        artifacts_on: bool,
+        checkpoint: &str,
+    ) -> Option<Decoder> {
+        let v: Value = serde_json::from_str(checkpoint).ok()?;
+        if v["v"] != 1 {
+            return None;
+        }
+        let mut d = Decoder::new(expected_version, v["session"].as_str()?, artifacts_on);
+        d.seen_result = v["seen_result"].as_bool()?;
+        let t = &v["totals"];
+        d.totals = Totals {
+            cost_micros: t["cost_micros"].as_u64()?,
+            input: t["input"].as_u64()?,
+            output: t["output"].as_u64()?,
+            cache_read: t["cache_read"].as_u64()?,
+            cache_write: t["cache_write"].as_u64()?,
+        };
+        d.tasks = v["tasks"]
+            .as_array()?
+            .iter()
+            .map(|t| BackgroundTask {
+                id: str_of(t, "id").to_string(),
+                kind: str_of(t, "kind").to_string(),
+                description: str_of(t, "description").to_string(),
+                ambient: t["ambient"].as_bool().unwrap_or(false),
+            })
+            .collect();
+        d.started_tasks = v["started_tasks"]
+            .as_array()?
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect();
+        for (u, k) in v["sends"].as_object()? {
+            let kind = if k == "notice" {
+                InputKind::Notice
+            } else {
+                InputKind::Operator
+            };
+            d.sends.insert(u.clone(), kind);
+        }
+        Some(d)
+    }
+
+    /// Mark the lines fed from now as ones the store holds already (or not). A re-read request that
+    /// is open already takes the new input and gives its event again, in place of an error.
+    pub fn set_reread(&mut self, on: bool) {
+        self.reread = on;
+    }
+
+    /// Open a request from what the store holds, so it can be answered although its line is gone
+    /// or has not been read yet. `input` is `None` when the stored input was cut.
+    pub fn seed_request(&mut self, request_id: &str, kind: RequestKind, input: Option<Value>) {
+        self.requests.insert(
+            request_id.to_string(),
+            OpenRequest {
+                kind,
+                cut: input.is_none(),
+                input: input.unwrap_or(Value::Null),
+            },
+        );
+    }
+
+    /// The ids of the open requests.
+    pub fn open_request_ids(&self) -> Vec<String> {
+        self.requests.keys().cloned().collect()
+    }
+
+    /// Output was lost: the first message that belongs in a turn opens one, with cause `Operator`,
+    /// so its `result` is still stored. The cost stays exact: the totals are cumulative.
+    pub fn after_gap(&mut self) {
+        self.gap = true;
+    }
+
+    /// Does this message belong inside a turn?
+    fn belongs_in_turn(msg: &Value) -> bool {
+        match str_of(msg, "type") {
+            "stream_event" | "assistant" | "user" => msg["parent_tool_use_id"].is_null(),
+            "control_request" => msg["request"]["subtype"] == "can_use_tool",
+            "result" => true,
+            _ => false,
         }
     }
 
@@ -194,6 +344,23 @@ impl Decoder {
     /// Decode one message from the CLI.
     pub fn feed(&mut self, msg: &Value) -> Vec<Out> {
         let mut out = Vec::new();
+        if self.gap {
+            if str_of(msg, "type") == "system" && str_of(msg, "subtype") == "init" {
+                self.gap = false;
+            } else if self.turn.is_none() && Self::belongs_in_turn(msg) {
+                self.gap = false;
+                self.turn = Some(Turn {
+                    cause: TurnCause::Operator,
+                    calls: BTreeSet::new(),
+                });
+                self.event(
+                    &mut out,
+                    ChatEvent::TurnStarted {
+                        cause: TurnCause::Operator,
+                    },
+                );
+            }
+        }
         match str_of(msg, "type") {
             "system" => self.system(msg, &mut out),
             "stream_event" => self.stream_event(msg, &mut out),
@@ -317,16 +484,31 @@ impl Decoder {
             return;
         }
         // The cause: the first message this init consumed, else the CLI woke itself for a task.
-        let cause = msg["user_message_uuids"]
+        let uuids: Vec<&str> = msg["user_message_uuids"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .find_map(|u| self.sends.get(u).copied())
-            .map_or(TurnCause::Task, |kind| match kind {
-                InputKind::Operator => TurnCause::Operator,
-                InputKind::Notice => TurnCause::Notice,
-            });
+            .collect();
+        // A re-read init that names a message this decoder never saw was sent in the life before
+        // a restart (the checkpoint holds only the sends open at a quiet point): the turn was
+        // started by a message, so it is not a task turn. The kind of that message is not known
+        // now, and the store holds the turn already, so `Operator` stands.
+        let unknown_send = self.reread && !uuids.is_empty();
+        let cause = uuids
+            .iter()
+            .find_map(|u| self.sends.get(*u).copied())
+            .map_or(
+                if unknown_send {
+                    TurnCause::Operator
+                } else {
+                    TurnCause::Task
+                },
+                |kind| match kind {
+                    InputKind::Operator => TurnCause::Operator,
+                    InputKind::Notice => TurnCause::Notice,
+                },
+            );
         self.turn = Some(Turn {
             cause,
             calls: BTreeSet::new(),
@@ -440,7 +622,8 @@ impl Decoder {
             });
             return;
         }
-        if self.turn.is_none() || self.requests.contains_key(&id) || id.is_empty() {
+        let repeated = self.requests.contains_key(&id) && !self.reread;
+        if self.turn.is_none() || repeated || id.is_empty() {
             out.push(Out::Log(format!(
                 "can_use_tool {id:?} outside a turn or with a repeated id"
             )));
@@ -477,6 +660,7 @@ impl Decoder {
                 OpenRequest {
                     kind: RequestKind::Question,
                     input,
+                    cut: false,
                 },
             );
             self.event(
@@ -499,6 +683,7 @@ impl Decoder {
             OpenRequest {
                 kind: RequestKind::Approval,
                 input,
+                cut: false,
             },
         );
         self.event(

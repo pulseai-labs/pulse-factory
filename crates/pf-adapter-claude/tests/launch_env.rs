@@ -81,7 +81,7 @@ fn open_and_read(
     let m = env_stub();
     let mut cfg = config(&m);
     cfg.inherited_env = Some(inherited);
-    let c = pf_adapter_claude::ClaudeChat::new(cfg);
+    let c = hosted_with(cfg);
     let work = tempfile::tempdir().unwrap();
     let mut s = spec(work.path());
     for (k, v) in env {

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod chat;
+pub mod chat_restart;
 pub mod ctl;
 pub mod restart;
 pub mod rig;

@@ -177,16 +177,27 @@ fn a_version_six_file_migrates_to_seven_with_every_row_unchanged() {
     };
     {
         let store = SqliteStore::open(&path).unwrap();
-        // 0008 follows 0007, and the plain open applies both.
-        assert_eq!(store.schema_version().unwrap(), 9);
+        // 0008 follows 0007, and the plain open applies them all.
+        assert_eq!(store.schema_version().unwrap(), 10);
     }
     let conn = Connection::open(&path).unwrap();
     for (table, was) in &before {
         let now = rows(&conn, table);
         if table == "schema_version" {
-            // The old rows stay, and one row each for 0007, 0008 and 0009 follows.
+            // The old rows stay, and one row each for 0007, 0008, 0009 and 0010 follows.
             assert_eq!(&now[..was.len()], &was[..], "{table}");
-            assert_eq!(now.len(), was.len() + 3);
+            assert_eq!(now.len(), was.len() + 4);
+        } else if table == "chat_sessions" {
+            // 0010 adds `host_cursor` last, NULL on every old row.
+            let trimmed: Vec<String> = now
+                .iter()
+                .map(|r| {
+                    r.strip_suffix("|Null")
+                        .expect("host_cursor is NULL")
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(&trimmed, was, "{table} changed");
         } else {
             assert_eq!(&now, was, "{table} changed");
         }
@@ -208,7 +219,7 @@ fn a_fresh_file_opens_at_seven_with_an_empty_settings_table() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 9);
+    assert_eq!(store.schema_version().unwrap(), 10);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "settings"), 0);
@@ -224,7 +235,7 @@ fn a_version_six_file_with_an_active_run_refuses_and_stays_at_six() {
         err,
         OpenError::RunActive {
             current: 6,
-            pending: 9
+            pending: 10
         }
     );
     let conn = Connection::open(&path).unwrap();

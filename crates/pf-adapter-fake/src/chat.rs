@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::{
-    BackgroundTask, ChatAnswer, ChatError, ChatEvent, ChatId, ChatOpen, ChatOpened, ChatOption,
-    ChatPort, ContextUsage, InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd, TurnCause,
-    cap, check_deny_commands,
+    BackgroundTask, ChatAnswer, ChatDelivery, ChatError, ChatEvent, ChatId, ChatOpen, ChatOpened,
+    ChatOption, ChatPort, ContextUsage, InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd,
+    TurnCause, cap, check_deny_commands,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -41,7 +41,7 @@ enum RequestKind {
 }
 
 struct ChatState {
-    tx: UnboundedSender<ChatEvent>,
+    tx: UnboundedSender<ChatDelivery>,
     alive: bool,
     /// A turn thread is running.
     running: bool,
@@ -64,7 +64,7 @@ impl ChatState {
     /// Push one event. A dropped receiver is not an error.
     fn push(&mut self, event: ChatEvent) {
         if self.alive {
-            let _ = self.tx.send(event);
+            let _ = self.tx.send(ChatDelivery::plain(event));
         }
     }
 
@@ -334,6 +334,7 @@ impl ChatPort for FakeChat {
             runtime_version: "fake".into(),
             qualified: true,
             events,
+            host: None,
         })
     }
 

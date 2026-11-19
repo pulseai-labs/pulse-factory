@@ -446,6 +446,16 @@ impl Store for FakeStore {
         ))
     }
 
+    fn set_chat_host_mark(
+        &self,
+        _session_id: &str,
+        _mark: pf_engine::port::store::ChatHostMark,
+    ) -> Result<(), StoreError> {
+        Err(StoreError(
+            "the engine's test store holds no chat sessions".to_string(),
+        ))
+    }
+
     // The engine tests carry no launch records and no hosts: the engine writes none.
     fn launch_record(
         &self,

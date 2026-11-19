@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use pf_adapter_fake::FakeChat;
 use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::{
-    CAP_BYTES, ChatAnswer, ChatError, ChatEvent, ChatEvents, ChatId, ChatOpen, ChatOption,
-    ChatPort, InputKind, MidTurn, TaskEnd, TurnCause, check_order,
+    CAP_BYTES, ChatAnswer, ChatDelivery, ChatError, ChatEvent, ChatEvents, ChatId, ChatOpen,
+    ChatOption, ChatPort, ChatRebind, InputKind, MidTurn, TaskEnd, TurnCause, check_order,
 };
 
 fn open_spec() -> ChatOpen {
@@ -23,7 +23,21 @@ fn open_spec() -> ChatOpen {
         env: BTreeMap::new(),
         options: BTreeMap::new(),
         deny_commands: Vec::new(),
+        chat_session: "S-1".into(),
+        project: "P-1".into(),
+        agent_id: "orchestrator".into(),
+        worktree_id: "W-1".into(),
+        deny_from: "built_in".into(),
+        secret_env: BTreeMap::new(),
+        recorded_binary: None,
     }
+}
+
+/// `FakeChat` runs no host: each delivery has no position and no checkpoint (r2.s2.w5).
+fn plain(delivery: ChatDelivery) -> ChatEvent {
+    assert_eq!(delivery.at, None, "a fake chat has no host cursor");
+    assert_eq!(delivery.checkpoint, None, "a fake chat has no checkpoint");
+    delivery.event
 }
 
 struct Chat {
@@ -65,7 +79,8 @@ impl Chat {
         let mut got = Vec::new();
         while Instant::now() < end {
             match self.rx.try_recv() {
-                Ok(e) => {
+                Ok(d) => {
+                    let e = plain(d);
                     let hit = stop(&e);
                     self.log.push(e.clone());
                     got.push(e);
@@ -85,7 +100,8 @@ impl Chat {
         let mut got = Vec::new();
         while Instant::now() < end {
             match self.rx.try_recv() {
-                Ok(e) => {
+                Ok(d) => {
+                    let e = plain(d);
                     self.log.push(e.clone());
                     got.push(e);
                 }
@@ -857,4 +873,40 @@ fn open_takes_the_fifteen_built_ins_and_an_empty_list() {
     spec.deny_commands = Vec::new();
     port.open(&spec).expect("an empty list opens");
     assert_eq!(port.open_count(), 2);
+}
+
+#[test]
+fn fake_chat_runs_no_host_so_it_names_none_and_the_new_calls_keep_their_defaults() {
+    let port = FakeChat::new();
+    let opened = port.open(&open_spec()).expect("open");
+    assert!(opened.host.is_none(), "a fake chat runs in no host");
+    let id = opened.chat.clone();
+    let mut chat = Chat {
+        port,
+        id: opened.chat,
+        rx: opened.events,
+        log: Vec::new(),
+    };
+    // A whole turn: every delivery passes `plain`, which asserts `at: None` and no checkpoint.
+    let got = chat.say("hi");
+    assert!(
+        got.iter()
+            .any(|e| matches!(e, ChatEvent::TurnResult { .. }))
+    );
+    chat.checked();
+    // `ack` and `detach` do nothing, `rebind` loses the chat, and a process stays.
+    assert_eq!(chat.port.ack(&id, 10), Ok(()));
+    assert_eq!(chat.port.detach(&id), Ok(()));
+    assert!(chat.port.is_alive(&id).unwrap());
+    let point = pf_engine::port::chat::ChatResumePoint {
+        runtime_session: pf_engine::port::agent::SessionRef("s".into()),
+        acked: 0,
+        committed: 0,
+        checkpoint: None,
+        pending: Vec::new(),
+    };
+    match chat.port.rebind("pf-host-x-1", &point) {
+        ChatRebind::Lost { exit } => assert!(exit.to_string().contains("no session host")),
+        other => panic!("the default rebind is Lost, got {other:?}"),
+    }
 }

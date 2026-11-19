@@ -4,7 +4,8 @@
 //! real `ClaudeChat` against it (`claude_bin_override`), so a chat session needs no tokens.
 //!
 //! ```text
-//! pf-claude-replay --fixture <file> [--pace recorded|none] [--version] [CLI flags…]
+//! pf-claude-replay --fixture <file> [--pace recorded|none] [--version]
+//!                  [--gate <type>:<file>]… [--progress <file>] [CLI flags…]
 //! ```
 //!
 //! - `--version` prints `<cli_version> (Claude Code)` from the fixture's header.
@@ -20,6 +21,13 @@
 //! - `--pace recorded` keeps the recorded gaps between lines. The default writes at once.
 //! - A line on stdin that is not the one awaited is logged on stderr and skipped. The end of stdin
 //!   ends the replay with exit 0, also in the middle of a fixture.
+//! - `--gate <type>:<file>` (repeatable, used in order): before the replay writes the next host line
+//!   whose top-level `type` is `<type>`, it waits until `<file>` exists (it polls every 50 ms). One
+//!   gate is used up at a time: the second one starts to hold after the first one was released. A
+//!   test or a demo holds a turn in the middle with it.
+//! - `--progress <file>`: after each host line, the replay rewrites `<file>` with the count of host
+//!   lines written so far. A reader sees a whole number, never half of one.
+//! - The two flags change no byte the replay writes, and the fixture's checks ignore them.
 //! - Every other CLI flag is ignored. The replay holds no secret and reads no file but the fixture.
 
 use std::collections::BTreeMap;
@@ -46,6 +54,9 @@ struct Args {
     version: bool,
     paced: bool,
     session: Option<String>,
+    /// `(type, file)`, in the order given.
+    gates: Vec<(String, String)>,
+    progress: Option<String>,
 }
 
 fn fail(message: &str) -> ExitCode {
@@ -59,6 +70,8 @@ fn parse_args() -> Result<Args, String> {
         version: false,
         paced: false,
         session: None,
+        gates: Vec::new(),
+        progress: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -71,6 +84,16 @@ fn parse_args() -> Result<Args, String> {
                 other => return Err(format!("--pace takes recorded or none, not {other:?}")),
             },
             "--session-id" | "--resume" => args.session = it.next(),
+            "--gate" => {
+                let value = it.next().ok_or("--gate needs <type>:<file>")?;
+                match value.split_once(':') {
+                    Some((ty, file)) if !ty.is_empty() && !file.is_empty() => {
+                        args.gates.push((ty.to_string(), file.to_string()));
+                    }
+                    _ => return Err(format!("--gate takes <type>:<file>, not {value:?}")),
+                }
+            }
+            "--progress" => args.progress = Some(it.next().ok_or("--progress needs a file")?),
             _ => {}
         }
     }
@@ -149,6 +172,15 @@ fn recorded_session(body: &[Line]) -> Option<String> {
         .find_map(|l| l.msg["session_id"].as_str().map(str::to_string))
 }
 
+/// Rewrite the progress file with `count`: a whole file in place of the old one, so a reader never
+/// sees half a number. A failure is ignored: the progress file is a help, not part of the replay.
+fn write_progress(file: &str, count: u64) {
+    let tmp = format!("{file}.tmp");
+    if std::fs::write(&tmp, format!("{count}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+}
+
 /// Read stdin until a line of kind `want` comes. `None` when stdin ends.
 fn wait_for(
     input: &mut impl Iterator<Item = std::io::Result<String>>,
@@ -200,6 +232,9 @@ fn main() -> ExitCode {
     let mut out = stdout.lock();
     let mut initialized = false;
     let mut previous_ms = 0u64;
+    let mut gates = args.gates.iter();
+    let mut gate = gates.next();
+    let mut written = 0u64;
 
     for line in &fixture.body {
         if line.to == "cli" {
@@ -226,6 +261,14 @@ fn main() -> ExitCode {
             }
             continue;
         }
+        if let Some((ty, file)) = gate
+            && line.msg["type"].as_str() == Some(ty.as_str())
+        {
+            while !std::path::Path::new(file).exists() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            gate = gates.next();
+        }
         if args.paced {
             std::thread::sleep(Duration::from_millis(line.t_ms.saturating_sub(previous_ms)));
         }
@@ -235,6 +278,10 @@ fn main() -> ExitCode {
         let text = serde_json::to_string(&msg).unwrap_or_default();
         if writeln!(out, "{text}").and_then(|()| out.flush()).is_err() {
             return ExitCode::SUCCESS;
+        }
+        written += 1;
+        if let Some(file) = &args.progress {
+            write_progress(file, written);
         }
     }
     // The recording is played out. Take what the host still writes, until it closes stdin.

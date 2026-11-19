@@ -686,6 +686,7 @@ impl Controller {
         if replayed {
             return self.changed(&args.session_id, true, None);
         }
+        self.revise_record(&args);
         let note = self.apply_set(&args);
         self.emit_session(&args.session_id);
         self.changed(&args.session_id, false, note)
@@ -782,6 +783,34 @@ impl Controller {
                 args.command_id
             ),
         })
+    }
+
+    /// Write the launch record's next revision for an admitted set (Approach 9). A session with no
+    /// launch record has nothing to revise. A failed write prints one line: the session row holds
+    /// the change, and the set is admitted already.
+    fn revise_record(&self, args: &wire::SessionSetArgs) {
+        let Ok(Some(row)) = self.session_row(&args.session_id) else {
+            return;
+        };
+        let options = match self.agent(&row.agent_id) {
+            Ok(Some(agent)) => effective_options(&row, &agent),
+            _ => row.runtime_options.clone(),
+        };
+        let changes = serde_json::json!({
+            "model": row.model,
+            "effort": row.effort,
+            "permission_mode": row.permission_mode,
+            "options": options,
+        });
+        if let Err(why) =
+            self.host_service()
+                .revise("chat", &args.session_id, &args.command_id, &changes)
+        {
+            eprintln!(
+                "pulse-factory: the launch record of chat session {} has no new revision: {why}",
+                args.session_id
+            );
+        }
     }
 
     /// The live part of an admitted set: a changed model, effort or mode reaches a live process, and

@@ -527,6 +527,7 @@ impl HostService {
         let session_impl = Arc::new(ServiceSession {
             service: self.arc(),
             conn: Mutex::new(conn),
+            writers_waiting: std::sync::atomic::AtomicUsize::new(0),
             unit: unit.to_string(),
             session: session.to_string(),
             incarnation,
@@ -621,12 +622,26 @@ impl HostService {
         let _one_at_a_time = locked(&self.launch_lock);
         let (kind, key) = (l.session_kind.as_str(), l.session_key.as_str());
         let session = session_name(kind, key);
+        // A seat's project is its run's; a chat's is in its binding (Approach 12).
         let project = l
             .run_binding
             .get("run_id")
             .and_then(Value::as_str)
-            .and_then(|run| ctl.run_project_of(run));
-        let settings = ctl.session_settings(project.as_deref());
+            .and_then(|run| ctl.run_project_of(run))
+            .or_else(|| {
+                l.run_binding
+                    .get("project_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        let mut settings = ctl.session_settings(project.as_deref());
+        // A chat launched again takes the `session.*` values of the record it resumes: they are
+        // `record` keys, read at the first launch and kept (Approach 12).
+        if kind == "chat"
+            && let Ok(Some(prior)) = ctl.newest_chat_record(key)
+        {
+            settings.take_recorded(&prior.record);
+        }
         let attach_wait = Duration::from_millis(settings.attach_wait_ms.0);
 
         // 1. Never two copies (Q9).
@@ -857,6 +872,80 @@ impl HostService {
         Ok(self.handle_of(conn, &hello, &started.unit, &session, inc, record))
     }
 
+    // -------------------------------------------------------------- revisions
+
+    /// Write the next revision of a session's newest incarnation, with `changes` merged into its
+    /// `settings` (Approach 9). It does nothing when the session has no launch record. The
+    /// revision is admitted under `@controller` with its own command ID, `command`, and writes one
+    /// `controller.ledger` line. A replay of the same `command` writes none. `argv` stays as the
+    /// host ran it, and tier 1 still compares a host with the revision it launched from.
+    pub fn revise(
+        &self,
+        kind: &str,
+        key: &str,
+        command: &str,
+        changes: &Value,
+    ) -> Result<Option<u32>, String> {
+        let ctl = self.ctl().map_err(|e| e.0)?;
+        let mut newest = None;
+        let mut incarnation = 1u32;
+        while let Some(r) = ctl
+            .store()
+            .newest_launch_record(kind, key, incarnation)
+            .map_err(|e| e.to_string())?
+        {
+            newest = Some(r);
+            incarnation += 1;
+        }
+        let Some(prior) = newest else {
+            return Ok(None);
+        };
+        let mut body: Value = serde_json::from_str(&prior.record).map_err(|e| e.to_string())?;
+        let target = body
+            .as_object_mut()
+            .ok_or_else(|| "the launch record is not an object".to_string())?
+            .entry("settings")
+            .or_insert_with(|| json!({}));
+        if let (Some(target), Some(changes)) = (target.as_object_mut(), changes.as_object()) {
+            for (k, v) in changes {
+                target.insert(k.clone(), v.clone());
+            }
+        }
+        let (canonical, record_sha256) =
+            NewLaunchRecord::seal(&body.to_string()).map_err(|e| e.to_string())?;
+        let revision = prior.revision + 1;
+        let command_id = format!("host-revise-{command}");
+        self.admit(
+            &ctl,
+            Commit {
+                kind: "host_record",
+                command_id: &command_id,
+                content: json!({"unit": prior.host_unit, "record_sha256": record_sha256})
+                    .to_string(),
+                effects: vec![Effect::LaunchRecordWrite(NewLaunchRecord {
+                    session_kind: kind.to_string(),
+                    session_id: key.to_string(),
+                    incarnation: prior.incarnation,
+                    revision,
+                    launcher: prior.launcher.clone(),
+                    host_unit: prior.host_unit.clone(),
+                    host_socket: prior.host_socket.clone(),
+                    record: canonical,
+                    record_sha256: record_sha256.clone(),
+                    created_at: now(),
+                })],
+                subject: &prior.host_unit,
+                line: format!(
+                    "host_record {} revision={revision} written session={} incarnation={} sha256={record_sha256} command={command_id}",
+                    prior.host_unit,
+                    field(key),
+                    prior.incarnation
+                ),
+            },
+        )?;
+        Ok(Some(revision))
+    }
+
     // -------------------------------------------------------------- rebind (tier 1)
 
     fn tier1_line(&self, ctl: &Controller, row: &HostRow, outcome: &str, reason: &str) {
@@ -943,12 +1032,18 @@ impl HostService {
         let Ok(key) = std::fs::read_to_string(&files.key) else {
             return unreachable(format!("no key file for {unit}"));
         };
-        let settings = ctl.session_settings(
+        let project = if row.session_kind == "chat" {
+            ctl.store()
+                .chat_session(&row.session_id)
+                .ok()
+                .flatten()
+                .map(|c| c.project_id)
+        } else {
             row.session_id
                 .split_once('/')
                 .and_then(|(run, _)| ctl.run_project_of(run))
-                .as_deref(),
-        );
+        };
+        let settings = ctl.session_settings(project.as_deref());
         let wait = Duration::from_millis(settings.attach_wait_ms.0);
         let (conn, hello) = match self.connect(Path::new(&row.socket), key.trim(), wait) {
             Ok(pair) => pair,
@@ -1191,7 +1286,16 @@ impl HostService {
                     .store()
                     .live_chat_sessions()
                     .map_err(|e| e.to_string())?;
-                Ok(chats.iter().any(|c| c.id == row.session_id))
+                // The session must be live, and the row its newest incarnation: an older
+                // incarnation's host is an orphan (Approach 12). A launch stops the older host
+                // before it writes the next record, so a live row older than the newest record is
+                // one nobody owns.
+                if !chats.iter().any(|c| c.id == row.session_id) {
+                    return Ok(false);
+                }
+                Ok(ctl
+                    .newest_chat_record(&row.session_id)?
+                    .is_none_or(|r| r.incarnation <= row.incarnation))
             }
             _ => Ok(false),
         }
@@ -1272,6 +1376,10 @@ impl SessionHosts for HostService {
 struct ServiceSession {
     service: Arc<HostService>,
     conn: Mutex<Conn>,
+    /// Writers that wait for `conn`. The reader's poll holds `conn` for its whole wait and takes it
+    /// again at once, so a writer that only waits on the mutex can starve: the reader yields to a
+    /// waiting writer before each poll.
+    writers_waiting: std::sync::atomic::AtomicUsize,
     unit: String,
     session: String,
     incarnation: u64,
@@ -1284,6 +1392,14 @@ fn host_err(e: ClientError) -> HostError {
 }
 
 impl ServiceSession {
+    /// The connection, for a write: it goes ahead of the reader's next poll.
+    fn conn_for_write(&self) -> std::sync::MutexGuard<'_, Conn> {
+        self.writers_waiting.fetch_add(1, Ordering::SeqCst);
+        let guard = locked(&self.conn);
+        self.writers_waiting.fetch_sub(1, Ordering::SeqCst);
+        guard
+    }
+
     /// Commit the end of this host's row, if it is live.
     fn end_row(&self, exit: Value, why: &str) {
         let Ok(ctl) = self.service.ctl() else { return };
@@ -1295,10 +1411,16 @@ impl ServiceSession {
 
 impl HostSession for ServiceSession {
     fn read(&self, from: u64) -> Result<(), HostError> {
-        locked(&self.conn).read_from(from).map_err(host_err)
+        self.conn_for_write().read_from(from).map_err(host_err)
     }
 
     fn events(&self, wait: Duration) -> Result<Vec<HostEvent>, HostError> {
+        // A writer that waits takes the connection before this poll does.
+        let mut yielded = 0;
+        while self.writers_waiting.load(Ordering::SeqCst) > 0 && yielded < 200 {
+            std::thread::sleep(Duration::from_millis(1));
+            yielded += 1;
+        }
         let mut conn = locked(&self.conn);
         conn.set_timeout(wait.max(Duration::from_millis(1)));
         let mut out = Vec::new();
@@ -1324,11 +1446,11 @@ impl HostSession for ServiceSession {
     }
 
     fn ack(&self, to: u64) -> Result<(), HostError> {
-        locked(&self.conn).ack(to).map_err(host_err)
+        self.conn_for_write().ack(to).map_err(host_err)
     }
 
     fn input(&self, data: &[u8]) -> Result<(), HostError> {
-        locked(&self.conn).input(data).map_err(host_err)
+        self.conn_for_write().input(data).map_err(host_err)
     }
 
     fn signal(&self, signal: HostSignal) -> Result<(), HostError> {
@@ -1337,7 +1459,7 @@ impl HostSession for ServiceSession {
             HostSignal::Terminate => SignalKind::Terminate,
             HostSignal::Kill => SignalKind::Kill,
         };
-        locked(&self.conn).signal(sig).map_err(host_err)
+        self.conn_for_write().signal(sig).map_err(host_err)
     }
 
     /// The exit was consumed: commit the row's end first, then tell the host, so the host never
@@ -1352,7 +1474,7 @@ impl HostSession for ServiceSession {
             }),
             "the exit was consumed",
         );
-        let res = locked(&self.conn).exit_ack().map_err(host_err);
+        let res = self.conn_for_write().exit_ack().map_err(host_err);
         self.service.remove_files(&self.session, self.incarnation);
         res
     }

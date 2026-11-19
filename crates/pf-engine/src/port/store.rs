@@ -522,6 +522,33 @@ pub struct ChatSessionRow {
     pub created_at: String,
     pub updated_at: String,
     pub ended_at: Option<String>,
+    /// Where the session's output stands in its host. `None` for a session with no host output.
+    pub host_cursor: Option<ChatHostCursor>,
+}
+
+/// Where a chat session's output stands in the host it came from (migration 0010).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatHostCursor {
+    /// The host the output came from.
+    pub unit: String,
+    pub incarnation: u32,
+    /// The cursor after the last output line the store consumed.
+    pub committed: u64,
+    /// The cursor the controller last acknowledged to the host.
+    pub acked: u64,
+    /// The adapter's opaque state at `acked`. `None` before the first quiet point.
+    pub checkpoint: Option<String>,
+}
+
+/// A position that comes with a write: the host, and the cursor after the output that gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatHostMark {
+    pub unit: String,
+    pub incarnation: u32,
+    /// The cursor after the output line.
+    pub at: u64,
+    /// The adapter's state at this quiet point. With it, the store also sets `acked`.
+    pub checkpoint: Option<String>,
 }
 
 /// The kind of one chat item: the closed list of the display log. The store keeps it as text with
@@ -668,6 +695,10 @@ pub struct NewChatItem {
     pub answers_seq: Option<u64>,
     /// A `turn_result`'s usage: the store adds it to the session's totals.
     pub usage: Option<Usage>,
+    /// An item written from host output: the store sets the session's `committed` to `at` in the
+    /// same transaction. A mark of another unit or incarnation replaces the cursor, and a
+    /// `committed` never moves back within one unit.
+    pub host: Option<ChatHostMark>,
     pub created_at: String,
 }
 
@@ -1367,6 +1398,10 @@ pub trait Store: Send + Sync {
     /// to the session's totals, in one transaction. It makes no admission and no ledger line
     /// (ADR-0003). An error writes nothing.
     fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError>;
+    /// Write a position that comes with no item (the adapter's state between turns), by the rules
+    /// of [`NewChatItem::host`]. It makes no admission and no ledger line: the display log and its
+    /// cursor are written outside admission (ADR-0003). An unknown session is an error.
+    fn set_chat_host_mark(&self, session_id: &str, mark: ChatHostMark) -> Result<(), StoreError>;
 
     /// Read one revision of a session's launch record.
     fn launch_record(

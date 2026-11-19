@@ -66,10 +66,13 @@ fn start_opens_the_orchestrator_in_the_projects_root() {
         spec.options,
         [("artifacts".to_string(), "on".to_string())].into()
     );
+    // The agent's `PF_AGENT_ENV_<AGENT>` pairs travel apart from `env`: a launch record never
+    // holds a value (r2.s2.w5, Approach 3).
     assert_eq!(
-        spec.env.get("EXAMPLE_ROLE").map(String::as_str),
+        spec.secret_env.get("EXAMPLE_ROLE").map(String::as_str),
         Some("orchestrator")
     );
+    assert!(!spec.env.contains_key("EXAMPLE_ROLE"));
     for word in ["alpha", &root.display().to_string(), "test-server", "S-1"] {
         assert!(spec.instructions.contains(word), "the persona names {word}");
     }

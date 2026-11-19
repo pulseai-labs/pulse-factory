@@ -19,4 +19,5 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 pf-adapter-fake = { path = "../pf-adapter-fake" }
+pf-host = { path = "../pf-host" }
 tempfile.workspace = true
