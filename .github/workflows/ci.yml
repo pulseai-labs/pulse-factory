@@ -44,11 +44,15 @@ jobs:
       # `r2.s2.w3` adds the controller's live tests: `PF_HOST_LAUNCHER=systemd`, the controller as a
       # transient unit, a paper seat in a host unit of its own. They start the `pf-host` binary, so it
       # is built first. This step is the land gate of AC-23.
+      #
+      # `r2.s2.w4` adds the OMP adapter's live tests: the stub `omp` on a terminal in a unit of its own,
+      # a second adapter that rebinds it. This step is the land gate of AC-20.
       - name: systemd live
         run: |
           cargo build -p pf-host --locked
           cargo test -p pf-host --test systemd_live --locked -- --ignored
           cargo test -p pulse-factory --test systemd_live_hosts --locked -- --ignored
+          cargo test -p pf-adapter-omp --test systemd_live_omp --locked -- --ignored
       # The binary run standalone: a dry arm with no model and no spend. `community-edition.sh` (d14)
       # looks for this step by its name.
       - name: Smoke
