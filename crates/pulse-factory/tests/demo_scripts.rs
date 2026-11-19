@@ -274,6 +274,180 @@ fn starts_one(path: &Path, text: &str) {
     );
 }
 
+/// A stand-in for a detached host: a bash process in its own session and group. Its first argument
+/// is its unit directory, its second is how it answers `SIGTERM`:
+///
+/// - `delay`: it ends its child and exits one second after the signal, and writes `termed` first;
+/// - `ignore`: it ignores the signal, and so does its child.
+///
+/// It writes its `host.pid` (PID and start time, as the real host does) only after it installed its
+/// trap, so a test that waits for the file never signals a host that is not ready. Its child's PID
+/// is in `child.pid`.
+const FAKE_HOST: &str = r#"
+unit=$1
+mode=$2
+if [ "$mode" = delay ]; then
+  trap 'touch "$unit/termed"; kill "$child" 2>/dev/null; sleep 1; exit 0' TERM
+  sleep 600 & child=$!
+else
+  trap '' TERM
+  ( trap '' TERM; exec sleep 600 ) & child=$!
+fi
+echo "$child" > "$unit/child.pid"
+start="$(sed 's/.*) //' "/proc/$$/stat" | cut -d' ' -f20)"
+echo "$$ $start" > "$unit/host.pid.tmp"
+mv "$unit/host.pid.tmp" "$unit/host.pid"
+while :; do wait "$child"; sleep 0.1; done
+"#;
+
+/// Start a `FAKE_HOST` as unit `unit` of server `server` under `rt`, and return its PID once its
+/// `host.pid` exists. `setsid --fork` makes it a session leader that init adopts, like a real host.
+fn start_fake_host(rt: &Runtime, server: &str, unit: &str, mode: &str) -> u32 {
+    let unit_dir = rt.0.join("pf-hosts").join(server).join(unit);
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    let script = rt.0.join(format!("fake-host-{server}-{unit}.sh"));
+    std::fs::write(&script, FAKE_HOST).unwrap();
+    let status = Command::new("setsid")
+        .arg("--fork")
+        .arg("bash")
+        .arg(&script)
+        .arg(&unit_dir)
+        .arg(mode)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("setsid starts");
+    assert!(status.success());
+    let start = Instant::now();
+    loop {
+        if let Ok(text) = std::fs::read_to_string(unit_dir.join("host.pid")) {
+            return text.split_whitespace().next().unwrap().parse().unwrap();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the fake host {unit} wrote no host.pid in 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Run `stop_hosts` of `scripts/demo/lib/hosts.sh` for `server`, as a script's exit trap does.
+fn run_stop_hosts(rt: &Runtime, server: &str) -> Output {
+    let state = rt.0.join("state");
+    std::fs::create_dir_all(state.join("hosts")).unwrap();
+    std::fs::write(state.join("hosts/server"), server).unwrap();
+    Command::new("bash")
+        .arg("-c")
+        .arg(r#". "$1"; stop_hosts"#)
+        .arg("stop-hosts")
+        .arg(script("lib/hosts.sh"))
+        .env("PF_STATE_DIR", &state)
+        .env("XDG_RUNTIME_DIR", &rt.0)
+        .output()
+        .expect("bash starts")
+}
+
+/// Wait until `pid` is gone or a zombie. A process that got `SIGKILL` needs a moment to leave the
+/// table, so this polls, but the signal is already sent: the wait has no bearing on the outcome.
+fn assert_gone(what: &str, pid: u32) {
+    let start = Instant::now();
+    while pf_host::peer::start_time(pid).is_some() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{what} (PID {pid}) is still live"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Send `SIGKILL` to a host's group and to the host when it goes out of scope.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        pf_host::peer::kill_group(self.0, 9);
+        pf_host::peer::kill_pid(self.0, 9);
+    }
+}
+
+fn child_pid(rt: &Runtime, server: &str, unit: &str) -> u32 {
+    let text = std::fs::read_to_string(
+        rt.0.join("pf-hosts")
+            .join(server)
+            .join(unit)
+            .join("child.pid"),
+    )
+    .unwrap();
+    text.trim().parse().unwrap()
+}
+
+#[test]
+fn stop_hosts_waits_for_a_host_that_exits_late() {
+    // r2.s2.w3, PR #76 red check: `stop_hosts` sent `SIGTERM` and returned, so a script's caller found
+    // the host live on a slow runner. This host exits one second after the signal; no timing of the
+    // test decides the result, because `stop_hosts` returns only when the host is gone.
+    let rt = Runtime::new();
+    let host = start_fake_host(&rt, "srv", "unit-1", "delay");
+    assert_eq!(rt.live_hosts().len(), 1, "the fake host is live before");
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        rt.live_hosts(),
+        Vec::<(PathBuf, u32)>::new(),
+        "a host is live after stop_hosts returned"
+    );
+    assert!(
+        rt.0.join("pf-hosts/srv/unit-1/termed").exists(),
+        "the host did not end through its SIGTERM path"
+    );
+    assert_gone("the host", host);
+}
+
+#[test]
+fn stop_hosts_kills_a_host_and_its_child_that_ignore_sigterm() {
+    // The host and its child ignore `SIGTERM`: after the 5 s wait, `SIGKILL` goes to the host's group
+    // and to the host.
+    let rt = Runtime::new();
+    let host = start_fake_host(&rt, "srv", "unit-1", "ignore");
+    let child = child_pid(&rt, "srv", "unit-1");
+    assert!(pf_host::peer::start_time(child).is_some());
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        rt.live_hosts(),
+        Vec::<(PathBuf, u32)>::new(),
+        "a host is live after stop_hosts returned"
+    );
+    assert_gone("the host", host);
+    assert_gone("the host's child", child);
+}
+
+#[test]
+fn stop_hosts_touches_only_hosts_of_its_own_server_with_a_matching_start_time() {
+    // Two rules that stay: a host of another server is never signalled, and a `host.pid` whose start
+    // time differs names another process now, so it is skipped.
+    let rt = Runtime::new();
+    let own = start_fake_host(&rt, "srv", "unit-1", "delay");
+    let other_server = start_fake_host(&rt, "other", "unit-1", "delay");
+    let reused = start_fake_host(&rt, "srv", "unit-2", "delay");
+    // `Runtime` stops only the hosts whose `host.pid` matches, and this one will not match.
+    let _stop_reused = KillOnDrop(reused);
+    let pidfile = rt.0.join("pf-hosts/srv/unit-2/host.pid");
+    let text = std::fs::read_to_string(&pidfile).unwrap();
+    let (pid, start) = text.trim().split_once(' ').unwrap();
+    let wrong = start.parse::<u64>().unwrap() + 1;
+    std::fs::write(&pidfile, format!("{pid} {wrong}\n")).unwrap();
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_gone("the own host", own);
+    let live: Vec<u32> = rt.live_hosts().into_iter().map(|(_, pid)| pid).collect();
+    assert_eq!(live, vec![other_server], "{live:?}");
+    assert!(pf_host::peer::start_time(reused).is_some());
+    assert!(!rt.0.join("pf-hosts/other/unit-1/termed").exists());
+    assert!(!rt.0.join("pf-hosts/srv/unit-2/termed").exists());
+}
+
 #[test]
 fn an_interrupted_golden_journey_a_stops_its_hosts() {
     interrupted_demo_leaves_no_host("golden-journey-a.sh", "paper");
