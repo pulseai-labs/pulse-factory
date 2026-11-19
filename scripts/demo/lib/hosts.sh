@@ -12,7 +12,9 @@
 # once, so `stop_hosts` waits for each host it signalled to exit, up to 5 s in total. It then sends
 # `SIGKILL` to the process group and to the PID of each host that is still live, and returns only
 # when no host it found is live (a zombie is not live). A caller that checks for live hosts right
-# after the script exits sees none. It returns 1 when a host is still live after `SIGKILL`.
+# after the script exits sees none. It always returns 0, so a `set -e` cleanup trap goes on to
+# `rm -rf "$tmp"`: when a host is still live after `SIGKILL` (a process in uninterruptible sleep),
+# it prints a warning on stderr that names each such host.
 # It does nothing when the state directory has no server name (no seat was started) and never
 # touches a host of another server. `host.pid` holds the host's PID and its start time (field 22 of
 # `/proc/<pid>/stat`); a PID whose start time differs belongs to another process now and is
@@ -71,5 +73,10 @@ stop_hosts() {
   done
   # A killed process is gone at once, or a zombie that its parent has not reaped yet. The short
   # bound stops a process in uninterruptible sleep from holding the script's exit trap.
-  _hosts_wait_gone "$left" "$(($(date +%s%N) + 2000000000))"
+  _hosts_wait_gone "$left" "$(($(date +%s%N) + 2000000000))" && return 0
+  for host in $left; do
+    _host_is_live "${host%%:*}" "${host#*:}" \
+      && echo "stop_hosts: host pid ${host%%:*} (start time ${host#*:}) is still live after SIGKILL" >&2
+  done
+  return 0
 }

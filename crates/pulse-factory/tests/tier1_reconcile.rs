@@ -54,6 +54,22 @@ fn a_controller_killed_and_started_again_finds_its_seat_survived() {
         .collect();
     assert_eq!(survived.len(), 1, "{survived:?}");
     assert!(survived[0].contains(&unit), "{}", survived[0]);
+    // One `attached` line for the launch and one for the rebind (SPINE.md Q4: one line per
+    // attach), both for this seat's unit, and no `refused` line.
+    let attach: Vec<String> = rig
+        .ledger_lines("host_attach")
+        .into_iter()
+        .filter(|l| l.contains(&unit))
+        .collect();
+    assert_eq!(
+        attach.iter().filter(|l| l.contains(" attached ")).count(),
+        2,
+        "{attach:?}"
+    );
+    assert!(
+        attach.iter().all(|l| !l.contains(" refused ")),
+        "{attach:?}"
+    );
     assert_eq!(rig.live_hosts().len(), 1);
     let rows = rig.host_rows();
     assert_eq!(rows.len(), 1, "no second host started: {rows:?}");

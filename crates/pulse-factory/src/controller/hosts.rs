@@ -978,6 +978,29 @@ impl HostService {
             .flatten()
             .and_then(|r| serde_json::from_str::<Value>(&r.record).ok())
             .unwrap_or(Value::Null);
+        // A rebind is an attach: one `host_attach` line, as the launch writes (the audit trail has
+        // one line per attach), and then the tier-1 line for the reconcile outcome.
+        let attach_cmd = format!("host-rebind-{unit}-{}", unique());
+        let attach_line = format!(
+            "host_attach {unit} attached session={} incarnation={} launcher={} command={attach_cmd}",
+            field(&row.session_id),
+            row.incarnation,
+            row.launcher
+        );
+        if let Err(e) = self.admit(
+            &ctl,
+            Commit {
+                kind: "host_attach",
+                command_id: &attach_cmd,
+                content: json!({"unit": unit, "record_sha256": row.launched_record_sha256})
+                    .to_string(),
+                effects: Vec::new(),
+                subject: unit,
+                line: attach_line,
+            },
+        ) {
+            eprintln!("pulse-factory: cannot write the attach line of {unit}: {e}");
+        }
         self.tier1_line(&ctl, &row, "survived", "the host answered its hello");
         Rebind::Survived(self.handle_of(conn, &hello, unit, &session, inc, record))
     }
