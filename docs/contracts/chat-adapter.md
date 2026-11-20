@@ -446,7 +446,9 @@ state and the adapter sends the same events, and sends no control response for a
 (the controller already answered or closed it). A host whose child ended while the controller was
 down is survived too: the adapter reads what the child left, then sends `Exited`. The controller
 keeps the process's start (the start of the host's registry row) and the start of the turn that ran
-at the restart (the cursor's `turn_since`): a rebind is no new process and no new turn.
+at the restart (the cursor's `turn_since`): a rebind is no new process and no new turn. A cursor
+written before `turn_since` existed holds none, so a turn that ran across that upgrade counts from
+the rebind.
 
 **Output lost.** A host `Gap` becomes `OutputLost` for the part above `committed`, and the adapter
 skips to the next newline. A request whose line was lost can still be answered from `point.pending`; a
