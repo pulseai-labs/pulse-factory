@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use common::{KEY, Tmp, host_bin};
 use pf_host::launcher::{
@@ -236,8 +237,18 @@ fn script(dir: &Path, name: &str, body: &str) -> String {
     path.display().to_string()
 }
 
+/// One test at a time writes a script or starts a process. A child that another test thread forks
+/// while a script is open for writing keeps that file descriptor until it runs its program, and the
+/// script then fails to run with ETXTBSY ("Text file busy"). CI saw this once, on the push run of
+/// the head of PR #79.
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    static SPAWNS: Mutex<()> = Mutex::new(());
+    SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[test]
 fn a_failed_systemd_run_is_an_error_naming_its_stderr_with_no_fallback_and_no_secrets_file() {
+    let _one = one_at_a_time();
     let tmp = Tmp::new();
     let rt = tmp.path.join("rt");
     std::fs::create_dir_all(&rt).unwrap();
@@ -262,6 +273,7 @@ fn a_failed_systemd_run_is_an_error_naming_its_stderr_with_no_fallback_and_no_se
 
 #[test]
 fn start_state_stop_and_list_use_the_systemctl_program() {
+    let _one = one_at_a_time();
     let tmp = Tmp::new();
     let rt = tmp.path.join("rt");
     std::fs::create_dir_all(&rt).unwrap();
@@ -353,6 +365,7 @@ fn stop_post(tmp: &Tmp, env: &[(&str, &str)]) {
 
 #[test]
 fn stop_post_writes_an_exit_file_when_none_exists_and_leaves_an_existing_one_alone() {
+    let _one = one_at_a_time();
     let tmp = Tmp::new();
     let file = tmp.path.join("state/hosts/exits/pf-host-srv-S-1-3.json");
     stop_post(
@@ -403,6 +416,7 @@ fn stop_post_writes_an_exit_file_when_none_exists_and_leaves_an_existing_one_alo
 
 #[test]
 fn a_start_that_cannot_read_the_unit_back_stops_it_and_leaves_no_secrets_file() {
+    let _one = one_at_a_time();
     let tmp = Tmp::new();
     let rt = tmp.path.join("rt");
     std::fs::create_dir_all(&rt).unwrap();
