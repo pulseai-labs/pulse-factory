@@ -624,7 +624,11 @@ stream (`api.md`).
   with `unqualified` for an override binary, `context lost: <why>`, and the holders when they apply:
   `waiting for an answer since <t>`, `background task <id> since <t>` and `turn since <t>`. For a
   process in a session host, `process since` is the start of its host and `turn since` is the start
-  of the running turn: a controller restart changes neither. The
+  of the running turn: a controller restart changes neither, with three exceptions. A turn that ran
+  across the upgrade to this rule has no stored start, so it counts from the restart. When the host
+  dropped the result of the turn that ran at the restart (`output_lost`), `turn since` keeps that
+  turn's start until the next result or the exit. A process with no session host takes both times
+  from the controller's clock, and it does not live through a restart. The
   branch is read live from the worktree. The JSON is `SessionList`: `{"schema_version": 1, "server":
   {"id", "name"}, "runtimes": […], "agents": […], "sessions": […]}`, where a runtime record holds the
   declared options, `mid_turn`, `ready` and `error`, an agent holds no env value, and a session record

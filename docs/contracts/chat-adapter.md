@@ -448,7 +448,10 @@ down is survived too: the adapter reads what the child left, then sends `Exited`
 keeps the process's start (the start of the host's registry row) and the start of the turn that ran
 at the restart (the cursor's `turn_since`): a rebind is no new process and no new turn. A cursor
 written before `turn_since` existed holds none, so a turn that ran across that upgrade counts from
-the rebind.
+the rebind. When the host dropped the result of the turn that ran at the restart (`OutputLost`), the
+controller cannot see that the turn ended: the start stays until the next result or the exit, and a
+later turn in the lines that are left shows it until its own result. A chat with no host is never
+rebound: its times come from the controller's clock at its open.
 
 **Output lost.** A host `Gap` becomes `OutputLost` for the part above `committed`, and the adapter
 skips to the next newline. A request whose line was lost can still be answered from `point.pending`; a
