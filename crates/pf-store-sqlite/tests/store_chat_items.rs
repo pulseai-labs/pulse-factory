@@ -734,6 +734,7 @@ fn mark(unit: &str, incarnation: u32, at: u64, checkpoint: Option<&str>) -> Chat
         at,
         checkpoint: checkpoint.map(ToString::to_string),
         exited: false,
+        turn_since: None,
     }
 }
 
@@ -751,6 +752,7 @@ fn cursor(
         acked,
         checkpoint: checkpoint.map(ToString::to_string),
         exited: false,
+        turn_since: None,
     })
 }
 
@@ -1015,6 +1017,96 @@ fn the_exit_mark_sets_exited_and_only_the_exit_mark_does() {
         .set_chat_host_mark("S-2", mark("pf-host-a-2", 2, 5, None))
         .unwrap();
     assert!(!host_cursor(&store, "S-2").unwrap().exited);
+}
+
+/// The d31 walk of 2026-11-20: a restart in a turn lost the turn's start, because nothing kept it.
+/// The mark of the line that starts a turn sets `turn_since`, and it stays until no turn runs.
+#[test]
+fn a_turn_start_mark_sets_turn_since_and_a_quiet_point_or_the_exit_clears_it() {
+    let (_d, store) = two_sessions();
+    let t1 = "2026-11-20T16:28:55.474Z";
+    let started = |at, since: &str| ChatHostMark {
+        turn_since: Some(since.to_string()),
+        ..mark("pf-host-a-1", 1, at, None)
+    };
+    let turn_since = |session: &str| host_cursor(&store, session).unwrap().turn_since;
+    // The start of a turn, written alone: it moves `committed`, and acknowledges nothing.
+    store.set_chat_host_mark("S-1", started(40, t1)).unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        Some(ChatHostCursor {
+            turn_since: Some(t1.to_string()),
+            ..cursor("pf-host-a-1", 1, 40, 0, None).unwrap()
+        })
+    );
+    // An item of the turn leaves it.
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 90, None),
+        ))
+        .unwrap();
+    assert_eq!(turn_since("S-1").as_deref(), Some(t1));
+    // The turn's result at a quiet point clears it, in the item's own transaction.
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::TurnResult,
+            mark("pf-host-a-1", 1, 120, Some("c1")),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 120, 120, Some("c1"))
+    );
+    // The next turn sets its own start.
+    let t2 = "2026-11-20T16:40:00.000Z";
+    store.set_chat_host_mark("S-1", started(150, t2)).unwrap();
+    assert_eq!(turn_since("S-1").as_deref(), Some(t2));
+    // A quiet point read again from below `committed` does not end a turn that started after it.
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-1", 1, 120, Some("c1")))
+        .unwrap();
+    assert_eq!(turn_since("S-1").as_deref(), Some(t2));
+    assert_eq!(host_cursor(&store, "S-1").unwrap().committed, 150);
+    // The exit clears it.
+    store
+        .set_chat_host_mark(
+            "S-1",
+            ChatHostMark {
+                exited: true,
+                ..mark("pf-host-a-1", 1, 150, None)
+            },
+        )
+        .unwrap();
+    assert_eq!(turn_since("S-1"), None);
+    // A new host starts with none, and its first line can be the start of a turn.
+    store.set_chat_host_mark("S-2", started(10, t1)).unwrap();
+    assert_eq!(turn_since("S-2").as_deref(), Some(t1));
+    store
+        .set_chat_host_mark("S-2", mark("pf-host-a-2", 2, 5, None))
+        .unwrap();
+    assert_eq!(turn_since("S-2"), None);
+    store
+        .set_chat_host_mark(
+            "S-2",
+            ChatHostMark {
+                turn_since: Some(t2.to_string()),
+                ..mark("pf-host-a-3", 3, 7, None)
+            },
+        )
+        .unwrap();
+    assert_eq!(turn_since("S-2").as_deref(), Some(t2));
+}
+
+/// A cursor written before `turn_since` existed reads with none, and an older reader ignores the
+/// field: the column is one JSON object, so no migration changes.
+#[test]
+fn a_cursor_written_before_turn_since_reads_with_none() {
+    let old = r#"{"unit":"pf-host-a-1","incarnation":1,"committed":9,"acked":4,"checkpoint":"c"}"#;
+    let read: ChatHostCursor = serde_json::from_str(old).unwrap();
+    assert_eq!(Some(read), cursor("pf-host-a-1", 1, 9, 4, Some("c")));
 }
 
 #[test]

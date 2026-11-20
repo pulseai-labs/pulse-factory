@@ -303,7 +303,13 @@ pub(super) struct LiveChat {
     /// output line, so `committed` alone cannot say whether the exit is stored: an exit at
     /// `committed` is a first exit until this is set (it reads the cursor's `exited`).
     pub exit_stored: AtomicBool,
+    /// When the process started. For a process in a session host it is the start of the host's
+    /// registry row, which a controller restart keeps: a rebind is no new process.
     pub opened_at: SystemTime,
+    /// The start of the turn that ran when the controller rebound to this process, as the store
+    /// holds it. `None` for a process the controller opened, and for a rebind between turns. The
+    /// output read again after a rebind gives that turn's start again, and it takes this time.
+    pub resumed_turn: Option<SystemTime>,
     pub version: String,
     pub qualified: bool,
     /// True once the controller asked the process to stop.
@@ -414,6 +420,12 @@ impl Chats {
 pub(super) fn utc(t: SystemTime) -> String {
     let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     pf_engine::engine::format_utc(d.as_secs(), d.subsec_millis())
+}
+
+/// The time of UTC text that [`utc`] or `now()` wrote, to the millisecond. `None` for any other
+/// text.
+fn time_of(text: &str) -> Option<SystemTime> {
+    super::devices::parse_utc_millis(text).map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
 }
 
 /// Why an open failed.
@@ -868,7 +880,7 @@ impl Controller {
         // The row's state is the stored one (a stopped process can leave `needs_you`): the live
         // chat starts as it, so the `sync_state` below writes `idle` over it at once, and not only
         // when the first event of the new process arrives.
-        let live = self.build_live(row, &port, &opened, options, row.state, 0);
+        let live = self.build_live(row, &port, &opened, options, row.state, 0, None);
         if row.runtime_session_ref.as_deref() != Some(opened.session.0.as_str()) {
             let _ = self
                 .store
@@ -908,7 +920,10 @@ impl Controller {
         Ok(live)
     }
 
-    /// The live table entry of a process the adapter opened or rebound.
+    /// The live table entry of a process the adapter opened or rebound. `turn_since` is the start
+    /// of the turn that runs at a rebind, as the store holds it: the process is in that turn from
+    /// the first moment, before any output is read again.
+    #[allow(clippy::too_many_arguments)]
     fn build_live(
         &self,
         row: &ChatSessionRow,
@@ -917,8 +932,18 @@ impl Controller {
         options: BTreeMap<String, String>,
         state: ChatSessionState,
         committed: u64,
+        turn_since: Option<SystemTime>,
     ) -> Arc<LiveChat> {
         let now_t = SystemTime::now();
+        // The process of a hosted chat started when its host did. The registry row holds that
+        // time, so an open and every later rebind name the same one. A chat with no host, or a
+        // row that cannot be read, starts now.
+        let opened_at = opened
+            .host
+            .as_ref()
+            .and_then(|h| self.store.host(&h.unit).ok().flatten())
+            .and_then(|host| time_of(&host.started_at))
+            .unwrap_or(now_t);
         Arc::new(LiveChat {
             session: row.id.clone(),
             project: row.project_id.clone(),
@@ -934,14 +959,15 @@ impl Controller {
                         .as_ref()
                         .is_some_and(|h| h.unit == c.unit && h.incarnation == c.incarnation)
             })),
-            opened_at: now_t,
+            opened_at,
+            resumed_turn: turn_since,
             version: opened.runtime_version.clone(),
             qualified: opened.qualified,
             stopping: AtomicBool::new(false),
             store_failed: AtomicBool::new(false),
             io: Mutex::new(()),
             inner: Mutex::new(LiveInner {
-                turn_since: None,
+                turn_since,
                 tasks: BTreeMap::new(),
                 requests: BTreeMap::new(),
                 tools: BTreeMap::new(),
@@ -1227,6 +1253,7 @@ impl Controller {
                 at,
                 checkpoint: checkpoint.clone(),
                 exited,
+                turn_since: None,
             });
             let ctx = Delivered {
                 reread,
@@ -1238,11 +1265,15 @@ impl Controller {
             let mut stored = ctx.stored.get();
             let failure = ctx.failure.take();
             // A position no item carried goes to the store alone: a checkpoint with no item (a
-            // moved session between turns), or the exit, which the host waits to hear about. A
-            // delivery that lost an item moves no position.
+            // moved session between turns), the exit, which the host waits to hear about, or the
+            // start of a turn, whose time a restart must find again. A turn the controller cut as
+            // it started (the self-started turn cap) stores no start. A delivery that lost an
+            // item moves no position.
             if failure.is_none()
                 && let Some(mark) = ctx.mark.take()
-                && (mark.checkpoint.is_some() || exited)
+                && (mark.checkpoint.is_some()
+                    || exited
+                    || (mark.turn_since.is_some() && !live.is_stopping()))
             {
                 match self.store.set_chat_host_mark(&live.session, mark) {
                     Ok(()) => stored = true,
@@ -1360,9 +1391,16 @@ impl Controller {
         match event {
             ChatEvent::TurnStarted { cause } => {
                 let self_started = cause != TurnCause::Operator;
+                let since = SystemTime::now();
+                // The turn's start goes to the store with this line's position, so a controller
+                // restart in the turn names the same start (see `rebind_chat`).
+                if let Some(mut mark) = ctx.mark.take() {
+                    mark.turn_since = Some(utc(since));
+                    ctx.mark.set(Some(mark));
+                }
                 {
                     let mut inner = lock(&live.inner);
-                    inner.turn_since = Some(SystemTime::now());
+                    inner.turn_since = Some(since);
                     // An operator's turn resets the count. A turn nobody asked for counts.
                     inner.self_turns = if self_started {
                         inner.self_turns + 1
@@ -1679,7 +1717,13 @@ impl Controller {
         let mut result = EventResult::default();
         match event {
             ChatEvent::TurnStarted { .. } => {
-                lock(&live.inner).turn_since = Some(SystemTime::now());
+                // The start of a turn the store holds, read again after a rebind: it is no new
+                // start. The last turn read again that has no end is the one that ran at the
+                // restart, and the store holds its time (`rebind_chat`). An earlier one takes the
+                // same time until its own result, read again, ends it. A cursor written before the
+                // store kept the time has none: then the turn counts from now.
+                lock(&live.inner).turn_since =
+                    Some(live.resumed_turn.unwrap_or_else(SystemTime::now));
             }
             ChatEvent::TextDelta { .. }
             | ChatEvent::Text { .. }
@@ -1988,8 +2032,23 @@ impl Controller {
                     Ok(Some(agent)) => effective_options(row, &agent),
                     _ => row.runtime_options.clone(),
                 };
-                let live =
-                    self.build_live(row, &port, &opened, options, row.state, point.committed);
+                // The turn that ran at the restart still runs, since the time the store holds
+                // for this host. The output read again ends it, when it ended meanwhile.
+                let turn_since = row
+                    .host_cursor
+                    .as_ref()
+                    .filter(|c| c.unit == unit && c.incarnation == incarnation)
+                    .and_then(|c| c.turn_since.as_deref())
+                    .and_then(time_of);
+                let live = self.build_live(
+                    row,
+                    &port,
+                    &opened,
+                    options,
+                    row.state,
+                    point.committed,
+                    turn_since,
+                );
                 for (item, request_id, kind) in self.pending_of(&row.id) {
                     lock(&live.inner).requests.insert(
                         item.seq,

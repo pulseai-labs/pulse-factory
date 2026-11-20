@@ -62,7 +62,7 @@ fn record(d: DeviceRow) -> DeviceRecord {
 
 /// Milliseconds since the Unix epoch of UTC text such as `2026-11-07T10:00:00.000Z`, the text that
 /// `now()` writes. `None` for any other text.
-fn parse_utc_millis(text: &str) -> Option<u64> {
+pub(super) fn parse_utc_millis(text: &str) -> Option<u64> {
     let num = |range: std::ops::Range<usize>| -> Option<i64> {
         let part = text.get(range)?;
         part.bytes()

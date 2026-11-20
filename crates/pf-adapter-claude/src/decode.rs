@@ -9,9 +9,9 @@
 //! inbound control request the adapter does not serve, a violation that ends the process, or a log
 //! line. Facts the recordings of CLI 2.1.319 settled (`docs/adr/adr-0014-*`):
 //!
-//! - a turn starts at the `system/init` message and ends at `result`; a turn with no sent message
-//!   behind it (no matching id in `user_message_uuids`) is a `Task` turn, which the CLI starts by
-//!   itself when a background task finishes;
+//! - a turn starts at the `system/init` message and ends at `result`; an `init` names the message
+//!   that started its turn in `user_message_uuids`, and an `init` that names none is a `Task`
+//!   turn, which the CLI starts by itself when a background task finishes;
 //! - a message sent during a turn is taken into it: one `init`, one `result`, both ids in the
 //!   result's `user_message_uuids`;
 //! - `result.total_cost_usd` and `result.modelUsage` are cumulative for the process, so a turn's
@@ -485,25 +485,18 @@ impl Decoder {
             .flatten()
             .filter_map(Value::as_str)
             .collect();
-        // A re-read init that names a message this decoder never saw was sent in the life before
-        // a restart (the checkpoint holds only the sends open at a quiet point): the turn was
-        // started by a message, so it is not a task turn. The kind of that message is not known
-        // now, and the store holds the turn already, so `Operator` stands.
-        let unknown_send = self.reread && !uuids.is_empty();
-        let cause = uuids
-            .iter()
-            .find_map(|u| self.sends.get(*u).copied())
-            .map_or(
-                if unknown_send {
-                    TurnCause::Operator
-                } else {
-                    TurnCause::Task
-                },
-                |kind| match kind {
-                    InputKind::Operator => TurnCause::Operator,
-                    InputKind::Notice => TurnCause::Notice,
-                },
-            );
+        // An init that names a message this decoder never saw: only the adapter writes the CLI's
+        // input, so the message was sent in the life before a controller restart. The checkpoint
+        // holds only the sends open at a quiet point, and a restart before the first quiet point
+        // leaves no checkpoint at all. A message started the turn, so it is not a task turn,
+        // whether the line is a re-read or not. The kind of that message is not known now, so
+        // `Operator` stands: an operator's turn must never count as one the chat started by itself.
+        let cause = match uuids.iter().find_map(|u| self.sends.get(*u).copied()) {
+            Some(InputKind::Operator) => TurnCause::Operator,
+            Some(InputKind::Notice) => TurnCause::Notice,
+            None if !uuids.is_empty() => TurnCause::Operator,
+            None => TurnCause::Task,
+        };
         self.turn = Some(Turn {
             cause,
             calls: BTreeSet::new(),

@@ -622,7 +622,9 @@ stream (`api.md`).
   ended ones. One line each:
   `S-1  P-1 alpha  W-1 main  idle  claude-opus-5-5/high/bypassPermissions  $0.003465  process since <t>, releases at <t>`,
   with `unqualified` for an override binary, `context lost: <why>`, and the holders when they apply:
-  `waiting for an answer since <t>`, `background task <id> since <t>` and `turn since <t>`. The
+  `waiting for an answer since <t>`, `background task <id> since <t>` and `turn since <t>`. For a
+  process in a session host, `process since` is the start of its host and `turn since` is the start
+  of the running turn: a controller restart changes neither. The
   branch is read live from the worktree. The JSON is `SessionList`: `{"schema_version": 1, "server":
   {"id", "name"}, "runtimes": […], "agents": […], "sessions": […]}`, where a runtime record holds the
   declared options, `mid_turn`, `ready` and `error`, an agent holds no env value, and a session record

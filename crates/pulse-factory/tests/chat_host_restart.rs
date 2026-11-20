@@ -121,6 +121,11 @@ fn plain_turn_done_once(rig: &ChatRig) {
         .find(|i| i.kind == "turn_result")
         .unwrap();
     assert_eq!(result.payload["usage"]["cost_micros"].as_u64(), Some(want));
+    assert_eq!(
+        result.payload["cause"], "operator",
+        "the operator's message started the turn: {}",
+        result.payload
+    );
     let reply = rig
         .items()
         .into_iter()
@@ -137,6 +142,93 @@ fn plain_turn_done_once(rig: &ChatRig) {
         "{}",
         turns[0]
     );
+    assert!(turns[0].contains(" cause=operator "), "{}", turns[0]);
+}
+
+/// The `process` record of the rig's session in `session list --json`, and what its line of
+/// `session list` says from `process since` on.
+fn listed(rig: &ChatRig) -> (Value, String) {
+    let listed = rig.json(&["session", "list"]);
+    let process = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == rig.session.as_str())
+        .unwrap_or_else(|| panic!("{listed}"))["process"]
+        .clone();
+    let out = rig.r.cli(&["session", "list"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with(&format!("{} ", rig.session)))
+        .unwrap_or_else(|| panic!("{text}"));
+    let tail = line
+        .find("process since")
+        .map_or(line, |i| &line[i..])
+        .to_string();
+    (process, tail)
+}
+
+/// The d31 walk of 2026-11-20: after a restart in a turn, `session list` named the restart as the
+/// process's start and showed no turn. The process and the turn are the ones from before the
+/// restart, so both times stay. `assistant` is a kill after the deltas (the store holds no
+/// position of this host yet); `result` is a kill after the reply item (it holds one).
+#[test]
+fn session_list_keeps_process_since_and_turn_since_across_a_restart_in_a_turn() {
+    for gate in ["assistant", "result"] {
+        let mut rig = ChatRig::new(PLAIN, None, &[(gate, "g1")], &[]);
+        rig.send("hello");
+        if gate == "assistant" {
+            rig.wait_progress(0, host_lines_before(PLAIN, "assistant"));
+        } else {
+            rig.wait_items("the reply item", |i| {
+                i.iter().any(|x| x.kind == "assistant_text")
+            });
+        }
+        rig.r
+            .wait_for("the turn in session list", Duration::from_secs(30), || {
+                listed(&rig).0["turn_since"].is_string()
+            });
+        let (before, line_before) = listed(&rig);
+        assert!(before["since"].is_string(), "{gate}: {before}");
+        assert!(before["releases_at"].is_null(), "{gate}: {before}");
+        assert!(line_before.contains(", turn since "), "{line_before}");
+        let pid = rig.pid(0);
+        let unit = rig.unit();
+        // A time made at the restart would differ from the one before it.
+        std::thread::sleep(Duration::from_millis(50));
+        rig.restart();
+        survived(&rig, pid, &unit, 1);
+
+        // Right after the rebind, and again once the output was read again.
+        for wait_ms in [0, 600] {
+            std::thread::sleep(Duration::from_millis(wait_ms));
+            let (after, line_after) = listed(&rig);
+            assert_eq!(
+                after["since"], before["since"],
+                "{gate}, {wait_ms} ms: the process did not restart: {after}"
+            );
+            assert_eq!(
+                after["turn_since"], before["turn_since"],
+                "{gate}, {wait_ms} ms: the turn still runs: {after}"
+            );
+            assert!(after["releases_at"].is_null(), "{gate}: {after}");
+            assert_eq!(line_after, line_before, "{gate}, {wait_ms} ms");
+        }
+
+        // The turn ends: no turn, the same process, and the idle window starts.
+        rig.release("g1");
+        plain_turn_done_once(&rig);
+        rig.r.wait_for(
+            "the end of the turn in session list",
+            Duration::from_secs(30),
+            || listed(&rig).0["turn_since"].is_null(),
+        );
+        let (ended, line_ended) = listed(&rig);
+        assert_eq!(ended["since"], before["since"], "{gate}: {ended}");
+        assert!(ended["releases_at"].is_string(), "{gate}: {ended}");
+        assert!(!line_ended.contains("turn since"), "{line_ended}");
+    }
 }
 
 #[test]
