@@ -291,11 +291,6 @@ impl Decoder {
         );
     }
 
-    /// The ids of the open requests.
-    pub fn open_request_ids(&self) -> Vec<String> {
-        self.requests.keys().cloned().collect()
-    }
-
     /// Output was lost: the first message that belongs in a turn opens one, with cause `Operator`,
     /// so its `result` is still stored. The cost stays exact: the totals are cumulative.
     pub fn after_gap(&mut self) {

@@ -683,10 +683,13 @@ impl Controller {
             Ok((_, replayed)) => replayed,
             Err(why) => return Response::err(why),
         };
+        // A replay revises too: the first run of this command may have stopped between the row
+        // update and the revision write, and a client retry is the repair. A revision that exists
+        // already is a replay of its own command ID and writes nothing.
+        self.revise_record(&args);
         if replayed {
             return self.changed(&args.session_id, true, None);
         }
-        self.revise_record(&args);
         let note = self.apply_set(&args);
         self.emit_session(&args.session_id);
         self.changed(&args.session_id, false, note)
@@ -787,7 +790,8 @@ impl Controller {
 
     /// Write the launch record's next revision for an admitted set (Approach 9). A session with no
     /// launch record has nothing to revise. A failed write prints one line: the session row holds
-    /// the change, and the set is admitted already.
+    /// the change, a resume takes these settings from the row, and a retry of the command writes
+    /// the revision again.
     fn revise_record(&self, args: &wire::SessionSetArgs) {
         let Ok(Some(row)) = self.session_row(&args.session_id) else {
             return;

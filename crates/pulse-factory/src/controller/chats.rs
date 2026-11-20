@@ -253,12 +253,11 @@ pub(super) struct OpenRequest {
     pub since: SystemTime,
 }
 
-/// What a resume takes from a launch record (Approach 8).
+/// What a resume takes from a launch record (Approach 8). The four settings a `session set` changes
+/// (`model`, `effort`, `permission_mode` and `options`) are not here: a resume takes them from the
+/// session row, which the set updates in the same commit that admits it. The record's own copy can
+/// lag the row after a kill or a failed revision write, and a resume must never revert a set.
 struct FromRecord {
-    model: String,
-    effort: String,
-    permission_mode: String,
-    options: BTreeMap<String, String>,
     instructions: String,
     env: BTreeMap<String, String>,
     secret_env: BTreeMap<String, String>,
@@ -305,6 +304,11 @@ pub(super) struct LiveChat {
     pub qualified: bool,
     /// True once the controller asked the process to stop.
     pub stopping: AtomicBool,
+    /// True once an item of this process's output failed to reach the store. From then on the
+    /// process's deliveries move nothing: no item, no position, no acknowledgement. The host keeps
+    /// the output past the last position the store consumed, and the next restart reads it again, so
+    /// no item is lost and none is stored twice. Only a process that runs in a host sets it.
+    pub store_failed: AtomicBool,
     /// One writer at a time for the session's items: the pump and the verbs take it, so the order
     /// of the log is the order of what happened.
     pub io: Mutex<()>,
@@ -599,7 +603,16 @@ impl Controller {
     fn put(&self, ctx: &Delivered, mut item: NewChatItem) -> Result<ChatItemRow, String> {
         item.host = ctx.mark.take();
         let marked = item.host.is_some();
-        let row = self.append_item(item)?;
+        let row = match self.append_item(item) {
+            Ok(row) => row,
+            Err(why) => {
+                // The delivery is not committed or acknowledged now, and no later one is either
+                // (see `handle_delivery`): the item stays in the host until it is stored.
+                let first = ctx.failure.take().unwrap_or_else(|| why.clone());
+                ctx.failure.set(Some(first));
+                return Err(why);
+            }
+        };
         if marked {
             ctx.stored.set(true);
         }
@@ -763,10 +776,10 @@ impl Controller {
         let (model, effort, permission_mode, options, instructions, mut env, secret_env, binary) =
             match recorded {
                 Some(r) => (
-                    r.model,
-                    r.effort,
-                    r.permission_mode,
-                    r.options,
+                    row.model.clone(),
+                    row.effort.clone(),
+                    row.permission_mode.clone(),
+                    effective_options(row, &agent),
                     r.instructions,
                     r.env,
                     r.secret_env,
@@ -898,6 +911,7 @@ impl Controller {
             version: opened.runtime_version.clone(),
             qualified: opened.qualified,
             stopping: AtomicBool::new(false),
+            store_failed: AtomicBool::new(false),
             io: Mutex::new(()),
             inner: Mutex::new(LiveInner {
                 turn_since: None,
@@ -987,10 +1001,6 @@ impl Controller {
         }
         let runtime = &body["runtime"];
         Ok(FromRecord {
-            model: text("model"),
-            effort: text("effort"),
-            permission_mode: text("permission_mode"),
-            options: pairs(&settings["options"]),
             instructions: text("instructions"),
             env,
             secret_env,
@@ -1151,7 +1161,6 @@ impl Controller {
             checkpoint,
         } = delivery;
         let exited = matches!(event, ChatEvent::Exited { .. });
-        let positioned = live.host.as_ref().zip(at);
         let (result, ack) = {
             let _io = lock(&live.io);
             // A stopper sets `stopping` while it holds `io`, so an event that waited for the lock
@@ -1167,6 +1176,18 @@ impl Controller {
             {
                 return;
             }
+            // After a failed item write, this process's output is not read on: an item stored now
+            // would sit past the one that is missing, and the restart would store it again. Only the
+            // exit still applies, and it moves no position.
+            let failed_before = live.store_failed.load(Ordering::SeqCst);
+            if failed_before && !exited {
+                return;
+            }
+            let positioned = if failed_before {
+                None
+            } else {
+                live.host.as_ref().zip(at)
+            };
             let reread =
                 positioned.is_some_and(|(_, at)| at <= live.committed.load(Ordering::SeqCst));
             let mark = positioned.map(|(host, at)| ChatHostMark {
@@ -1179,12 +1200,16 @@ impl Controller {
                 reread,
                 mark: Cell::new(mark),
                 stored: Cell::new(false),
+                failure: Cell::new(None),
             };
             let result = self.apply_event(live, event, &ctx);
             let mut stored = ctx.stored.get();
+            let failure = ctx.failure.take();
             // A position no item carried goes to the store alone: a checkpoint with no item (a
-            // moved session between turns), or the exit, which the host waits to hear about.
-            if let Some(mark) = ctx.mark.take()
+            // moved session between turns), or the exit, which the host waits to hear about. A
+            // delivery that lost an item moves no position.
+            if failure.is_none()
+                && let Some(mark) = ctx.mark.take()
                 && (mark.checkpoint.is_some() || exited)
             {
                 match self.store.set_chat_host_mark(&live.session, mark) {
@@ -1198,9 +1223,13 @@ impl Controller {
             if stored && let Some((_, at)) = positioned {
                 live.committed.fetch_max(at, Ordering::SeqCst);
             }
+            if let (Some(why), Some((_, at))) = (&failure, positioned) {
+                self.hold_unstored(live, at, why);
+            }
             let ack = match positioned {
                 Some((_, at))
-                    if !live.is_stopping()
+                    if failure.is_none()
+                        && !live.is_stopping()
                         && ((checkpoint.is_some() && stored) || (exited && (stored || reread))) =>
                 {
                     Some(at)
@@ -1223,6 +1252,24 @@ impl Controller {
             lock(&live.inner).context = usage;
             self.emit_session(&live.session);
         }
+    }
+
+    /// An item of a delivery at host position `at` did not reach the store: stop this process's
+    /// deliveries from moving past it, and say so. The position stays where the store has it, the
+    /// host is not acknowledged, and a restart reads the output again from there.
+    fn hold_unstored(&self, live: &Arc<LiveChat>, at: u64, why: &str) {
+        live.store_failed.store(true, Ordering::SeqCst);
+        eprintln!(
+            "pulse-factory: chat session {}: an item at host position {at} is not stored: {why}",
+            live.session
+        );
+        self.notice(
+            &live.session,
+            "output_not_stored",
+            &format!(
+                "an item of this chat's output could not be stored (host position {at}: {why}); the chat's output is not read on until the controller restarts, and then it is read again from the last stored position"
+            ),
+        );
     }
 
     /// One event with no position, as an adapter that runs no host sends it.
@@ -1543,7 +1590,7 @@ impl Controller {
                         },
                     );
                     item.tool_input = Some(tool_text(input));
-                    let _ = self.append_item(item);
+                    let _ = self.put(ctx, item);
                 }
                 {
                     let mut inner = lock(&live.inner);
@@ -2033,6 +2080,8 @@ struct Delivered {
     mark: Cell<Option<ChatHostMark>>,
     /// True once an item carried the mark into the store.
     stored: Cell<bool>,
+    /// Why the first item write of this delivery failed, when one did.
+    failure: Cell<Option<String>>,
 }
 
 /// What applying one event found.

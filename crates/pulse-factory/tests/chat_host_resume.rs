@@ -265,3 +265,89 @@ fn a_session_with_no_launch_record_resumes_from_its_row() {
     assert_eq!((records[0].0, records[0].1), (1, 1));
     let _: Value = records[0].2.clone();
 }
+
+// ---------------------------------------------------------------------------- a missed revision
+
+/// A lost chat whose `session set` was admitted and wrote the session row, and whose revision never
+/// reached the store: the controller died between the two writes. The test builds that state from a
+/// real set. It stops the controller, removes the revision and the admission of its command ID (past
+/// the triggers that keep them write-once) and starts the controller again.
+fn lost_chat_with_a_missed_revision() -> ChatRig {
+    let mut rig = lost_chat(&[]);
+    rig.json(&[
+        "session",
+        "set",
+        &rig.session.clone(),
+        "--model",
+        "claude-sonnet-5-5",
+        "--command-id",
+        "set-1",
+    ]);
+    assert_eq!(rig.records().len(), 2, "the set wrote revision 2");
+    rig.r.kill9();
+    {
+        let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
+        db.execute_batch(
+            "DROP TRIGGER launch_records_never_delete; \
+             DELETE FROM launch_records WHERE revision = 2; \
+             DELETE FROM admissions WHERE command_id = 'host-revise-set-1';",
+        )
+        .unwrap();
+    }
+    rig.r.start_controller();
+    assert_eq!(rig.records().len(), 1, "the revision is missing");
+    assert_eq!(
+        rig.row().model,
+        "claude-sonnet-5-5",
+        "the row holds the set"
+    );
+    assert_ne!(
+        rig.records()[0].2["settings"]["model"],
+        "claude-sonnet-5-5",
+        "the record does not"
+    );
+    rig
+}
+
+#[test]
+fn a_set_the_record_missed_is_not_reverted_by_the_resume() {
+    let rig = lost_chat_with_a_missed_revision();
+    rig.send("again");
+    wait_second_turn(&rig);
+    let argv = rig.argv(1);
+    assert_eq!(
+        value_after(&argv, "--model").as_deref(),
+        Some("claude-sonnet-5-5"),
+        "the resume takes the model from the row: {argv:?}"
+    );
+    // The new incarnation's record holds the model the resume ran with.
+    let records = rig.records();
+    assert_eq!(
+        records.last().unwrap().2["settings"]["model"],
+        "claude-sonnet-5-5"
+    );
+}
+
+#[test]
+fn a_client_retry_of_a_set_the_record_missed_writes_the_revision_once() {
+    let rig = lost_chat_with_a_missed_revision();
+    let set = |rig: &ChatRig| {
+        rig.json(&[
+            "session",
+            "set",
+            &rig.session.clone(),
+            "--model",
+            "claude-sonnet-5-5",
+            "--command-id",
+            "set-1",
+        ])
+    };
+    // The retry is a replay of an admitted command, and it still repairs the record.
+    set(&rig);
+    let records = rig.records();
+    assert_eq!(records.len(), 2, "the retry wrote revision 2");
+    assert_eq!(records[1].2["settings"]["model"], "claude-sonnet-5-5");
+    // A second retry finds the revision there: nothing more is written.
+    set(&rig);
+    assert_eq!(rig.records().len(), 2);
+}

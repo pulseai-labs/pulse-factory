@@ -10,11 +10,10 @@ use pf_engine::port::store::{
     ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit,
     Committed, DeviceRow, Effect, HostPositionRow, HostRow, LaunchRecordRow, LedgerLine, NEW_ID,
     NewChatItem, NewChatSession, NewDevice, NewHost, NewLaunchRecord, NewProject, NewRequest,
-    NodeKind, NodeRow,
-    ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind,
-    RequestRow, RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow,
-    SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy,
-    WorktreeRow,
+    NodeKind, NodeRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD,
+    REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow,
+    SessionWorktree, SettingRow, SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText,
+    WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
