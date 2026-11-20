@@ -141,11 +141,11 @@ fn a_version_eight_store_with_data_migrates_to_the_latest_and_keeps_every_row() 
         .collect();
     drop(before);
 
-    assert_eq!(MIGRATIONS.len(), 10);
+    assert_eq!(MIGRATIONS.len(), 11);
     assert_eq!(MIGRATIONS[8].version, 9);
     assert_eq!(MIGRATIONS[8].name, "launch_records");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     drop(store);
 
     let after = Connection::open(&path).unwrap();
@@ -153,8 +153,8 @@ fn a_version_eight_store_with_data_migrates_to_the_latest_and_keeps_every_row() 
         if table == "schema_version" {
             assert_eq!(
                 count(&after, table),
-                n + 2,
-                "versions 9 and 10 are recorded"
+                n + 3,
+                "versions 9, 10 and 11 are recorded"
             );
         } else {
             assert_eq!(count(&after, table), *n, "{table} keeps every row");

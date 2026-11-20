@@ -849,6 +849,7 @@ name = "pf-adapter-omp"
 version = "0.1.0"
 dependencies = [
  "pf-engine",
+ "pf-host",
  "pf-rules",
  "pf-store-sqlite",
  "pf-workflow",

@@ -297,6 +297,18 @@ fn the_socket_is_not_bound_until_tier_1_has_finished() {
 
 /// Start a host of `server` that no row names, from a copy of a live record file.
 fn stray_host(rig: &Restart, server: &str, session: &str, from_unit: &str) -> String {
+    stray_host_with(rig, server, session, from_unit, None)
+}
+
+/// A stray host from a copy of a live record file, with the record body edited first when `edit` is
+/// given (the edited body is sealed again, so its hash is its own).
+fn stray_host_with(
+    rig: &Restart,
+    server: &str,
+    session: &str,
+    from_unit: &str,
+    edit: Option<fn(&mut Value)>,
+) -> String {
     let own = rig.server();
     let (s, inc) = pf_host::names::parse_unit(&own, from_unit).unwrap();
     let dir = rig.state.join("hosts").join(&own);
@@ -304,7 +316,20 @@ fn stray_host(rig: &Restart, server: &str, session: &str, from_unit: &str) -> St
     let record_dir = rig.state.join("hosts").join(server);
     std::fs::create_dir_all(&record_dir).unwrap();
     let record = record_dir.join(format!("{session}-1.record.json"));
-    std::fs::copy(dir.join(format!("{s}-{inc}.record.json")), &record).unwrap();
+    let source = dir.join(format!("{s}-{inc}.record.json"));
+    match edit {
+        None => {
+            std::fs::copy(source, &record).unwrap();
+        }
+        Some(edit) => {
+            let mut body: Value =
+                serde_json::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+            edit(&mut body);
+            let (canonical, _hash) =
+                pf_engine::port::store::NewLaunchRecord::seal(&body.to_string()).unwrap();
+            std::fs::write(&record, canonical).unwrap();
+        }
+    }
     let spec = StartSpec::new(
         server,
         session,
@@ -380,5 +405,53 @@ fn orphans_are_stopped_or_removed_with_one_line_each_and_another_servers_host_is
         other_state,
         pf_host::launcher::HostState::Live,
         "another server's host was stopped"
+    );
+}
+
+/// An OMP seat's host runs its child on a terminal. The sweep reads a host of this server by its
+/// unit name and its row, never by its transport, so a terminal host that no live session row
+/// claims is stopped as one orphan (audit 3).
+#[test]
+fn a_terminal_host_that_no_row_names_is_stopped_by_the_orphan_sweep_with_one_line() {
+    let (mut rig, seats) = rig_with(&["u1"]);
+    let server = rig.server();
+    let unit1 = seats[0].2.clone();
+    rig.kill9();
+
+    // A `/bin/sh` stub on a terminal: the shape of an OMP seat.
+    let stray = stray_host_with(
+        &rig,
+        &server,
+        "sterminal0000000a",
+        &unit1,
+        Some(|body: &mut Value| {
+            body["argv"] = serde_json::json!(["/bin/sh", "-c", "exec sleep 600"]);
+            body["transport"] = serde_json::json!({"kind": "pty", "rows": 24, "cols": 80});
+        }),
+    );
+    assert_eq!(
+        rig.detached().state(&stray),
+        pf_host::launcher::HostState::Live,
+        "the terminal host runs before the controller starts"
+    );
+
+    rig.start_controller();
+    rig.wait_for("the orphan line", Duration::from_secs(30), || {
+        !rig.ledger_lines("host_orphan").is_empty()
+    });
+    let orphans = rig.ledger_lines("host_orphan");
+    assert_eq!(
+        orphans.iter().filter(|l| l.contains(&stray)).count(),
+        1,
+        "{orphans:?}"
+    );
+    assert_eq!(orphans.len(), 1, "{orphans:?}");
+    assert!(orphans[0].contains(" orphan "), "{orphans:?}");
+    let live: Vec<String> = rig.live_hosts().into_iter().map(|h| h.unit).collect();
+    assert!(!live.contains(&stray), "{live:?}");
+    assert!(live.contains(&unit1), "the seat of u1 survived: {live:?}");
+    assert_eq!(
+        rig.detached().state(&stray),
+        pf_host::launcher::HostState::Gone
     );
 }

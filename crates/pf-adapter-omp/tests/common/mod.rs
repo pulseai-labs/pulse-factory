@@ -1,6 +1,8 @@
 //! Helpers for the adapter tests. Every test uses a stub `omp` script and spends nothing.
 #![allow(dead_code)]
 
+pub mod hosts;
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,6 +10,9 @@ use std::sync::Arc;
 
 use pf_adapter_omp::{OmpAdapter, OmpConfig};
 use pf_engine::port::agent::LaunchPlan;
+use pf_engine::port::host::SessionHosts;
+
+use hosts::TestHosts;
 
 /// Write a stub `omp` into `dir`. `--version` prints `omp/<version>`. Any other call runs `body`,
 /// a POSIX shell snippet. `$DIR` is the stub's directory.
@@ -32,11 +37,10 @@ echo '{"ev":"session_start","t":1}' >> "$PF_EVENT_FILE"
 echo '{"ev":"agent_start","t":2}' >> "$PF_EVENT_FILE"
 exec sleep 600"#;
 
+/// An adapter over a test host service of its own: every launch runs the stub in a host on a
+/// terminal, and the service stops its hosts when the adapter drops, pass or fail.
 pub fn adapter(dir: &Path, omp: PathBuf) -> OmpAdapter {
-    let mut cfg = OmpConfig::new(dir.join("state"));
-    cfg.omp_bin = omp;
-    cfg.repo = "acme/widgets".to_string();
-    OmpAdapter::new(cfg)
+    adapter_over(dir, omp, TestHosts::owned())
 }
 
 pub fn adapter_with_clock(
@@ -44,11 +48,22 @@ pub fn adapter_with_clock(
     omp: PathBuf,
     clock: Arc<dyn Fn() -> u64 + Send + Sync>,
 ) -> OmpAdapter {
+    let mut cfg = config(dir, omp);
+    cfg.clock_ms = clock;
+    OmpAdapter::new(cfg, TestHosts::owned())
+}
+
+pub fn config(dir: &Path, omp: PathBuf) -> OmpConfig {
     let mut cfg = OmpConfig::new(dir.join("state"));
     cfg.omp_bin = omp;
     cfg.repo = "acme/widgets".to_string();
-    cfg.clock_ms = clock;
-    OmpAdapter::new(cfg)
+    cfg
+}
+
+/// An adapter over a host service the test holds, so that it can read what the service saw, or
+/// play a restarted controller with a second adapter over the same directories.
+pub fn adapter_over(dir: &Path, omp: PathBuf, hosts: Arc<dyn SessionHosts>) -> OmpAdapter {
+    OmpAdapter::new(config(dir, omp), hosts)
 }
 
 pub fn plan(cwd: &Path, extra: &[(&str, &str)]) -> LaunchPlan {
@@ -132,7 +147,7 @@ pub fn real_adapter(dir: &Path) -> OmpAdapter {
     cfg.repo = "probe/repo".to_string();
     // The probes observe what OMP does with MCP config, so the static refusal is off here.
     cfg.isolation_check = false;
-    OmpAdapter::new(cfg)
+    OmpAdapter::new(cfg, TestHosts::owned())
 }
 
 /// A probe plan: the probe model, low thinking, a scratch cwd and the allow hook.

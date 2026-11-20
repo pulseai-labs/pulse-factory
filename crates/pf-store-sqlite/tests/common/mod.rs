@@ -383,6 +383,46 @@ pub fn host_end_commit(command_id: &str, unit: &str, exit: &str) -> Commit {
     )
 }
 
+/// A live host named `unit`, with its launch record: a seat of the session `S-<unit>`.
+pub fn live_host(store: &SqliteStore, unit: &str) {
+    let session = format!("S-{unit}");
+    let record = new_record("seat", &session, 1, 1, &record_body(&hashed_secret()));
+    let hash = record.record_sha256.clone();
+    applied(
+        store
+            .commit(record_commit(&format!("lr-{unit}"), record))
+            .unwrap(),
+    );
+    applied(
+        store
+            .commit(host_commit(
+                &format!("hs-{unit}"),
+                new_host(unit, "seat", &session, 1, 1, &hash),
+            ))
+            .unwrap(),
+    );
+}
+
+/// The commit that saves one position of a host, as the controller's host service builds it: no
+/// ledger line, the command ID `host-position-<unit>-<seq>` by the caller's choice.
+pub fn position_commit(command_id: &str, unit: &str, seq: u64, position: &str) -> Commit {
+    commit(
+        "host_position",
+        command_id,
+        &format!("{{\"unit\":\"{unit}\",\"seq\":{seq},\"position\":{position}}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(unit),
+        vec![Effect::HostPositionWrite {
+            unit: unit.to_string(),
+            seq,
+            position: position.to_string(),
+            updated_at: "t5".to_string(),
+        }],
+        None,
+    )
+}
+
 // ------------------------------------------------------------------ an older store file
 
 /// A store file at schema version 8, built from the text of migrations `0001` to `0008` alone, as the

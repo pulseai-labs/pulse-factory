@@ -196,7 +196,8 @@ impl Store for FakeStore {
                 | Effect::UnsetSetting { .. }
                 | Effect::LaunchRecordWrite(_)
                 | Effect::HostStarted(_)
-                | Effect::HostEnded { .. } => {}
+                | Effect::HostEnded { .. }
+                | Effect::HostPositionWrite { .. } => {}
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
@@ -481,6 +482,10 @@ impl Store for FakeStore {
     }
 
     fn host(&self, _unit: &str) -> Result<Option<HostRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn host_position(&self, _unit: &str) -> Result<Option<HostPositionRow>, StoreError> {
         Ok(None)
     }
 }

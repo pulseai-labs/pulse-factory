@@ -1,8 +1,8 @@
-//! Migration `0010` adds the position of a chat session's output in its host (ADR-0003's
+//! Migration `0011` adds the position of a chat session's output in its host (ADR-0003's
 //! amendment of 2026-11-16, ADR-0007: forward-only; `r2.s2.w5`).
 //!
-//! The migration case builds its version-9 store file by hand, from the text of migrations `0001`
-//! to `0009` alone, as the binary of round 2 left it. The guard cases write to a migrated file with
+//! The migration case builds its version-10 store file by hand, from the text of migrations `0001`
+//! to `0010` alone, as the binary of `r2.s2.w4` left it. The guard cases write to a migrated file with
 //! plain SQL, so a constraint refuses what the store port would never send.
 
 use std::collections::BTreeSet;
@@ -20,9 +20,10 @@ const MIGRATION_0006: &str = include_str!("../migrations/0006_session_options.sq
 const MIGRATION_0007: &str = include_str!("../migrations/0007_settings.sql");
 const MIGRATION_0008: &str = include_str!("../migrations/0008_run_project.sql");
 const MIGRATION_0009: &str = include_str!("../migrations/0009_launch_records.sql");
+const MIGRATION_0010: &str = include_str!("../migrations/0010_host_positions.sql");
 
-/// A store file at schema version 9, with one live chat session `S-1` and one item.
-fn version_nine(path: &Path) {
+/// A store file at schema version 10, with one live chat session `S-1` and one item.
+fn version_ten(path: &Path) {
     let conn = Connection::open(path).unwrap();
     for (version, name, sql) in [
         (1, "init", MIGRATION_0001),
@@ -34,6 +35,7 @@ fn version_nine(path: &Path) {
         (7, "settings", MIGRATION_0007),
         (8, "run_project", MIGRATION_0008),
         (9, "launch_records", MIGRATION_0009),
+        (10, "host_positions", MIGRATION_0010),
     ] {
         conn.execute_batch(sql).unwrap();
         conn.execute(
@@ -97,7 +99,7 @@ fn count(conn: &Connection, table: &str) -> i64 {
 fn the_migration_adds_one_nullable_column_and_leaves_every_existing_row_null() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    version_nine(&path);
+    version_ten(&path);
     let before = Connection::open(&path).unwrap();
     let tables_before = names(&before, "table");
     let triggers_before = names(&before, "trigger");
@@ -107,11 +109,11 @@ fn the_migration_adds_one_nullable_column_and_leaves_every_existing_row_null() {
         .collect();
     drop(before);
 
-    assert_eq!(MIGRATIONS.len(), 10);
-    assert_eq!(MIGRATIONS[9].version, 10);
-    assert_eq!(MIGRATIONS[9].name, "chat_host_cursor");
+    assert_eq!(MIGRATIONS.len(), 11);
+    assert_eq!(MIGRATIONS[10].version, 11);
+    assert_eq!(MIGRATIONS[10].name, "chat_host_cursor");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    assert_eq!(store.schema_version().unwrap(), 11);
     drop(store);
 
     let after = Connection::open(&path).unwrap();
@@ -150,7 +152,7 @@ fn the_migration_adds_one_nullable_column_and_leaves_every_existing_row_null() {
 fn a_cursor_that_is_not_json_is_refused_and_json_or_null_is_taken() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    version_nine(&path);
+    version_ten(&path);
     drop(SqliteStore::open(&path).unwrap());
     let conn = Connection::open(&path).unwrap();
 
@@ -187,7 +189,7 @@ fn a_cursor_that_is_not_json_is_refused_and_json_or_null_is_taken() {
 fn the_redaction_trigger_and_the_other_chat_triggers_are_as_they_were() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    version_nine(&path);
+    version_ten(&path);
     let before = Connection::open(&path).unwrap();
     let names_to_keep = [
         "chat_items_change_only_by_redaction",

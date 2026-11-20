@@ -1,4 +1,4 @@
--- Migration 0010: the position of a chat session's output in its host (ADR-0003's amendment of
+-- Migration 0011: the position of a chat session's output in its host (ADR-0003's amendment of
 -- 2026-11-16, ADR-0007; `r2.s2.w5`). Forward-only.
 --
 -- One nullable column on `chat_sessions`. It holds one JSON object:

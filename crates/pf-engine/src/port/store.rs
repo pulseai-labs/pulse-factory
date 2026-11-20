@@ -526,7 +526,7 @@ pub struct ChatSessionRow {
     pub host_cursor: Option<ChatHostCursor>,
 }
 
-/// Where a chat session's output stands in the host it came from (migration 0010).
+/// Where a chat session's output stands in the host it came from (migration 0011).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatHostCursor {
     /// The host the output came from.
@@ -952,6 +952,21 @@ pub struct HostRow {
     pub command_id: String,
 }
 
+/// The position an adapter saved for one host (ADR-0003's amendment of 2026-11-16, ADR-0011's
+/// kept-and-resent event test): how far it had read in the output a session writes, and what it
+/// derived up to there. The store keeps one row for each unit, and never reads inside `position`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostPositionRow {
+    pub unit: String,
+    /// The saves of this unit so far, from 1.
+    pub seq: u64,
+    /// The JSON text the adapter saved.
+    pub position: String,
+    /// The command that wrote this `seq`.
+    pub command_id: String,
+    pub updated_at: String,
+}
+
 /// The canonical form of a JSON value: no white space and every object's keys in order, so the
 /// same value always gives the same bytes.
 pub fn canonical_json(value: &serde_json::Value) -> String {
@@ -1229,6 +1244,17 @@ pub enum Effect {
         ended_at: String,
         exit: String,
     },
+    /// Save the position an adapter has read to for the host of `unit` (JSON text). Allowed only
+    /// in an admission under [`CONTROLLER_SCOPE`]. `seq` must be the stored one plus 1, or 1 when
+    /// the unit has none. A unit with no host row (live or ended), a `seq` that is not the next
+    /// one, a position that is not JSON, or a scope other than the controller's makes the commit
+    /// [`Committed::Rejected`].
+    HostPositionWrite {
+        unit: String,
+        seq: u64,
+        position: String,
+        updated_at: String,
+    },
 }
 
 /// What the engine wants on the ledger. The store assigns the sequence number.
@@ -1424,4 +1450,6 @@ pub trait Store: Send + Sync {
     fn live_hosts(&self) -> Result<Vec<HostRow>, StoreError>;
     /// Read one host row by unit, live or ended.
     fn host(&self, unit: &str) -> Result<Option<HostRow>, StoreError>;
+    /// Read the last position saved for the host of `unit`, or `None` when none was saved.
+    fn host_position(&self, unit: &str) -> Result<Option<HostPositionRow>, StoreError>;
 }

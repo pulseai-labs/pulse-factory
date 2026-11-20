@@ -26,7 +26,8 @@ use pf_engine::port::host::{
     Rebind, SessionHosts,
 };
 use pf_engine::port::store::{
-    Effect, HostRow, NewHost, NewLaunchRecord, SESSION_KINDS, Store, canonical_json,
+    AdmissionOutcome, CONTROLLER_SCOPE, Commit as StoreCommit, Committed, Effect, HostRow,
+    NewAdmission, NewHost, NewLaunchRecord, SESSION_KINDS, Store, canonical_json,
 };
 use pf_host::client::{self, ClientError, Conn, Event};
 use pf_host::launcher::{Detached, HostState, Launcher, StartSpec, Systemd};
@@ -1366,6 +1367,66 @@ impl SessionHosts for HostService {
             )
             .map_err(|e| hold(e.to_string()))?
             .and_then(|r| serde_json::from_str(&r.record).ok()))
+    }
+
+    fn position(&self, unit: &str) -> Result<Option<Value>, HostError> {
+        let ctl = self.ctl()?;
+        let row = ctl
+            .store()
+            .host_position(unit)
+            .map_err(|e| hold(e.to_string()))?;
+        Ok(row.and_then(|r| serde_json::from_str(&r.position).ok()))
+    }
+
+    /// Commit one `HostPositionWrite` under `@controller` with the command ID
+    /// `host-position-<unit>-<seq>`, where `seq` is the stored one plus 1. The commit carries no
+    /// ledger line: a save comes with each drain that read new lines, and a line each would flood
+    /// `controller.ledger`. The admission row is its audit trail.
+    fn save_position(&self, unit: &str, position: Value) -> Result<(), HostError> {
+        let ctl = self.ctl()?;
+        let seq = ctl
+            .store()
+            .host_position(unit)
+            .map_err(|e| hold(e.to_string()))?
+            .map_or(1, |r| r.seq + 1);
+        let text = canonical_json(&position);
+        let command_id = format!("host-position-{unit}-{seq}");
+        let content = json!({"unit": unit, "seq": seq, "position": position}).to_string();
+        let commit = StoreCommit {
+            run_id: CONTROLLER_SCOPE.to_string(),
+            command_id: command_id.clone(),
+            content,
+            admission: NewAdmission {
+                kind: "host_position".to_string(),
+                outcome: AdmissionOutcome::Admitted,
+                reason: None,
+                unit_id: Some(unit.to_string()),
+                role: None,
+                model: None,
+                attempt: None,
+                admitted_at: now(),
+            },
+            effects: vec![Effect::HostPositionWrite {
+                unit: unit.to_string(),
+                seq,
+                position: text,
+                updated_at: now(),
+            }],
+            ledger: None,
+        };
+        match ctl
+            .store()
+            .commit(commit)
+            .map_err(|e| hold(e.to_string()))?
+        {
+            Committed::Applied { .. } | Committed::Replayed(_) => Ok(()),
+            Committed::Conflict(_) => Err(hold(format!(
+                "command {command_id} was used before with another position"
+            ))),
+            Committed::Rejected(why) => {
+                Err(hold(format!("the position of {unit} was refused: {why}")))
+            }
+        }
     }
 }
 
