@@ -608,8 +608,7 @@ impl Controller {
             Err(why) => {
                 // The delivery is not committed or acknowledged now, and no later one is either
                 // (see `handle_delivery`): the item stays in the host until it is stored.
-                let first = ctx.failure.take().unwrap_or_else(|| why.clone());
-                ctx.failure.set(Some(first));
+                ctx.fail(why.clone());
                 return Err(why);
             }
         };
@@ -637,6 +636,18 @@ impl Controller {
     /// holds the open lock, so no process of the session opens while it reads the table and the
     /// store.
     pub(super) fn close_pending(&self, live: &Arc<LiveChat>, reason: &str) -> usize {
+        self.close_pending_in(live, reason, None)
+    }
+
+    /// [`Controller::close_pending`] for the exit of a delivery: an answer item that is not stored
+    /// is a failed write of that delivery, so the exit is not acknowledged and a restart reads it
+    /// again (a re-read exit closes the requests an interrupted exit left open).
+    fn close_pending_in(
+        &self,
+        live: &Arc<LiveChat>,
+        reason: &str,
+        ctx: Option<&Delivered>,
+    ) -> usize {
         let session_id = live.session.as_str();
         let _no_open = lock(&self.chats.open_lock);
         let replaced = lock(&self.chats.live)
@@ -665,8 +676,13 @@ impl Controller {
             let body = super::chat_view::closing_body(answer, wire::AnswerOutcome::Lost, reason);
             let mut item = super::chat_view::new_item(session_id, &body);
             item.answers_seq = Some(request.seq);
-            if self.append_item(item).is_ok() {
-                closed += 1;
+            match self.append_item(item) {
+                Ok(_) => closed += 1,
+                Err(why) => {
+                    if let Some(ctx) = ctx {
+                        ctx.fail(why);
+                    }
+                }
             }
         }
         lock(&live.inner).requests.clear();
@@ -1291,7 +1307,7 @@ impl Controller {
         use super::chat_view::new_item;
         use wire::ChatItemBody as Body;
         if ctx.reread {
-            return self.apply_reread(live, event);
+            return self.apply_reread(live, event, ctx);
         }
         let session = live.session.as_str();
         let mut result = EventResult::default();
@@ -1574,7 +1590,7 @@ impl Controller {
                     "exited",
                     &format!("the chat process exited (code {code_text}): {reason}"),
                 );
-                self.close_pending(live, "the chat process exited");
+                self.close_pending_in(live, "the chat process exited", Some(ctx));
                 // A tool still open at the exit is stored with no output and `finished: false`.
                 let open_tools = std::mem::take(&mut lock(&live.inner).tools);
                 for (call_id, (tool, input)) in open_tools {
@@ -1613,7 +1629,7 @@ impl Controller {
     /// A delivery at or below the consumed cursor (Approach 5): it updates the state in memory and
     /// writes no item, adds no usage, sends no frame and writes no `chat.ledger` line. The one
     /// exception is a re-read exit, which closes the requests an interrupted exit left open.
-    fn apply_reread(&self, live: &Arc<LiveChat>, event: ChatEvent) -> EventResult {
+    fn apply_reread(&self, live: &Arc<LiveChat>, event: ChatEvent, ctx: &Delivered) -> EventResult {
         let mut result = EventResult::default();
         match event {
             ChatEvent::TurnStarted { .. } => {
@@ -1672,7 +1688,7 @@ impl Controller {
                         table.remove(&live.session);
                     }
                 }
-                self.close_pending(live, "the chat process exited");
+                self.close_pending_in(live, "the chat process exited", Some(ctx));
                 let mut inner = lock(&live.inner);
                 inner.turn_since = None;
                 inner.tasks.clear();
@@ -2082,6 +2098,14 @@ struct Delivered {
     stored: Cell<bool>,
     /// Why the first item write of this delivery failed, when one did.
     failure: Cell<Option<String>>,
+}
+
+impl Delivered {
+    /// An item write of this delivery failed. The first reason stays.
+    fn fail(&self, why: String) {
+        let first = self.failure.take().unwrap_or(why);
+        self.failure.set(Some(first));
+    }
 }
 
 /// What applying one event found.

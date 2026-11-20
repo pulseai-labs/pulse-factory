@@ -16,14 +16,14 @@ use common::chat_restart::*;
 
 const PLAIN: &str = "plain_turn";
 
-/// A trigger that refuses the insert of an `assistant_text` item: a store write that fails.
-fn fail_replies(rig: &ChatRig) {
+/// A trigger that refuses the insert of an item of `kind`: a store write that fails.
+fn fail_inserts(rig: &ChatRig, kind: &str) {
     let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute_batch(
-        "CREATE TRIGGER fault_reply BEFORE INSERT ON chat_items WHEN NEW.kind = 'assistant_text' \
-         BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
-    )
+    db.execute_batch(&format!(
+        "CREATE TRIGGER fault_insert BEFORE INSERT ON chat_items WHEN NEW.kind = '{kind}' \
+         BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;"
+    ))
     .unwrap();
 }
 
@@ -31,7 +31,7 @@ fn fail_replies(rig: &ChatRig) {
 fn heal(rig: &ChatRig) {
     let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute_batch("DROP TRIGGER fault_reply;").unwrap();
+    db.execute_batch("DROP TRIGGER fault_insert;").unwrap();
 }
 
 /// How many host lines a fixture holds through its `n`th `result` line.
@@ -72,7 +72,7 @@ fn a_failed_item_write_stops_the_position_and_the_acknowledgement_until_a_restar
     let pid = rig.pid(0);
 
     // The write of the reply fails once. The controller says so in the log.
-    fail_replies(&rig);
+    fail_inserts(&rig, "assistant_text");
     rig.release("g1");
     rig.wait_items("the notice of the lost write", |i| {
         i.iter()
@@ -111,4 +111,51 @@ fn a_failed_item_write_stops_the_position_and_the_acknowledgement_until_a_restar
     );
     assert!(alive(pid), "the chat's process is the same and runs");
     assert_eq!(rig.launches(), 1, "no second launch");
+}
+
+#[test]
+fn a_failed_closing_answer_on_an_exit_holds_the_exit_until_a_restart_closes_the_request() {
+    let mut rig = ChatRig::new("permissions", None, &[], &[]);
+    rig.json(&["session", "set", &rig.session.clone(), "--mode", "manual"]);
+    rig.send("list the files");
+    rig.wait_items("the approval request", |i| {
+        i.iter().any(|x| x.kind == "approval_request")
+    });
+    let pid = rig.pid(0);
+
+    // The child ends while the store refuses the `lost` answer that closes the request.
+    fail_inserts(&rig, "approval_answer");
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    rig.wait_items("the notice of the lost write", |i| {
+        i.iter()
+            .any(|x| x.kind == "notice" && x.payload["code"] == "output_not_stored")
+    });
+    heal(&rig);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rig.count("approval_answer"), 0, "the request is still open");
+    assert!(
+        !rig.r.live_hosts().is_empty(),
+        "the exit is not acknowledged, so the host waits"
+    );
+
+    // A restart reads the exit again. A re-read exit closes the request, and the host ends.
+    rig.restart();
+    rig.wait_items("the closing answer", |i| {
+        i.iter().any(|x| x.kind == "approval_answer")
+    });
+    let answers: Vec<Item> = rig
+        .items()
+        .into_iter()
+        .filter(|x| x.kind == "approval_answer")
+        .collect();
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers[0].payload["outcome"], "lost");
+    rig.r
+        .wait_for("the host to end", Duration::from_secs(10), || {
+            rig.r.live_hosts().is_empty()
+        });
 }
