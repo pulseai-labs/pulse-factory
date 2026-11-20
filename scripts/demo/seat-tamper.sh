@@ -42,11 +42,13 @@ command -v "$PF_BIN" >/dev/null || [ -x "$PF_BIN" ] || fail "PF_BIN=$PF_BIN is n
 
 tmp="$(mktemp -d)"
 controller_pid=""
+. "$here/lib/hosts.sh"
 cleanup() {
   if [ -n "$controller_pid" ]; then
     kill "$controller_pid" 2>/dev/null || true
     wait "$controller_pid" 2>/dev/null || true
   fi
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

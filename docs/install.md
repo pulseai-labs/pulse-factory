@@ -27,22 +27,36 @@ scripts/install.sh
 
 The script does these steps and no others:
 
-1. `nice -n 10 ionice -c3 cargo install --path crates/pulse-factory --locked --root ~/.local`. The
+1. The upgrade guard. It builds the release binary into the shared target
+   (`nice -n 10 ionice -c3 cargo build --release --locked --manifest-path <checkout>/Cargo.toml -p pulse-factory
+   --bin pulse-factory`), then
+   runs that binary's `store check-upgrade --json` against `$PF_STATE_DIR` (default
+   `~/.local/state/pulse-factory`). On exit 3 it stops before it installs any file, prints what the JSON
+   names and `end or halt the runs, or let the hosts end, then install again`. The old controller keeps
+   running. Any other failure of the check stops the install too. See "Install with no active run".
+2. The session host (`r2.s2.w3`). It builds `pf-host` in release mode, niced, into the same shared
+   target, and runs `scripts/install-hosts.sh <share> <built pf-host> <saved guard answer>`. That script
+   copies the binary to `<share>/hosts/<sha256>/pf-host` (mode 0755; a hash directory that exists is left as it
+   is), points `~/.local/bin/pf-host` at it with a symlink, and removes every other
+   `<share>/hosts/<sha256>/` directory except those that the guard's answer names in `host_binaries`. It
+   removes no path in `cli_copies`. See "Session hosts and an upgrade". The script needs `jq`, and
+   `install.sh` checks for `jq` before it builds anything.
+3. `nice -n 10 ionice -c3 cargo install --path crates/pulse-factory --locked --root ~/.local`. The
    binary lands in `~/.local/bin`. **This is a cold build.** It writes a lot to disk, so it runs at low
    priority. Run it once, not in a loop, and never at the same time as another build. It uses your
    `~/.cargo/config.toml` as it is, and it never edits that file.
-2. `nice -n 10 ionice -c3 cargo install --path crates/pf-client --bin pf-client-bridge --locked --root
+4. `nice -n 10 ionice -c3 cargo install --path crates/pf-client --bin pf-client-bridge --locked --root
    ~/.local`. This is the test bridge, `pf-client-bridge`, beside the main binary. It is for the UI demo
    (`scripts/demo/ui-pair.sh`, d12) and for tests. The Mac app does not use it, and the controller does
    not need it. It uses the workspace's target, so this second install is incremental.
-3. `nice -n 10 ionice -c3 cargo install --path crates/pf-adapter-claude --bin pf-claude-replay --locked
+5. `nice -n 10 ionice -c3 cargo install --path crates/pf-adapter-claude --bin pf-claude-replay --locked
    --root ~/.local`. This is the replay of recorded Claude Code sessions, beside the main binary. It is
    for the chat demo (`scripts/demo/chat-api.sh`, d18) and for tests. The controller does not need it.
    The `pulse-factory` install also puts `pf-stream-reader`, a small client of the chat stream for the
    same demo, in `~/.local/bin`.
-4. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
-5. Builds the UI bundle (`scripts/install-ui.sh`, Node 22 and `npm`) into `~/.local/share/pulse-factory/ui/`.
-6. Runs `pulse-factory chat-runtime install`. It fetches the managed Claude Code copy that the chat
+6. Copies `workflows/` and `skill/` to `~/.local/share/pulse-factory/` (`$PF_SHARE_DIR` overrides it).
+7. Builds the UI bundle (`scripts/install-ui.sh`, Node 22 and `npm`) into `~/.local/share/pulse-factory/ui/`.
+8. Runs `pulse-factory chat-runtime install`. It fetches the managed Claude Code copy that the chat
    runs, at the pinned version, from the npm registry (`$PF_CHAT_REGISTRY`, default
    `https://registry.npmjs.org`), checks its SHA-256 against the pin and places it at
    `~/.local/share/pulse-factory/claude/<version>/claude`. The binary is Anthropic's official
@@ -50,10 +64,16 @@ The script does these steps and no others:
    cause and goes on: the controller checks the copy at each start and fetches it again. Until a good
    copy is in place, `session start` is refused with a message that names this verb. The chat never
    runs a `claude` that it finds on `PATH`.
-7. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`. The unit states
-   `KillMode=control-group`, so a stop of the controller also ends any process left in its cgroup,
-   such as a background command that a chat started.
-8. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
+9. Copies `deploy/systemd/pulse-factory.service` to `~/.config/systemd/user/`. The unit sets
+   `PF_HOST_LAUNCHER=systemd`, so each seat starts in a session host that is a unit of its own (see
+   "Session hosts and an upgrade"). The unit states `KillMode=control-group`, so a stop of the
+   controller also ends any process left in its cgroup, such as a background command that a chat
+   started. A seat is not in that cgroup: its host runs outside the controller's cgroup, so a stop or a
+   restart of the controller keeps it. A chat runs in a session host too, in a unit of its own: a stop
+   or a restart of the controller keeps the chat process and the pending requests it holds, and the
+   next controller start rebinds to it. `KillMode=control-group` covers only the controller's own
+   unit.
+10. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
    bus. Then it runs `systemctl --user daemon-reload`, `enable --now pulse-factory` and
    `try-restart pulse-factory`.
 
@@ -68,8 +88,70 @@ The unit sets `PATH` to `~/.local/bin`, `~/.cargo/bin` and the system directorie
 so `gh`, `git` and `omp` must be on one of those paths.
 
 **Install with no active run.** Each release of the binary can migrate the store (migration 0004
-adds the `devices` table, and migration 0006 adds the session's runtime options). The controller refuses to migrate while a run is active, so it does not
-start until no run is active (ADR-0003, ADR-0007). End or halt every run, then install.
+adds the `devices` table, migration 0006 adds the session's runtime options and migration 0009 adds the
+launch records and the host registry). The controller refuses to migrate while a run is active, so it
+does not start until no run is active (ADR-0003, ADR-0007), and with session hosts a controller that
+does not start leaves every seat's hook denied. So `scripts/install.sh` asks first. Its first step runs
+`pulse-factory store check-upgrade` with the new binary. When a run is active and a migration is
+pending, or when a live session host speaks a protocol the new binary drops, the script prints what the
+check names and `end or halt the runs, or let the hosts end, then install again`, and stops before it
+installs any file. The old controller keeps running. End or halt every run, then install again. You can
+run `pulse-factory store check-upgrade` yourself at any time: it reads the store without writing to it
+(`docs/contracts/cli.md`, `store`).
+
+**The backup before a migration.** When the controller opens a store that needs a migration, it first
+writes a checked backup beside the store: `~/.local/state/pulse-factory/store.sqlite.v<from>-v<to>.<utc>.bak`
+(`$PF_STATE_DIR` moves the directory), mode 0600. The store keeps the newest `PF_STORE_BACKUP_KEEP`
+backups (1 to 20, default 3; set it in `~/.config/pulse-factory/controller.env`). A backup that fails its
+integrity check is removed and no migration runs. A new store and an up-to-date store write none.
+`pulse-factory store backups` lists them.
+
+**Restore a backup.** Migrations only go forward (ADR-0007), so a binary older than the store cannot
+open it. To go back, stop the controller and put the backup in place:
+
+```bash
+systemctl --user stop pulse-factory
+pulse-factory store restore ~/.local/state/pulse-factory/store.sqlite.v8-v9.<utc>.bak
+```
+
+`store restore` is refused while the controller answers, while a session host lives (or the check
+cannot tell), and for a backup that fails its integrity check or is newer than the binary supports. It
+moves the current store and its `-wal` and `-shm` aside as `store.sqlite.replaced.<utc>{,-wal,-shm}`,
+copies the backup in, checks the copy and prints both paths. Then install the older binary and start the
+controller.
+
+## Session hosts and an upgrade
+
+A seat runs in a **session host**, `pf-host`, a small process outside the controller. A restart of the
+controller, or an upgrade that restarts it, keeps every seat (`docs/contracts/session-host.md`).
+
+- **`PF_HOST_LAUNCHER`** says how the controller starts a host. `systemd` starts each host as a
+  transient user unit `pf-host-<server>-<session>-<n>` in the slice `pf-hosts-<server>.slice`, which
+  is the launcher the installed unit uses. `detached` starts a detached process under
+  `$XDG_RUNTIME_DIR/pf-hosts/`, and it is the default when the variable is unset. A detached host
+  shares the cgroup of the process that started it, so a controller that runs as a service with the
+  detached launcher loses its hosts when the service's cgroup is killed: `pulse-factory status` then
+  prints a warning that names the variable. Any other value stops the controller at start. Set the
+  variable in `~/.config/pulse-factory/controller.env` to change the launcher (`docs/contracts/cli.md`,
+  `controller`).
+- **Where the host binary lives.** The install copies `pf-host` to
+  `~/.local/share/pulse-factory/hosts/<sha256>/pf-host` (under `$PF_SHARE_DIR` when it is set). The
+  directory name is the SHA-256 of the file, so a live host's binary is never replaced in place.
+  `~/.local/bin/pf-host` is a symlink to the newest copy. The controller finds `pf-host` beside its own
+  binary, follows the link, and so starts hosts from the content-hash path. `PF_HOST_BIN` names another
+  binary.
+- **What an upgrade keeps.** The guard (`store check-upgrade --json`) names each host binary that a live
+  launch record runs from in `host_binaries`, and each managed CLI copy in `cli_copies`.
+  `scripts/install-hosts.sh` removes every other `hosts/<sha256>/` directory and no more. It keeps the
+  directory of each host binary that a live host runs, and it removes no path in `cli_copies`: when a
+  copy sits inside a directory that it would prune, it removes only the `pf-host` file and keeps the
+  directory. A directory for a hash that already exists is left as it is. The new controller starts, runs
+  tier 1, attaches to each live host again and goes on; a host that speaks a protocol the new binary
+  drops stops the install at the guard.
+- **The wait for a controller.** A seat's `hook` call that finds no controller tries again for
+  `session.hook_wait_seconds` (15 by default; `PF_HOOK_WAIT_SECONDS` in the seat's environment), so a
+  restart that takes a few seconds denies nothing. The four `session.*` settings are in
+  `docs/contracts/cli.md`, `settings`.
 
 ## Turn on the network API
 

@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 pub mod chat;
+pub mod chat_restart;
 pub mod ctl;
+pub mod restart;
 pub mod rig;
 pub mod spine;
 pub mod start;
@@ -736,4 +738,36 @@ impl Sandbox {
     pub fn read_json(&self, rel: &str) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(self.state.join(rel)).unwrap()).unwrap()
     }
+}
+
+/// A host service that starts nothing: for a test that builds ports and never launches a seat in a
+/// host.
+pub struct NoHosts;
+
+impl pf_engine::port::host::SessionHosts for NoHosts {
+    fn launch(
+        &self,
+        _: pf_engine::port::host::HostLaunch,
+    ) -> Result<pf_engine::port::host::HostHandle, pf_engine::port::host::HostError> {
+        Err(pf_engine::port::host::HostError(
+            "this test has no host service".to_string(),
+        ))
+    }
+
+    fn rebind(&self, _: &str) -> pf_engine::port::host::Rebind {
+        pf_engine::port::host::Rebind::Lost {
+            exit: serde_json::json!("this test has no host service"),
+        }
+    }
+
+    fn launched_record(
+        &self,
+        _: &str,
+    ) -> Result<Option<serde_json::Value>, pf_engine::port::host::HostError> {
+        Ok(None)
+    }
+}
+
+pub fn no_hosts() -> std::sync::Arc<dyn pf_engine::port::host::SessionHosts> {
+    std::sync::Arc::new(NoHosts)
 }

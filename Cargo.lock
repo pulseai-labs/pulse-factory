@@ -824,6 +824,7 @@ version = "0.1.0"
 dependencies = [
  "pf-adapter-fake",
  "pf-engine",
+ "pf-host",
  "serde",
  "serde_json",
  "tempfile",
@@ -835,6 +836,7 @@ name = "pf-adapter-fake"
 version = "0.1.0"
 dependencies = [
  "pf-engine",
+ "pf-host",
  "pf-store-sqlite",
  "pf-workflow",
  "serde_json",
@@ -847,6 +849,7 @@ name = "pf-adapter-omp"
 version = "0.1.0"
 dependencies = [
  "pf-engine",
+ "pf-host",
  "pf-rules",
  "pf-store-sqlite",
  "pf-workflow",
@@ -937,6 +940,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "pf-host"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1079,6 +1092,7 @@ dependencies = [
  "pf-engine",
  "pf-forge-bare",
  "pf-forge-github",
+ "pf-host",
  "pf-ipc",
  "pf-rules",
  "pf-store-sqlite",

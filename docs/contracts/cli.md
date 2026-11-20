@@ -2,12 +2,13 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has eighteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has nineteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
 `add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
 `session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
 runtime it needs, `settings` (`r1.s4`), which reads and sets how a chat behaves, per server,
-project or agent, and `propose` (`r1.s4`), which posts a start card into the calling chat.
+project or agent, `propose` (`r1.s4`), which posts a start card into the calling chat, and `store`
+(`r2.s2`), which lists the store's backups, restores one and checks an upgrade, with no controller.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -48,9 +49,11 @@ project or agent, and `propose` (`r1.s4`), which posts a start card into the cal
   `field()`, and no line holds a message, a tool text, a token or a key:
 
   ```
-  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in>
+  <UTC> chat open session=S-1 runtime=claude-code version=2.1.319 qualified=true resume=no pid=<n|-> deny=<count> deny_from=<scope|built_in> [unit=<host unit> incarnation=<n> binary_sha256=<hex>]
   <UTC> chat turn session=S-1 cause=operator input_tokens=9 output_tokens=12 cache_read_tokens=0 cache_write_tokens=13006 cost_micros=3465 duration_ms=1042 stop=end_turn is_error=false
-  <UTC> chat stop session=S-1 reason=end|idle|halt|exited|shutdown|option [code=<n>]
+  <UTC> chat stop session=S-1 reason=end|idle|halt|exited|option [code=<n>]
+  <UTC> chat detach session=S-1
+  <UTC> chat rebind session=S-1 unit=<host unit> incarnation=<n> outcome=survived|lost|unreachable
   <UTC> chat stop session=S-1 reason=self_turn_cap self_turns=<n> cap=<n> from=<scope|built_in>
   ```
 
@@ -82,12 +85,13 @@ project or agent, and `propose` (`r1.s4`), which posts a start card into the cal
   and `skill/`. `scripts/install.sh` fills it.
 - **No controller.** A verb that needs the controller exits 1 and prints a message that names
   `systemctl --user status pulse-factory`.
-- **`--json`.** Each verb except `hook` and `controller` takes `--json`. Its JSON holds
+- **`--json`.** Each verb except `hook`, `controller` and `store restore` takes `--json`. Its JSON holds
   `schema_version` (now `1`). A change that removes or renames a field raises the version.
 - **Exit codes.** 0 is success. 1 is a refusal or an error. 2 is `arm` with neither `--dry-run` nor
-  `--yes`, and a command line that clap refuses.
+  `--yes`, and a command line that clap refuses. 3 is `store check-upgrade` when the upgrade must not
+  start.
 - **A seat cannot spend.** `arm`, `propose`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
-  `project remove`, `device pair`, `device revoke` and the state-changing `session` verbs (`start`,
+  `project remove`, `device pair`, `device revoke`, every `store` verb and the state-changing `session` verbs (`start`,
   `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
@@ -251,6 +255,21 @@ stage, role, model, runtime, status, tokens by kind and cost, and the run's tota
 micro-dollars, shown as dollars. An unknown run exits 1 and names it. `status --json` and the
 controller's `runs` list carry `project_id` (`r1.s4.w2`): the project of the chat that proposed the
 run, or null for a run that the CLI armed.
+
+`status --json` also carries two fields from `r2.s2.w3`:
+
+- `launcher` is `systemd` or `detached`: the launcher that starts session hosts (see
+  `PF_HOST_LAUNCHER` under `controller`).
+- `warnings` is a list of texts, empty when there is nothing to say. There is one warning when the
+  launcher is `detached` and the controller's own cgroup (`/proc/self/cgroup`) ends in `.service`: the
+  controller's hosts then share a service's cgroup, and a group kill of that service ends them, so set
+  `PF_HOST_LAUNCHER=systemd`. There is one more, `orphan sweep skipped: <why>`, when the sweep at the
+  controller's start could not list the hosts (no user manager answered).
+
+A failed store read is an error, never an empty list. `status` reads the run, its nodes, sessions,
+admissions and requests, and when one read fails the controller answers `cannot read run <id> from the
+store: <cause>`, and the CLI exits 1 with that text and prints no unit list. A run whose units the
+store really holds none of still prints an empty list.
 
 ## `halt`
 
@@ -626,10 +645,25 @@ stream (`api.md`).
   released early to make room, and the refusal names every live chat and why it holds its process:
   `the chat process cap (4) is reached: S-3 waits for an answer since <t>; S-5 holds background task
   <id> since <t>; S-7 runs a turn since <t>; S-8 is idle until <t>; end one with pulse-factory
-  session end`. A pending card keeps its process live, so it counts against the cap. `halt`, `end` and
-  a controller stop (`chat stop reason=shutdown`) stop the processes, and the unit states
-  `KillMode=control-group` so that systemd ends any child left. A controller start sets each live
-  session `idle` and closes its pending requests as `lost`; the next `send` resumes it.
+  session end`. A pending card keeps its process live, so it counts against the cap. A chat process
+  that survived a controller restart is live too: it counts against the cap, and its idle clock
+  starts at the rebind. `halt`, `end` and `project remove --end-sessions` stop each chat's process
+  through its session host. A controller stop stops no chat: each adapter drops its connection
+  (`chat detach session=S-1`), the host keeps the process, and the unit states
+  `KillMode=control-group` for the controller's own unit only.
+- **A controller start and a chat.** Before the socket binds, the controller rebinds each live chat
+  session to its newest live `chat` host (tier 1). A host that answers keeps its process and its
+  pending requests: the session stays live, the output the host kept is read again from the last
+  acknowledged position, and no item is stored twice. A host that is gone sets the session `idle`,
+  closes each pending request as `lost` and adds a `host_lost` notice. A host that does not answer
+  does the same with a `host_unreachable` notice and nothing starts; the next `send` stops it first.
+  A session with no host row is set `idle` as before. Each outcome is one `chat rebind` line. The next
+  `send` of a lost session resumes it from the newest revision of its launch record: a `current` key
+  (`chat.deny_commands`, `chat.self_turn_cap`, `chat.propose_per_min`) is read now, a `record` key
+  (`session.*`) comes from the record, and the CLI copy the chat was launched with must still be in
+  place with the same SHA-256, or the resume fails with `RuntimeNotReady` and starts nothing. A
+  `session set` writes the next revision of the record. A host that dropped output before the
+  controller read it shows an `output_lost` notice.
 - **Context lost.** When the runtime cannot resume a session (its transcript is missing), the
   session is marked `context lost: <why>`, a `notice` item says so, and `send` is refused at once.
   Nothing opens a fresh context for a session that has had a message (an `operator_message` item).
@@ -674,15 +708,38 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly three in this release. Any other key is refused: `unknown setting <key>; the
-  settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min`. The confirm code, the caller checks and the
-  claim are authority floors, not settings, and never become keys.
+- **The keys.** Exactly seven in this release. Any other key is refused: `unknown setting <key>; the
+  settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
+  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds`. The confirm code, the
+  caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
   |---|---|---|---|---|
   | `chat.self_turn_cap` | a JSON integer, 0 to 100; `0` is off | `3` | `override` | at the next turn the chat starts on its own, with no relaunch |
   | `chat.deny_commands` | a JSON array of 0 to 32 command patterns, no duplicates | the fifteen patterns below | `override` | at the chat's next launch (`chat.ledger` `open`, `deny=`, `deny_from=`) |
   | `chat.propose_per_min` | a JSON integer, 0 to 60; `0` is off | `4` | `override` | at the next `propose`, with no relaunch |
+  | `session.replay_bytes` | a JSON integer, 65536 to 67108864 | `4194304` | `override` | at the next seat launch |
+  | `session.exit_hold_minutes` | a JSON integer, 1 to 10080 | `1440` | `override` | at the next seat launch |
+  | `session.attach_wait_ms` | a JSON integer, 100 to 30000 | `3000` | `override` | at the next seat launch |
+  | `session.hook_wait_seconds` | a JSON integer, 1 to 120 | `15` | `override` | at the next seat launch |
+
+  The four `session.*` keys set how a session host serves a seat (`r2.s2.w3`, ADR-0016's amendment
+  of 2026-11-16). `session.replay_bytes` is the size of the host's output buffer: the host keeps that
+  many bytes of the child's output until the controller acknowledges them. `session.exit_hold_minutes`
+  is how long a host stays after its child ends when no controller consumed the exit and the last
+  output. `session.attach_wait_ms` is how long the controller waits for a host's `hello`, at a launch
+  and at tier 1 after a restart; a host that does not answer in time is unreachable.
+  `session.hook_wait_seconds` is how long the `hook` verb retries when no controller answers (see
+  `hook`). A seat launch resolves the four keys for the run's project and writes each, with its value
+  and scope, into the launch record, and the seat's record `env` carries `PF_HOOK_WAIT_SECONDS`. A
+  chat or a seat still cannot set any key: the caller check above refuses it.
+
+  **The resume flag.** Each key in the registry has a flag that says what a resume does with it:
+  `record` means a resume uses the value the launch record holds, and `current` means a resume reads
+  the value now. The four `session.*` keys are `record`. `chat.deny_commands`, `chat.self_turn_cap`
+  and `chat.propose_per_min` are `current`. The code names the flag `at_resume`, because
+  `SettingApplies` of the API already names when a change takes effect (`applies`, below). `settings
+  get` and the API's `SettingRecord` do not show the flag yet.
 
   `chat.propose_per_min` bounds the plans one chat session builds in a minute (see `propose`). It
   is read for the session's project and agent, and every `propose` call counts as a build, a refused
@@ -697,7 +754,7 @@ settings" in the common rules).
   `git push --delete`, `git push * --delete`, `git push -d`, `git push * -d`, `git branch -D`,
   `git branch * -D`, `gh pr merge`, `gh -R * pr merge`, `gh --repo * pr merge` and
   `gh --repo=* pr merge`. The list is a speed bump, not a boundary (`chat-adapter.md`).
-- **The merge mode.** Each key declares how the rows of its scope chain combine. Both keys are
+- **The merge mode.** Each key declares how the rows of its scope chain combine. Every key is
   `override` now: the first row on the chain wins whole, and every other stored row on the chain is
   masked. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
   migration, because the store keeps every scope's row as it is. A stored value that this binary
@@ -749,7 +806,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (`chat.self_turn_cap`, `chat.deny_commands`, `chat.propose_per_min`, or `other` for an unknown key
+  (one of the seven keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -762,8 +819,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, eight
-  across the four buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, sixteen
+  across the eight buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
@@ -866,6 +923,90 @@ Shows the state of the network API listener. It is a read: it needs no claim and
 - The hash is the one a pairing code carries. A client pins it. A new key (the key files were
   removed) shows a new hash, and every paired client then fails closed (`api.md`, "Key loss").
 
+## `store`
+
+```
+pulse-factory store backups [--json]
+pulse-factory store restore <file>
+pulse-factory store check-upgrade [--json]
+```
+
+The three verbs work on the store file, `<state>/store.sqlite`, with no controller (ADR-0003,
+ADR-0007). They are CLI only: none is on the device allowlist (ADR-0012). Each refuses with exit 1
+when `PF_SEAT_TOKEN` or `PULSE_FACTORY_CHAT` is in the environment (ADR-0005).
+
+**The read path.** `check-upgrade` opens the live file with a normal connection and
+`PRAGMA query_only = ON`, `wal_autocheckpoint = 0` and `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`. It reads
+the frames in the `-wal`, it shares the WAL index with a running controller, and it never writes or
+checkpoints the store. It never opens the file with `immutable=1`, which would skip the `-wal`. A reader
+that finds no read mark at the last frame can move one in the `-shm`; that is the only byte SQLite lets
+a reader change. `backups` never opens the store: it lists the backup files beside it. `restore` is a
+writer by design (see below); it opens a backup and its copy read-only to check them.
+
+**The offline host probe.** After a crash every `hosts` row can read live, so no verb trusts a row. The
+probe lists `systemctl --user list-units --all 'pf-host-<server>-*'` and reads
+`<XDG_RUNTIME_DIR>/pf-hosts/<server>/`, where a `host.pid` whose PID and start time match a live process
+is a live host. `<server>` is the server id: the SHA-256 of the SPKI of the API key, read from
+`<state>/api/cert.pem` (the key itself is never read, and the probe creates nothing). With no
+certificate and no key the probe finds no host and says `no server key`. When `systemctl --user` cannot
+answer, or a detached host's `host.pid` cannot be read, the probe says so, and the verb that asked
+refuses with that reason. It does not guess.
+
+### `store backups`
+
+Lists the backups beside the store, newest first: path, `from_version`, `to_version`, time and size.
+The text form prints one line for each backup, or `no backups beside <store>`. The JSON is
+`{"schema_version": 1, "backups": [{"path", "from_version", "to_version", "time", "size_bytes"}]}`.
+
+A backup is written by the store before it applies a migration, after the active-run check and before
+the first pending migration. Its name is `store.sqlite.v<from>-v<to>.<utc>.bak`, its mode is 0600, and
+it passes `PRAGMA integrity_check` or the open fails with a backup error and applies nothing. The store
+keeps the newest `PF_STORE_BACKUP_KEEP` backups (1 to 20, default 3; a value outside the range prints one
+line to stderr and uses 3). A new store and an up-to-date store write none.
+
+### `store restore <file>`
+
+Puts a backup back as the store. It takes no `--json`. It is refused (exit 1, the reason on stderr):
+
+- while the controller answers on its socket;
+- while the offline probe finds a live host, or cannot tell whether one lives;
+- for a backup that fails `PRAGMA integrity_check`;
+- for a backup whose schema version is newer than the binary supports.
+
+A `hosts` row that reads live while no unit or process exists does not refuse a restore.
+
+Otherwise it moves the store file and its `-wal` and `-shm` aside as
+`store.sqlite.replaced.<utc>{,-wal,-shm}`, copies the backup in at mode 0600 (it writes nothing into
+the backup), and runs `PRAGMA integrity_check` on the copy. Only then does it print success, with the
+backup's path and the paths of the replaced files, and exit 0. A copy that fails its check is removed,
+the replaced files go back, and the verb says so and exits 1.
+
+### `store check-upgrade`
+
+Run it with the new binary, before an install. It reports the store's schema version and the highest
+version this binary supports, this binary's version and host protocol range, the pending migrations,
+the active runs and the live hosts. A host counts as live only when its `hosts` row has no end **and**
+the probe finds its unit or process. The probe runs only when a row reads live, so a first upgrade into
+the host world (a store with no `hosts` table) needs no `systemctl` and lists no host. A machine with
+no store has nothing to check and exits 0.
+
+For each live host it prints the unit, the protocol, the host binary path and the managed CLI copy
+paths its launch records name (`runtime.binary_path` of every revision of the host's incarnation). An
+install must keep those files.
+
+The upgrade must not start (exit 3, each cause named) when a run is active and a migration is pending
+(`run_active_migration_pending`), or when this binary's protocol range drops a live host's protocol
+(`protocol_dropped`). Any other failure exits 1, and so does a probe that cannot tell.
+`scripts/install.sh` runs this verb with `--json` before it installs any file.
+
+The JSON is `{"schema_version": 1, "store_version": <n>, "supported_store_version": <n>,
+"binary_version": "<v>", "protocol": {"min": <n>, "max": <n>}, "pending_migrations": [{"version",
+"name"}], "active_runs": ["<run>"], "live_hosts": [{"unit", "session_kind", "session", "incarnation",
+"launcher", "protocol", "host_binary", "cli_copies"}], "host_binaries": ["<path>"], "cli_copies":
+["<path>"], "probe_note": <text or null>, "refusals": [{"kind", ...}], "can_start": <bool>}`. A
+`run_active_migration_pending` refusal holds `runs` and `pending`. A `protocol_dropped` refusal holds
+`unit`, `protocol`, `min` and `max`.
+
 ## `hook`
 
 ```
@@ -878,6 +1019,14 @@ reads `input.path` or `input.file_path`; a write tool with neither is denied. It
 session key (`PF_SESSION_KEY`), the tool and the command or path to the controller. It prints
 `{"decision":"allow"|"deny","reason":..}` and exits 0. Every failure is a deny: no key, an unknown
 key, no controller, unreadable input. This is the extension's protocol, not `--json`.
+
+A controller that restarts is not a reason to deny. When `hook` cannot reach a controller, it tries
+again every 200 ms, until `PF_HOOK_WAIT_SECONDS` seconds have passed since its first attempt, and then
+denies with "no controller answers: …". The seat's record `env` carries the variable, set from
+`session.hook_wait_seconds`; an absent value, or one outside 1 to 120, means 15. A controller's answer,
+a deny included, is final and is never tried again. The wait covers a restart: the new controller
+binds its socket only after tier 1 has rebuilt the seat key table, so a call that waits is answered
+from the whole table.
 
 ## `controller`
 
@@ -894,3 +1043,25 @@ no one answers is stale, and the controller removes it.
 With neither, the API is off, no key is made and nothing listens. The unit reads
 `~/.config/pulse-factory/controller.env` as an optional environment file, so the operator sets
 `PF_API_LISTEN` there (`docs/install.md`).
+
+**Session hosts (`r2.s2.w3`).** A seat runs in a session host, a process outside the controller
+(`session-host.md`), so a controller restart keeps it. Two environment variables choose how:
+
+- `PF_HOST_LAUNCHER` names the launcher: `systemd` starts each host as a transient user unit in its
+  own cgroup, and `detached` starts it as a detached process under `$XDG_RUNTIME_DIR/pf-hosts/`. Unset
+  means `detached`. Any other value stops the controller at start, with a reason that names the value,
+  before it takes the lock. The installed unit sets `PF_HOST_LAUNCHER=systemd`. A failed `systemd-run`
+  never falls back to the detached launcher. `status` names the launcher.
+- `PF_HOST_BIN` names the `pf-host` binary. When it is unset, the controller uses `pf-host` beside its
+  own binary, with symlinks resolved, so the installed link finds the content-hash path
+  (`docs/install.md`). With no binary, a launch fails with a reason that says so.
+
+At start the controller takes `controller.lock`, opens the store, runs **tier 1** for every running
+seat, and only then binds its socket. A second controller refuses at the lock while tier 1 runs. Tier
+1 attaches to each seat's host again (`rebind`, `agent-adapter.md`). A seat is survived, lost,
+unreachable or an orphan, and each outcome writes one `controller.ledger` line (`host_tier1 … survived`,
+`lost` or `unreachable`; `host_orphan … orphan`). A survived seat's hook calls are answered again,
+because the seat key table is rebuilt from the launch records. A lost or unreachable seat parks its
+unit with `seat_lost`. The orphan sweep then stops every host of this server that no live row names,
+and removes stale host directories, key files and record files. It never touches a host of another
+server.

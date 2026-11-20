@@ -108,17 +108,28 @@ fn masked_values(r: &Value) -> Vec<Value> {
 }
 
 #[test]
-fn a_fresh_store_reads_the_three_built_ins() {
+fn a_fresh_store_reads_the_seven_built_ins() {
     let (live, _) = live();
     let v = get(&live, &[]);
     assert_eq!(v["schema_version"], 1);
     let settings = v["settings"].as_array().unwrap();
-    assert_eq!(settings.len(), 3, "{v}");
+    assert_eq!(settings.len(), 7, "{v}");
     let keys: Vec<&str> = settings
         .iter()
         .map(|r| r["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys, [DENY, CAP, "chat.propose_per_min"]);
+    assert_eq!(
+        keys,
+        [
+            DENY,
+            CAP,
+            "chat.propose_per_min",
+            "session.replay_bytes",
+            "session.exit_hold_minutes",
+            "session.attach_wait_ms",
+            "session.hook_wait_seconds",
+        ]
+    );
     for r in settings {
         assert_eq!(from_kind(r), "built_in", "{r}");
         assert_eq!(r["merge"], "override", "{r}");
@@ -132,6 +143,11 @@ fn a_fresh_store_reads_the_three_built_ins() {
     assert_eq!(settings[2]["applies"], "next_turn");
     assert_eq!(settings[0]["value"], json!(BUILT_IN));
     assert_eq!(settings[0]["applies"], "next_launch");
+    // The four session keys: the built-ins of ADR-0016's amendment, each applied at the next launch.
+    for (i, built_in) in [(3, 4_194_304), (4, 1_440), (5, 3_000), (6, 15)] {
+        assert_eq!(settings[i]["value"], built_in, "{}", settings[i]);
+        assert_eq!(settings[i]["applies"], "next_launch", "{}", settings[i]);
+    }
 
     let out = live.cli(&["settings", "get"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
@@ -547,7 +563,7 @@ fn a_caller_that_descends_from_a_live_chat_can_read_but_not_write() {
     // The read answers for a descendant of the live chat.
     let resp = pf_ipc::call(&live.sb.state, "settings_get", json!({})).unwrap();
     assert!(resp.ok, "{:?}", resp.error);
-    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 3);
+    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 7);
     // The write is refused, and names the chat process. Its audit is AC-25's.
     let resp = pf_ipc::call(
         &live.sb.state,

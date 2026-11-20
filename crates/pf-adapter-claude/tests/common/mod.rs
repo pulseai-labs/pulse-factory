@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+pub mod hosts;
 pub mod propose_rule;
 
 /// The fixtures directory of the crate.
@@ -135,8 +136,40 @@ pub fn config(m: &Managed) -> ClaudeConfig {
     c
 }
 
-pub fn chat(m: &Managed) -> ClaudeChat {
-    ClaudeChat::new(config(m))
+/// A `ClaudeChat` with a test host service on `pf_host`'s detached launcher, and the guard that
+/// stops every host it started when the test ends, pass or fail (Approach 17). It derefs to the
+/// chat, so a test calls the port on it.
+pub struct HostedChat {
+    pub chat: ClaudeChat,
+    pub hosts: std::sync::Arc<hosts::TestHosts>,
+    _guard: hosts::Guard,
+    _dirs: hosts::Dirs,
+}
+
+impl std::ops::Deref for HostedChat {
+    type Target = ClaudeChat;
+    fn deref(&self) -> &ClaudeChat {
+        &self.chat
+    }
+}
+
+/// A second chat adapter over the same host directories: the controller after a restart.
+pub fn hosted_with(cfg: ClaudeConfig) -> HostedChat {
+    use pf_engine::port::chat::ChatPort;
+    let dirs = hosts::Dirs::new();
+    let hosts = hosts::TestHosts::new(&dirs);
+    let chat = ClaudeChat::new(cfg);
+    chat.set_hosts(hosts.clone());
+    HostedChat {
+        chat,
+        hosts: hosts.clone(),
+        _guard: hosts::Guard(hosts),
+        _dirs: dirs,
+    }
+}
+
+pub fn chat(m: &Managed) -> HostedChat {
+    hosted_with(config(m))
 }
 
 /// A `ChatOpen` with the pinned defaults, in a directory that exists.
@@ -151,6 +184,13 @@ pub fn spec(cwd: &Path) -> ChatOpen {
         env: BTreeMap::new(),
         options: BTreeMap::new(),
         deny_commands: Vec::new(),
+        chat_session: "S-1".into(),
+        project: "P-1".into(),
+        agent_id: "orchestrator".into(),
+        worktree_id: "W-1".into(),
+        deny_from: "built_in".into(),
+        secret_env: BTreeMap::new(),
+        recorded_binary: None,
     }
 }
 
@@ -274,7 +314,7 @@ pub struct Rig {
     pub root: tempfile::TempDir,
     pub dir: PathBuf,
     pub work: tempfile::TempDir,
-    pub chat: ClaudeChat,
+    pub chat: HostedChat,
     /// A directory the rig keeps alive for the test, such as the one holding a hand-made fixture.
     pub extra: Option<tempfile::TempDir>,
 }
@@ -299,7 +339,7 @@ pub fn rig_with(
         root,
         dir,
         work: tempfile::tempdir().unwrap(),
-        chat: ClaudeChat::new(cfg),
+        chat: hosted_with(cfg),
         extra: None,
     }
 }
@@ -345,8 +385,8 @@ pub fn collect_until(
     let end = Instant::now() + Duration::from_secs(secs);
     let mut got = Vec::new();
     loop {
-        while let Ok(e) = events.try_recv() {
-            got.push(e);
+        while let Ok(d) = events.try_recv() {
+            got.push(d.event);
         }
         if done(&got) {
             return got;
@@ -370,7 +410,7 @@ pub fn count_turn_results(events: &[ChatEvent]) -> usize {
 /// Stop the chat and return what is left on the channel, ending with `Exited`.
 pub fn stop_and_drain(chat: &ClaudeChat, opened: &mut ChatOpened) -> Vec<ChatEvent> {
     chat.stop(&opened.chat).unwrap();
-    std::iter::from_fn(|| opened.events.try_recv().ok()).collect()
+    std::iter::from_fn(|| opened.events.try_recv().ok().map(|d| d.event)).collect()
 }
 
 // ------------------------------------------------------------------ scenes built by hand

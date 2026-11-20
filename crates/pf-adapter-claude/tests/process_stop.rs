@@ -32,7 +32,7 @@ fn read_pid(m: &Managed, name: &str) -> u32 {
 
 /// Everything on the channel now.
 fn drain(events: &mut ChatEvents) -> Vec<ChatEvent> {
-    std::iter::from_fn(|| events.try_recv().ok()).collect()
+    std::iter::from_fn(|| events.try_recv().ok().map(|d| d.event)).collect()
 }
 
 /// Wait for `Exited`, up to 10 s, and return it with what came before.
@@ -83,7 +83,7 @@ fn stop_ends_the_stub_and_a_grandchild_in_its_group_and_sends_exited_once() {
     let first = drain(&mut opened.events);
     assert_eq!(
         exited(&first),
-        [(Some(0), "stopped".to_string())],
+        [(None, "stopped".to_string())],
         "one Exited, last, with the reason stopped: {first:?}"
     );
     assert!(matches!(first.last(), Some(ChatEvent::Exited { .. })));
@@ -110,7 +110,7 @@ fn a_stub_that_ignores_stdin_close_and_term_is_ended_by_kill() {
     c.stop(&opened.chat).unwrap();
     assert!(
         started.elapsed() >= Duration::from_secs(5),
-        "stop waits for the stdin close before it signals"
+        "stop gives the child 5 s to end after the terminate signal, then stops the host"
     );
     assert!(wait_gone(pid), "KILL ended what TERM did not");
     let events = drain(&mut opened.events);
@@ -121,7 +121,7 @@ fn a_stub_that_ignores_stdin_close_and_term_is_ended_by_kill() {
 }
 
 #[test]
-fn a_stub_that_exits_by_itself_gives_exited_with_its_code_and_stderr_tail() {
+fn a_stub_that_exits_by_itself_gives_exited_with_its_code_and_no_stderr_text() {
     let m = stub("echo 'the stub broke: out of luck' >&2\nexit 3");
     let c = chat(&m);
     let work = tempfile::tempdir().unwrap();
@@ -130,11 +130,9 @@ fn a_stub_that_exits_by_itself_gives_exited_with_its_code_and_stderr_tail() {
     let ended = exited(&events);
     assert_eq!(ended.len(), 1, "{events:?}");
     assert_eq!(ended[0].0, Some(3), "its own exit code");
-    assert!(
-        ended[0].1.contains("the stub broke: out of luck"),
-        "the stderr tail is the reason: {}",
-        ended[0].1
-    );
+    // The host keeps the child's error output (the unit's journal): the reason holds the exit and
+    // no stderr text (r2.s2.w5, the stderr tail is later work).
+    assert_eq!(ended[0].1, "process exited (code 3)");
     assert!(!c.is_alive(&opened.chat).unwrap());
     c.stop(&opened.chat).expect("stop after an exit is fine");
     assert!(
@@ -144,10 +142,10 @@ fn a_stub_that_exits_by_itself_gives_exited_with_its_code_and_stderr_tail() {
 }
 
 #[test]
-fn a_secret_on_stderr_is_redacted_in_the_reason() {
+fn a_child_ended_by_a_signal_names_the_signal_and_a_secret_on_stderr_is_never_in_the_reason() {
     let key = format!("sk-{}", "A".repeat(32));
     let m = stub(&format!(
-        "echo 'refused: key {key} and Authorization: Bearer abcdefghijklmnop' >&2\nexit 1"
+        "echo 'refused: key {key} and Authorization: Bearer abcdefghijklmnop' >&2\nkill -KILL $$"
     ));
     let c = chat(&m);
     let work = tempfile::tempdir().unwrap();
@@ -155,35 +153,7 @@ fn a_secret_on_stderr_is_redacted_in_the_reason() {
     let events = until_exited(&mut opened.events);
     let ended = exited(&events);
     assert_eq!(ended.len(), 1);
-    let reason = &ended[0].1;
-    assert!(reason.contains("refused"), "the text stays: {reason}");
-    assert!(!reason.contains(&key), "the key is gone: {reason}");
-    assert!(
-        !reason.contains("abcdefghijklmnop"),
-        "the bearer value is gone: {reason}"
-    );
-    assert!(reason.chars().count() <= 500, "at most 500 characters");
-    assert!(!reason.contains('\n'), "one line");
-}
-
-#[test]
-fn a_stderr_tail_longer_than_the_limit_is_cut_to_500_characters() {
-    let m = stub(
-        "i=0\nwhile [ $i -lt 400 ]; do echo \"line $i of noise to fill the tail\" >&2; i=$((i+1)); done\nexit 1",
-    );
-    let c = chat(&m);
-    let work = tempfile::tempdir().unwrap();
-    let mut opened = c.open(&spec(work.path())).expect("open");
-    let events = until_exited(&mut opened.events);
-    let ended = exited(&events);
-    assert_eq!(ended.len(), 1);
-    assert!(
-        ended[0].1.chars().count() <= 500,
-        "{} chars",
-        ended[0].1.chars().count()
-    );
-    assert!(
-        ended[0].1.contains("noise"),
-        "the tail is kept, not blanked"
-    );
+    assert_eq!(ended[0].0, None, "ended by a signal, so no exit code");
+    assert_eq!(ended[0].1, "process exited (signal 9)");
+    assert!(!ended[0].1.contains(&key) && !ended[0].1.contains("abcdefghijklmnop"));
 }

@@ -23,9 +23,10 @@ rule that the engine knows no agent.
 - A runtime name has text and no `:`. A plan with a runtime that has no adapter is refused with
   `AgentError::Refused("no adapter for runtime \"<name>\"")`. The unit then parks with that reason.
 - An adapter keeps no state that must survive a restart (ADR-0007). After a restart, the controller
-  asks `is_alive` for each stored reference. A reference that the adapter does not know is not alive:
-  `is_alive` answers `Ok(false)` for it, never an error. (A router answers `Refused` for a reference
-  with no runtime tag.)
+  asks `rebind` for each stored reference, and then `is_alive` for a reference that `rebind` did not
+  settle (see "`rebind`"). A reference that the adapter does not know is not alive: `is_alive`
+  answers `Ok(false)` for it, never an error. (A router answers `Refused` for a reference with no
+  runtime tag.)
 
 ## The nine duties
 
@@ -47,6 +48,10 @@ for ending a session. An adapter returns
 
 The engine calls duty 7, then duty 8, then duty 1, in that order, on the same plan.
 
+An adapter that runs hosts stops the old session **first** in `hand_off`, then starts the successor:
+the host service stops an older incarnation of the same session key anyway, so a session never has
+two copies (Q9). A failed start of the successor therefore leaves no old session.
+
 ### `process_id`
 
 `process_id(session)` is a provided method of `AgentPort`, and it is not one of the nine duties. It
@@ -62,6 +67,32 @@ a router, is `Ok(())`: there is nothing to stop. Reads such as `usage` and `drai
 after a stop, so the controller can take the last reading. The controller calls `stop` for every
 session it ends, so no process outlives its stage.
 
+An adapter that runs its sessions in hosts ends the host, and then **waits until no process of the
+child's process group is live** before `stop` returns `Ok`. A process is live when `/proc/<pid>/stat`
+names the group and its state is not `Z` or `X` (Linux; `r2.s6` gives macOS its own). The wait is
+bounded: up to 5 s, then `SIGKILL` to the group and up to 2 s more, and then `stop` fails with "the
+group of <unit> still has a live process: <pids>". So a test asserts the child is gone once, with no
+polling. The OMP adapter does this in the adapter and not in the host, so it holds for both launchers.
+
+### `rebind`
+
+`rebind(session)` is a provided method of `AgentPort`, and it is not one of the nine duties. The
+controller calls it once for each running unit's open session when it starts, before it calls
+`is_alive` and before it binds its socket. It asks the adapter to attach to the session's host again
+(ADR-0007, ADR-0011; "Session hosts" below). It answers one of three outcomes:
+
+| Outcome | Meaning | What the engine does |
+|---|---|---|
+| `Survived` | The host runs and the adapter attached with every check passing. The adapter rebuilt its state from what the host and the launch record hold, so every other call works as before. A host whose child already ended is still `Survived`: `status` reports `Ended`, and the driver ends the stage as for any seat whose process ended. | The unit stays running. No request opens, and `is_alive` is not called. |
+| `Lost { cause }` | The host is gone. `cause` is what it left: the text of the exit, or "ended, cause unknown" when the unit is gone and left no exit file. | The unit parks with `seat_lost` and the reason "seat lost across a controller restart", and the session ends. |
+| `Unreachable { why }` | The host may run, but no valid `hello` came within `session.attach_wait_ms`, or a check refused it. | The unit parks with `seat_lost` and the reason `host unreachable: <why>`. Nothing is relaunched and no second host starts. |
+
+The default answers `Lost` with the cause `no session host` (`NO_SESSION_HOST`). An adapter that runs
+no host, such as the scripted `FakeAdapter`, keeps this default,
+and the engine then falls back to `is_alive` as before, so every existing case passes unchanged. A
+`Lost` with any other cause parks the unit at once. A router sends `rebind` to the adapter of the
+reference's runtime, as it does every other call.
+
 ### What a runtime may refuse
 
 A launch is refused (`AgentError::Refused`, never `Failed`) when:
@@ -75,6 +106,109 @@ A launch is refused (`AgentError::Refused`, never `Failed`) when:
 - a setting is missing or not readable (for example a non-numeric `first_turn_seconds`).
 
 The engine parks the unit with the reason `launch refused: <why>`.
+
+## Session hosts
+
+A seat whose adapter runs a host does not run as a child of the controller. Its process lives in a
+**session host**, a small process of its own that outlives a controller restart and keeps the
+process's output until the controller has consumed it (`session-host.md`, ADR-0001). An adapter must
+not start a host itself. The launch record must be written before the host starts, and the registry
+row after it, and both belong to the controller. So the controller hands each adapter an
+`Arc<dyn SessionHosts>` (`pf_engine::port::host`, ADR-0002), and the adapter asks it for each host.
+The port names no runtime, no launcher and no host crate, and `port_is_neutral.rs` and
+`engine_is_generic.rs` enforce that.
+
+`SessionHosts` has three calls for the host, and two provided calls for a position:
+
+- `launch(HostLaunch)` returns a `HostHandle`. The `HostLaunch` carries the session kind (`seat`),
+  the session key (`<run id>/<unit id>`), `argv`, `cwd`, `env` (values that are not secret),
+  `secrets` (name to value), the transport (`Pipes` or `Terminal`), and the record body fields
+  `runtime`, `settings`, `run_binding` and `resume`. A text `{unit}` in `argv`, `env` or `files` is
+  replaced by the host's unit name, which the adapter cannot know before the launch; `files` lists
+  files that must exist, empty, before the child starts. The service writes the launch record, makes
+  the attach key, starts the host, attaches with the controller's half of the checks and commits the
+  registry row. A launch with the same kind and key is the next incarnation of the same session, and
+  the service stops the older host first, so a session never has two copies. A secret reaches the
+  child only. The record holds `sha256:<hex>` of its value.
+- `rebind(unit)` attaches again after a restart and answers `Survived(HostHandle)`, `Lost { exit }`
+  or `Unreachable { why }`. The adapter's own `rebind` maps these to the three outcomes above.
+- `launched_record(unit)` returns the body of the launch record the host of `unit` was launched
+  from, without a second attach, so an adapter can rebuild its state after `Survived`.
+- `save_position(unit, position)` and `position(unit)` keep and read one JSON value per host unit
+  that the adapter owns: how far it read a file its session writes, and what it took from there. They
+  are provided calls. A host service that keeps no positions answers `position` with `None` and
+  refuses `save_position` ("this host service keeps no positions"), so a paper host and a test
+  host service need no change. The controller's service commits each save as an admitted write under
+  `@controller` with the command ID `host-position-<unit>-<seq>` (the stored `seq` plus 1) and no
+  ledger line, because a save comes with each drain that read new lines. `position` reads the last
+  one. Both answer a `HostError` with the store's text on a failed read or a refused commit.
+
+A `HostHandle` holds the unit, the incarnation, the record body, the child's process ID and the exit,
+when the child had ended already at the attach. Its calls are `read`, `ack`, `input`, `signal`,
+`exit_ack` and `stop`, and its events are `Out`, `Gap` and `Exit`, in neutral words. The adapter
+acknowledges output with `ack` after the commit that consumed it. When the host sends `Exit` (after
+the last byte), the service commits the end of the host's row, then the adapter sends `exit_ack`,
+and the host ends at once. `stop` ends the child's group and the host, and is safe to repeat.
+
+The **paper adapter** (`pf-adapter-fake`) runs its script through a host. It launches
+`/bin/sh <script>` on pipes. The host clears the child's environment, so the adapter passes the plan's
+`env.*` settings, `PF_PAPER_EVENTS`, `PF_PAPER_INBOX`, and the controller's own values of a fixed list
+of names (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR`, `PF_STATE_DIR`,
+`PF_SHARE_DIR`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_NOSYSTEM`, `GIT_TERMINAL_PROMPT`). `PF_SESSION_KEY`
+goes in `secrets`. The session reference is the host unit, and the events and inbox files are named
+for it, so two controller lifetimes never share a file or a push ID. `rebind` reads the record's
+`PF_PAPER_EVENTS` and `PF_PAPER_INBOX` and reads the events file again from byte 0. Each effect is
+idempotent: usage is a running sum, a push is admitted once by its stable ID, and the turn is ended
+when the count of `turn_end` lines is at least 1 plus the count of inbox lines. `process_id` is the
+child's process ID from the host's `hello`. The nine duties do not change.
+
+The **OMP adapter** (`pf-adapter-omp`) runs OMP on a **terminal** (`HostTransport::Terminal { rows,
+cols }`) in a host of its own (ADR-0011's amendment of 2026-11-16: the PTY moves into the host). The
+launch sends `argv` with the `omp` binary as an absolute path, the session directory
+`<state dir>/sessions/{unit}/omp-sessions`, and `files` for `events.jsonl` and `inbox.jsonl` in
+`<state dir>/sessions/{unit}/`. The host clears the child's environment, so `env` is the controller's
+own values of a fixed list (the paper adapter's thirteen names and `TERM`, `COLORTERM`, `SHELL`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`,
+`CARGO_HOME`, `RUSTUP_HOME`, `SSH_AUTH_SOCK`; a name the controller lacks stays absent), then the
+plan's `env.*` settings, then the adapter's own names (`PI_EDIT_VARIANT`, `PF_EVENT_FILE`,
+`PF_INBOX_FILE`, `PF_SESSION_DIR`, `PF_SEAT_ROLE`, `PF_ALLOWED_TOOLS`). A name the list lacks reaches
+the seat through a stage's `env.<NAME>` setting. `secrets` holds two names: `PF_SESSION_KEY` (from
+`env.PF_SESSION_KEY`) and `PF_SEAT_TOKEN` (fresh for each launch). The `runtime` of the record is
+`{"id":"omp","version":…,"binary_path":…,"sha256":…}`. The session reference is the host unit.
+
+The adapter reads the screen from the host's output only as reason text: it keeps the last 256 KiB,
+and acknowledges output up to 32 KiB below the newest byte, so the host keeps the last 32 KiB for a
+rebound adapter. A run of exactly 32 hex digits is masked in every screen tail, because after a
+`rebind` the token's value is not known.
+
+**The position and its acknowledge (ADR-0011's kept-and-resent event test).** An OMP event line is
+not self-contained: a `bash` line names a command, and the adapter reads git when it reads the line,
+against a snapshot in memory. So the adapter saves, through `save_position`, one JSON value:
+`offset` (the byte after the last whole line read), the usage sum at that offset, `push_seq`, `state`,
+`turn_ended`, `first_turn_started`, `last_activity_ms`, the remote-tracking `refs`, the `baseline` of
+the default branch, and `pending`: the `Push` and `DefaultBranchMoved` events taken from the lines
+before `offset` and not yet acknowledged. `drain_events` saves the position **before** it hands the
+events over, and a failed save returns an error and keeps the queue. **The next drain is the
+acknowledge**: the driver commits what a drain returned, and the usage, before it drains again, so the
+next drain's save drops those events from `pending`. After a restart the adapter hands `pending` over
+again (the engine reads each as a replay by its ID and content) and reads on from `offset`: each line
+after it is read once. A drain that read no line and holds nothing pending saves nothing. The launch
+saves the first position before it returns, so the baseline and the refs survive a restart; a failed
+save stops the host and fails the launch. When the child ends, the adapter acknowledges every output
+byte and reads the events file to its end; once a drain has saved a position with nothing pending, it
+sends `exit_ack` and the host ends at once.
+
+**`rebind` for OMP.** `rebind(session)` calls `hosts.rebind(unit)`. `Lost { exit }` forgets the session
+and answers `Lost`. `Unreachable { why }` answers the same. `Survived(handle)` reads the launched
+record from `handle.record` (never a newer revision) and the position from `hosts.position(unit)`,
+rebuilds the session (file paths from the record's `env`; `repo`, `push_dir`, `push_branch`, `remote`,
+`stall_minutes` and `skills` from its `settings`; the state from the position; the inbox sequence from
+the inbox file's line count), puts `pending` first in the queue and reads the screen again from the
+host. A host whose `hello` carried an exit is still `Survived`. A survived host with **no stored
+position** answers `Unreachable` with "no stored position for <unit>": the launch saves one before it
+returns, so such a host was never handed to the engine and its baseline is gone. `is_alive` is false
+once the exit is seen, the host is gone, or the adapter stopped it. `interrupt` sends `ESC` through the
+host's input.
 
 ## First turn
 

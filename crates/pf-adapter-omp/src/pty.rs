@@ -1,6 +1,11 @@
 //! The PTY driver, on `portable-pty` (ADR-0008). It spawns a program in a PTY, reads its output
 //! on a thread, writes to it and resizes it. Its calls block, so an async caller runs them with
 //! `tokio::task::spawn_blocking`.
+//!
+//! This is not the seat path. An OMP seat runs in a session host (`r2.s2.w4`, ADR-0011's amendment
+//! of 2026-11-16: the PTY moves into the host), and the adapter drives it through the host port. The
+//! module stays for `tests/pty_driver.rs` (ADR-0008's first-use proof of `portable-pty`) and for the
+//! real probes, and it holds `wait_group_gone`, which the adapter's `stop` uses too.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -25,6 +30,62 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     pub rows: u16,
     pub cols: u16,
+}
+
+/// The live processes of a process group, from `/proc`: a process is live when its `stat` names
+/// the group and its state is not `Z` (a zombie) or `X` (dead). Linux only (`r2.s6` gives macOS its
+/// own).
+pub fn live_in_group(pgid: u32) -> Vec<u32> {
+    let mut live = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return live;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid pgrp ...`: the name may hold spaces and brackets, so read from the
+        // last `)`.
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or("");
+        let _ppid = fields.next();
+        let pgrp: Option<u32> = fields.next().and_then(|f| f.parse().ok());
+        if pgrp == Some(pgid) && state != "Z" && state != "X" {
+            live.push(pid);
+        }
+    }
+    live.sort_unstable();
+    live
+}
+
+/// Wait until no live process is left in the group `pgid`. `Ok` when the group is gone, and the
+/// live process IDs when `within` ran out.
+pub fn wait_group_gone(pgid: u32, within: Duration) -> Result<(), Vec<u32>> {
+    let end = Instant::now() + within;
+    loop {
+        let live = live_in_group(pgid);
+        if live.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err(live);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Send `SIGKILL` to every process of the group `pgid`.
+pub fn kill_group(pgid: u32) {
+    let _ = std::process::Command::new("sh")
+        .args(["-c", "kill -s KILL -- \"-$1\" 2>/dev/null; exit 0", "sh"])
+        .arg(pgid.to_string())
+        .status();
 }
 
 /// One process in a PTY.
@@ -172,14 +233,15 @@ impl PtySession {
     /// a session and group leader, so its group holds the children it started, such as `cargo`.
     pub fn kill(&self) {
         if let Some(pid) = self.pid {
-            let _ = std::process::Command::new("sh")
-                .args(["-c", "kill -s KILL -- \"-$1\" 2>/dev/null; exit 0", "sh"])
-                .arg(pid.to_string())
-                .status();
+            kill_group(pid);
         }
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
         let _ = child.wait();
+        drop(child);
+        if let Some(pid) = self.pid {
+            let _ = wait_group_gone(pid, Duration::from_secs(2));
+        }
     }
 }
 

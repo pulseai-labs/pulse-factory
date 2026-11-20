@@ -7,9 +7,10 @@ use std::collections::BTreeMap;
 
 use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::{
-    BackgroundTask, CAP_BYTES, Capped, ChatAnswer, ChatError, ChatEvent, ChatOption, ContextUsage,
-    InputKind, MidTurn, QuestionChoice, QuestionItem, TaskEnd, TurnCause, cap, check_deny_command,
-    check_deny_commands, check_order,
+    BackgroundTask, CAP_BYTES, Capped, ChatAnswer, ChatDelivery, ChatError, ChatEvent, ChatHost,
+    ChatId, ChatOpen, ChatOpened, ChatOption, ChatPort, ChatRebind, ChatResumePoint, ContextUsage,
+    InputKind, MidTurn, PendingKind, PendingRequest, QuestionChoice, QuestionItem, RecordedBinary,
+    TaskEnd, TurnCause, cap, check_deny_command, check_deny_commands, check_order,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -124,6 +125,10 @@ fn exited() -> ChatEvent {
     }
 }
 
+fn lost(from: u64, to: u64) -> ChatEvent {
+    ChatEvent::OutputLost { from, to }
+}
+
 fn task_started(id: &str) -> ChatEvent {
     ChatEvent::TaskStarted { task: task(id) }
 }
@@ -175,6 +180,7 @@ fn every_event_round_trips_with_a_snake_case_type_tag() {
         (result(TurnCause::Task), "turn_result"),
         (moved(), "session_moved"),
         (exited(), "exited"),
+        (lost(0, 10), "output_lost"),
     ];
     for (event, tag) in &events {
         let json = round_trip(event);
@@ -714,9 +720,8 @@ fn check_deny_commands_refuses_33_entries_and_a_duplicate() {
     assert_eq!(check_deny_commands(&[]), Ok(()));
 }
 
-#[test]
-fn a_chat_open_with_deny_commands_keeps_them_in_order() {
-    let open = pf_engine::port::chat::ChatOpen {
+fn open_spec() -> ChatOpen {
+    ChatOpen {
         cwd: "/w".into(),
         resume: None,
         instructions: String::new(),
@@ -726,10 +731,197 @@ fn a_chat_open_with_deny_commands_keeps_them_in_order() {
         env: BTreeMap::new(),
         options: BTreeMap::new(),
         deny_commands: BUILT_IN.iter().map(ToString::to_string).collect(),
-    };
+        chat_session: "S-1".into(),
+        project: "P-1".into(),
+        agent_id: "orchestrator".into(),
+        worktree_id: "W-1".into(),
+        deny_from: "built_in".into(),
+        secret_env: BTreeMap::new(),
+        recorded_binary: None,
+    }
+}
+
+#[test]
+fn a_chat_open_with_deny_commands_keeps_them_in_order() {
+    let open = open_spec();
     let copy = open.clone();
     assert_eq!(copy, open);
     assert_eq!(copy.deny_commands.len(), 15);
     assert_eq!(copy.deny_commands[0], "git push -f*");
     assert_eq!(copy.deny_commands[14], "gh --repo=* pr merge");
+}
+
+// ------------------------------------------------------------------ the host calls (r2.s2.w5)
+
+#[test]
+fn check_order_accepts_output_lost_anywhere_before_exited_and_rejects_it_after() {
+    // Between turns, before the first turn, inside a turn, and in a row.
+    let mut between = plain_turn();
+    between.push(lost(10, 20));
+    between.extend(plain_turn());
+    check_order(&between).unwrap();
+    check_order(&[
+        lost(0, 5),
+        started(TurnCause::Operator),
+        result(TurnCause::Operator),
+    ])
+    .unwrap();
+    let mut inside = vec![
+        started(TurnCause::Operator),
+        delta("a"),
+        lost(3, 9),
+        text("a"),
+    ];
+    inside.push(result(TurnCause::Operator));
+    check_order(&inside).unwrap();
+    check_order(&[lost(0, 1), lost(1, 2)]).unwrap();
+    // A lost stretch does not close a turn, open a request or end a task.
+    check_order(&[
+        started(TurnCause::Operator),
+        approval("r1"),
+        lost(1, 2),
+        ChatEvent::RequestClosed {
+            request_id: "r1".into(),
+        },
+        result(TurnCause::Operator),
+    ])
+    .unwrap();
+    // An open turn at Exited with a lost stretch inside is allowed, like any open turn.
+    check_order(&[started(TurnCause::Operator), lost(1, 2), exited()]).unwrap();
+    // After Exited it is rejected, with the rule's reason.
+    let err = check_order(&[exited(), lost(1, 2)]).unwrap_err();
+    assert!(err.contains("after Exited"), "{err}");
+    assert!(err.contains("OutputLost"), "{err}");
+}
+
+/// An adapter that implements only the required calls, so the new calls take their defaults.
+struct Bare;
+
+impl ChatPort for Bare {
+    fn options(&self) -> Vec<ChatOption> {
+        Vec::new()
+    }
+    fn mid_turn(&self) -> MidTurn {
+        MidTurn::Steer
+    }
+    fn open(&self, _: &ChatOpen) -> Result<ChatOpened, pf_engine::port::chat::ChatError> {
+        Err(ChatError::Failed("bare".into()))
+    }
+    fn send(&self, _: &ChatId, _: InputKind, _: &str) -> Result<(), ChatError> {
+        Ok(())
+    }
+    fn answer(&self, _: &ChatId, _: &str, _: &ChatAnswer) -> Result<(), ChatError> {
+        Ok(())
+    }
+    fn interrupt(&self, _: &ChatId) -> Result<(), ChatError> {
+        Ok(())
+    }
+    fn set_option(&self, _: &ChatId, _: &str, _: &str) -> Result<(), ChatError> {
+        Ok(())
+    }
+    fn context_usage(&self, _: &ChatId) -> Result<ContextUsage, ChatError> {
+        Err(ChatError::Failed("bare".into()))
+    }
+    fn background_tasks(&self, _: &ChatId) -> Result<Vec<BackgroundTask>, ChatError> {
+        Ok(Vec::new())
+    }
+    fn is_alive(&self, _: &ChatId) -> Result<bool, ChatError> {
+        Ok(false)
+    }
+    fn stop(&self, _: &ChatId) -> Result<(), ChatError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_new_calls_default_so_an_adapter_with_no_host_keeps_working() {
+    let bare = Bare;
+    let chat = ChatId("c1".into());
+    // `ack` and `detach` do nothing and succeed.
+    assert_eq!(bare.ack(&chat, 42), Ok(()));
+    assert_eq!(bare.detach(&chat), Ok(()));
+    // `rebind` loses the chat, and says why.
+    let point = ChatResumePoint {
+        runtime_session: pf_engine::port::agent::SessionRef("s1".into()),
+        acked: 0,
+        committed: 0,
+        checkpoint: None,
+        pending: Vec::new(),
+    };
+    match bare.rebind("pf-host-x-1", &point) {
+        ChatRebind::Lost { exit } => {
+            let text = exit.to_string();
+            assert!(text.contains("no session host"), "{text}");
+        }
+        other => panic!("the default rebind must be Lost, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_host_types_hold_their_fields_and_a_delivery_carries_the_cursor() {
+    // `at: None` is an adapter with no host; a checkpoint comes only with a cursor.
+    let plain = ChatDelivery {
+        event: text("x"),
+        at: None,
+        checkpoint: None,
+    };
+    let hosted = ChatDelivery {
+        event: result(TurnCause::Operator),
+        at: Some(120),
+        checkpoint: Some("{\"totals\":1}".into()),
+    };
+    assert_ne!(plain, hosted);
+    assert_eq!(hosted.clone(), hosted);
+    // The resume point names each pending request: id, kind and the stored input when not cut.
+    let point = ChatResumePoint {
+        runtime_session: pf_engine::port::agent::SessionRef("s1".into()),
+        acked: 10,
+        committed: 20,
+        checkpoint: Some("c".into()),
+        pending: vec![
+            PendingRequest {
+                request_id: "r1".into(),
+                kind: PendingKind::Approval,
+                input: Some("{}".into()),
+            },
+            PendingRequest {
+                request_id: "r2".into(),
+                kind: PendingKind::Question,
+                input: None,
+            },
+        ],
+    };
+    assert_eq!(point.clone(), point);
+    // The open carries the session key, the project, the secrets apart from `env`, and the binary
+    // the session was launched with.
+    let mut open = open_spec();
+    open.secret_env.insert("PF_AGENT_ENV_A".into(), "v".into());
+    open.recorded_binary = Some(RecordedBinary {
+        path: "/bin/x".into(),
+        sha256: "ab".repeat(32),
+        version: "2.1.319".into(),
+    });
+    assert_eq!(open.clone(), open);
+    assert_eq!(open.chat_session, "S-1");
+    // `ChatOpened` names the host it runs in.
+    let (_tx, events) = tokio::sync::mpsc::unbounded_channel();
+    let opened = ChatOpened {
+        chat: ChatId("c1".into()),
+        session: pf_engine::port::agent::SessionRef("s1".into()),
+        runtime_version: "v".into(),
+        qualified: true,
+        events,
+        host: Some(ChatHost {
+            unit: "pf-host-x-1".into(),
+            incarnation: 2,
+        }),
+    };
+    assert_eq!(opened.host.as_ref().unwrap().incarnation, 2);
+    // A rebind that cannot reach the host says why.
+    match (ChatRebind::Unreachable {
+        why: "no hello".into(),
+    }) {
+        ChatRebind::Unreachable { why } => assert_eq!(why, "no hello"),
+        _ => unreachable!(),
+    }
 }

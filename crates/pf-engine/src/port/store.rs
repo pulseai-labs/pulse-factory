@@ -522,6 +522,40 @@ pub struct ChatSessionRow {
     pub created_at: String,
     pub updated_at: String,
     pub ended_at: Option<String>,
+    /// Where the session's output stands in its host. `None` for a session with no host output.
+    pub host_cursor: Option<ChatHostCursor>,
+}
+
+/// Where a chat session's output stands in the host it came from (migration 0011).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatHostCursor {
+    /// The host the output came from.
+    pub unit: String,
+    pub incarnation: u32,
+    /// The cursor after the last output line the store consumed.
+    pub committed: u64,
+    /// The cursor the controller last acknowledged to the host.
+    pub acked: u64,
+    /// The adapter's opaque state at `acked`. `None` before the first quiet point.
+    pub checkpoint: Option<String>,
+    /// True once the store holds this host's exit: the exit's own write set it. The exit comes at
+    /// the cursor of the last output line, so a cursor that equals `committed` does not say that
+    /// the exit is stored; only this flag does. A cursor written before the flag reads `false`.
+    #[serde(default)]
+    pub exited: bool,
+}
+
+/// A position that comes with a write: the host, and the cursor after the output that gave it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatHostMark {
+    pub unit: String,
+    pub incarnation: u32,
+    /// The cursor after the output line.
+    pub at: u64,
+    /// The adapter's state at this quiet point. With it, the store also sets `acked`.
+    pub checkpoint: Option<String>,
+    /// The output is the host's exit: the store sets `exited` with it.
+    pub exited: bool,
 }
 
 /// The kind of one chat item: the closed list of the display log. The store keeps it as text with
@@ -668,6 +702,10 @@ pub struct NewChatItem {
     pub answers_seq: Option<u64>,
     /// A `turn_result`'s usage: the store adds it to the session's totals.
     pub usage: Option<Usage>,
+    /// An item written from host output: the store sets the session's `committed` to `at` in the
+    /// same transaction. A mark of another unit or incarnation replaces the cursor, and a
+    /// `committed` never moves back within one unit.
+    pub host: Option<ChatHostMark>,
     pub created_at: String,
 }
 
@@ -817,6 +855,293 @@ pub struct SettingRow {
     pub set_at: String,
 }
 
+/// The kinds of session that a launch record and a host can name. The store keeps the kind as
+/// text with no `CHECK`: the port validates it, so a later kind needs no table rebuild (ADR-0003's
+/// amendment of 2026-11-16, the precedent of ADR-0016's key list).
+pub const SESSION_KINDS: [&str; 3] = ["seat", "chat", "terminal"];
+
+/// The launchers that start a host: a transient service unit, or a detached process. The store
+/// keeps the launcher as text with no `CHECK`.
+pub const HOST_LAUNCHERS: [&str; 2] = ["systemd", "detached"];
+
+/// A launch record before the store writes it: what a session's next launch must use. A record is
+/// written once, before its host starts, and never changes. A live change that must hold after a
+/// resume writes the next revision, and the newest revision wins.
+///
+/// The body, `record`, is JSON with the fields `argv`, `cwd`, `env`, `secret_names`, `transport`,
+/// `runtime`, `settings`, `plugins`, `skills`, `rules_sha256`, `run_binding` and `resume`. `resume`
+/// says how to resume. It never holds the runtime's own session ID: the runtime mints that ID after
+/// the launch, so it stays on the session row. No secret value is in the body: a name in
+/// `secret_names` holds `sha256:<64 hex>` or `ref:<name>` in `env`. No attach key is in the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewLaunchRecord {
+    /// `seat`, `chat` or `terminal` ([`SESSION_KINDS`]).
+    pub session_kind: String,
+    pub session_id: String,
+    /// From 1. Each launch of a session is the next incarnation.
+    pub incarnation: u32,
+    /// From 1 within an incarnation. A live change writes the next revision.
+    pub revision: u32,
+    /// `systemd` or `detached` ([`HOST_LAUNCHERS`]).
+    pub launcher: String,
+    pub host_unit: String,
+    pub host_socket: String,
+    /// The JSON body. The store keeps its canonical form ([`canonical_json`]).
+    pub record: String,
+    /// SHA-256 of the canonical body, as 64 lower-case hex digits.
+    pub record_sha256: String,
+    pub created_at: String,
+}
+
+/// One stored launch record. `record` is the canonical body, and `record_sha256` is its hash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchRecordRow {
+    pub session_kind: String,
+    pub session_id: String,
+    pub incarnation: u32,
+    pub revision: u32,
+    pub launcher: String,
+    pub host_unit: String,
+    pub host_socket: String,
+    pub record: String,
+    pub record_sha256: String,
+    /// The command that wrote the record. It is unique in the table.
+    pub command_id: String,
+    pub created_at: String,
+}
+
+/// A host row before the store writes it: one session host, started from one revision of one
+/// launch record. `launched_revision` and `launched_record_sha256` name what the host was
+/// launched from. A restart compares the host's `hello` with them, never with the newest revision.
+/// The row holds no secret: the attach key lives in a key file outside the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewHost {
+    /// The unit name. It is the key of the registry.
+    pub unit: String,
+    pub session_kind: String,
+    pub session_id: String,
+    pub incarnation: u32,
+    /// An existing revision of the same incarnation.
+    pub launched_revision: u32,
+    /// The hash of that revision's body.
+    pub launched_record_sha256: String,
+    pub launcher: String,
+    pub socket: String,
+    pub invocation_id: String,
+    pub host_binary: String,
+    pub host_sha256: String,
+    /// The host protocol version the host speaks.
+    pub protocol: u32,
+    pub started_at: String,
+}
+
+/// One row of the host registry. A host is live while `ended_at` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRow {
+    pub unit: String,
+    pub session_kind: String,
+    pub session_id: String,
+    pub incarnation: u32,
+    pub launched_revision: u32,
+    pub launched_record_sha256: String,
+    pub launcher: String,
+    pub socket: String,
+    pub invocation_id: String,
+    pub host_binary: String,
+    pub host_sha256: String,
+    pub protocol: u32,
+    pub started_at: String,
+    /// Set once, with `exit`.
+    pub ended_at: Option<String>,
+    /// JSON text. Set once, with `ended_at`.
+    pub exit: Option<String>,
+    /// The command that started the host. It is unique in the table.
+    pub command_id: String,
+}
+
+/// The position an adapter saved for one host (ADR-0003's amendment of 2026-11-16, ADR-0011's
+/// kept-and-resent event test): how far it had read in the output a session writes, and what it
+/// derived up to there. The store keeps one row for each unit, and never reads inside `position`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostPositionRow {
+    pub unit: String,
+    /// The saves of this unit so far, from 1.
+    pub seq: u64,
+    /// The JSON text the adapter saved.
+    pub position: String,
+    /// The command that wrote this `seq`.
+    pub command_id: String,
+    pub updated_at: String,
+}
+
+/// The canonical form of a JSON value: no white space and every object's keys in order, so the
+/// same value always gives the same bytes.
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                write_canonical(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// The SHA-256 of a launch record's canonical body, as 64 lower-case hex digits.
+pub fn record_sha256(canonical_body: &str) -> String {
+    crate::claim::sha256_hex(canonical_body.as_bytes())
+}
+
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A secret value as a record may hold it: `sha256:<64 hex>` or `ref:<name>`.
+fn is_secret_stand_in(value: &str) -> bool {
+    if let Some(hex) = value.strip_prefix("sha256:") {
+        return is_sha256_hex(hex);
+    }
+    value.strip_prefix("ref:").is_some_and(|name| {
+        !name.is_empty() && name.chars().all(|c| !c.is_whitespace() && !c.is_control())
+    })
+}
+
+fn check_kind_and_launcher(kind: &str, launcher: &str) -> Result<(), String> {
+    if !SESSION_KINDS.contains(&kind) {
+        return Err(format!(
+            "session kind {kind:?} is not one of {}",
+            SESSION_KINDS.join(", ")
+        ));
+    }
+    if !HOST_LAUNCHERS.contains(&launcher) {
+        return Err(format!(
+            "launcher {launcher:?} is not one of {}",
+            HOST_LAUNCHERS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+impl NewLaunchRecord {
+    /// Seal a body: the canonical text and its hash, for a caller that builds the record.
+    pub fn seal(body: &str) -> Result<(String, String), String> {
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|e| format!("the launch record is not JSON: {e}"))?;
+        let canonical = canonical_json(&value);
+        let hash = record_sha256(&canonical);
+        Ok((canonical, hash))
+    }
+
+    /// The checks that need no stored state, before any write. They answer the canonical body that
+    /// the store keeps, or the one-line reason the record is refused:
+    ///
+    /// - the kind is `seat`, `chat` or `terminal`, and the launcher is `systemd` or `detached`;
+    /// - the body is a JSON object;
+    /// - every `env` value of a name in `secret_names` is `sha256:<64 hex>` or `ref:<name>`;
+    /// - `record_sha256` is the SHA-256 of the canonical body.
+    ///
+    /// The next revision and the next incarnation need the store, and the store checks them.
+    pub fn check(&self) -> Result<String, String> {
+        check_kind_and_launcher(&self.session_kind, &self.launcher)?;
+        if self.session_id.is_empty() {
+            return Err("the launch record names no session".to_string());
+        }
+        if self.incarnation == 0 || self.revision == 0 {
+            return Err("the incarnation and the revision start at 1".to_string());
+        }
+        let value: serde_json::Value = serde_json::from_str(&self.record)
+            .map_err(|e| format!("the launch record is not JSON: {e}"))?;
+        let Some(body) = value.as_object() else {
+            return Err("the launch record is not a JSON object".to_string());
+        };
+        let secret_names: Vec<&str> = match body.get("secret_names") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Array(names)) => names
+                .iter()
+                .map(|n| {
+                    n.as_str()
+                        .ok_or("secret_names holds a name that is not text")
+                })
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err("secret_names is not a list".to_string()),
+        };
+        let env = match body.get("env") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::Object(env)) => Some(env),
+            Some(_) => return Err("env is not an object".to_string()),
+        };
+        if let Some(env) = env {
+            for name in secret_names {
+                let Some(value) = env.get(name) else {
+                    continue;
+                };
+                match value.as_str() {
+                    Some(text) if is_secret_stand_in(text) => {}
+                    _ => {
+                        return Err(format!(
+                            "the value of the secret {name} is not sha256:<64 hex digits> or ref:<name>"
+                        ));
+                    }
+                }
+            }
+        }
+        let canonical = canonical_json(&value);
+        if self.record_sha256 != record_sha256(&canonical) {
+            return Err(
+                "record_sha256 is not the SHA-256 of the canonical record body".to_string(),
+            );
+        }
+        Ok(canonical)
+    }
+}
+
+impl NewHost {
+    /// The checks that need no stored state, before any write. The launched revision and its hash
+    /// need the store, and the store checks them.
+    pub fn check(&self) -> Result<(), String> {
+        check_kind_and_launcher(&self.session_kind, &self.launcher)?;
+        if self.unit.is_empty() {
+            return Err("the host row names no unit".to_string());
+        }
+        if self.session_id.is_empty() {
+            return Err("the host row names no session".to_string());
+        }
+        if self.incarnation == 0 || self.launched_revision == 0 {
+            return Err("the incarnation and the launched revision start at 1".to_string());
+        }
+        if !is_sha256_hex(&self.launched_record_sha256) {
+            return Err("launched_record_sha256 is not 64 hex digits".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -907,6 +1232,35 @@ pub enum Effect {
     SetRunProject {
         run_id: String,
         project_id: String,
+    },
+    /// Write one revision of a launch record (ADR-0003's amendment of 2026-11-16). Allowed only in
+    /// an admission under [`CONTROLLER_SCOPE`]. A kind or launcher that is not listed, a secret
+    /// value in plain text, a revision or an incarnation that is not the next one, or a
+    /// `record_sha256` that is not the hash of the body makes the commit [`Committed::Rejected`].
+    LaunchRecordWrite(NewLaunchRecord),
+    /// Register a host that started from one revision of a launch record. Allowed only in an
+    /// admission under [`CONTROLLER_SCOPE`]. A launched revision that does not exist, a hash that
+    /// is not that revision's, or a unit or an incarnation that has a host already makes the
+    /// commit [`Committed::Rejected`].
+    HostStarted(NewHost),
+    /// End a live host with its exit (JSON). It sets the end and the exit once, together. Allowed
+    /// only in an admission under [`CONTROLLER_SCOPE`]. An unknown or ended host makes the commit
+    /// [`Committed::Rejected`].
+    HostEnded {
+        unit: String,
+        ended_at: String,
+        exit: String,
+    },
+    /// Save the position an adapter has read to for the host of `unit` (JSON text). Allowed only
+    /// in an admission under [`CONTROLLER_SCOPE`]. `seq` must be the stored one plus 1, or 1 when
+    /// the unit has none. A unit with no host row (live or ended), a `seq` that is not the next
+    /// one, a position that is not JSON, or a scope other than the controller's makes the commit
+    /// [`Committed::Rejected`].
+    HostPositionWrite {
+        unit: String,
+        seq: u64,
+        position: String,
+        updated_at: String,
     },
 }
 
@@ -1077,4 +1431,32 @@ pub trait Store: Send + Sync {
     /// to the session's totals, in one transaction. It makes no admission and no ledger line
     /// (ADR-0003). An error writes nothing.
     fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError>;
+    /// Write a position that comes with no item (the adapter's state between turns), by the rules
+    /// of [`NewChatItem::host`]. It makes no admission and no ledger line: the display log and its
+    /// cursor are written outside admission (ADR-0003). An unknown session is an error.
+    fn set_chat_host_mark(&self, session_id: &str, mark: ChatHostMark) -> Result<(), StoreError>;
+
+    /// Read one revision of a session's launch record.
+    fn launch_record(
+        &self,
+        session_kind: &str,
+        session_id: &str,
+        incarnation: u32,
+        revision: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError>;
+    /// Read the newest revision of a session's incarnation: the one that wins.
+    fn newest_launch_record(
+        &self,
+        session_kind: &str,
+        session_id: &str,
+        incarnation: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError>;
+    /// Read the host rows with no end, in the order they started. A row reads live until the
+    /// controller records the exit: after a crash, every row can read live, so a caller checks
+    /// the unit before it trusts the row.
+    fn live_hosts(&self) -> Result<Vec<HostRow>, StoreError>;
+    /// Read one host row by unit, live or ended.
+    fn host(&self, unit: &str) -> Result<Option<HostRow>, StoreError>;
+    /// Read the last position saved for the host of `unit`, or `None` when none was saved.
+    fn host_position(&self, unit: &str) -> Result<Option<HostPositionRow>, StoreError>;
 }

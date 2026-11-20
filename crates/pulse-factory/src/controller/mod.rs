@@ -17,6 +17,7 @@ pub mod devices;
 pub mod driver;
 pub mod files;
 pub mod folders;
+pub mod hosts;
 pub mod ports;
 pub mod projects;
 pub mod proposals;
@@ -116,6 +117,13 @@ pub struct Config {
     /// The faults a test injects into the start card's arm (`r1.s4.w2`), as `random_device` is a
     /// seam: none by default.
     pub start_faults: proposals::StartFaults,
+    /// The runtime directory (`XDG_RUNTIME_DIR`): the detached launcher's hosts and the systemd
+    /// launcher's secrets files live under it. A test points it at its own.
+    pub runtime_dir: PathBuf,
+    /// The launcher that starts the hosts (`PF_HOST_LAUNCHER`): detached unless set.
+    pub host_launcher: hosts::HostLauncher,
+    /// The `pf-host` binary (`PF_HOST_BIN`). `None`: `pf-host` beside `binary`.
+    pub host_bin: Option<PathBuf>,
 }
 
 impl Config {
@@ -146,6 +154,11 @@ impl Config {
             confirm_ttl: DEFAULT_CONFIRM_TTL,
             confirm_tombstone: DEFAULT_CONFIRM_TOMBSTONE,
             start_faults: proposals::StartFaults::default(),
+            runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|v| !v.is_empty())
+                .map_or_else(std::env::temp_dir, PathBuf::from),
+            host_launcher: hosts::HostLauncher::Detached,
+            host_bin: None,
         }
     }
 
@@ -202,6 +215,8 @@ pub struct Controller {
     settings_refusals: settings::Refusals,
     /// The start proposals, in memory only (`r1.s4.w2`).
     proposals: proposals::Proposals,
+    /// The host service: the launch, the rebind and the orphan sweep of session hosts.
+    hosts: Arc<hosts::HostService>,
     /// This controller, for the threads that outlive a call.
     me: Weak<Controller>,
 }
@@ -230,7 +245,18 @@ impl Controller {
         // before the listener binds.
         let api = api::ApiRuntime::start(&cfg.state_dir, cfg.api_listen.as_deref());
         let chats = chats::Chats::new(&cfg.state_dir);
+        let host_server = hosts::host_server_name(&cfg.state_dir, &cfg.random_device);
+        let host_cfg = hosts::HostConfig {
+            state_dir: cfg.state_dir.clone(),
+            runtime_dir: cfg.runtime_dir.clone(),
+            launcher: cfg.host_launcher.clone(),
+            host_bin: cfg.host_bin.clone(),
+            binary: cfg.binary.clone(),
+            proc_root: cfg.proc_root.clone(),
+            random_device: cfg.random_device.clone(),
+        };
         let controller = Arc::new_cyclic(|me| Controller {
+            hosts: hosts::HostService::new(me.clone(), host_cfg, host_server),
             cfg,
             store,
             ports,
@@ -248,7 +274,13 @@ impl Controller {
         // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
         // session is set to wait for `--resume`, as the restart ended its process.
         controller.backfill_project_kinds();
-        controller.settle_live_chat_sessions();
+        // The chat adapters need the host service before any chat opens or rebinds, and the chat
+        // tier 1 runs before the runs' start-up and before the orphan sweep (ADR-0007).
+        let hosts: Arc<dyn pf_engine::port::host::SessionHosts> = controller.hosts.clone();
+        for port in controller.cfg.chat_runtimes.values() {
+            port.set_hosts(hosts.clone());
+        }
+        controller.reconcile_live_chat_sessions();
         // A restart withdraws every open proposal (ADR-0007): the snapshots go, and each card that
         // has no result gets one.
         controller.recover_start_cards();
@@ -270,8 +302,16 @@ impl Controller {
                 Err(why) => eprintln!("pulse-factory: run {} is not loaded: {why}", info.run_id),
             }
         }
+        // Tier 1 ran in each run's start-up (reconcile). The orphan sweep runs once, after every
+        // run, and before the socket binds (ADR-0007).
+        controller.hosts.sweep_orphans();
         controller.prime_request_watch();
         Ok(controller)
+    }
+
+    /// The host service, for the tests and for `status`.
+    pub fn host_service(&self) -> &Arc<hosts::HostService> {
+        &self.hosts
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -310,6 +350,7 @@ impl Controller {
                 plugin_roots: info.plugin_roots.clone(),
                 paper: info.paper.clone(),
                 forge_repo: info.forge_repo.clone(),
+                hosts: self.hosts.clone(),
             })?,
         };
         let run_ports = self.wrap_seats(run_ports, &package, &info, dir);
@@ -406,11 +447,10 @@ impl Controller {
             random_device: self.cfg.random_device.clone(),
         };
         ports::RunPorts {
-            agent: Arc::new(seat::SeatPort::new(
-                run_ports.agent,
-                facts,
-                self.seats.clone(),
-            )),
+            agent: Arc::new(
+                seat::SeatPort::new(run_ports.agent, facts, self.seats.clone())
+                    .with_hosts(self.hosts.clone()),
+            ),
             forge: run_ports.forge,
             forge_api_hosts: run_ports.forge_api_hosts,
         }
@@ -609,6 +649,7 @@ impl Controller {
             plugin_roots: plan.plugin_roots.clone(),
             paper: plan.paper.clone(),
             forge_repo: plan.forge_repo.clone(),
+            hosts: self.hosts.clone(),
         };
         let run_ports = self.ports.build(&spec)?;
         let mut copies = Vec::new();
@@ -923,7 +964,10 @@ impl Controller {
     fn verb_status(&self, args: &Value) -> Response {
         let run = args.get("run").and_then(Value::as_str);
         match self.find(run) {
-            Ok(handle) => Response::ok(status::build(self, &handle)),
+            Ok(handle) => match status::build(self, &handle) {
+                Ok(answer) => Response::ok(answer),
+                Err(why) => Response::err(why),
+            },
             Err(why) => Response::err(why),
         }
     }
@@ -981,8 +1025,22 @@ pub fn run(args: &ControllerArgs) -> i32 {
         );
         return 1;
     }
-    let bound = match pf_ipc::bind(&state) {
-        Ok(b) => b,
+    // `PF_HOST_LAUNCHER` names the launcher of the session hosts: systemd or detached. Any other
+    // value stops the controller here, before it takes the lock or makes a socket (Q6).
+    let host_launcher = match hosts::HostLauncher::from_env_value(
+        std::env::var("PF_HOST_LAUNCHER").ok().as_deref(),
+    ) {
+        Ok(l) => l,
+        Err(why) => {
+            eprintln!("pulse-factory: controller: {why}");
+            return 1;
+        }
+    };
+    // The lock first, so a second controller refuses at once; the socket after `Controller::open`,
+    // which runs tier 1 for every run, the orphan sweep and the seat key table. A hook call finds
+    // no socket until then, and `hook` waits for one (Approach 7, Q8).
+    let locked = match pf_ipc::lock(&state) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("pulse-factory: controller: {e}");
             return 1;
@@ -1011,6 +1069,7 @@ pub fn run(args: &ControllerArgs) -> i32 {
     for warning in warnings {
         eprintln!("{warning}");
     }
+    cfg.host_launcher = host_launcher;
     cfg.apply_chat_env(&chat_env);
     if let Some(bin) = &chat_env.claude_bin {
         eprintln!(
@@ -1029,6 +1088,13 @@ pub fn run(args: &ControllerArgs) -> i32 {
         Ok(c) => c,
         Err(why) => {
             eprintln!("pulse-factory: controller: {why}");
+            return 1;
+        }
+    };
+    let bound = match locked.bind() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("pulse-factory: controller: {e}");
             return 1;
         }
     };
@@ -1077,9 +1143,10 @@ pub fn serve_forever(controller: Arc<Controller>, bound: pf_ipc::Bound) -> i32 {
             }
         };
         pf_ipc::serve(bound, controller.clone(), shutdown).await;
-        // A controller stop ends every chat process and every stream (Q2 rule 3).
+        // A controller stop stops no chat: each adapter drops its connection and the host keeps the
+        // process (ADR-0015's amendment). Every stream ends.
         let stopping = controller.clone();
-        let _ = tokio::task::spawn_blocking(move || stopping.shutdown_chats()).await;
+        let _ = tokio::task::spawn_blocking(move || stopping.detach_chats()).await;
         tick_task.abort();
         if let Some(task) = api_task {
             task.abort();

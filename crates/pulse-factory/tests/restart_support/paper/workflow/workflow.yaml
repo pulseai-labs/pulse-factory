@@ -1,0 +1,55 @@
+# The paper workflow of the restart tests (`tier1_reconcile.rs`, `seat_key_rebuild.rs`,
+# `time_to_ready.rs`): units come from the run's queue, and each unit has one stage, run by a paper
+# seat that stays alive until the test gives it the go-ahead. No model, no spend, no network.
+version: 1
+name: paper-restart
+
+# What `arm` must supply.
+#   spine         the spine ID (arm sets it)
+#   spine_dir     the directory that holds the reports
+#   worktree_root the directory that holds the unit worktrees
+#   forge_repo    the bare repo; `arm --paper` sets it to <paper>/forge.git
+#   briefs        the run's own copy of the briefs (arm sets it)
+params: [spine, spine_dir, worktree_root, forge_repo, briefs]
+
+roles:
+  seat:
+    runtime: paper
+    model: paper/seat
+    rules: rules/seat.yaml
+
+settings:
+  model_sessions: 40
+  cold_builds: 1
+
+plan_check: [echo, "1"]
+
+roots: ["{param.worktree_root}"]
+
+unit_sources:
+  - dir: "{run.dir}/queue"
+    track: item
+    vars: [worktree_path, branch]
+
+tracks:
+  item:
+    stages:
+      - name: work
+        role: seat
+        brief: [briefs/common.md]
+        message: "Paper seat for {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 5
+        first_turn_seconds: 30
+        settings:
+          env.PAPER_UNIT: "{unit.id}"
+          env.PAPER_OUT: "{run.dir}/out/{unit.id}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+        done:
+          - file: "{run.dir}/out/{unit.id}/work.done"

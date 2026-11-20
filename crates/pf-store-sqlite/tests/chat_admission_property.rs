@@ -555,6 +555,7 @@ impl Rig {
             tool_output: None,
             answers_seq: None,
             usage: None,
+            host: None,
             created_at: "t".to_string(),
         };
         let mut expect_ok = self.sessions.contains_key(&n);

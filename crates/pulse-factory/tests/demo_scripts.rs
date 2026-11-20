@@ -1,4 +1,5 @@
-//! AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
+//! AC-14 and AC-15 of `r2.s2.w5` (d30's guard and its static checks, and the chat and start demos that
+//! leave no host: `run` asserts it for each script it runs), AC-14 and AC-8 (`r0.s2.w3`), AC-5 (`r0.s3.w1`), AC-3 to AC-7 (`r1.s1.w5`), AC-6 (`r1.s2.w5`) and
 //! AC-9 (`r1.s2.w4`), AC-14 (`r1.s3.w3`) and AC-27 (`r1.s4.w4`): the demo scripts run against the built binary, and each fails when its journey is
 //! broken. The scripts run the paper env: no model, no spend, no network beyond `127.0.0.0/8`, no `gh`,
 //! and no build. d14 (`community-edition.sh`) is the exception that the five tests at the end cover: it
@@ -32,14 +33,85 @@ fn script(name: &str) -> PathBuf {
     root().join("scripts/demo").join(name)
 }
 
+/// The runtime directory of one demo script run: a short path, so the host sockets under it stay
+/// under 107 bytes, and the script's own, so the hosts of two scripts that run at once never mix.
+/// A script that leaves a detached host live under it is a failure (r2.s2.w3, AC-15): a controller
+/// stop ends no seat now, so each script stops its own hosts in its exit trap.
+struct Runtime(PathBuf);
+
+static RUNTIMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Runtime {
+    fn new() -> Runtime {
+        let n = RUNTIMES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("pfd{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Runtime(dir)
+    }
+
+    /// The live hosts under this directory: the `host.pid` of every `pf-hosts/<server>/<unit>`
+    /// whose PID still has its recorded start time.
+    fn live_hosts(&self) -> Vec<(PathBuf, u32)> {
+        let mut out = Vec::new();
+        let Ok(servers) = std::fs::read_dir(self.0.join("pf-hosts")) else {
+            return out;
+        };
+        for server in servers.flatten() {
+            let Ok(units) = std::fs::read_dir(server.path()) else {
+                continue;
+            };
+            for unit in units.flatten() {
+                let Ok(text) = std::fs::read_to_string(unit.path().join("host.pid")) else {
+                    continue;
+                };
+                let mut it = text.split_whitespace();
+                let (Some(Ok(pid)), Some(Ok(start))) = (
+                    it.next().map(str::parse::<u32>),
+                    it.next().map(str::parse::<u64>),
+                ) else {
+                    continue;
+                };
+                if pf_host::peer::start_time(pid) == Some(start) {
+                    out.push((unit.path(), pid));
+                }
+            }
+        }
+        out
+    }
+}
+
+impl Drop for Runtime {
+    /// A host that a failed script left is stopped here, so one failure leaves no process behind.
+    fn drop(&mut self) {
+        for (_, pid) in self.live_hosts() {
+            pf_host::peer::kill_group(pid, 9);
+            pf_host::peer::kill_pid(pid, 9);
+        }
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Fail when a script left a detached host of its own server live.
+fn assert_no_host_left(name: &str, rt: &Runtime) {
+    let left = rt.live_hosts();
+    assert!(
+        left.is_empty(),
+        "{name} left {} detached host(s) live: {left:?}",
+        left.len()
+    );
+}
+
 fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
     let _one_tamper_demo =
         (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
     let _one_stranded_demo =
         (name == "stranded-close.sh").then(|| STRANDED.lock().unwrap_or_else(|e| e.into_inner()));
     let mut cmd = Command::new("bash");
+    let rt = Runtime::new();
     cmd.arg(script(name))
         .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
+        .env("XDG_RUNTIME_DIR", &rt.0)
         .env_remove("PF_SEAT_TOKEN")
         .env_remove("PF_STATE_DIR")
         .env_remove("PF_SHARE_DIR");
@@ -48,7 +120,9 @@ fn run(name: &str, env: &[(&str, &str)]) -> (Output, Duration) {
     }
     let start = Instant::now();
     let out = cmd.output().expect("bash starts");
-    (out, start.elapsed())
+    let took = start.elapsed();
+    assert_no_host_left(name, &rt);
+    (out, took)
 }
 
 fn stderr(o: &Output) -> String {
@@ -94,6 +168,445 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
     let new = f(text.clone());
     assert_ne!(new, text, "the edit of {rel} changed nothing");
     std::fs::write(&path, new).unwrap();
+}
+
+/// Run a paper demo whose every seat hangs, wait until a detached host is live, then send the script
+/// `SIGTERM` (an interrupted demo, or one that fails with a seat still running). The script's exit
+/// trap must stop its own server's hosts: a controller stop ends no seat now (G6). The test fails when a
+/// host of the script is still live 15 s after the script ended.
+fn interrupted_demo_leaves_no_host(name: &str, package: &str) {
+    let _tamper =
+        (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
+    let _stranded =
+        (name == "stranded-close.sh").then(|| STRANDED.lock().unwrap_or_else(|e| e.into_inner()));
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join(package);
+    copy_dir(&root().join("scripts/demo").join(package), &paper);
+    for entry in std::fs::read_dir(paper.join("seats")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "sh") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let (shebang, rest) = text.split_once('\n').expect("a seat has a shebang line");
+            std::fs::write(&path, format!("{shebang}\nsleep 600\n{rest}\n")).unwrap();
+        }
+    }
+    let rt = Runtime::new();
+    let mut child = Command::new("bash")
+        .arg(script(name))
+        .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
+        .env("XDG_RUNTIME_DIR", &rt.0)
+        .env("PAPER_SRC", &paper)
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("bash starts");
+    let start = Instant::now();
+    while rt.live_hosts().is_empty() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{name} ended before a seat host was live"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(40),
+            "{name} started no host in 40 s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    pf_host::peer::kill_pid(child.id(), 15);
+    child.wait().unwrap();
+    let end = Instant::now();
+    while !rt.live_hosts().is_empty() && end.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_no_host_left(name, &rt);
+}
+
+#[test]
+fn every_demo_script_that_starts_a_controller_stops_its_hosts_in_its_exit_trap() {
+    // The five tests below run the paper demos. The chat and UI demos start no paper seat, so they
+    // cannot be made to leave a host here: this test holds them to the same helper by text.
+    let mut starters = 0;
+    for entry in std::fs::read_dir(root().join("scripts/demo")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "sh") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let starts = text.lines().any(|l| {
+            let l = l.trim_start();
+            !l.starts_with('#')
+                && (l.contains("\"$PF_BIN\" controller") || l.contains("\"$pf_bin\" controller"))
+        });
+        if !starts {
+            continue;
+        }
+        starts_one(&path, &text);
+        starters += 1;
+    }
+    assert!(
+        starters >= 14,
+        "found only {starters} scripts that start a controller"
+    );
+}
+
+fn starts_one(path: &Path, text: &str) {
+    let name = path.file_name().unwrap().to_string_lossy();
+    assert!(
+        text.contains("lib/hosts.sh"),
+        "{name} does not source lib/hosts.sh"
+    );
+    let cleanup = text
+        .lines()
+        .skip_while(|l| !l.starts_with("cleanup() "))
+        .take_while(|l| !l.starts_with('}') || l.starts_with("cleanup()"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cleanup.contains("stop_hosts"),
+        "{name}: its cleanup does not call stop_hosts"
+    );
+    assert!(
+        text.contains("trap cleanup EXIT"),
+        "{name} has no exit trap named cleanup"
+    );
+}
+
+/// d30 (`host-restart.sh`, `r2.s2.w5`, AC-14 and AC-15): the script needs a real systemd user
+/// manager, so a seat inside the fence cannot run it. A runtime directory and a bus that do not exist
+/// stop it at its guard, in a fenced seat and in CI alike: one line on stderr, exit 1, at once.
+#[test]
+fn host_restart_with_no_user_manager_exits_1_within_5_s_with_the_guard_text() {
+    let start = Instant::now();
+    let out = Command::new("bash")
+        .arg(script("host-restart.sh"))
+        .env("XDG_RUNTIME_DIR", "/nonexistent")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent")
+        .env_remove("PF_SEAT_TOKEN")
+        .env_remove("PF_STATE_DIR")
+        .env_remove("PF_SHARE_DIR")
+        .output()
+        .expect("bash starts");
+    let took = start.elapsed();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{:?}\n{}",
+        out.status,
+        stderr(&out)
+    );
+    assert_eq!(
+        stderr(&out).trim_end(),
+        "host-restart: no systemd user manager (run outside the seat fence)"
+    );
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    assert!(took < Duration::from_secs(5), "{took:?}");
+}
+
+/// The code lines of a script: no blank line and no comment.
+fn code_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn host_restart_builds_nothing_makes_a_temp_directory_and_takes_its_binaries_by_variable() {
+    let text = std::fs::read_to_string(script("host-restart.sh")).unwrap();
+    for bad in [
+        "cargo build",
+        "cargo run",
+        "cargo install",
+        "gh pr",
+        "gh api",
+    ] {
+        assert!(!text.contains(bad), "host-restart.sh holds {bad:?}");
+    }
+    assert!(
+        text.contains("mktemp -d"),
+        "host-restart.sh makes a temp directory"
+    );
+    for var in ["PF_BIN", "PF_HOST_BIN", "PF_REPLAY_BIN", "PF_STREAM_BIN"] {
+        assert!(
+            text.contains(&format!("{var}=\"${{{var}:-")),
+            "host-restart.sh takes {var} with a default"
+        );
+    }
+    // The guard comes first: before the binaries, the tools and the temp directory.
+    let code = code_lines(&text);
+    assert_eq!(code[0], "set -euo pipefail");
+    assert!(
+        code[1].starts_with("if ! systemctl --user show-environment"),
+        "the guard is the first command: {}",
+        code[1]
+    );
+    // The budget is one wall-time limit of 60 s.
+    assert!(
+        text.contains("BUDGET=60"),
+        "host-restart.sh has no 60 s budget"
+    );
+}
+
+#[test]
+fn host_restart_stops_its_hosts_in_its_exit_trap() {
+    let path = script("host-restart.sh");
+    let text = std::fs::read_to_string(&path).unwrap();
+    starts_one(&path, &text);
+    // It also stops the units themselves, and fails a run that leaves one.
+    let cleanup = text
+        .lines()
+        .skip_while(|l| !l.starts_with("cleanup() "))
+        .take_while(|l| !l.starts_with('}') || l.starts_with("cleanup()"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        cleanup.contains("pf-host-$server-"),
+        "the trap stops no host unit"
+    );
+    assert!(
+        cleanup.contains("pfc-$server"),
+        "the trap stops no controller unit"
+    );
+    assert!(
+        cleanup.contains("units left behind"),
+        "the trap checks for left units"
+    );
+}
+
+#[test]
+fn host_restart_calls_systemctl_only_on_its_own_units() {
+    let text = std::fs::read_to_string(script("host-restart.sh")).unwrap();
+    assert!(
+        !text.contains("pulse-factory.service"),
+        "host-restart.sh names the installed controller's unit"
+    );
+    let mut calls = 0;
+    for line in code_lines(&text) {
+        if line.contains("systemctl --user") {
+            calls += 1;
+            assert!(
+                [
+                    "show-environment",
+                    "list-units",
+                    "pfc-$server",
+                    "pf-host-$server-"
+                ]
+                .iter()
+                .any(|ok| line.contains(ok)),
+                "a systemctl call that names no unit of this script's server: {line}"
+            );
+        }
+        if line.contains("--unit=") {
+            assert!(
+                line.contains("--unit=\"pfc-$server\""),
+                "a unit of another name: {line}"
+            );
+        }
+    }
+    assert!(calls >= 8, "found only {calls} systemctl calls");
+}
+
+/// A stand-in for a detached host: a bash process in its own session and group. Its first argument
+/// is its unit directory, its second is how it answers `SIGTERM`:
+///
+/// - `delay`: it ends its child and exits one second after the signal, and writes `termed` first;
+/// - `ignore`: it ignores the signal, and so does its child.
+///
+/// It writes its `host.pid` (PID and start time, as the real host does) only after it installed its
+/// trap, so a test that waits for the file never signals a host that is not ready. Its child's PID
+/// is in `child.pid`.
+const FAKE_HOST: &str = r#"
+unit=$1
+mode=$2
+if [ "$mode" = delay ]; then
+  trap 'touch "$unit/termed"; kill "$child" 2>/dev/null; sleep 1; exit 0' TERM
+  sleep 600 & child=$!
+else
+  trap '' TERM
+  ( trap '' TERM; exec sleep 600 ) & child=$!
+fi
+echo "$child" > "$unit/child.pid"
+start="$(sed 's/.*) //' "/proc/$$/stat" | cut -d' ' -f20)"
+echo "$$ $start" > "$unit/host.pid.tmp"
+mv "$unit/host.pid.tmp" "$unit/host.pid"
+while :; do wait "$child"; sleep 0.1; done
+"#;
+
+/// Start a `FAKE_HOST` as unit `unit` of server `server` under `rt`, and return its PID once its
+/// `host.pid` exists. `setsid --fork` makes it a session leader that init adopts, like a real host.
+fn start_fake_host(rt: &Runtime, server: &str, unit: &str, mode: &str) -> u32 {
+    let unit_dir = rt.0.join("pf-hosts").join(server).join(unit);
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    let script = rt.0.join(format!("fake-host-{server}-{unit}.sh"));
+    std::fs::write(&script, FAKE_HOST).unwrap();
+    let status = Command::new("setsid")
+        .arg("--fork")
+        .arg("bash")
+        .arg(&script)
+        .arg(&unit_dir)
+        .arg(mode)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("setsid starts");
+    assert!(status.success());
+    let start = Instant::now();
+    loop {
+        if let Ok(text) = std::fs::read_to_string(unit_dir.join("host.pid")) {
+            return text.split_whitespace().next().unwrap().parse().unwrap();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "the fake host {unit} wrote no host.pid in 10 s"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Run `stop_hosts` of `scripts/demo/lib/hosts.sh` for `server`, as a script's exit trap does.
+fn run_stop_hosts(rt: &Runtime, server: &str) -> Output {
+    let state = rt.0.join("state");
+    std::fs::create_dir_all(state.join("hosts")).unwrap();
+    std::fs::write(state.join("hosts/server"), server).unwrap();
+    Command::new("bash")
+        .arg("-c")
+        .arg(r#". "$1"; stop_hosts"#)
+        .arg("stop-hosts")
+        .arg(script("lib/hosts.sh"))
+        .env("PF_STATE_DIR", &state)
+        .env("XDG_RUNTIME_DIR", &rt.0)
+        .output()
+        .expect("bash starts")
+}
+
+/// Wait until `pid` is gone or a zombie. A process that got `SIGKILL` needs a moment to leave the
+/// table, so this polls, but the signal is already sent: the wait has no bearing on the outcome.
+fn assert_gone(what: &str, pid: u32) {
+    let start = Instant::now();
+    while pf_host::peer::start_time(pid).is_some() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{what} (PID {pid}) is still live"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Send `SIGKILL` to a host's group and to the host when it goes out of scope.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        pf_host::peer::kill_group(self.0, 9);
+        pf_host::peer::kill_pid(self.0, 9);
+    }
+}
+
+fn child_pid(rt: &Runtime, server: &str, unit: &str) -> u32 {
+    let text = std::fs::read_to_string(
+        rt.0.join("pf-hosts")
+            .join(server)
+            .join(unit)
+            .join("child.pid"),
+    )
+    .unwrap();
+    text.trim().parse().unwrap()
+}
+
+#[test]
+fn stop_hosts_waits_for_a_host_that_exits_late() {
+    // r2.s2.w3, PR #76 red check: `stop_hosts` sent `SIGTERM` and returned, so a script's caller found
+    // the host live on a slow runner. This host exits one second after the signal; no timing of the
+    // test decides the result, because `stop_hosts` returns only when the host is gone.
+    let rt = Runtime::new();
+    let host = start_fake_host(&rt, "srv", "unit-1", "delay");
+    assert_eq!(rt.live_hosts().len(), 1, "the fake host is live before");
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        rt.live_hosts(),
+        Vec::<(PathBuf, u32)>::new(),
+        "a host is live after stop_hosts returned"
+    );
+    assert!(
+        rt.0.join("pf-hosts/srv/unit-1/termed").exists(),
+        "the host did not end through its SIGTERM path"
+    );
+    assert_gone("the host", host);
+}
+
+#[test]
+fn stop_hosts_kills_a_host_and_its_child_that_ignore_sigterm() {
+    // The host and its child ignore `SIGTERM`: after the 5 s wait, `SIGKILL` goes to the host's group
+    // and to the host.
+    let rt = Runtime::new();
+    let host = start_fake_host(&rt, "srv", "unit-1", "ignore");
+    let child = child_pid(&rt, "srv", "unit-1");
+    assert!(pf_host::peer::start_time(child).is_some());
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        rt.live_hosts(),
+        Vec::<(PathBuf, u32)>::new(),
+        "a host is live after stop_hosts returned"
+    );
+    assert_gone("the host", host);
+    assert_gone("the host's child", child);
+}
+
+#[test]
+fn stop_hosts_touches_only_hosts_of_its_own_server_with_a_matching_start_time() {
+    // Two rules that stay: a host of another server is never signalled, and a `host.pid` whose start
+    // time differs names another process now, so it is skipped.
+    let rt = Runtime::new();
+    let own = start_fake_host(&rt, "srv", "unit-1", "delay");
+    let other_server = start_fake_host(&rt, "other", "unit-1", "delay");
+    let reused = start_fake_host(&rt, "srv", "unit-2", "delay");
+    // `Runtime` stops only the hosts whose `host.pid` matches, and this one will not match.
+    let _stop_reused = KillOnDrop(reused);
+    let pidfile = rt.0.join("pf-hosts/srv/unit-2/host.pid");
+    let text = std::fs::read_to_string(&pidfile).unwrap();
+    let (pid, start) = text.trim().split_once(' ').unwrap();
+    let wrong = start.parse::<u64>().unwrap() + 1;
+    std::fs::write(&pidfile, format!("{pid} {wrong}\n")).unwrap();
+    let out = run_stop_hosts(&rt, "srv");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_gone("the own host", own);
+    let live: Vec<u32> = rt.live_hosts().into_iter().map(|(_, pid)| pid).collect();
+    assert_eq!(live, vec![other_server], "{live:?}");
+    assert!(pf_host::peer::start_time(reused).is_some());
+    assert!(!rt.0.join("pf-hosts/other/unit-1/termed").exists());
+    assert!(!rt.0.join("pf-hosts/srv/unit-2/termed").exists());
+}
+
+#[test]
+fn an_interrupted_golden_journey_a_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("golden-journey-a.sh", "paper");
+}
+
+#[test]
+fn an_interrupted_golden_journey_b_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("golden-journey-b.sh", "paper-b");
+}
+
+#[test]
+fn an_interrupted_spine_base_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("spine-base.sh", "paper-base");
+}
+
+#[test]
+fn an_interrupted_seat_tamper_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("seat-tamper.sh", "paper-tamper");
+}
+
+#[test]
+fn an_interrupted_stranded_close_stops_its_hosts() {
+    interrupted_demo_leaves_no_host("stranded-close.sh", "paper-stranded");
 }
 
 #[test]
@@ -676,10 +1189,12 @@ fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
         bin_dir.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    let rt = Runtime::new();
     let start = Instant::now();
     let out = Command::new("bash")
         .arg(script("start-api.sh"))
         .env("PATH", path)
+        .env("XDG_RUNTIME_DIR", &rt.0)
         .env_remove("PF_BIN")
         .env_remove("PF_REPLAY_BIN")
         .env_remove("PF_STREAM_BIN")
@@ -689,6 +1204,7 @@ fn start_api_runs_with_the_binaries_on_path_and_no_pf_variable_set() {
         .output()
         .expect("bash starts");
     let took = start.elapsed();
+    assert_no_host_left("start-api.sh", &rt);
     let _ = std::fs::remove_dir_all(&bin_dir);
     assert!(
         out.status.success(),

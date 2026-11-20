@@ -193,7 +193,11 @@ impl Store for FakeStore {
                 | Effect::SetChatSessionRuntime { .. }
                 | Effect::RedactChatItem { .. }
                 | Effect::SetSetting(_)
-                | Effect::UnsetSetting { .. } => {}
+                | Effect::UnsetSetting { .. }
+                | Effect::LaunchRecordWrite(_)
+                | Effect::HostStarted(_)
+                | Effect::HostEnded { .. }
+                | Effect::HostPositionWrite { .. } => {}
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
@@ -442,6 +446,48 @@ impl Store for FakeStore {
             "the engine's test store holds no chat items".to_string(),
         ))
     }
+
+    fn set_chat_host_mark(
+        &self,
+        _session_id: &str,
+        _mark: pf_engine::port::store::ChatHostMark,
+    ) -> Result<(), StoreError> {
+        Err(StoreError(
+            "the engine's test store holds no chat sessions".to_string(),
+        ))
+    }
+
+    // The engine tests carry no launch records and no hosts: the engine writes none.
+    fn launch_record(
+        &self,
+        _session_kind: &str,
+        _session_id: &str,
+        _incarnation: u32,
+        _revision: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn newest_launch_record(
+        &self,
+        _session_kind: &str,
+        _session_id: &str,
+        _incarnation: u32,
+    ) -> Result<Option<LaunchRecordRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn live_hosts(&self) -> Result<Vec<HostRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn host(&self, _unit: &str) -> Result<Option<HostRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn host_position(&self, _unit: &str) -> Result<Option<HostPositionRow>, StoreError> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------- agent
@@ -453,6 +499,11 @@ pub struct FakeAgent {
     pub dead: Mutex<HashSet<String>>,
     pub interrupts: AtomicU64,
     next: AtomicU64,
+    /// What `rebind` answers, by session reference. A reference with no entry gets the default
+    /// of an adapter with no `rebind` of its own.
+    pub rebinds: Mutex<HashMap<String, RebindOutcome>>,
+    /// Every `rebind` and `is_alive` call, in order, as `rebind:<ref>` and `alive:<ref>`.
+    pub calls: Mutex<Vec<String>>,
 }
 
 impl FakeAgent {
@@ -470,6 +521,18 @@ impl FakeAgent {
 
     pub fn launch_count(&self) -> usize {
         self.launches.lock().unwrap().len()
+    }
+
+    /// Script the answer of `rebind` for one session reference.
+    pub fn script_rebind(&self, process_ref: &str, outcome: RebindOutcome) {
+        self.rebinds
+            .lock()
+            .unwrap()
+            .insert(process_ref.to_string(), outcome);
+    }
+
+    pub fn call_log(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
     }
 }
 
@@ -515,7 +578,26 @@ impl AgentPort for FakeAgent {
         self.launch(successor)
     }
     fn is_alive(&self, session: &SessionRef) -> Result<bool, AgentError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("alive:{}", session.0));
         Ok(!self.dead.lock().unwrap().contains(&session.0))
+    }
+    fn rebind(&self, session: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("rebind:{}", session.0));
+        Ok(self
+            .rebinds
+            .lock()
+            .unwrap()
+            .get(&session.0)
+            .cloned()
+            .unwrap_or(RebindOutcome::Lost {
+                cause: NO_SESSION_HOST.to_string(),
+            }))
     }
     fn stop(&self, _session: &SessionRef) -> Result<(), AgentError> {
         Ok(())

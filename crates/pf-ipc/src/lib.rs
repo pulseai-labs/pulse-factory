@@ -180,39 +180,72 @@ impl Bound {
     }
 }
 
-/// Bind the controller socket of `dir`.
+/// The controller's lock on a state directory, taken before the socket is bound. A controller that
+/// builds its state before it serves (tier 1 of `r2.s2.w3`) takes the lock first, so a second
+/// controller refuses at once, then opens its state, and only then calls [`Locked::bind`]: a client
+/// never reaches a half-built controller.
+#[derive(Debug)]
+pub struct Locked {
+    dir: PathBuf,
+    lock: File,
+}
+
+fn io_err(what: &str, e: &std::io::Error) -> BindError {
+    BindError::Io(format!("{what}: {e}"))
+}
+
+/// Take the controller lock of `dir`.
+///
+/// The state directory is made with mode 0700. One controller holds `controller.lock` there, so a
+/// second one refuses. Nothing is bound.
+pub fn lock(dir: &Path) -> Result<Locked, BindError> {
+    prepare_state_dir(dir)
+        .map_err(|e| io_err(&format!("state directory {}", dir.display()), &e))?;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("controller.lock"))
+        .map_err(|e| io_err("lock file", &e))?;
+    if file.try_lock().is_err() {
+        return Err(BindError::AlreadyRunning(socket_path(dir)));
+    }
+    Ok(Locked {
+        dir: dir.to_path_buf(),
+        lock: file,
+    })
+}
+
+impl Locked {
+    /// Bind the controller socket. A socket file that no one answers is stale, and it is removed.
+    /// The socket gets mode 0600.
+    pub fn bind(self) -> Result<Bound, BindError> {
+        let socket = socket_path(&self.dir);
+        if socket.exists() {
+            // The lock is ours, so no controller of this version serves the socket. An older one
+            // might: if something answers, leave it alone.
+            if UnixStream::connect(&socket).is_ok() {
+                return Err(BindError::AlreadyRunning(socket));
+            }
+            std::fs::remove_file(&socket).map_err(|e| io_err("stale socket", &e))?;
+        }
+        let listener = StdListener::bind(&socket).map_err(|e| io_err("socket", &e))?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| io_err("socket mode", &e))?;
+        Ok(Bound {
+            listener,
+            _lock: self.lock,
+        })
+    }
+}
+
+/// Bind the controller socket of `dir`: the lock, then the bind.
 ///
 /// The state directory is made with mode 0700. One controller holds `controller.lock` there, so a
 /// second one refuses. A socket file that no one answers is stale, and it is removed. The socket
 /// gets mode 0600.
 pub fn bind(dir: &Path) -> Result<Bound, BindError> {
-    let io = |what: &str, e: std::io::Error| BindError::Io(format!("{what}: {e}"));
-    prepare_state_dir(dir).map_err(|e| io(&format!("state directory {}", dir.display()), e))?;
-    let socket = socket_path(dir);
-    let lock = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("controller.lock"))
-        .map_err(|e| io("lock file", e))?;
-    if lock.try_lock().is_err() {
-        return Err(BindError::AlreadyRunning(socket));
-    }
-    if socket.exists() {
-        // The lock is ours, so no controller of this version serves the socket. An older one
-        // might: if something answers, leave it alone.
-        if UnixStream::connect(&socket).is_ok() {
-            return Err(BindError::AlreadyRunning(socket));
-        }
-        std::fs::remove_file(&socket).map_err(|e| io("stale socket", e))?;
-    }
-    let listener = StdListener::bind(&socket).map_err(|e| io("socket", e))?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))
-        .map_err(|e| io("socket mode", e))?;
-    Ok(Bound {
-        listener,
-        _lock: lock,
-    })
+    lock(dir)?.bind()
 }
 
 // ------------------------------------------------------------------ the server

@@ -2,8 +2,13 @@
 //!
 //! `SeatPort` implements `AgentPort` over the run's adapters. Its `launch` and `hand_off` add the
 //! run's facts to the plan, make a fresh session key, and enter the seat in the key table. The
-//! `hook` verb looks the key up and calls `pf_rules::decide`. The key table is in memory: it dies
-//! with the process, so a seat that outlives its controller is denied everything.
+//! `hook` verb looks the key up and calls `pf_rules::decide`.
+//!
+//! The table is in memory and keyed by the SHA-256 of each session key, never the key text. A
+//! seat's launch record holds that hash (`sha256:<hex>` in the record's `env.PF_SESSION_KEY`), so a
+//! controller that starts again rebuilds the entry of each seat that survived: `rebind` reads the
+//! launched record from the host service and builds the entry through the function `launch` uses
+//! (G3, ADR-0011). An unknown key is still denied.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -11,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use pf_engine::port::agent::*;
+use pf_engine::port::host::SessionHosts;
 use pf_rules::{Context, OwnPaths, ToolCall, audit_line, decide, is_write_tool};
 use pf_workflow::WorkflowFile;
 use pf_workflow::commands::run_argv;
@@ -44,13 +50,30 @@ fn deny(reason: &str) -> Value {
     json!({ "decision": "deny", "reason": reason })
 }
 
+/// The hash a key is held under: the lower-case hex of its SHA-256.
+fn key_hash(key: &str) -> String {
+    pf_host::sha256::sha256_hex(key.as_bytes())
+}
+
 impl SeatTable {
     fn insert(&self, key: &str, entry: SeatEntry) {
-        locked(&self.seats).insert(key.to_string(), entry);
+        self.insert_hashed(&key_hash(key), entry);
+    }
+
+    /// Enter a seat under the hash of its key, as a launch record holds it.
+    fn insert_hashed(&self, hash: &str, entry: SeatEntry) {
+        locked(&self.seats).insert(hash.to_string(), entry);
     }
 
     fn remove(&self, key: &str) {
-        locked(&self.seats).remove(key);
+        locked(&self.seats).remove(&key_hash(key));
+    }
+
+    /// The hashes the table holds. It holds no key text.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = locked(&self.seats).keys().cloned().collect();
+        keys.sort();
+        keys
     }
 
     pub fn len(&self) -> usize {
@@ -68,7 +91,7 @@ impl SeatTable {
         if key.is_empty() {
             return deny("the call carries no session key");
         }
-        let Some(entry) = locked(&self.seats).get(key).cloned() else {
+        let Some(entry) = locked(&self.seats).get(&key_hash(key)).cloned() else {
             return deny("the session key is unknown to this controller");
         };
         let tool = args.get("tool").and_then(Value::as_str).unwrap_or_default();
@@ -268,6 +291,9 @@ pub struct SeatPort {
     inner: Arc<dyn AgentPort>,
     facts: SeatFacts,
     table: Arc<SeatTable>,
+    /// The host service, for the launch record of a seat that survived a restart. A port with none
+    /// cannot rebuild a seat's entry.
+    hosts: Option<Arc<dyn SessionHosts>>,
 }
 
 fn refused(why: impl Into<String>) -> AgentError {
@@ -280,7 +306,15 @@ impl SeatPort {
             inner,
             facts,
             table,
+            hosts: None,
         }
+    }
+
+    /// The same port with the host service that holds the launch records.
+    #[must_use]
+    pub fn with_hosts(mut self, hosts: Arc<dyn SessionHosts>) -> SeatPort {
+        self.hosts = Some(hosts);
+        self
     }
 
     /// Add the run's facts to a plan. Nothing starts if a fact is missing.
@@ -352,12 +386,29 @@ impl SeatPort {
             f.state_dir.display().to_string(),
         );
 
-        let worktree = PathBuf::from(get(&plan, "worktree"));
-        let own_tag = Some(get(&plan, "own_tag")).filter(|t| !t.is_empty());
+        let entry = self.entry_of(&plan)?;
+        Ok((plan, key, entry))
+    }
+
+    /// What the hook needs to judge a seat's calls, from its plan: the rules of its role and its
+    /// context. `prepare` and `rebind` both build the entry here, so a seat that survived a restart
+    /// is judged as it was at launch.
+    fn entry_of(&self, plan: &LaunchPlan) -> Result<SeatEntry, AgentError> {
+        let f = &self.facts;
+        let get = |k: &str| plan.settings.get(k).cloned().unwrap_or_default();
+        let (_, rules) =
+            f.rules.get(&plan.role).cloned().ok_or_else(|| {
+                refused(format!("role {} has no rule file in the run", plan.role))
+            })?;
+        let unit_dir = f.run_dir.join("out").join(&plan.unit_id);
+        let scratch = unit_dir.join("scratch");
+        let report_dir = get("report_dir");
+        let worktree = PathBuf::from(get("worktree"));
+        let own_tag = Some(get("own_tag")).filter(|t| !t.is_empty());
         let context = Context {
             seat: format!("{}/{}", plan.role, plan.unit_id),
             current_branch: String::new(),
-            own_branch: get(&plan, "own_branch"),
+            own_branch: get("own_branch"),
             own_tag,
             default_branch: f.default_branch.clone(),
             api_hosts: f
@@ -366,8 +417,8 @@ impl SeatPort {
                 .map(|h| h.trim().to_string())
                 .filter(|h| !h.is_empty())
                 .collect(),
-            cwd: PathBuf::from(get(&plan, "cwd")),
-            push_dir: PathBuf::from(get(&plan, "push_dir")),
+            cwd: PathBuf::from(get("cwd")),
+            push_dir: PathBuf::from(get("push_dir")),
             paths: OwnPaths {
                 scratch,
                 build_target: PathBuf::from(&f.target_dir),
@@ -382,13 +433,59 @@ impl SeatPort {
                     .collect(),
             },
         };
-        let entry = SeatEntry {
+        Ok(SeatEntry {
             rules,
             context,
             worktree,
             audit_log: unit_dir.join("audit.log"),
+        })
+    }
+
+    /// Enter again the seat of a host that survived a restart. The launched record names the hash
+    /// of the seat's key and the plan the seat was launched from.
+    fn rebuild(&self, hosts: &dyn SessionHosts, session: &SessionRef) -> Result<(), String> {
+        // The router tags a reference as `<runtime>:<unit>`.
+        let unit = session
+            .0
+            .split_once(':')
+            .map_or(session.0.as_str(), |(_, inner)| inner);
+        let record = hosts
+            .launched_record(unit)
+            .map_err(|e| format!("cannot read the launch record of {unit}: {e}"))?
+            .ok_or_else(|| format!("the registry holds no launch record for {unit}"))?;
+        let hash = record["env"]["PF_SESSION_KEY"]
+            .as_str()
+            .and_then(|v| v.strip_prefix("sha256:"))
+            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| format!("the launch record of {unit} holds no hash of the seat's key"))?
+            .to_ascii_lowercase();
+        let binding = &record["run_binding"];
+        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        let plan = LaunchPlan {
+            run_id: text(&binding["run_id"]),
+            unit_id: text(&binding["unit_id"]),
+            stage: text(&binding["stage"]),
+            role: text(&binding["role"]),
+            model: text(&binding["model"]),
+            runtime: text(&record["runtime"]["id"]),
+            attempt: binding["attempt"]
+                .as_u64()
+                .and_then(|a| u32::try_from(a).ok())
+                .unwrap_or(1),
+            // The record's settings also hold the session keys, each with its value and scope:
+            // only the launch settings, which are text, make the plan.
+            settings: record["settings"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
-        Ok((plan, key, entry))
+        let entry = self.entry_of(&plan).map_err(|e| e.to_string())?;
+        self.table.insert_hashed(&hash, entry);
+        Ok(())
     }
 }
 
@@ -445,6 +542,24 @@ impl AgentPort for SeatPort {
     }
     fn is_alive(&self, s: &SessionRef) -> Result<bool, AgentError> {
         self.inner.is_alive(s)
+    }
+    /// A seat that survived is entered in the key table again, so its next hook call is judged by
+    /// its rules. A seat whose entry cannot be rebuilt would be denied every call, so it is not
+    /// survived: the engine parks it as unreachable.
+    fn rebind(&self, s: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        let outcome = self.inner.rebind(s)?;
+        if outcome != RebindOutcome::Survived {
+            return Ok(outcome);
+        }
+        let Some(hosts) = &self.hosts else {
+            return Ok(outcome);
+        };
+        Ok(match self.rebuild(hosts.as_ref(), s) {
+            Ok(()) => outcome,
+            Err(why) => RebindOutcome::Unreachable {
+                why: format!("the seat's key entry cannot be rebuilt: {why}"),
+            },
+        })
     }
     fn process_id(&self, s: &SessionRef) -> Option<u32> {
         self.inner.process_id(s)

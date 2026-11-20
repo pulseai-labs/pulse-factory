@@ -166,6 +166,14 @@ sent, except a redaction's re-send (`redacted_at` set), which always passes. No 
 doubled between the stored read and the live frames. A client that reconnects sends the last `seq`
 it holds as `after`.
 
+**After a controller restart.** A controller stop closes every stream with `1001`, and it stops no
+chat: each chat process lives on in its session host. The next controller start rebinds to the host
+before the API listens. A client that reconnects with `after=<the last seq it saw>` gets each later
+item once, then the live frames of the same process. The stream API does not change. A `delta`
+between the last stored item and the stop may arrive twice, because deltas are never stored. If the
+host dropped output while the controller was down, an `output_lost` notice item says so, and no item
+is stored twice.
+
 **The close codes.** The server closes with:
 
 | Code | Reason | When |

@@ -48,6 +48,7 @@ fixture="$repo_root/crates/pf-adapter-claude/fixtures/deny_rules.jsonl"
 
 tmp="$(mktemp -d)"
 pid=""
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/hosts.sh"
 stop_controller() {
   [ -n "$pid" ] || return 0
   kill "$pid" 2>/dev/null || true
@@ -58,6 +59,7 @@ stop_controller() {
 }
 cleanup() {
   stop_controller
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

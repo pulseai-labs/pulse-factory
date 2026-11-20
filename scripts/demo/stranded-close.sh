@@ -24,6 +24,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$here/lib/status.sh"
 PF_BIN="${PF_BIN:-pulse-factory}"
 src="${PAPER_SRC:-$here/paper-stranded}"
 package="$here/../../workflows/ossify-spine"
@@ -54,11 +55,13 @@ command -v "$PF_BIN" >/dev/null || [ -x "$PF_BIN" ] || fail "PF_BIN=$PF_BIN is n
 
 tmp="$(mktemp -d)"
 controller_pid=""
+. "$here/lib/hosts.sh"
 cleanup() {
   if [ -n "$controller_pid" ]; then
     kill "$controller_pid" 2>/dev/null || true
     wait "$controller_pid" 2>/dev/null || true
   fi
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -126,7 +129,7 @@ arm_run() {
 # person, so the journey cannot finish: fail at once. It sets `status`.
 wait_end() {
   while :; do
-    status="$("$PF_BIN" status "$1" --json)" || fail "status failed"
+    status="$(status_json "$1")" || fail "status failed 4 times"
     state="$(printf '%s' "$status" | jq -r '.state')"
     [ "$state" = "ended" ] && break
     local stuck
@@ -207,7 +210,7 @@ wt="$worktree_root/item-1"
 
 # Wait for the unit to park. A run that ends, or a park of another unit, is a failure.
 while :; do
-  status="$("$PF_BIN" status "$run2" --json)" || fail "status failed"
+  status="$(status_json "$run2")" || fail "status failed 4 times"
   state="$(printf '%s' "$status" | jq -r '.state')"
   [ "$state" != "ended" ] || fail "the run ended: $(printf '%s' "$status" | jq -r '.end_reason')"
   halted="$(printf '%s' "$status" | jq -r '.halted_reason // empty')"

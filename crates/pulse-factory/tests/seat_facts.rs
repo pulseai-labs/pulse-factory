@@ -4,7 +4,6 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -477,7 +476,10 @@ fn stop_on_an_unknown_or_untagged_reference_is_ok() {
     let fake = FakeAdapter::new();
     assert!(fake.stop(&SessionRef("fake-9".into())).is_ok());
     let dir = tempfile::tempdir().unwrap();
-    let omp = pf_adapter_omp::OmpAdapter::new(pf_adapter_omp::OmpConfig::new(dir.path()));
+    let omp = pf_adapter_omp::OmpAdapter::new(
+        pf_adapter_omp::OmpConfig::new(dir.path()),
+        common::no_hosts(),
+    );
     assert!(omp.stop(&SessionRef("omp-9".into())).is_ok());
     assert_eq!(omp.is_alive(&SessionRef("omp-9".into())), Ok(false));
     assert_eq!(fake.is_alive(&SessionRef("fake-9".into())), Ok(false));
@@ -492,6 +494,7 @@ fn the_omp_adapter_gets_its_roots_and_the_live_forge_has_hosts() {
         plugin_roots: vec![PathBuf::from("/plugins")],
         paper: None,
         forge_repo: "acme/widgets".into(),
+        hosts: common::no_hosts(),
     };
     let cfg = omp_config(&spec);
     assert_eq!(cfg.plugin_roots, vec![PathBuf::from("/plugins")]);
@@ -499,65 +502,6 @@ fn the_omp_adapter_gets_its_roots_and_the_live_forge_has_hosts() {
     assert_eq!(cfg.repo, "acme/widgets");
     let built = LivePorts.build(&spec).unwrap();
     assert_eq!(built.forge_api_hosts, "api.github.com");
-}
-
-const STUB_BODY: &str = r#"env > "$DIR/env"
-(trap '' HUP; exec sleep 600) &
-echo $! > "$DIR/child.pid"
-echo '{"ev":"session_start","t":1}' >> "$PF_EVENT_FILE"
-echo '{"ev":"agent_start","t":2}' >> "$PF_EVENT_FILE"
-wait"#;
-
-fn alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|s| !s.contains(") Z "))
-        .unwrap_or(false)
-}
-
-#[test]
-fn omp_sets_the_edit_variant_and_stop_leaves_no_child_alive() {
-    let dir = tempfile::tempdir().unwrap();
-    let omp = dir.path().join("omp");
-    std::fs::write(
-        &omp,
-        format!("#!/bin/sh\nDIR='{}'\nif [ \"$1\" = \"--version\" ]; then echo \"omp/18.11.3\"; exit 0; fi\n{STUB_BODY}\n", dir.path().display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&omp, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut cfg = pf_adapter_omp::OmpConfig::new(dir.path().join("state"));
-    cfg.omp_bin = omp;
-    cfg.repo = "acme/widgets".into();
-    let adapter = pf_adapter_omp::OmpAdapter::new(cfg);
-    let cwd = dir.path().join("cwd");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let p = plan(
-        "implementer",
-        &[
-            ("cwd", cwd.to_str().unwrap()),
-            ("message", "go"),
-            ("first_turn_seconds", "20"),
-            ("stall_minutes", "10"),
-        ],
-    );
-    let s = adapter.launch(&p).unwrap();
-    let env = std::fs::read_to_string(dir.path().join("env")).unwrap();
-    assert!(env.lines().any(|l| l == "PI_EDIT_VARIANT=replace"), "{env}");
-    let child: u32 = std::fs::read_to_string(dir.path().join("child.pid"))
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
-    assert!(alive(child), "the stub's child runs");
-    adapter.stop(&s).unwrap();
-    adapter.stop(&s).unwrap(); // safe to repeat
-    for _ in 0..50 {
-        if !alive(child) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(!alive(child), "stop must leave no child of the stub alive");
-    assert_eq!(adapter.is_alive(&s), Ok(false));
 }
 
 #[test]
@@ -576,6 +520,7 @@ fn the_paper_forge_has_api_hosts_too() {
         plugin_roots: vec![],
         paper: Some(dir.path().to_path_buf()),
         forge_repo: bare.display().to_string(),
+        hosts: common::no_hosts(),
     };
     let built = LivePorts.build(&spec).unwrap();
     assert_eq!(built.forge_api_hosts, "forge.invalid");

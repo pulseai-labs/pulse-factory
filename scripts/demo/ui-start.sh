@@ -69,6 +69,7 @@ fi
 tmp="$(mktemp -d)"
 controller_pid=""
 bridge_pid=""
+. "$here/lib/hosts.sh"
 cleanup() {
   for pid in "$bridge_pid" "$controller_pid"; do
     if [ -n "$pid" ]; then
@@ -76,6 +77,7 @@ cleanup() {
       wait "$pid" 2>/dev/null || true
     fi
   done
+  stop_hosts
   rm -rf "$tmp"
 }
 trap cleanup EXIT

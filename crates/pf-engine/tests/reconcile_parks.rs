@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use common::*;
 use pf_engine::ledger::FsLedger;
-use pf_engine::port::store::{AdmissionOutcome, Store};
+use pf_engine::port::agent::{AgentPort, NO_SESSION_HOST, RebindOutcome, SessionRef};
+use pf_engine::port::store::{AdmissionOutcome, RequestKind, Store};
 use pf_engine::unit::Signal;
 use pf_engine::{Command, CommandBody, EndStatus, Engine, Status};
 
@@ -280,4 +281,208 @@ fn a_failed_liveness_check_stops_the_start_up_and_parks_nothing() {
     let err = second.start_up().unwrap_err();
     assert!(err.to_string().contains("socket closed"), "{err}");
     assert_eq!(node(&old, "u-live"), (Status::Running, None));
+}
+
+// ------------------------------------------------------------------ rebind (r2.s2.w3, ADR-0007)
+
+/// How many `seat_lost` requests of the run name a unit.
+fn seat_lost_requests(env: &Env, unit: &str) -> usize {
+    env.store
+        .requests("run-1")
+        .unwrap()
+        .iter()
+        .filter(|r| r.kind == RequestKind::SeatLost && r.unit_id.as_deref() == Some(unit))
+        .count()
+}
+
+fn session_ended(env: &Env, unit: &str) -> bool {
+    env.store
+        .sessions("run-1")
+        .unwrap()
+        .iter()
+        .rfind(|s| s.unit_id == unit)
+        .is_some_and(|s| s.ended)
+}
+
+#[test]
+fn reconcile_calls_rebind_for_each_running_session_before_is_alive() {
+    let old = first_controller();
+    old.agent.kill("proc-2");
+    let second = second_controller(&old);
+    second.start_up().unwrap();
+    let log = old.agent.call_log();
+    // Every session of a running unit is rebound first. The agent here has no host, so its
+    // `rebind` answers the default, and `is_alive` decides after it.
+    for r in ["proc-1", "proc-2"] {
+        let rebound = log.iter().position(|c| *c == format!("rebind:{r}"));
+        let alive = log.iter().position(|c| *c == format!("alive:{r}"));
+        assert!(rebound.is_some(), "no rebind for {r}: {log:?}");
+        assert!(
+            rebound < alive,
+            "rebind comes before is_alive for {r}: {log:?}"
+        );
+    }
+}
+
+#[test]
+fn a_survived_seat_stays_running_and_opens_no_request() {
+    let old = first_controller();
+    // The agent would call this process dead. `Survived` is the answer that counts.
+    old.agent.kill("proc-1");
+    old.agent.script_rebind("proc-1", RebindOutcome::Survived);
+    old.agent.kill("proc-2");
+    let second = second_controller(&old);
+    second.start_up().unwrap();
+
+    assert_eq!(node(&old, "u-live"), (Status::Running, None));
+    assert_eq!(node(&old, "u-live/build#1"), (Status::Running, None));
+    assert_eq!(seat_lost_requests(&old, "u-live"), 0);
+    assert!(!session_ended(&old, "u-live"));
+    assert!(
+        !old.agent.call_log().contains(&"alive:proc-1".to_string()),
+        "a survived seat needs no liveness check"
+    );
+    let report = second.reconcile().unwrap();
+    assert!(report.alive.contains(&"u-live".to_string()), "{report:?}");
+}
+
+#[test]
+fn a_lost_seat_parks_with_seat_lost_and_its_session_ends() {
+    let old = first_controller();
+    // The process looks alive to `is_alive`: the host's own answer, `Lost`, decides.
+    old.agent.script_rebind(
+        "proc-1",
+        RebindOutcome::Lost {
+            cause: "the unit is gone".to_string(),
+        },
+    );
+    let second = second_controller(&old);
+    second.start_up().unwrap();
+
+    assert_eq!(
+        node(&old, "u-live"),
+        (Status::Parked, Some(LOST.to_string()))
+    );
+    assert_eq!(node(&old, "u-live/build#1").0, Status::Failed);
+    assert_eq!(seat_lost_requests(&old, "u-live"), 1);
+    assert!(session_ended(&old, "u-live"));
+}
+
+#[test]
+fn an_unreachable_host_parks_the_unit_with_the_host_unreachable_reason() {
+    let old = first_controller();
+    old.agent.script_rebind(
+        "proc-1",
+        RebindOutcome::Unreachable {
+            why: "no hello in 3000 ms".to_string(),
+        },
+    );
+    let launches_before = old.agent.launch_count();
+    let second = second_controller(&old);
+    second.start_up().unwrap();
+
+    let (status, reason) = node(&old, "u-live");
+    assert_eq!(status, Status::Parked);
+    let reason = reason.unwrap();
+    assert!(
+        reason.starts_with("host unreachable: "),
+        "the reason starts with the fixed prefix: {reason}"
+    );
+    assert!(reason.contains("no hello in 3000 ms"), "{reason}");
+    assert_eq!(seat_lost_requests(&old, "u-live"), 1);
+    assert!(session_ended(&old, "u-live"));
+    // Nothing was relaunched: no second host starts for the seat (Q9).
+    assert_eq!(old.agent.launch_count(), launches_before);
+}
+
+#[test]
+fn an_adapter_with_no_rebind_of_its_own_answers_lost_with_no_session_host() {
+    // `BrokenAgent` is defined in the test above; this one names the default directly.
+    struct Plain;
+    impl AgentPort for Plain {
+        fn launch(
+            &self,
+            _: &pf_engine::port::agent::LaunchPlan,
+        ) -> Result<SessionRef, pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn status(
+            &self,
+            _: &SessionRef,
+        ) -> Result<pf_engine::port::agent::SessionStatus, pf_engine::port::agent::AgentError>
+        {
+            unreachable!()
+        }
+        fn deliver(
+            &self,
+            _: &SessionRef,
+            _: &str,
+        ) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn interrupt(&self, _: &SessionRef) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn usage(
+            &self,
+            _: &SessionRef,
+        ) -> Result<pf_engine::port::agent::Usage, pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn answer_dialog(
+            &self,
+            _: &SessionRef,
+            _: &pf_engine::port::agent::Dialog,
+        ) -> Result<pf_engine::port::agent::DialogAnswer, pf_engine::port::agent::AgentError>
+        {
+            unreachable!()
+        }
+        fn apply_rules(
+            &self,
+            _: &mut pf_engine::port::agent::LaunchPlan,
+            _: &pf_engine::port::agent::RuleSet,
+        ) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn remove_ask_tool(
+            &self,
+            _: &mut pf_engine::port::agent::LaunchPlan,
+        ) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn hand_off(
+            &self,
+            _: &SessionRef,
+            _: &pf_engine::port::agent::LaunchPlan,
+        ) -> Result<SessionRef, pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn is_alive(&self, _: &SessionRef) -> Result<bool, pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn stop(&self, _: &SessionRef) -> Result<(), pf_engine::port::agent::AgentError> {
+            unreachable!()
+        }
+        fn resolve_plugin(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<pf_engine::port::agent::ResolvedPlugin, pf_engine::port::agent::AgentError>
+        {
+            unreachable!()
+        }
+        fn drain_events(
+            &self,
+            _: &SessionRef,
+        ) -> Result<Vec<pf_engine::port::agent::SessionEvent>, pf_engine::port::agent::AgentError>
+        {
+            unreachable!()
+        }
+    }
+    assert_eq!(
+        Plain.rebind(&SessionRef("any".to_string())).unwrap(),
+        RebindOutcome::Lost {
+            cause: NO_SESSION_HOST.to_string()
+        }
+    );
 }
