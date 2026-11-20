@@ -38,8 +38,9 @@ jobs:
           echo "XDG_RUNTIME_DIR=$xdg" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --workspace --locked
-      # The `#[ignore]`d tests of the host crate: a real transient unit per host. After `r2.s2.w5`
-      # lands, this step also runs `scripts/demo/host-restart.sh` (w5 adds that line).
+      # The `#[ignore]`d tests of the host crate: a real transient unit per host. The step ends with
+      # `scripts/demo/host-restart.sh` (d30): the controller, two paper seats and a chat, restarted and
+      # killed in the middle of a turn, against this user manager. It is the land gate of `r2.s2.w5`.
       #
       # `r2.s2.w3` adds the controller's live tests: `PF_HOST_LAUNCHER=systemd`, the controller as a
       # transient unit, a paper seat in a host unit of its own. They start the `pf-host` binary, so it
@@ -53,6 +54,10 @@ jobs:
           cargo test -p pf-host --test systemd_live --locked -- --ignored
           cargo test -p pulse-factory --test systemd_live_hosts --locked -- --ignored
           cargo test -p pf-adapter-omp --test systemd_live_omp --locked -- --ignored
+          cargo build -p pulse-factory -p pf-adapter-claude --bins --locked
+          PF_BIN=target/debug/pulse-factory PF_HOST_BIN=target/debug/pf-host \
+            PF_REPLAY_BIN=target/debug/pf-claude-replay PF_STREAM_BIN=target/debug/pf-stream-reader \
+            scripts/demo/host-restart.sh
       # The binary run standalone: a dry arm with no model and no spend. `community-edition.sh` (d14)
       # looks for this step by its name.
       - name: Smoke

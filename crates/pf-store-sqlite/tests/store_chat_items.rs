@@ -9,7 +9,8 @@ use common::*;
 use pf_engine::port::agent::Usage;
 use pf_engine::port::chat::cap;
 use pf_engine::port::store::{
-    ChatItemKind, ChatItemRow, NewChatItem, ProjectKind, Store, TOOL_TEXT_MAX_BYTES, ToolText,
+    ChatHostCursor, ChatHostMark, ChatItemKind, ChatItemRow, NewChatItem, ProjectKind, Store,
+    TOOL_TEXT_MAX_BYTES, ToolText,
 };
 use pf_store_sqlite::SqliteStore;
 
@@ -721,5 +722,275 @@ fn a_redacted_request_stays_a_request_and_still_pairs_with_its_answer() {
     assert_eq!(
         store.chat_item("S-1", 2).unwrap().unwrap().answers_seq,
         Some(1)
+    );
+}
+
+// ------------------------------------------------------------------ the host cursor (r2.s2.w5)
+
+fn mark(unit: &str, incarnation: u32, at: u64, checkpoint: Option<&str>) -> ChatHostMark {
+    ChatHostMark {
+        unit: unit.to_string(),
+        incarnation,
+        at,
+        checkpoint: checkpoint.map(ToString::to_string),
+    }
+}
+
+fn cursor(
+    unit: &str,
+    incarnation: u32,
+    committed: u64,
+    acked: u64,
+    checkpoint: Option<&str>,
+) -> Option<ChatHostCursor> {
+    Some(ChatHostCursor {
+        unit: unit.to_string(),
+        incarnation,
+        committed,
+        acked,
+        checkpoint: checkpoint.map(ToString::to_string),
+    })
+}
+
+fn host_cursor(store: &SqliteStore, session: &str) -> Option<ChatHostCursor> {
+    store.chat_session(session).unwrap().unwrap().host_cursor
+}
+
+fn marked(session: &str, kind: ChatItemKind, m: ChatHostMark) -> NewChatItem {
+    let mut i = item(session, kind);
+    i.host = Some(m);
+    i
+}
+
+#[test]
+fn a_session_with_no_host_output_has_no_cursor_and_an_unmarked_item_leaves_it_so() {
+    let (_d, store) = two_sessions();
+    assert_eq!(host_cursor(&store, "S-1"), None);
+    store
+        .append_chat_item(item("S-1", ChatItemKind::AssistantText))
+        .unwrap();
+    assert_eq!(host_cursor(&store, "S-1"), None);
+}
+
+#[test]
+fn an_item_with_a_mark_sets_committed_in_the_same_transaction_as_the_item_and_its_usage() {
+    let (_d, store) = two_sessions();
+    let mut turn = marked(
+        "S-1",
+        ChatItemKind::TurnResult,
+        mark("pf-host-a-1", 1, 100, None),
+    );
+    turn.usage = Some(Usage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_tokens: 3,
+        cache_write_tokens: 4,
+        cost_micros: 500,
+    });
+    let row = store.append_chat_item(turn).unwrap();
+    assert_eq!(row.seq, 1);
+    let session = store.chat_session("S-1").unwrap().unwrap();
+    assert_eq!(session.cost_micros, 500, "the usage is in");
+    assert_eq!(
+        session.host_cursor,
+        cursor("pf-host-a-1", 1, 100, 0, None),
+        "committed is at the item's mark; nothing was acknowledged yet"
+    );
+    // The other session is untouched.
+    assert_eq!(host_cursor(&store, "S-2"), None);
+}
+
+#[test]
+fn a_failed_item_write_leaves_the_cursor_and_the_log_unchanged() {
+    let (_d, store) = two_sessions();
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 100, Some("c1")),
+        ))
+        .unwrap();
+    let before = store.chat_session("S-1").unwrap();
+    let mut bad = marked(
+        "S-1",
+        ChatItemKind::AssistantText,
+        mark("pf-host-a-1", 1, 200, Some("c2")),
+    );
+    bad.payload = "not json".to_string();
+    let why = writes_nothing(&store, "S-1", || store.append_chat_item(bad));
+    assert!(why.contains("not JSON"), "{why}");
+    assert_eq!(store.chat_session("S-1").unwrap(), before);
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 100, 100, Some("c1"))
+    );
+    // A mark with usage on a kind that takes none fails the same way.
+    let mut worse = marked(
+        "S-1",
+        ChatItemKind::Notice,
+        mark("pf-host-a-1", 1, 300, None),
+    );
+    worse.usage = Some(Usage::default());
+    writes_nothing(&store, "S-1", || store.append_chat_item(worse));
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 100, 100, Some("c1"))
+    );
+}
+
+#[test]
+fn a_checkpoint_sets_acked_and_the_state_and_a_mark_without_one_leaves_them() {
+    let (_d, store) = two_sessions();
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 150, Some("c1")),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 150, 150, Some("c1"))
+    );
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::ToolCall,
+            mark("pf-host-a-1", 1, 180, None),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 180, 150, Some("c1")),
+        "committed moves on; acked and the checkpoint wait for the next quiet point"
+    );
+}
+
+#[test]
+fn a_lower_at_for_the_same_unit_never_moves_committed_back() {
+    let (_d, store) = two_sessions();
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 180, Some("c1")),
+        ))
+        .unwrap();
+    let again = store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::Notice,
+            mark("pf-host-a-1", 1, 50, Some("old")),
+        ))
+        .unwrap();
+    assert_eq!(again.seq, 2, "the item is still written");
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 180, 180, Some("c1")),
+        "neither committed nor the checkpoint went back"
+    );
+}
+
+#[test]
+fn a_mark_of_a_new_incarnation_or_another_unit_replaces_the_cursor() {
+    let (_d, store) = two_sessions();
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 900, Some("c1")),
+        ))
+        .unwrap();
+    // The next incarnation starts its own output at 0: a lower `at` is right.
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-2", 2, 40, None),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-2", 2, 40, 0, None),
+        "the new host's cursor replaces the old one, checkpoint and all"
+    );
+    // The same incarnation number on another unit replaces too.
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::Notice,
+            mark("pf-host-b-2", 2, 7, Some("c9")),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-b-2", 2, 7, 7, Some("c9"))
+    );
+}
+
+#[test]
+fn set_chat_host_mark_follows_the_same_rules_and_writes_no_item_and_no_admission() {
+    let (_d, store) = two_sessions();
+    let state = admission_state(&store);
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-1", 1, 300, Some("c3")))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 300, 300, Some("c3"))
+    );
+    assert_eq!(count(&store, "S-1"), 0, "no item");
+    assert_eq!(admission_state(&store), state, "no admission, no line");
+    // A lower position does not move it back.
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-1", 1, 10, Some("old")))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 300, 300, Some("c3"))
+    );
+    // A mark with no checkpoint moves committed only.
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-1", 1, 340, None))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 340, 300, Some("c3"))
+    );
+    // A new incarnation replaces.
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-2", 2, 5, None))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-2", 2, 5, 0, None)
+    );
+    // An unknown session is an error.
+    let err = store
+        .set_chat_host_mark("S-9", mark("pf-host-a-1", 1, 1, None))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no chat session S-9"), "{err}");
+}
+
+#[test]
+fn the_cursor_survives_an_end_and_a_redaction_of_the_session() {
+    let (_d, store) = two_sessions();
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 60, Some("c1")),
+        ))
+        .unwrap();
+    applied(end(&store, "e1", "S-1"));
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 60, 60, Some("c1"))
+    );
+    applied(redact(&store, "r1", "S-1", 1));
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        cursor("pf-host-a-1", 1, 60, 60, Some("c1"))
     );
 }

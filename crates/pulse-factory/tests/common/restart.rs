@@ -73,6 +73,8 @@ pub struct Restart {
     pub log: PathBuf,
     pub controller: Option<Child>,
     pub run: Option<String>,
+    /// More variables for the controller and the CLI, such as `PF_CHAT_CLAUDE_BIN` (r2.s2.w5).
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Restart {
@@ -91,6 +93,7 @@ impl Restart {
             root,
             controller: None,
             run: None,
+            extra_env: Vec::new(),
         };
         for d in [
             &rig.state,
@@ -137,6 +140,9 @@ impl Restart {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0");
+        for (name, value) in &self.extra_env {
+            cmd.env(name, value);
+        }
     }
 
     pub fn cli_cmd(&self, args: &[&str]) -> Command {

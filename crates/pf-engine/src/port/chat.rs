@@ -11,8 +11,12 @@
 //! The contract in full: `docs/contracts/chat-adapter.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::port::host::SessionHosts;
 
 pub use crate::port::agent::{SessionRef, Usage};
 
@@ -43,11 +47,65 @@ pub struct ChatOpen {
     /// [`check_deny_command`]). The controller resolves the list at each open (ADR-0016). A deny
     /// rule is a speed bump, not a boundary: it stops the command text the model writes.
     pub deny_commands: Vec<String>,
+    /// The store's id of the chat session (`S-<n>`). A host keys its session by it.
+    pub chat_session: String,
+    /// The id of the session's project.
+    pub project: String,
+    /// The ids of the session's agent and worktree. The launch record names them in its binding.
+    pub agent_id: String,
+    pub worktree_id: String,
+    /// The scope the deny list came from, as the setting resolver names it. The launch record
+    /// keeps it beside the list.
+    pub deny_from: String,
+    /// The agent's secret variables (`PF_AGENT_ENV_<AGENT>` pairs), apart from `env`. A launch
+    /// record keeps `sha256:<hex>` of each value, never the value.
+    pub secret_env: BTreeMap<String, String>,
+    /// The runtime copy the session was launched with, from its launch record. A resume starts
+    /// that copy or nothing (ADR-0007): it never starts another one.
+    pub recorded_binary: Option<RecordedBinary>,
+}
+
+/// The runtime copy a launch record names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedBinary {
+    pub path: String,
+    /// The SHA-256 of the file, in lower-case hex.
+    pub sha256: String,
+    pub version: String,
+}
+
+/// One event and where it came from. `at` is the host's output cursor after the output line that
+/// gave the event. `checkpoint` is set on the last event of a line after which the adapter is
+/// quiet (no turn and no request open): it is the adapter's own state, opaque to the caller, and
+/// the caller stores it with the position. An adapter that runs no host sends `at: None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatDelivery {
+    pub event: ChatEvent,
+    pub at: Option<u64>,
+    pub checkpoint: Option<String>,
+}
+
+impl ChatDelivery {
+    /// An event with no position, as an adapter with no host sends it.
+    pub fn plain(event: ChatEvent) -> ChatDelivery {
+        ChatDelivery {
+            event,
+            at: None,
+            checkpoint: None,
+        }
+    }
 }
 
 /// The channel that carries a chat's events. It is unbounded, so a reader thread never blocks the
 /// runtime. A dropped receiver does not stop the process and fails no call.
-pub type ChatEvents = tokio::sync::mpsc::UnboundedReceiver<ChatEvent>;
+pub type ChatEvents = tokio::sync::mpsc::UnboundedReceiver<ChatDelivery>;
+
+/// The host a chat runs in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatHost {
+    pub unit: String,
+    pub incarnation: u32,
+}
 
 /// What `open` returns.
 #[derive(Debug)]
@@ -60,6 +118,51 @@ pub struct ChatOpened {
     /// True when the runtime is the version the adapter qualified.
     pub qualified: bool,
     pub events: ChatEvents,
+    /// The host the process runs in. `None` for an adapter that runs no host.
+    pub host: Option<ChatHost>,
+}
+
+/// What kind of request is pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingKind {
+    Approval,
+    Question,
+}
+
+/// One request the chat awaits an answer to, as the store holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingRequest {
+    pub request_id: String,
+    pub kind: PendingKind,
+    /// The stored input text, when it was not cut. A request with no input can be denied, and an
+    /// allow is refused (the adapter has no input to hand back).
+    pub input: Option<String>,
+}
+
+/// Where a chat stands when the controller rebinds to its host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatResumePoint {
+    /// The runtime's own session id, from the session row.
+    pub runtime_session: SessionRef,
+    /// The cursor the controller last acknowledged to the host.
+    pub acked: u64,
+    /// The cursor after the last output line the store consumed.
+    pub committed: u64,
+    /// The adapter's opaque state at `acked`.
+    pub checkpoint: Option<String>,
+    pub pending: Vec<PendingRequest>,
+}
+
+/// What `rebind` found.
+#[derive(Debug)]
+pub enum ChatRebind {
+    /// The host runs and the adapter attached. The chat keeps its process.
+    Survived(ChatOpened),
+    /// The host is gone. `exit` is what it left.
+    Lost { exit: Value },
+    /// The host may run, and the adapter could not attach to it.
+    Unreachable { why: String },
 }
 
 /// Who sent a message.
@@ -184,6 +287,12 @@ pub enum ChatEvent {
     SessionMoved {
         session: SessionRef,
     },
+    /// The host dropped output from cursor `from` to `to` before it was read. It may come anywhere
+    /// before `Exited`.
+    OutputLost {
+        from: u64,
+        to: u64,
+    },
     /// The process ended. Always the last event.
     Exited {
         code: Option<i32>,
@@ -207,6 +316,7 @@ impl ChatEvent {
             ChatEvent::TaskFinished { .. } => "TaskFinished",
             ChatEvent::TurnResult { .. } => "TurnResult",
             ChatEvent::SessionMoved { .. } => "SessionMoved",
+            ChatEvent::OutputLost { .. } => "OutputLost",
             ChatEvent::Exited { .. } => "Exited",
         }
     }
@@ -313,6 +423,26 @@ pub trait ChatPort: Send + Sync {
     /// The operating-system process id of the chat's process, when the adapter runs one.
     fn process_id(&self, _chat: &ChatId) -> Option<u32> {
         None
+    }
+    /// Hand the adapter the controller's host service. The controller calls it once, before any
+    /// chat opens or rebinds. An adapter that runs no host ignores it.
+    fn set_hosts(&self, _hosts: Arc<dyn SessionHosts>) {}
+    /// Attach to the host of `unit` again after a controller restart, and read on from the
+    /// controller's position. The default loses the chat.
+    fn rebind(&self, _unit: &str, _point: &ChatResumePoint) -> ChatRebind {
+        ChatRebind::Lost {
+            exit: json!({"reason": "no session host"}),
+        }
+    }
+    /// Say the output below `to` is stored. The adapter passes it to the host. The default does
+    /// nothing.
+    fn ack(&self, _chat: &ChatId, _to: u64) -> Result<(), ChatError> {
+        Ok(())
+    }
+    /// Drop the connection to the chat and stop nothing: the controller stops, the process lives
+    /// on. The default does nothing.
+    fn detach(&self, _chat: &ChatId) -> Result<(), ChatError> {
+        Ok(())
     }
 }
 
@@ -453,6 +583,7 @@ pub fn cap(text: &str) -> Capped {
 /// - a turn with cause `Task` follows a `TaskFinished` that no earlier `Task` turn answered;
 /// - `SessionMoved` comes between turns, or right after a `TurnStarted` and before the turn's other
 ///   events;
+/// - `OutputLost` may come anywhere before `Exited`;
 /// - `Exited` comes once, last. A turn open at `Exited` has no `TurnResult`, which is allowed.
 ///
 /// Both adapters' tests call it on every sequence they produce, so the fake, the real adapter and
@@ -517,6 +648,8 @@ pub fn check_order(events: &[ChatEvent]) -> Result<(), String> {
                 }
             }
             ChatEvent::Exited { .. } => exited = true,
+            // A stretch the host dropped. It says nothing of the grammar, so it fits anywhere.
+            ChatEvent::OutputLost { .. } => {}
             ChatEvent::TurnResult { cause, .. } => {
                 let Some(open) = turn.take() else {
                     return Err(at("a TurnResult outside a turn".to_string()));

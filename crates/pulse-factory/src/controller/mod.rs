@@ -274,7 +274,13 @@ impl Controller {
         // The project hierarchy (ADR-0015): a project that has no kind gets one, and a live chat
         // session is set to wait for `--resume`, as the restart ended its process.
         controller.backfill_project_kinds();
-        controller.settle_live_chat_sessions();
+        // The chat adapters need the host service before any chat opens or rebinds, and the chat
+        // tier 1 runs before the runs' start-up and before the orphan sweep (ADR-0007).
+        let hosts: Arc<dyn pf_engine::port::host::SessionHosts> = controller.hosts.clone();
+        for port in controller.cfg.chat_runtimes.values() {
+            port.set_hosts(hosts.clone());
+        }
+        controller.reconcile_live_chat_sessions();
         // A restart withdraws every open proposal (ADR-0007): the snapshots go, and each card that
         // has no result gets one.
         controller.recover_start_cards();
@@ -1137,9 +1143,10 @@ pub fn serve_forever(controller: Arc<Controller>, bound: pf_ipc::Bound) -> i32 {
             }
         };
         pf_ipc::serve(bound, controller.clone(), shutdown).await;
-        // A controller stop ends every chat process and every stream (Q2 rule 3).
+        // A controller stop stops no chat: each adapter drops its connection and the host keeps the
+        // process (ADR-0015's amendment). Every stream ends.
         let stopping = controller.clone();
-        let _ = tokio::task::spawn_blocking(move || stopping.shutdown_chats()).await;
+        let _ = tokio::task::spawn_blocking(move || stopping.detach_chats()).await;
         tick_task.abort();
         if let Some(task) = api_task {
             task.abort();

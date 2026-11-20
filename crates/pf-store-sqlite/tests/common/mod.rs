@@ -220,6 +220,7 @@ pub fn item(session_id: &str, kind: ChatItemKind) -> NewChatItem {
         tool_output: None,
         answers_seq: None,
         usage: None,
+        host: None,
         created_at: "t6".to_string(),
     }
 }

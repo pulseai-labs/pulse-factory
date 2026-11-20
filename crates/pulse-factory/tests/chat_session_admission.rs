@@ -135,6 +135,7 @@ fn item(session: &str, kind: ChatItemKind, payload: &str) -> NewChatItem {
         tool_output: None,
         answers_seq: None,
         usage: None,
+        host: None,
         created_at: T.to_string(),
     }
 }

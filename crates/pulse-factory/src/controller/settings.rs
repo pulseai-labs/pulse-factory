@@ -281,6 +281,28 @@ pub struct SessionSettings {
 }
 
 impl SessionSettings {
+    /// Take each `session.*` value of a launch record (JSON text) in place of the resolved one:
+    /// the value and the scope it was recorded with. A key the record lacks keeps its value.
+    pub fn take_recorded(&mut self, record: &str) {
+        let Ok(body) = serde_json::from_str::<Value>(record) else {
+            return;
+        };
+        let settings = &body["settings"];
+        for (key, slot) in [
+            (SESSION_REPLAY_BYTES, &mut self.replay_bytes),
+            (SESSION_EXIT_HOLD_MINUTES, &mut self.exit_hold_minutes),
+            (SESSION_ATTACH_WAIT_MS, &mut self.attach_wait_ms),
+            (SESSION_HOOK_WAIT_SECONDS, &mut self.hook_wait_seconds),
+        ] {
+            if let (Some(value), Some(scope)) = (
+                settings[key]["value"].as_u64(),
+                settings[key]["scope"].as_str(),
+            ) {
+                *slot = (value, scope.to_string());
+            }
+        }
+    }
+
     /// The record's `settings` entries: each key with its value and scope.
     pub fn as_record(&self) -> Vec<(&'static str, Value)> {
         [

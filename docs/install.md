@@ -69,8 +69,10 @@ The script does these steps and no others:
    "Session hosts and an upgrade"). The unit states `KillMode=control-group`, so a stop of the
    controller also ends any process left in its cgroup, such as a background command that a chat
    started. A seat is not in that cgroup: its host runs outside the controller's cgroup, so a stop or a
-   restart of the controller keeps it. Chat processes are still children of the controller until
-   `r2.s2.w5`.
+   restart of the controller keeps it. A chat runs in a session host too, in a unit of its own: a stop
+   or a restart of the controller keeps the chat process and the pending requests it holds, and the
+   next controller start rebinds to it. `KillMode=control-group` covers only the controller's own
+   unit.
 10. Sets `XDG_RUNTIME_DIR` to `/run/user/<uid>` when it is unset, so `systemctl --user` finds the user
    bus. Then it runs `systemctl --user daemon-reload`, `enable --now pulse-factory` and
    `try-restart pulse-factory`.

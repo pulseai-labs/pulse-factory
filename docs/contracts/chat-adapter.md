@@ -6,6 +6,8 @@ A chat adapter lets the operator hold a chat with a coding agent. It implements 
 
 Two adapters implement it: `ClaudeChat` (`crates/pf-adapter-claude`), which drives a managed copy of
 the Claude Code CLI, and `FakeChat` (`crates/pf-adapter-fake`), a scripted adapter with no process.
+`ClaudeChat` runs the CLI in a **session host** (`docs/contracts/session-host.md`), outside the
+controller, so a controller restart keeps the process: see "The chat in a session host".
 
 The port is neutral: no runtime name, flag or planning-method word in `pf-engine`. What follows
 describes the port first, then what `ClaudeChat` adds.
@@ -29,17 +31,34 @@ runs it with `spawn_blocking`.
 | `is_alive(chat)` | Is the process alive? An unknown chat is `Ok(false)`. |
 | `stop(chat)` | Ends the process and every process in its group. An unknown chat is `Ok(())`. It is safe to repeat. |
 | `process_id(chat)` | The leader's operating-system pid, while it runs. ADR-0005's caller check can use it. |
+| `set_hosts(hosts)` | The controller hands over its host service (`Arc<dyn SessionHosts>`), once, before any chat opens or rebinds. An adapter that runs no host ignores it (default: nothing). |
+| `rebind(unit, &ChatResumePoint)` | Attach to the host of `unit` again after a controller restart and read on from the controller's position. Returns `ChatRebind`: `Survived(ChatOpened)`, `Lost { exit }` or `Unreachable { why }`. The default is `Lost` with the cause "no session host". |
+| `ack(chat, to)` | Say the output below cursor `to` is stored. The adapter passes it to the host, so the host may drop those bytes. After the exit's cursor it also sends `exit_ack`, and the host ends at once. The default does nothing. |
+| `detach(chat)` | Drop the connection to the chat and stop nothing: the controller stops and the process lives on. The default does nothing. |
 
 `ChatOpen` holds `cwd` (the session's worktree; a resume uses the same one), `resume`
 (`Option<SessionRef>`: `None` starts a new runtime session), `instructions`, `model`, `effort`,
 `permission_mode`, `env` (the agent's launch-env map), `options` (runtime-specific options by id) and
 `deny_commands` (`Vec<String>`: shell command patterns the runtime must refuse to run, in a
-runtime-neutral form; see "The deny list"). `ChatOpened` holds `chat` (a `ChatId`), `session` (the runtime's own session id, which survives the
-process), `runtime_version`, `qualified` and `events`.
+runtime-neutral form; see "The deny list"). It also holds the ids a launch record names:
+`chat_session` (the store's `S-<n>`, the host's session key), `project`, `agent_id`, `worktree_id`,
+`deny_from` (the scope of the deny list); `secret_env` (the `PF_AGENT_ENV_<AGENT>` pairs, apart from
+`env`, so a launch record keeps `sha256:<hex>` of each value and never the value); and
+`recorded_binary` (`Option<RecordedBinary { path, sha256, version }>`: the runtime copy a resume must
+start, from the launch record). `ChatOpened` holds `chat` (a `ChatId`), `session` (the runtime's own
+session id, which survives the process), `runtime_version`, `qualified`, `events` and `host`
+(`Option<ChatHost { unit, incarnation }>`, `None` for an adapter that runs no host).
 
 ## Events
 
-The adapter pushes each event on `events`, an unbounded channel, as it happens. Nothing drains on a
+The adapter pushes each event on `events`, an unbounded channel, as it happens. The channel carries
+`ChatDelivery { event, at, checkpoint }`: the event, the host's output cursor after the line that
+gave it (`at`, `None` for an adapter with no host) and, on the last event of a line after which the
+adapter is quiet (no turn and no request open), the adapter's own state (`checkpoint`, opaque to the
+caller). The caller stores the event with its `at`, and acknowledges a checkpoint's `at` with `ack`
+after the store committed it. A line that gives n events gives its last event `at` = the line's end
+and event i (counting from 0, i below n-1) `at` = the line's end minus (n-1-i), so every event of a
+line has its own position and only the last may carry the checkpoint. Nothing drains on a
 tick, and a reader thread never blocks the runtime. **A consumer may drop the receiver mid-stream**,
 for example when the controller closes a revoked device's streams. That does not stop the process and
 fails no call. Later events are dropped. Only `stop` ends the process, and the adapter must go on
@@ -60,6 +79,7 @@ Each event is JSON with a `type` tag in snake case. These are the shapes:
 {"type":"task_finished","task_id":"bdv4952p9","end":"completed","summary":"Background command finished"}
 {"type":"turn_result","cause":"operator","usage":{"input_tokens":9,"output_tokens":12,"cache_read_tokens":0,"cache_write_tokens":13006,"cost_micros":3465},"is_error":false,"stop":"end_turn","duration_ms":1042,"cache_ttl_seconds":3600}
 {"type":"session_moved","session":"6f0c2e9a-1f1c-4b6e-8a3a-0c9d1e2f3a4b"}
+{"type":"output_lost","from":65536,"to":131072}
 {"type":"exited","code":0,"reason":"stopped"}
 ```
 
@@ -70,6 +90,11 @@ Each event is JSON with a `type` tag in snake case. These are the shapes:
   (`error_during_execution` for an interrupt), because an interrupt's `stop_reason` is `tool_use`.
 - `session_moved`: the runtime reports a session id other than the current one. The caller (the
   controller) then updates the session's `runtime_session_ref`.
+- `output_lost`: the host dropped the output from cursor `from` to `to` before the controller read
+  it (the host's replay buffer overflowed while the controller was down). The event covers the part
+  above the cursor the store consumed. It may come anywhere before `exited`. The first message after
+  a gap that belongs in a turn opens one with cause `operator`, so its `turn_result` is still stored.
+  The controller adds a `notice` item with the code `output_lost`.
 - `exited` is always the last event. `code` is `null` when a signal ended the process.
 
 ### The 16 KB cap
@@ -117,6 +142,7 @@ call it on every sequence they produce, and the engine's test calls it on every 
 - a turn with cause `Task` follows a `TaskFinished` that no earlier `Task` turn answered;
 - `SessionMoved` comes between turns, or right after a `TurnStarted` and before the turn's other
   events. Never in the middle of a turn;
+- `OutputLost` may come anywhere before `Exited`, inside a turn or between turns;
 - `Exited` comes once, last. A turn open at `Exited` has no `TurnResult`, which is allowed.
 
 Two things the grammar does **not** hold, and why:
@@ -353,11 +379,14 @@ of a subagent (a `parent_tool_use_id`) give no text or tool events, and thinking
 
 ### Stop, exit and the interrupt's known limit
 
-`stop` closes stdin and waits up to 5 s for the process to end. Then it sends `TERM` to the group,
-waits 2 s, sends `KILL` to the group, and waits for the leader. The reader sends `Exited` once, when
-stdout ends and the leader is reaped, with the exit code and a redacted one-line reason of at most
-500 characters. A child that leaves the group on its own escapes `stop`: a known limit. A background
-`Bash` of the CLI runs in its own session, and `TERM` to the group still ended it in the qualification.
+`stop` sends `Terminate` to the child's group through the host and waits up to 5 s for the exit.
+Then it stops the host (the host's own `SIGTERM`, 5 s, `SIGKILL`), and the host service ends the
+registry row. The reader sends `Exited` once, when the host reports the child's exit, with the exit
+code and a one-line reason: the violation that stopped the chat, `stopped`, or "process exited (code
+<n>)" / "process exited (signal <n>)". The host keeps the child's error output (the unit's journal
+under systemd), so the reason holds no stderr tail. A child that leaves the group on its own escapes
+`stop`: a known limit. A background `Bash` of the CLI runs in its own session, and `TERM` to the
+group still ended it in the qualification.
 
 An interrupt stops the running turn **and its background agents** (the CLI's default without
 `perTaskStopAffordance`, accepted for `r1.s3`). A background `Bash` survived an interrupt in case 9. A
@@ -370,6 +399,54 @@ the events. The 30-minute idle release, the rule that a process with a running b
 not released, the cap on live chat processes and the restart rule belong to the controller. A turn
 starts only on `send`, or when a background task the chat started finishes (the CLI starts that turn
 itself; the adapter sends no notice).
+
+### The chat in a session host
+
+`ClaudeChat::open` validates, builds the environment and resolves the binary, then calls
+`SessionHosts::launch` with kind `chat`, key `chat_session`, `argv` (the binary, and the flags of the
+launch with `--session-id <uuid>` or `--resume <id>`), `cwd`, the allowlisted `env`, `secrets` and
+transport `Pipes`. The launch record body holds:
+
+- `runtime`: `{id, version, qualified, binary_path, binary_sha256}`. `store check-upgrade` reports
+  `binary_path` as a CLI copy, so the install step keeps it while the host lives. The override binary
+  is hashed too;
+- `settings`: `model`, `effort`, `permission_mode`, `options`, `instructions`, `launch_env` (the
+  agent's launch environment, never a secret) and `chat.deny_commands` with its scope. The service adds
+  the four `session.*` keys. A `session set` writes the next revision of the record with the new
+  values; `argv` stays as the host ran it;
+- `run_binding`: `{chat_session, project_id, agent_id, worktree_id}`;
+- `resume`: `{"flag": "--resume", "id_from": "session_row"}`. A resume takes the session ID from the
+  session row, never from an old `argv`. A `SessionMoved` writes the row and no revision.
+
+The reader thread reads host events, splits the bytes into lines and feeds the decoder. Control
+writes go through the host's input. `process_id` is the child's PID from the host's `hello`, so the
+caller check of ADR-0005 still finds the chat. A violation sends `Kill`.
+
+**The checkpoint** is the decoder's state at a quiet point: the process totals and whether a
+`result` came (the per-turn cost baseline), the background tasks and the runtime's session ID. It is
+small and opaque to the controller.
+
+**Commit, then acknowledge.** The controller writes each item with its `at` in one transaction and
+calls `ack(chat, at)` only for a delivery that carried a checkpoint, so the bytes of a running turn
+stay in the host until its `turn_result` is stored. After `Exited` it acknowledges the exit's cursor
+and the adapter sends `exit_ack`.
+
+**`rebind`.** After a controller restart `rebind(unit, point)` reads the launched record through
+`SessionHosts`, builds the decoder from `point.checkpoint`, seeds the open requests from
+`point.pending` (ID, kind and the stored input text, `None` when it was cut), and reads from
+`point.acked`. A line that ends at or below `point.committed` is read again: the decoder updates its
+state and the adapter sends the same events, and sends no control response for an inbound request
+(the controller already answered or closed it). A host whose child ended while the controller was
+down is survived too: the adapter reads what the child left, then sends `Exited`.
+
+**Output lost.** A host `Gap` becomes `OutputLost` for the part above `committed`, and the adapter
+skips to the next newline. A request whose line was lost can still be answered from `point.pending`; a
+request whose stored input was cut can be denied, and an allow is refused with a reason that says so.
+
+**G8.** A resume carries `recorded_binary`. The adapter checks that the file exists and has the
+recorded SHA-256. If not, `open` fails with `RuntimeNotReady` ("the CLI copy this chat was launched
+with is gone or changed: <path> (sha256 <hex>); end the session and start a new one, or put that copy
+back") and starts no other binary. It is not "context lost".
 
 ## Test paths
 

@@ -44,6 +44,7 @@ pub(super) fn new_item(session_id: &str, body: &wire::ChatItemBody) -> NewChatIt
         tool_output: None,
         answers_seq: None,
         usage: None,
+        host: None,
         created_at: now(),
     }
 }

@@ -12,11 +12,12 @@
 //! The verbs that use these live in `chat_verbs.rs`. The records and the item conversions are in
 //! `chat_view.rs`.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,12 +25,13 @@ use pf_api::host::{StreamEnd, StreamEvent, StreamFeed, StreamRefusal};
 use pf_api::types::{self as wire, DeviceRecord};
 use pf_engine::port::agent::SessionRef;
 use pf_engine::port::chat::{
-    BackgroundTask, Capped, ChatError, ChatEvent, ChatId, ChatOpen, ChatOption, ChatPort,
-    ContextUsage, TaskEnd, TurnCause,
+    BackgroundTask, Capped, ChatDelivery, ChatError, ChatEvent, ChatHost, ChatId, ChatOpen,
+    ChatOpened, ChatOption, ChatPort, ChatRebind, ChatResumePoint, ContextUsage, PendingKind,
+    PendingRequest, RecordedBinary, TaskEnd, TurnCause,
 };
 use pf_engine::port::store::{
-    AgentRow, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, NewChatItem, Store,
-    ToolText,
+    AgentRow, ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState,
+    LaunchRecordRow, NewChatItem, Store, ToolText,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -251,6 +253,17 @@ pub(super) struct OpenRequest {
     pub since: SystemTime,
 }
 
+/// What a resume takes from a launch record (Approach 8). The four settings a `session set` changes
+/// (`model`, `effort`, `permission_mode` and `options`) are not here: a resume takes them from the
+/// session row, which the set updates in the same commit that admits it. The record's own copy can
+/// lag the row after a kill or a failed revision write, and a resume must never revert a set.
+struct FromRecord {
+    instructions: String,
+    env: BTreeMap<String, String>,
+    secret_env: BTreeMap<String, String>,
+    binary: RecordedBinary,
+}
+
 /// What changes while a process lives.
 pub(super) struct LiveInner {
     pub turn_since: Option<SystemTime>,
@@ -281,11 +294,21 @@ pub(super) struct LiveChat {
     pub agent: String,
     pub chat: ChatId,
     pub port: Arc<dyn ChatPort>,
+    /// The session host the process runs in. `None` for an adapter that runs no host.
+    pub host: Option<ChatHost>,
+    /// The cursor after the last output line the store consumed, in memory. A delivery at or below
+    /// it is a re-read after a restart: it updates the state and writes nothing (Approach 5).
+    pub committed: AtomicU64,
     pub opened_at: SystemTime,
     pub version: String,
     pub qualified: bool,
     /// True once the controller asked the process to stop.
     pub stopping: AtomicBool,
+    /// True once an item of this process's output failed to reach the store. From then on the
+    /// process's deliveries move nothing: no item, no position, no acknowledgement. The host keeps
+    /// the output past the last position the store consumed, and the next restart reads it again, so
+    /// no item is lost and none is stored twice. Only a process that runs in a host sets it.
+    pub store_failed: AtomicBool,
     /// One writer at a time for the session's items: the pump and the verbs take it, so the order
     /// of the log is the order of what happened.
     pub io: Mutex<()>,
@@ -575,12 +598,56 @@ impl Controller {
         }
     }
 
+    /// [`Controller::append_item`] for an item a delivery gave: the first one carries the
+    /// delivery's position, so the item, its usage and the cursor are one transaction.
+    fn put(&self, ctx: &Delivered, mut item: NewChatItem) -> Result<ChatItemRow, String> {
+        item.host = ctx.mark.take();
+        let marked = item.host.is_some();
+        let row = match self.append_item(item) {
+            Ok(row) => row,
+            Err(why) => {
+                // The delivery is not committed or acknowledged now, and no later one is either
+                // (see `handle_delivery`): the item stays in the host until it is stored.
+                ctx.fail(why.clone());
+                return Err(why);
+            }
+        };
+        if marked {
+            ctx.stored.set(true);
+        }
+        Ok(row)
+    }
+
+    /// A notice item a delivery gave (see [`Controller::put`]).
+    fn notice_at(&self, ctx: &Delivered, session_id: &str, code: &str, text: &str) {
+        let body = wire::ChatItemBody::Notice {
+            code: code.to_string(),
+            text: text.to_string(),
+        };
+        let item = super::chat_view::new_item(session_id, &body);
+        if let Err(why) = self.put(ctx, item) {
+            eprintln!("pulse-factory: a notice of chat session {session_id} is not stored: {why}");
+        }
+    }
+
     /// Close the pending requests of a stopped process with a `lost` answer. Returns how many it
     /// closed. It is scoped to the process it is given: when another process of the same session
     /// is live, it closes only the requests this one held and leaves the other's untouched. It
     /// holds the open lock, so no process of the session opens while it reads the table and the
     /// store.
     pub(super) fn close_pending(&self, live: &Arc<LiveChat>, reason: &str) -> usize {
+        self.close_pending_in(live, reason, None)
+    }
+
+    /// [`Controller::close_pending`] for the exit of a delivery: an answer item that is not stored
+    /// is a failed write of that delivery, so the exit is not acknowledged and a restart reads it
+    /// again (a re-read exit closes the requests an interrupted exit left open).
+    fn close_pending_in(
+        &self,
+        live: &Arc<LiveChat>,
+        reason: &str,
+        ctx: Option<&Delivered>,
+    ) -> usize {
         let session_id = live.session.as_str();
         let _no_open = lock(&self.chats.open_lock);
         let replaced = lock(&self.chats.live)
@@ -609,8 +676,13 @@ impl Controller {
             let body = super::chat_view::closing_body(answer, wire::AnswerOutcome::Lost, reason);
             let mut item = super::chat_view::new_item(session_id, &body);
             item.answers_seq = Some(request.seq);
-            if self.append_item(item).is_ok() {
-                closed += 1;
+            match self.append_item(item) {
+                Ok(_) => closed += 1,
+                Err(why) => {
+                    if let Some(ctx) = ctx {
+                        ctx.fail(why);
+                    }
+                }
             }
         }
         lock(&live.inner).requests.clear();
@@ -697,31 +769,6 @@ impl Controller {
         if let Some(why) = self.cap_refusal() {
             return Err(OpenFailure::Refused(why));
         }
-        let options = effective_options(row, &agent);
-        let notes = check_launch(
-            port.as_ref(),
-            &row.model,
-            &row.effort,
-            &row.permission_mode,
-            &options,
-        )
-        .map_err(OpenFailure::Refused)?;
-        for note in notes {
-            eprintln!("{note}");
-        }
-        let mut env = agent.launch_env.clone();
-        if let Some(pairs) = self
-            .cfg
-            .chat_agent_env
-            .get(&super::chats::agent_env_key(&agent.id))
-        {
-            for (name, value) in pairs {
-                env.insert(name.clone(), value.clone());
-            }
-        }
-        // Last, so neither the agent row nor the setting can remove or replace it. A child the chat
-        // detaches keeps the chat's environment, and the caller check reads the marker there.
-        env.insert(super::requests::CHAT_MARKER.to_string(), row.id.clone());
         // Only a session that has had a message has a conversation to resume. The runtime writes
         // no transcript before the first message, so a resume of a session with none would fail
         // as "context lost" (operator ruling on PR #41, class C1). A session with no message
@@ -732,26 +779,80 @@ impl Controller {
             }
             _ => None,
         };
+        // A resume reads the newest revision of the session's newest incarnation, when one exists
+        // (Approach 8). A session with no launch record resumes from its row, as before.
+        let recorded = if resume.is_some() {
+            match self.newest_chat_record(&row.id).map_err(failed)? {
+                Some(record) => Some(self.open_from_record(&record, &agent, &row.agent_id)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let (model, effort, permission_mode, options, instructions, mut env, secret_env, binary) =
+            match recorded {
+                Some(r) => (
+                    row.model.clone(),
+                    row.effort.clone(),
+                    row.permission_mode.clone(),
+                    effective_options(row, &agent),
+                    r.instructions,
+                    r.env,
+                    r.secret_env,
+                    Some(r.binary),
+                ),
+                None => (
+                    row.model.clone(),
+                    row.effort.clone(),
+                    row.permission_mode.clone(),
+                    effective_options(row, &agent),
+                    super::agents::instructions(
+                        &agent,
+                        &project.name,
+                        &project.root,
+                        &self.cfg.server_name,
+                        &row.id,
+                        &self.cfg.chat_share_dir,
+                    ),
+                    agent.launch_env.clone(),
+                    // The agent's secret pairs travel apart from `env`: a launch record never
+                    // holds a value.
+                    self.cfg
+                        .chat_agent_env
+                        .get(&super::chats::agent_env_key(&agent.id))
+                        .cloned()
+                        .unwrap_or_default(),
+                    None,
+                ),
+            };
+        let notes = check_launch(port.as_ref(), &model, &effort, &permission_mode, &options)
+            .map_err(OpenFailure::Refused)?;
+        for note in notes {
+            eprintln!("{note}");
+        }
+        // Last, so neither the agent row nor the setting can remove or replace it. A child the chat
+        // detaches keeps the chat's environment, and the caller check reads the marker there.
+        env.insert(super::requests::CHAT_MARKER.to_string(), row.id.clone());
         // The deny list in force at this open: a change applies at the next launch (ADR-0016).
         let (deny_commands, deny_from) = self.deny_commands(&row.project_id, &row.agent_id);
         let deny_count = deny_commands.len();
         let spec = ChatOpen {
             cwd: worktree.path.clone(),
             resume,
-            instructions: super::agents::instructions(
-                &agent,
-                &project.name,
-                &project.root,
-                &self.cfg.server_name,
-                &row.id,
-                &self.cfg.chat_share_dir,
-            ),
-            model: row.model.clone(),
-            effort: row.effort.clone(),
-            permission_mode: row.permission_mode.clone(),
+            instructions,
+            model,
+            effort,
+            permission_mode,
             env,
             options: options.clone(),
             deny_commands,
+            chat_session: row.id.clone(),
+            project: row.project_id.clone(),
+            agent_id: row.agent_id.clone(),
+            worktree_id: row.worktree_id.clone(),
+            deny_from: deny_from.clone(),
+            secret_env,
+            recorded_binary: binary,
         };
         let resuming = spec.resume.is_some();
         let opened = port.open(&spec).map_err(|e| match e {
@@ -760,31 +861,10 @@ impl Controller {
             ChatError::Failed(why) => OpenFailure::Failed(why),
         })?;
         let pid = port.process_id(&opened.chat);
-        let now_t = SystemTime::now();
-        let live = Arc::new(LiveChat {
-            session: row.id.clone(),
-            project: row.project_id.clone(),
-            agent: row.agent_id.clone(),
-            chat: opened.chat.clone(),
-            port: port.clone(),
-            opened_at: now_t,
-            version: opened.runtime_version.clone(),
-            qualified: opened.qualified,
-            stopping: AtomicBool::new(false),
-            io: Mutex::new(()),
-            inner: Mutex::new(LiveInner {
-                turn_since: None,
-                tasks: BTreeMap::new(),
-                requests: BTreeMap::new(),
-                tools: BTreeMap::new(),
-                idle_since: now_t,
-                context: None,
-                applied: options,
-                state: ChatSessionState::Idle,
-                self_turns: 0,
-                held: None,
-            }),
-        });
+        // The row's state is the stored one (a stopped process can leave `needs_you`): the live
+        // chat starts as it, so the `sync_state` below writes `idle` over it at once, and not only
+        // when the first event of the new process arrives.
+        let live = self.build_live(row, &port, &opened, options, row.state, 0);
         if row.runtime_session_ref.as_deref() != Some(opened.session.0.as_str()) {
             let _ = self
                 .store
@@ -792,8 +872,24 @@ impl Controller {
         }
         lock(&self.chats.lost).remove(&row.id);
         lock(&self.chats.live).insert(row.id.clone(), live.clone());
+        let host_fields = opened.host.as_ref().map_or_else(String::new, |h| {
+            let sha = self
+                .store
+                .newest_launch_record("chat", &row.id, h.incarnation)
+                .ok()
+                .flatten()
+                .and_then(|r| serde_json::from_str::<Value>(&r.record).ok())
+                .and_then(|v| v["runtime"]["binary_sha256"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            format!(
+                " unit={} incarnation={} binary_sha256={}",
+                field(&h.unit),
+                h.incarnation,
+                field(&sha)
+            )
+        });
         self.chats.ledger.append(&format!(
-            "open session={} runtime={} version={} qualified={} resume={} pid={} deny={deny_count} deny_from={}",
+            "open session={} runtime={} version={} qualified={} resume={} pid={} deny={deny_count} deny_from={}{host_fields}",
             field(&row.id),
             field(&row.runtime),
             field(&opened.runtime_version),
@@ -806,6 +902,136 @@ impl Controller {
         self.sync_state(&live);
         self.emit_session(&row.id);
         Ok(live)
+    }
+
+    /// The live table entry of a process the adapter opened or rebound.
+    fn build_live(
+        &self,
+        row: &ChatSessionRow,
+        port: &Arc<dyn ChatPort>,
+        opened: &ChatOpened,
+        options: BTreeMap<String, String>,
+        state: ChatSessionState,
+        committed: u64,
+    ) -> Arc<LiveChat> {
+        let now_t = SystemTime::now();
+        Arc::new(LiveChat {
+            session: row.id.clone(),
+            project: row.project_id.clone(),
+            agent: row.agent_id.clone(),
+            chat: opened.chat.clone(),
+            port: port.clone(),
+            host: opened.host.clone(),
+            committed: AtomicU64::new(committed),
+            opened_at: now_t,
+            version: opened.runtime_version.clone(),
+            qualified: opened.qualified,
+            stopping: AtomicBool::new(false),
+            store_failed: AtomicBool::new(false),
+            io: Mutex::new(()),
+            inner: Mutex::new(LiveInner {
+                turn_since: None,
+                tasks: BTreeMap::new(),
+                requests: BTreeMap::new(),
+                tools: BTreeMap::new(),
+                idle_since: now_t,
+                context: None,
+                applied: options,
+                state,
+                self_turns: 0,
+                held: None,
+            }),
+        })
+    }
+
+    /// The newest revision of the newest incarnation of a chat session's launch record.
+    pub(super) fn newest_chat_record(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<LaunchRecordRow>, String> {
+        let mut found = None;
+        let mut incarnation = 1u32;
+        while let Some(record) = self
+            .store
+            .newest_launch_record("chat", session_id, incarnation)
+            .map_err(|e| e.to_string())?
+        {
+            found = Some(record);
+            incarnation += 1;
+        }
+        Ok(found)
+    }
+
+    /// What a resume takes from a launch record (Approach 8): the `record` half of the launch. A
+    /// secret value comes from the controller's environment now, and a name with no value fails the
+    /// resume with a reason that names it.
+    fn open_from_record(
+        &self,
+        record: &LaunchRecordRow,
+        agent: &AgentRow,
+        agent_id: &str,
+    ) -> Result<FromRecord, OpenFailure> {
+        let body: Value = serde_json::from_str(&record.record).map_err(|e| {
+            OpenFailure::Failed(format!(
+                "the launch record of {} is not JSON: {e}",
+                record.host_unit
+            ))
+        })?;
+        let settings = &body["settings"];
+        let text = |key: &str| settings[key].as_str().unwrap_or_default().to_string();
+        let pairs = |value: &Value| -> BTreeMap<String, String> {
+            value
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let env = if settings["launch_env"].is_object() {
+            pairs(&settings["launch_env"])
+        } else {
+            agent.launch_env.clone()
+        };
+        let available = self
+            .cfg
+            .chat_agent_env
+            .get(&agent_env_key(agent_id))
+            .cloned()
+            .unwrap_or_default();
+        let mut secret_env = BTreeMap::new();
+        for name in body["secret_names"].as_array().into_iter().flatten() {
+            let Some(name) = name.as_str() else { continue };
+            match available.get(name) {
+                Some(value) => {
+                    secret_env.insert(name.to_string(), value.clone());
+                }
+                None => {
+                    return Err(OpenFailure::Refused(format!(
+                        "the secret variable {name} this chat was launched with has no value in PF_AGENT_ENV_{} now; set it and send again",
+                        agent_env_key(agent_id)
+                    )));
+                }
+            }
+        }
+        let runtime = &body["runtime"];
+        Ok(FromRecord {
+            instructions: text("instructions"),
+            env,
+            secret_env,
+            binary: RecordedBinary {
+                path: runtime["binary_path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                sha256: runtime["binary_sha256"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                version: runtime["version"].as_str().unwrap_or_default().to_string(),
+            },
+        })
     }
 
     /// Whether the session's log holds an `operator_message` item.
@@ -830,16 +1056,20 @@ impl Controller {
     }
 
     /// One thread per live process drains its events. It never blocks the controller's runtime.
-    fn spawn_pump(&self, live: Arc<LiveChat>, mut events: pf_engine::port::chat::ChatEvents) {
+    pub(super) fn spawn_pump(
+        &self,
+        live: Arc<LiveChat>,
+        mut events: pf_engine::port::chat::ChatEvents,
+    ) {
         let me = self.me.clone();
         let name = format!("chat-pump-{}", live.session);
         let spawned = std::thread::Builder::new().name(name).spawn(move || {
-            while let Some(event) = events.blocking_recv() {
-                let exited = matches!(event, ChatEvent::Exited { .. });
+            while let Some(delivery) = events.blocking_recv() {
+                let exited = matches!(delivery.event, ChatEvent::Exited { .. });
                 let Some(controller) = me.upgrade() else {
                     break;
                 };
-                controller.handle_event(&live, event);
+                controller.handle_delivery(&live, delivery);
                 if exited {
                     break;
                 }
@@ -936,10 +1166,18 @@ impl Controller {
 
     // -------------------------------------------------------------- the events
 
-    /// Apply one event of a live process to the log, the session and the stream. A test feeds a
-    /// hand-built sequence through [`Controller::apply_chat_event`].
-    pub(super) fn handle_event(&self, live: &Arc<LiveChat>, event: ChatEvent) {
-        let result = {
+    /// Apply one delivery of a live process to the log, the session and the stream: commit what it
+    /// gives with its position in one write, then acknowledge the position to the host when it is a
+    /// quiet point (Approach 5). A test feeds a hand-built sequence through
+    /// [`Controller::apply_chat_event`].
+    pub(super) fn handle_delivery(&self, live: &Arc<LiveChat>, delivery: ChatDelivery) {
+        let ChatDelivery {
+            event,
+            at,
+            checkpoint,
+        } = delivery;
+        let exited = matches!(event, ChatEvent::Exited { .. });
+        let (result, ack) = {
             let _io = lock(&live.io);
             // A stopper sets `stopping` while it holds `io`, so an event that waited for the lock
             // sees the flag here. A stopped process owns no state any more: only the result of a
@@ -954,14 +1192,131 @@ impl Controller {
             {
                 return;
             }
-            self.apply_event(live, event)
+            // After a failed item write, this process's output is not read on: an item stored now
+            // would sit past the one that is missing, and the restart would store it again. The
+            // exit is no exception: it stores nothing, moves no position and is not acknowledged,
+            // so the restart reads it again with the rest. Only the process's state in memory ends.
+            if live.store_failed.load(Ordering::SeqCst) {
+                if exited {
+                    self.end_unstored_exit(live);
+                }
+                return;
+            }
+            let positioned = live.host.as_ref().zip(at);
+            let reread =
+                positioned.is_some_and(|(_, at)| at <= live.committed.load(Ordering::SeqCst));
+            let mark = positioned.map(|(host, at)| ChatHostMark {
+                unit: host.unit.clone(),
+                incarnation: host.incarnation,
+                at,
+                checkpoint: checkpoint.clone(),
+            });
+            let ctx = Delivered {
+                reread,
+                mark: Cell::new(mark),
+                stored: Cell::new(false),
+                failure: Cell::new(None),
+            };
+            let result = self.apply_event(live, event, &ctx);
+            let mut stored = ctx.stored.get();
+            let failure = ctx.failure.take();
+            // A position no item carried goes to the store alone: a checkpoint with no item (a
+            // moved session between turns), or the exit, which the host waits to hear about. A
+            // delivery that lost an item moves no position.
+            if failure.is_none()
+                && let Some(mark) = ctx.mark.take()
+                && (mark.checkpoint.is_some() || exited)
+            {
+                match self.store.set_chat_host_mark(&live.session, mark) {
+                    Ok(()) => stored = true,
+                    Err(e) => eprintln!(
+                        "pulse-factory: the host position of chat session {} is not stored: {e}",
+                        live.session
+                    ),
+                }
+            }
+            if stored && let Some((_, at)) = positioned {
+                live.committed.fetch_max(at, Ordering::SeqCst);
+            }
+            if let (Some(why), Some((_, at))) = (&failure, positioned) {
+                self.hold_unstored(live, at, why);
+            }
+            let ack = match positioned {
+                Some((_, at))
+                    if failure.is_none()
+                        && !live.is_stopping()
+                        && ((checkpoint.is_some() && stored) || (exited && (stored || reread))) =>
+                {
+                    Some(at)
+                }
+                _ => None,
+            };
+            (result, ack)
         };
+        if let Some(to) = ack
+            && let Err(e) = live.port.ack(&live.chat, to)
+        {
+            eprintln!(
+                "pulse-factory: chat session {}: the host is not acknowledged to {to}: {e}",
+                live.session
+            );
+        }
         if result.turn_ended {
             // The usage call can take a while, so it runs outside the session's lock.
             let usage = live.port.context_usage(&live.chat).ok();
             lock(&live.inner).context = usage;
             self.emit_session(&live.session);
         }
+    }
+
+    /// The exit of a process that lost an item write. The state in memory ends with the process;
+    /// no item is stored, so the restart that reads the exit again stores each of them once.
+    fn end_unstored_exit(&self, live: &Arc<LiveChat>) {
+        if live.is_stopping() {
+            return;
+        }
+        {
+            let mut table = lock(&self.chats.live);
+            if table
+                .get(&live.session)
+                .is_some_and(|l| Arc::ptr_eq(l, live))
+            {
+                table.remove(&live.session);
+            }
+        }
+        {
+            let mut inner = lock(&live.inner);
+            inner.turn_since = None;
+            inner.tasks.clear();
+            inner.requests.clear();
+            inner.tools.clear();
+            inner.context = None;
+        }
+        self.sync_state(live);
+        self.emit_session(&live.session);
+    }
+
+    /// An item of a delivery at host position `at` did not reach the store: stop this process's
+    /// deliveries from moving past it, and say so. The position stays where the store has it, the
+    /// host is not acknowledged, and a restart reads the output again from there.
+    fn hold_unstored(&self, live: &Arc<LiveChat>, at: u64, why: &str) {
+        live.store_failed.store(true, Ordering::SeqCst);
+        eprintln!(
+            "pulse-factory: chat session {}: an item at host position {at} is not stored: {why}",
+            live.session
+        );
+        self.notice(
+            &live.session,
+            "output_not_stored",
+            &format!(
+                "an item of this chat's output could not be stored (host position {at}: {why}); the chat's output is not read on until the controller restarts, and then it is read again from the last stored position"
+            ),
+        );
+    }
+
+    /// One event with no position, as an adapter that runs no host sends it.
+    pub(super) fn handle_event(&self, live: &Arc<LiveChat>, event: ChatEvent) {
+        self.handle_delivery(live, ChatDelivery::plain(event));
     }
 
     /// Feed one event to the live process of a session. For tests.
@@ -974,9 +1329,12 @@ impl Controller {
         Ok(())
     }
 
-    fn apply_event(&self, live: &Arc<LiveChat>, event: ChatEvent) -> EventResult {
+    fn apply_event(&self, live: &Arc<LiveChat>, event: ChatEvent, ctx: &Delivered) -> EventResult {
         use super::chat_view::new_item;
         use wire::ChatItemBody as Body;
+        if ctx.reread {
+            return self.apply_reread(live, event, ctx);
+        }
         let session = live.session.as_str();
         let mut result = EventResult::default();
         match event {
@@ -1004,7 +1362,7 @@ impl Controller {
                 return result;
             }
             ChatEvent::Text { text } => {
-                let _ = self.append_item(new_item(session, &Body::AssistantText { text }));
+                let _ = self.put(ctx, new_item(session, &Body::AssistantText { text }));
             }
             ChatEvent::ToolStarted {
                 call_id,
@@ -1044,7 +1402,7 @@ impl Controller {
                 );
                 item.tool_input = input.map(tool_text);
                 item.tool_output = Some(tool_text(output));
-                let _ = self.append_item(item);
+                let _ = self.put(ctx, item);
             }
             ChatEvent::ApprovalRequest {
                 request_id,
@@ -1062,7 +1420,7 @@ impl Controller {
                     },
                 );
                 item.tool_input = Some(tool_text(input));
-                if let Ok(row) = self.append_item(item) {
+                if let Ok(row) = self.put(ctx, item) {
                     lock(&live.inner).requests.insert(
                         row.seq,
                         OpenRequest {
@@ -1097,7 +1455,7 @@ impl Controller {
                         items,
                     },
                 );
-                if let Ok(row) = self.append_item(item) {
+                if let Ok(row) = self.put(ctx, item) {
                     lock(&live.inner).requests.insert(
                         row.seq,
                         OpenRequest {
@@ -1134,7 +1492,7 @@ impl Controller {
                     );
                     let mut item = new_item(session, &body);
                     item.answers_seq = Some(seq);
-                    let _ = self.append_item(item);
+                    let _ = self.put(ctx, item);
                 }
             }
             ChatEvent::TaskStarted { task } => {
@@ -1149,7 +1507,7 @@ impl Controller {
                 lock(&live.inner)
                     .tasks
                     .insert(task.id.clone(), (task, SystemTime::now()));
-                let _ = self.append_item(new_item(session, &body));
+                let _ = self.put(ctx, new_item(session, &body));
             }
             ChatEvent::TaskFinished {
                 task_id,
@@ -1172,7 +1530,7 @@ impl Controller {
                     ),
                     summary: Some(summary),
                 };
-                let _ = self.append_item(new_item(session, &body));
+                let _ = self.put(ctx, new_item(session, &body));
                 self.note_idle_if_free(live);
             }
             ChatEvent::TurnResult {
@@ -1199,7 +1557,7 @@ impl Controller {
                 };
                 let mut item = new_item(session, &body);
                 item.usage = Some(usage);
-                let _ = self.append_item(item);
+                let _ = self.put(ctx, item);
                 {
                     let mut inner = lock(&live.inner);
                     inner.turn_since = None;
@@ -1230,6 +1588,17 @@ impl Controller {
             ChatEvent::SessionMoved { session: moved } => {
                 let _ = self.store.set_chat_runtime_ref(session, &moved.0, &now());
             }
+            ChatEvent::OutputLost { from, to } => {
+                self.notice_at(
+                    ctx,
+                    session,
+                    "output_lost",
+                    &format!(
+                        "output lost: {} bytes of this chat's output were dropped before Pulse Factory read them (cursor {from} to {to}); the conversation is in the CLI's own transcript",
+                        to.saturating_sub(from)
+                    ),
+                );
+            }
             ChatEvent::Exited { code, reason } => {
                 if live.is_stopping() {
                     return result;
@@ -1241,12 +1610,13 @@ impl Controller {
                     }
                 }
                 let code_text = code.map_or_else(|| "none".to_string(), |c| c.to_string());
-                self.notice(
+                self.notice_at(
+                    ctx,
                     session,
                     "exited",
                     &format!("the chat process exited (code {code_text}): {reason}"),
                 );
-                self.close_pending(live, "the chat process exited");
+                self.close_pending_in(live, "the chat process exited", Some(ctx));
                 // A tool still open at the exit is stored with no output and `finished: false`.
                 let open_tools = std::mem::take(&mut lock(&live.inner).tools);
                 for (call_id, (tool, input)) in open_tools {
@@ -1262,7 +1632,7 @@ impl Controller {
                         },
                     );
                     item.tool_input = Some(tool_text(input));
-                    let _ = self.append_item(item);
+                    let _ = self.put(ctx, item);
                 }
                 {
                     let mut inner = lock(&live.inner);
@@ -1280,6 +1650,126 @@ impl Controller {
         self.sync_state(live);
         self.emit_session(session);
         result
+    }
+
+    /// A delivery at or below the consumed cursor (Approach 5): it updates the state in memory and
+    /// writes no item, adds no usage, sends no frame and writes no `chat.ledger` line. The one
+    /// exception is a re-read exit, which closes the requests an interrupted exit left open.
+    fn apply_reread(&self, live: &Arc<LiveChat>, event: ChatEvent, ctx: &Delivered) -> EventResult {
+        let mut result = EventResult::default();
+        match event {
+            ChatEvent::TurnStarted { .. } => {
+                lock(&live.inner).turn_since = Some(SystemTime::now());
+            }
+            ChatEvent::TextDelta { .. }
+            | ChatEvent::Text { .. }
+            | ChatEvent::SessionMoved { .. }
+            | ChatEvent::OutputLost { .. } => return result,
+            ChatEvent::ToolStarted {
+                call_id,
+                tool,
+                input,
+            } => {
+                lock(&live.inner).tools.insert(call_id, (tool, input));
+            }
+            ChatEvent::ToolFinished { call_id, .. } => {
+                lock(&live.inner).tools.remove(&call_id);
+            }
+            ChatEvent::ApprovalRequest { request_id, .. }
+            | ChatEvent::Question { request_id, .. } => {
+                self.map_pending(live, &request_id);
+            }
+            ChatEvent::RequestClosed { request_id } => {
+                lock(&live.inner)
+                    .requests
+                    .retain(|_, r| r.request_id != request_id);
+            }
+            ChatEvent::TaskStarted { task } => {
+                lock(&live.inner)
+                    .tasks
+                    .insert(task.id.clone(), (task, SystemTime::now()));
+            }
+            ChatEvent::TaskFinished { task_id, .. } => {
+                lock(&live.inner).tasks.remove(&task_id);
+                self.note_idle_if_free(live);
+            }
+            ChatEvent::TurnResult { .. } => {
+                let mut inner = lock(&live.inner);
+                inner.turn_since = None;
+                if inner.requests.is_empty() {
+                    inner.idle_since = SystemTime::now();
+                }
+                result.turn_ended = true;
+            }
+            ChatEvent::Exited { .. } => {
+                if live.is_stopping() {
+                    return result;
+                }
+                {
+                    let mut table = lock(&self.chats.live);
+                    if table
+                        .get(&live.session)
+                        .is_some_and(|l| Arc::ptr_eq(l, live))
+                    {
+                        table.remove(&live.session);
+                    }
+                }
+                self.close_pending_in(live, "the chat process exited", Some(ctx));
+                let mut inner = lock(&live.inner);
+                inner.turn_since = None;
+                inner.tasks.clear();
+                inner.requests.clear();
+                inner.tools.clear();
+                inner.context = None;
+            }
+        }
+        self.sync_state(live);
+        result
+    }
+
+    /// Map a request ID the adapter read again to the stored request that is still pending.
+    fn map_pending(&self, live: &LiveChat, request_id: &str) {
+        if lock(&live.inner)
+            .requests
+            .values()
+            .any(|r| r.request_id == request_id)
+        {
+            return;
+        }
+        for (row, id, kind) in self.pending_of(&live.session) {
+            if id == request_id {
+                lock(&live.inner).requests.insert(
+                    row.seq,
+                    OpenRequest {
+                        request_id: id,
+                        kind,
+                        since: SystemTime::now(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// The requests of a session that have no answer: the item, the runtime's request ID and the
+    /// kind.
+    pub(super) fn pending_of(&self, session: &str) -> Vec<(ChatItemRow, String, ChatItemKind)> {
+        let rows = match self.store.pending_requests(session) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!(
+                    "pulse-factory: the requests of chat session {session} are not read: {e}"
+                );
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            .filter_map(|row| {
+                let kind = ChatItemKind::parse(&row.kind)?;
+                let payload: Value = serde_json::from_str(&row.payload).ok()?;
+                let id = payload["request_id"].as_str()?.to_string();
+                Some((row, id, kind))
+            })
+            .collect()
     }
 
     /// The self-started turn cap (ADR-0015, ADR-0016). A turn the chat started on its own counts.
@@ -1387,15 +1877,124 @@ impl Controller {
         stopped
     }
 
-    /// Stop every live process and end every stream, for a controller stop.
-    pub fn shutdown_chats(&self) {
+    /// Drop every live process's connection and end every stream, for a controller stop. No
+    /// process stops: each lives on in its session host, and the next controller start rebinds it
+    /// (Approach 10).
+    pub fn detach_chats(&self) {
         for live in self.live_chats() {
             let _io = lock(&live.io);
-            self.stop_chat(&live, "shutdown");
+            if let Err(e) = live.port.detach(&live.chat) {
+                eprintln!(
+                    "pulse-factory: chat session {} did not detach cleanly: {e}",
+                    live.session
+                );
+            }
+            {
+                let mut table = lock(&self.chats.live);
+                if table
+                    .get(&live.session)
+                    .is_some_and(|l| Arc::ptr_eq(l, &live))
+                {
+                    table.remove(&live.session);
+                }
+            }
+            self.chats
+                .ledger
+                .append(&format!("detach session={}", field(&live.session)));
         }
         let mut streams = lock(&self.chats.streams);
         for (_, end) in streams.drain(..) {
             let _ = end.send(StreamEnd::Shutdown);
+        }
+    }
+
+    // -------------------------------------------------------------- tier 1
+
+    /// Where a chat stands when the controller rebinds to its host: the cursor the store holds for
+    /// that host and the requests with no answer (Approach 7).
+    pub(super) fn resume_point(
+        &self,
+        row: &ChatSessionRow,
+        unit: &str,
+        incarnation: u32,
+    ) -> ChatResumePoint {
+        let (acked, committed, checkpoint) = match &row.host_cursor {
+            Some(c) if c.unit == unit && c.incarnation == incarnation => {
+                (c.acked, c.committed, c.checkpoint.clone())
+            }
+            _ => (0, 0, None),
+        };
+        let pending = self
+            .pending_of(&row.id)
+            .into_iter()
+            .map(|(item, request_id, kind)| match kind {
+                ChatItemKind::QuestionRequest => PendingRequest {
+                    request_id,
+                    kind: PendingKind::Question,
+                    input: question_input(&item.payload),
+                },
+                _ => PendingRequest {
+                    request_id,
+                    kind: PendingKind::Approval,
+                    input: item.tool_input.filter(|_| !item.tool_input_truncated),
+                },
+            })
+            .collect();
+        ChatResumePoint {
+            runtime_session: SessionRef(row.runtime_session_ref.clone().unwrap_or_default()),
+            acked,
+            committed,
+            checkpoint,
+            pending,
+        }
+    }
+
+    /// Rebind a live chat session to the host of `unit` (tier 1 for a chat). A survived host
+    /// gives the session its live process back, with its pending requests and a pump.
+    pub(super) fn rebind_chat(
+        &self,
+        row: &ChatSessionRow,
+        unit: &str,
+        incarnation: u32,
+    ) -> ChatRebindOutcome {
+        let port = match self.chat_port(&row.runtime) {
+            Ok(p) => p,
+            Err(why) => return ChatRebindOutcome::Unreachable(why),
+        };
+        let point = self.resume_point(row, unit, incarnation);
+        match port.rebind(unit, &point) {
+            ChatRebind::Survived(opened) => {
+                let options = match self.agent(&row.agent_id) {
+                    Ok(Some(agent)) => effective_options(row, &agent),
+                    _ => row.runtime_options.clone(),
+                };
+                let live =
+                    self.build_live(row, &port, &opened, options, row.state, point.committed);
+                for (item, request_id, kind) in self.pending_of(&row.id) {
+                    lock(&live.inner).requests.insert(
+                        item.seq,
+                        OpenRequest {
+                            request_id,
+                            kind,
+                            since: SystemTime::now(),
+                        },
+                    );
+                }
+                lock(&self.chats.live).insert(row.id.clone(), live.clone());
+                self.spawn_pump(live, opened.events);
+                ChatRebindOutcome::Survived
+            }
+            ChatRebind::Lost { exit } => {
+                let reason = match &exit {
+                    Value::String(text) => text.clone(),
+                    other => other["reason"]
+                        .as_str()
+                        .unwrap_or("the host ended and left no reason")
+                        .to_string(),
+                };
+                ChatRebindOutcome::Lost(reason)
+            }
+            ChatRebind::Unreachable { why } => ChatRebindOutcome::Unreachable(why),
         }
     }
 
@@ -1483,6 +2082,55 @@ impl Controller {
             following: session.map(str::to_string),
             after_seq: after,
         })
+    }
+}
+
+/// What a rebind of a chat found (Approach 7).
+pub(super) enum ChatRebindOutcome {
+    Survived,
+    Lost(String),
+    Unreachable(String),
+}
+
+/// The text of the question request the adapter's `seed_request` reads: the input the runtime sent
+/// with it, rebuilt from the stored payload.
+fn question_input(payload: &str) -> Option<String> {
+    let body: Value = serde_json::from_str(payload).ok()?;
+    let questions: Vec<Value> = body["items"]
+        .as_array()?
+        .iter()
+        .map(|q| {
+            serde_json::json!({
+                "question": q["text"],
+                "header": q["header"],
+                "options": q["options"].as_array().map(|opts| opts.iter().map(|o| serde_json::json!({
+                    "label": o["label"],
+                    "description": o["description"],
+                })).collect::<Vec<_>>()).unwrap_or_default(),
+                "multiSelect": q["multi_select"],
+            })
+        })
+        .collect();
+    Some(serde_json::json!({ "questions": questions }).to_string())
+}
+
+/// What one delivery carries beside its event (Approach 5).
+struct Delivered {
+    /// The delivery is at or below the cursor the store consumed: it updates the state only.
+    reread: bool,
+    /// The delivery's position. The first item the event writes takes it.
+    mark: Cell<Option<ChatHostMark>>,
+    /// True once an item carried the mark into the store.
+    stored: Cell<bool>,
+    /// Why the first item write of this delivery failed, when one did.
+    failure: Cell<Option<String>>,
+}
+
+impl Delivered {
+    /// An item write of this delivery failed. The first reason stays.
+    fn fail(&self, why: String) {
+        let first = self.failure.take().unwrap_or(why);
+        self.failure.set(Some(first));
     }
 }
 

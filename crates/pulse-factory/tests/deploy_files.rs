@@ -38,10 +38,18 @@ fn unit_problems(unit: &str) -> Vec<String> {
     if unit.contains("CARGO_") {
         p.push("the unit sets a CARGO_ variable".into());
     }
-    // The chat processes are children of the controller. systemd must end any child that is left
-    // in the unit's cgroup, such as a background `Bash` in its own session (ADR-0001, ADR-0015).
+    // Seats and chats run in session hosts outside this unit's cgroup (r2.s2.w3, r2.s2.w5), so the
+    // kill mode covers only the controller's own unit. It stays `control-group`: systemd ends any
+    // process left in that cgroup (ADR-0001, ADR-0015).
     if !unit.lines().any(|l| l.trim() == "KillMode=control-group") {
         p.push("no KillMode=control-group".into());
+    }
+    // The comment says chats run in hosts too, and no longer says they are the controller's children.
+    if unit.contains("still children of the controller") {
+        p.push("the unit comment says chat processes are still children of the controller".into());
+    }
+    if !unit.contains("Seats and chats run in session hosts") {
+        p.push("the unit comment does not say that chats run in session hosts".into());
     }
     // Seats run in session hosts, each in a unit of its own, outside this unit's cgroup (r2.s2.w3,
     // Q6): the installed controller starts them through the user manager.

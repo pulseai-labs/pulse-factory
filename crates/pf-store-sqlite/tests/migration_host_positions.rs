@@ -92,7 +92,8 @@ fn a_version_nine_store_with_a_live_host_migrates_to_ten_and_keeps_every_row() {
     assert_eq!(MIGRATIONS[9].version, 10);
     assert_eq!(MIGRATIONS[9].name, "host_positions");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 10);
+    // The plain open applies every later migration too: 0011 follows 0010.
+    assert_eq!(store.schema_version().unwrap(), 11);
     // The old rows read as before.
     let host = store.host("pf-host-s-1").unwrap().expect("the host row");
     assert!(host.ended_at.is_none());
@@ -110,7 +111,11 @@ fn a_version_nine_store_with_a_live_host_migrates_to_ten_and_keeps_every_row() {
     let after = Connection::open(&path).unwrap();
     for (table, n) in &counts_before {
         if table == "schema_version" {
-            assert_eq!(count(&after, table), n + 1, "the new version is recorded");
+            assert_eq!(
+                count(&after, table),
+                n + 2,
+                "versions 10 and 11 are recorded"
+            );
         } else {
             assert_eq!(count(&after, table), *n, "{table} keeps every row");
         }
@@ -172,23 +177,23 @@ fn the_table_holds_no_key_and_no_secret() {
 fn migration_ten_is_forward_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    let eleven = Migration {
-        version: 11,
+    let twelve = Migration {
+        version: 12,
         name: "next",
         sql: "CREATE TABLE next_for_test (x INTEGER) STRICT;",
     };
-    drop(SqliteStore::open_with_migrations(&path, &[eleven]).unwrap());
-    // A file at version 11 does not open in a binary that knows version 10 only: no roll back.
+    drop(SqliteStore::open_with_migrations(&path, &[twelve]).unwrap());
+    // A file at version 12 does not open in a binary that knows version 11 only: no roll back.
     let err = SqliteStore::open(&path).err().unwrap();
     assert_eq!(
         err,
         OpenError::SchemaNewer {
-            database: 11,
-            supported: 10
+            database: 12,
+            supported: 11
         }
     );
-    // The migration list has no gap and the new one is the tenth.
-    assert_eq!(MIGRATIONS.len(), 10);
+    // The migration list has no gap, and 0010 sits in the tenth place.
+    assert_eq!(MIGRATIONS.len(), 11);
     for (i, m) in MIGRATIONS.iter().enumerate() {
         assert_eq!(m.version as usize, i + 1);
     }
