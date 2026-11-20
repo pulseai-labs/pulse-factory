@@ -159,3 +159,61 @@ fn a_failed_closing_answer_on_an_exit_holds_the_exit_until_a_restart_closes_the_
             rig.r.live_hosts().is_empty()
         });
 }
+
+#[test]
+fn an_exit_after_a_failed_item_write_stores_nothing_until_a_restart_reads_it_again() {
+    let mut rig = ChatRig::new(PLAIN, None, &[("assistant", "g1")], &[]);
+    rig.send("hello");
+    rig.wait_progress(0, host_lines_before(PLAIN, "assistant"));
+    std::thread::sleep(Duration::from_millis(300));
+    let pid = rig.pid(0);
+
+    // The write of the reply fails once, then the store works again.
+    fail_inserts(&rig, "assistant_text");
+    rig.release("g1");
+    rig.wait_items("the notice of the lost write", |i| {
+        i.iter()
+            .any(|x| x.kind == "notice" && x.payload["code"] == "output_not_stored")
+    });
+    heal(&rig);
+    rig.wait_progress(0, host_lines_through_result(PLAIN, 1));
+
+    // The child ends. The exit follows the lost write, so it stores no `exited` notice, moves no
+    // position and is not acknowledged: the host waits.
+    let before = rig.row().host_cursor;
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::thread::sleep(Duration::from_millis(800));
+    let exited = |rig: &ChatRig| {
+        rig.items()
+            .iter()
+            .filter(|x| x.kind == "notice" && x.payload["code"] == "exited")
+            .count()
+    };
+    assert_eq!(exited(&rig), 0, "the exit stores no notice");
+    assert_eq!(rig.row().host_cursor, before, "the exit moves no position");
+    assert!(
+        !rig.r.live_hosts().is_empty(),
+        "the exit is not acknowledged, so the host waits"
+    );
+
+    // A restart reads the output again from the stored position. Each item is stored once, the
+    // exit is read again with them, and the host ends.
+    rig.restart();
+    rig.wait_items("the reply and the result", |i| {
+        i.iter().any(|x| x.kind == "assistant_text") && i.iter().any(|x| x.kind == "turn_result")
+    });
+    rig.r
+        .wait_for("the host to end", Duration::from_secs(10), || {
+            rig.r.live_hosts().is_empty()
+        });
+    assert_eq!(
+        without_notices(&rig),
+        ["operator_message", "assistant_text", "turn_result"],
+        "every item is stored once"
+    );
+    assert!(exited(&rig) <= 1, "the exit notice is not stored twice");
+}

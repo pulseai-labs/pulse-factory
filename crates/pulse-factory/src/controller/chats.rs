@@ -1193,17 +1193,16 @@ impl Controller {
                 return;
             }
             // After a failed item write, this process's output is not read on: an item stored now
-            // would sit past the one that is missing, and the restart would store it again. Only the
-            // exit still applies, and it moves no position.
-            let failed_before = live.store_failed.load(Ordering::SeqCst);
-            if failed_before && !exited {
+            // would sit past the one that is missing, and the restart would store it again. The
+            // exit is no exception: it stores nothing, moves no position and is not acknowledged,
+            // so the restart reads it again with the rest. Only the process's state in memory ends.
+            if live.store_failed.load(Ordering::SeqCst) {
+                if exited {
+                    self.end_unstored_exit(live);
+                }
                 return;
             }
-            let positioned = if failed_before {
-                None
-            } else {
-                live.host.as_ref().zip(at)
-            };
+            let positioned = live.host.as_ref().zip(at);
             let reread =
                 positioned.is_some_and(|(_, at)| at <= live.committed.load(Ordering::SeqCst));
             let mark = positioned.map(|(host, at)| ChatHostMark {
@@ -1268,6 +1267,33 @@ impl Controller {
             lock(&live.inner).context = usage;
             self.emit_session(&live.session);
         }
+    }
+
+    /// The exit of a process that lost an item write. The state in memory ends with the process;
+    /// no item is stored, so the restart that reads the exit again stores each of them once.
+    fn end_unstored_exit(&self, live: &Arc<LiveChat>) {
+        if live.is_stopping() {
+            return;
+        }
+        {
+            let mut table = lock(&self.chats.live);
+            if table
+                .get(&live.session)
+                .is_some_and(|l| Arc::ptr_eq(l, live))
+            {
+                table.remove(&live.session);
+            }
+        }
+        {
+            let mut inner = lock(&live.inner);
+            inner.turn_since = None;
+            inner.tasks.clear();
+            inner.requests.clear();
+            inner.tools.clear();
+            inner.context = None;
+        }
+        self.sync_state(live);
+        self.emit_session(&live.session);
     }
 
     /// An item of a delivery at host position `at` did not reach the store: stop this process's
