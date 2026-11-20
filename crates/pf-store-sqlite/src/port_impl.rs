@@ -583,14 +583,20 @@ fn write_host_mark(
     let next = match held {
         Some(c) if c.unit == mark.unit && c.incarnation == mark.incarnation => {
             let committed = c.committed.max(mark.at);
+            let exited = c.exited || mark.exited;
             match &mark.checkpoint {
                 Some(state) if mark.at >= c.acked => ChatHostCursor {
                     committed,
                     acked: mark.at,
                     checkpoint: Some(state.clone()),
+                    exited,
                     ..c
                 },
-                _ => ChatHostCursor { committed, ..c },
+                _ => ChatHostCursor {
+                    committed,
+                    exited,
+                    ..c
+                },
             }
         }
         _ => ChatHostCursor {
@@ -603,6 +609,7 @@ fn write_host_mark(
                 0
             },
             checkpoint: mark.checkpoint.clone(),
+            exited: mark.exited,
         },
     };
     let text = serde_json::to_string(&next)

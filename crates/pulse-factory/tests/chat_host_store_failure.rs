@@ -215,5 +215,7 @@ fn an_exit_after_a_failed_item_write_stores_nothing_until_a_restart_reads_it_aga
         ["operator_message", "assistant_text", "turn_result"],
         "every item is stored once"
     );
-    assert!(exited(&rig) <= 1, "the exit notice is not stored twice");
+    // The exit is at the position of the last stored line (the result), and it is a first exit:
+    // the restart stores its notice once.
+    assert_eq!(exited(&rig), 1, "the exit notice is stored once");
 }

@@ -538,6 +538,11 @@ pub struct ChatHostCursor {
     pub acked: u64,
     /// The adapter's opaque state at `acked`. `None` before the first quiet point.
     pub checkpoint: Option<String>,
+    /// True once the store holds this host's exit: the exit's own write set it. The exit comes at
+    /// the cursor of the last output line, so a cursor that equals `committed` does not say that
+    /// the exit is stored; only this flag does. A cursor written before the flag reads `false`.
+    #[serde(default)]
+    pub exited: bool,
 }
 
 /// A position that comes with a write: the host, and the cursor after the output that gave it.
@@ -549,6 +554,8 @@ pub struct ChatHostMark {
     pub at: u64,
     /// The adapter's state at this quiet point. With it, the store also sets `acked`.
     pub checkpoint: Option<String>,
+    /// The output is the host's exit: the store sets `exited` with it.
+    pub exited: bool,
 }
 
 /// The kind of one chat item: the closed list of the display log. The store keeps it as text with

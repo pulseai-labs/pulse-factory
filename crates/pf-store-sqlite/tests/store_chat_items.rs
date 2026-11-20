@@ -733,6 +733,7 @@ fn mark(unit: &str, incarnation: u32, at: u64, checkpoint: Option<&str>) -> Chat
         incarnation,
         at,
         checkpoint: checkpoint.map(ToString::to_string),
+        exited: false,
     }
 }
 
@@ -749,6 +750,7 @@ fn cursor(
         committed,
         acked,
         checkpoint: checkpoint.map(ToString::to_string),
+        exited: false,
     })
 }
 
@@ -971,6 +973,48 @@ fn set_chat_host_mark_follows_the_same_rules_and_writes_no_item_and_no_admission
         .unwrap_err()
         .to_string();
     assert!(err.contains("no chat session S-9"), "{err}");
+}
+
+/// Class C1 of PR #79, round 1: the exit comes at the position of the last output line, so the
+/// cursor's position cannot say that the exit is stored. Only the flag does.
+#[test]
+fn the_exit_mark_sets_exited_and_only_the_exit_mark_does() {
+    let (_d, store) = two_sessions();
+    let exit = |at| ChatHostMark {
+        exited: true,
+        ..mark("pf-host-a-1", 1, at, None)
+    };
+    store
+        .append_chat_item(marked(
+            "S-1",
+            ChatItemKind::AssistantText,
+            mark("pf-host-a-1", 1, 100, Some("c1")),
+        ))
+        .unwrap();
+    assert!(!host_cursor(&store, "S-1").unwrap().exited);
+    // The exit at the same position: `committed` stays, `exited` is set with the notice.
+    store
+        .append_chat_item(marked("S-1", ChatItemKind::Notice, exit(100)))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-1"),
+        Some(ChatHostCursor {
+            exited: true,
+            ..cursor("pf-host-a-1", 1, 100, 100, Some("c1")).unwrap()
+        })
+    );
+    // A later mark of the same host does not clear it.
+    store
+        .set_chat_host_mark("S-1", mark("pf-host-a-1", 1, 100, None))
+        .unwrap();
+    assert!(host_cursor(&store, "S-1").unwrap().exited);
+    // The exit written alone sets it too, and a new host starts with it clear.
+    store.set_chat_host_mark("S-2", exit(30)).unwrap();
+    assert!(host_cursor(&store, "S-2").unwrap().exited);
+    store
+        .set_chat_host_mark("S-2", mark("pf-host-a-2", 2, 5, None))
+        .unwrap();
+    assert!(!host_cursor(&store, "S-2").unwrap().exited);
 }
 
 #[test]

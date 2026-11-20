@@ -299,6 +299,10 @@ pub(super) struct LiveChat {
     /// The cursor after the last output line the store consumed, in memory. A delivery at or below
     /// it is a re-read after a restart: it updates the state and writes nothing (Approach 5).
     pub committed: AtomicU64,
+    /// True once the store holds this host's exit. The exit comes at the position of the last
+    /// output line, so `committed` alone cannot say whether the exit is stored: an exit at
+    /// `committed` is a first exit until this is set (it reads the cursor's `exited`).
+    pub exit_stored: AtomicBool,
     pub opened_at: SystemTime,
     pub version: String,
     pub qualified: bool,
@@ -923,6 +927,13 @@ impl Controller {
             port: port.clone(),
             host: opened.host.clone(),
             committed: AtomicU64::new(committed),
+            exit_stored: AtomicBool::new(row.host_cursor.as_ref().is_some_and(|c| {
+                c.exited
+                    && opened
+                        .host
+                        .as_ref()
+                        .is_some_and(|h| h.unit == c.unit && h.incarnation == c.incarnation)
+            })),
             opened_at: now_t,
             version: opened.runtime_version.clone(),
             qualified: opened.qualified,
@@ -1203,13 +1214,19 @@ impl Controller {
                 return;
             }
             let positioned = live.host.as_ref().zip(at);
-            let reread =
-                positioned.is_some_and(|(_, at)| at <= live.committed.load(Ordering::SeqCst));
+            // A delivery at or below the consumed cursor was stored before. The exit is the
+            // exception: it comes at the position of the last output line, so an exit at the
+            // cursor is a re-read only when the store holds the exit itself.
+            let reread = positioned.is_some_and(|(_, at)| {
+                at <= live.committed.load(Ordering::SeqCst)
+                    && (!exited || live.exit_stored.load(Ordering::SeqCst))
+            });
             let mark = positioned.map(|(host, at)| ChatHostMark {
                 unit: host.unit.clone(),
                 incarnation: host.incarnation,
                 at,
                 checkpoint: checkpoint.clone(),
+                exited,
             });
             let ctx = Delivered {
                 reread,
@@ -1237,6 +1254,9 @@ impl Controller {
             }
             if stored && let Some((_, at)) = positioned {
                 live.committed.fetch_max(at, Ordering::SeqCst);
+                if exited {
+                    live.exit_stored.store(true, Ordering::SeqCst);
+                }
             }
             if let (Some(why), Some((_, at))) = (&failure, positioned) {
                 self.hold_unstored(live, at, why);

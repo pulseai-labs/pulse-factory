@@ -429,7 +429,9 @@ small and opaque to the controller.
 **Commit, then acknowledge.** The controller writes each item with its `at` in one transaction and
 calls `ack(chat, at)` only for a delivery that carried a checkpoint, so the bytes of a running turn
 stay in the host until its `turn_result` is stored. After `Exited` it acknowledges the exit's cursor
-and the adapter sends `exit_ack`.
+and the adapter sends `exit_ack`. The exit comes at the cursor of the last output line, so an
+exit at `committed` is a first exit unless the session's cursor holds `exited`, which the write of the
+exit's own notice sets in the same transaction; only an exit read again after that stores nothing.
 
 **`rebind`.** After a controller restart `rebind(unit, point)` reads the launched record through
 `SessionHosts`, builds the decoder from `point.checkpoint`, seeds the open requests from

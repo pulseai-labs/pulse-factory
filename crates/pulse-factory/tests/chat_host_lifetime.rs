@@ -166,6 +166,116 @@ fn a_chat_whose_child_exits_has_its_row_ended_and_its_host_gone_at_once() {
     assert_eq!(stops.len(), 1, "{stops:?}");
 }
 
+/// Class C1 of PR #79, round 1. The reply is stored and the replay holds before the next line, so
+/// the host's end of output is the cursor of the last stored line. A child that ends there gives an
+/// exit at the committed position, and that is a first exit, not one the store has already seen:
+/// it stores the notice, the ledger line and the session's new state, and the host ends.
+#[test]
+fn a_chat_that_exits_right_after_a_stored_item_stores_its_exit() {
+    let rig = ChatRig::new(
+        PLAIN,
+        None,
+        &[("assistant", "g1"), ("stream_event", "g2")],
+        &[],
+    );
+    rig.send("hello");
+    rig.wait_progress(0, host_lines_before(PLAIN, "assistant"));
+    let pid = rig.pid(0);
+    rig.release("g1");
+    rig.wait_items("the reply", |i| {
+        i.iter().any(|x| x.kind == "assistant_text")
+    });
+    // The replay has written the reply line and holds before the next `stream_event` line.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = rig.row().host_cursor.expect("the reply moved the position");
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    rig.wait_items("the exit notice", |i| {
+        i.iter()
+            .any(|x| x.kind == "notice" && x.payload["code"] == "exited")
+    });
+    rig.r
+        .wait_for("the host to end", Duration::from_secs(10), || {
+            rig.r.live_hosts().is_empty()
+        });
+    assert_eq!(rig.notices("exited").len(), 1, "one exit notice");
+    let stops: Vec<String> = rig
+        .chat_ledger()
+        .into_iter()
+        .filter(|l| l.contains(" chat stop ") && l.contains("reason=exited"))
+        .collect();
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    // The exit sits at the position the reply moved to: no byte came between them.
+    assert_eq!(
+        rig.row().host_cursor.expect("the cursor")["committed"],
+        before["committed"],
+        "the exit is at the committed position"
+    );
+}
+
+/// The other half of class C1: an exit the store holds, read again, stores nothing more. The
+/// controller dies with the child's exit unacknowledged. The test writes what a controller that
+/// stored the exit and died before the acknowledgement leaves: the `exited` notice, and `exited` in
+/// the cursor. The restart reads the exit at the committed position, stores no second notice, writes
+/// no ledger line, and acknowledges it, so the host ends.
+#[test]
+fn an_exit_the_store_holds_is_read_again_without_a_second_notice() {
+    let mut rig = ChatRig::new(
+        PLAIN,
+        None,
+        &[("assistant", "g1"), ("stream_event", "g2")],
+        &[],
+    );
+    rig.send("hello");
+    rig.wait_progress(0, host_lines_before(PLAIN, "assistant"));
+    let pid = rig.pid(0);
+    rig.release("g1");
+    rig.wait_items("the reply", |i| {
+        i.iter().any(|x| x.kind == "assistant_text")
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    rig.r.kill9();
+    let out = std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !rig.r.live_hosts().is_empty(),
+        "no controller acknowledged the exit, so the host waits"
+    );
+    {
+        let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute_batch(
+            "INSERT INTO chat_items (session_id, seq, kind, payload, created_at) \
+             SELECT 'S-1', MAX(seq) + 1, 'notice', \
+                    json_object('code', 'exited', 'text', 'the chat process exited'), \
+                    '2026-01-01T00:00:00Z' \
+             FROM chat_items WHERE session_id = 'S-1'; \
+             UPDATE chat_sessions SET host_cursor = json_set(host_cursor, '$.exited', json('true')) \
+             WHERE id = 'S-1';",
+        )
+        .unwrap();
+    }
+    rig.r.start_controller();
+    rig.r
+        .wait_for("the host to end", Duration::from_secs(10), || {
+            rig.r.live_hosts().is_empty()
+        });
+    assert_eq!(rig.notices("exited").len(), 1, "no second exit notice");
+    let stops: Vec<String> = rig
+        .chat_ledger()
+        .into_iter()
+        .filter(|l| l.contains(" chat stop ") && l.contains("reason=exited"))
+        .collect();
+    assert!(stops.is_empty(), "a re-read exit writes no line: {stops:?}");
+}
+
 #[test]
 fn survived_chats_count_against_the_cap_and_a_third_start_is_refused_with_both_named() {
     let mut rig = ChatRig::new(PLAIN, None, &[], &[]);
