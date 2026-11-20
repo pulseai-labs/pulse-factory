@@ -561,10 +561,10 @@ fn chat_session_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSessionRow> 
 /// Write the mark into the session's cursor, in the open transaction. The rules: a mark of another
 /// unit or incarnation replaces the cursor (the new host counts its output from 0, and nothing of
 /// the old one was acknowledged to it); within one host `committed` never moves back, and a
-/// checkpoint sets `acked` and the state only when it is not older than the one held. A mark that
-/// starts a turn sets `turn_since`; a mark with a checkpoint (a quiet point: no turn runs) or the
-/// exit clears it, unless it is a line read again from below `committed` (a turn that started
-/// after that line may run); any other mark leaves it.
+/// checkpoint sets `acked` and the state only when it is not older than the one held. A mark of a
+/// line in a turn names the turn's start and sets `turn_since`; a mark with a checkpoint (a quiet
+/// point: no turn runs) or the exit clears it, unless it is a line read again from below
+/// `committed` (a turn that started after that line may run); any other mark leaves it.
 fn write_host_mark(
     tx: &Transaction<'_>,
     session_id: &str,
@@ -583,7 +583,7 @@ fn write_host_mark(
                 .map_err(|e| store_err(format!("the host cursor of {session_id} is bad: {e}")))
         })
         .transpose()?;
-    // No turn runs at a quiet point or after the exit. A line that starts a turn names its time.
+    // No turn runs at a quiet point or after the exit. A line of a turn names the turn's start.
     let no_turn = mark.checkpoint.is_some() || mark.exited;
     let next = match held {
         Some(c) if c.unit == mark.unit && c.incarnation == mark.incarnation => {

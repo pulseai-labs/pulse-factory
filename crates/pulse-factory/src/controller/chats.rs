@@ -1247,17 +1247,26 @@ impl Controller {
                 at <= live.committed.load(Ordering::SeqCst)
                     && (!exited || live.exit_stored.load(Ordering::SeqCst))
             });
+            // A new line of a turn that runs names the turn's start with its position. The store
+            // then holds the start although the write of the turn's first line failed: that line
+            // gives no item, so its failed write is only printed.
+            let running = if reread {
+                None
+            } else {
+                lock(&live.inner).turn_since.map(utc)
+            };
             let mark = positioned.map(|(host, at)| ChatHostMark {
                 unit: host.unit.clone(),
                 incarnation: host.incarnation,
                 at,
                 checkpoint: checkpoint.clone(),
                 exited,
-                turn_since: None,
+                turn_since: running,
             });
             let ctx = Delivered {
                 reread,
                 mark: Cell::new(mark),
+                turn_started: Cell::new(false),
                 stored: Cell::new(false),
                 failure: Cell::new(None),
             };
@@ -1273,7 +1282,7 @@ impl Controller {
                 && let Some(mark) = ctx.mark.take()
                 && (mark.checkpoint.is_some()
                     || exited
-                    || (mark.turn_since.is_some() && !live.is_stopping()))
+                    || (ctx.turn_started.get() && !live.is_stopping()))
             {
                 match self.store.set_chat_host_mark(&live.session, mark) {
                     Ok(()) => stored = true,
@@ -1391,15 +1400,12 @@ impl Controller {
         match event {
             ChatEvent::TurnStarted { cause } => {
                 let self_started = cause != TurnCause::Operator;
-                let since = SystemTime::now();
-                // The turn's start goes to the store with this line's position, so a controller
-                // restart in the turn names the same start (see `rebind_chat`).
-                if let Some(mut mark) = ctx.mark.take() {
-                    mark.turn_since = Some(utc(since));
-                    ctx.mark.set(Some(mark));
-                }
-                {
+                let since = {
                     let mut inner = lock(&live.inner);
+                    // A turn that runs already keeps its start. The adapter starts no turn inside
+                    // a turn, so this is the turn of a rebind whose first line the host dropped:
+                    // the adapter opens it again at the first line that is left.
+                    let since = inner.turn_since.unwrap_or_else(SystemTime::now);
                     inner.turn_since = Some(since);
                     // An operator's turn resets the count. A turn nobody asked for counts.
                     inner.self_turns = if self_started {
@@ -1407,6 +1413,14 @@ impl Controller {
                     } else {
                         0
                     };
+                    since
+                };
+                // The turn's start goes to the store with this line's position, so a controller
+                // restart in the turn names the same start (see `rebind_chat`).
+                ctx.turn_started.set(true);
+                if let Some(mut mark) = ctx.mark.take() {
+                    mark.turn_since = Some(utc(since));
+                    ctx.mark.set(Some(mark));
                 }
                 if self_started {
                     self.cut_at_self_turn_cap(live);
@@ -2199,6 +2213,8 @@ struct Delivered {
     reread: bool,
     /// The delivery's position. The first item the event writes takes it.
     mark: Cell<Option<ChatHostMark>>,
+    /// The delivery started a turn: its position goes to the store although it gives no item.
+    turn_started: Cell<bool>,
     /// True once an item carried the mark into the store.
     stored: Cell<bool>,
     /// Why the first item write of this delivery failed, when one did.

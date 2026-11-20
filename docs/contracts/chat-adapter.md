@@ -432,7 +432,8 @@ small and opaque to the controller.
 calls `ack(chat, at)` only for a delivery that carried a checkpoint, so the bytes of a running turn
 stay in the host until its `turn_result` is stored. A `TurnStarted` gives no item: the controller
 writes its `at` alone, with the time the turn started (`turn_since` in the session's cursor), and
-acknowledges nothing. A checkpoint or the exit clears that time. After `Exited` it acknowledges the exit's cursor
+acknowledges nothing. Each later position of the turn names that time again, and a checkpoint or
+the exit clears it. After `Exited` it acknowledges the exit's cursor
 and the adapter sends `exit_ack`. The exit comes at the cursor of the last output line, so an
 exit at `committed` is a first exit unless the session's cursor holds `exited`, which the write of the
 exit's own notice sets in the same transaction; only an exit read again after that stores nothing.

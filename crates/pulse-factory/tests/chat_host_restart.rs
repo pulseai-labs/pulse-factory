@@ -145,30 +145,6 @@ fn plain_turn_done_once(rig: &ChatRig) {
     assert!(turns[0].contains(" cause=operator "), "{}", turns[0]);
 }
 
-/// The `process` record of the rig's session in `session list --json`, and what its line of
-/// `session list` says from `process since` on.
-fn listed(rig: &ChatRig) -> (Value, String) {
-    let listed = rig.json(&["session", "list"]);
-    let process = listed["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|s| s["id"] == rig.session.as_str())
-        .unwrap_or_else(|| panic!("{listed}"))["process"]
-        .clone();
-    let out = rig.r.cli(&["session", "list"]);
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let line = text
-        .lines()
-        .find(|l| l.starts_with(&format!("{} ", rig.session)))
-        .unwrap_or_else(|| panic!("{text}"));
-    let tail = line
-        .find("process since")
-        .map_or(line, |i| &line[i..])
-        .to_string();
-    (process, tail)
-}
-
 /// The d31 walk of 2026-11-20: after a restart in a turn, `session list` named the restart as the
 /// process's start and showed no turn. The process and the turn are the ones from before the
 /// restart, so both times stay. `assistant` is a kill after the deltas (the store holds no

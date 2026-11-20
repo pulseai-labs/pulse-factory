@@ -219,3 +219,64 @@ fn an_exit_after_a_failed_item_write_stores_nothing_until_a_restart_reads_it_aga
     // the restart stores its notice once.
     assert_eq!(exited(&rig), 1, "the exit notice is stored once");
 }
+
+/// PR #80, round 1: the write of a turn's start fails (it is a position with no item, so the
+/// failure is only logged). The turn's next item carries the start again, so a restart in the turn
+/// still names it.
+#[test]
+fn a_turn_start_whose_own_write_failed_is_stored_with_the_turns_next_item() {
+    let mut rig = ChatRig::new(PLAIN, None, &[("assistant", "g1"), ("result", "g2")], &[]);
+    // Every write of the session's cursor fails. An item with no position is still stored.
+    {
+        let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fault_cursor BEFORE UPDATE OF host_cursor ON chat_sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected store fault'); END;",
+        )
+        .unwrap();
+    }
+    rig.send("hello");
+    rig.wait_progress(0, host_lines_before(PLAIN, "assistant"));
+    rig.r
+        .wait_for("the turn in session list", Duration::from_secs(30), || {
+            listed(&rig).0["turn_since"].is_string()
+        });
+    let (before, line_before) = listed(&rig);
+    assert!(
+        rig.row().host_cursor.is_none(),
+        "the start's own write failed: {:?}",
+        rig.row().host_cursor
+    );
+    {
+        let db = rusqlite::Connection::open(rig.r.state.join("store.sqlite")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute_batch("DROP TRIGGER fault_cursor;").unwrap();
+    }
+
+    // The reply is the turn's next item: its position carries the turn's start.
+    rig.release("g1");
+    rig.wait_items("the reply item", |i| {
+        i.iter().any(|x| x.kind == "assistant_text")
+    });
+    assert_eq!(
+        rig.row().host_cursor.unwrap()["turn_since"],
+        before["turn_since"],
+        "the store holds the start now"
+    );
+    rig.restart();
+    let (after, line_after) = listed(&rig);
+    assert_eq!(after["turn_since"], before["turn_since"], "{after}");
+    assert_eq!(line_after, line_before);
+
+    rig.release("g2");
+    rig.wait_items("the turn's result", |i| {
+        i.iter().any(|x| x.kind == "turn_result")
+    });
+    assert_eq!(
+        without_notices(&rig),
+        ["operator_message", "assistant_text", "turn_result"],
+        "every item is stored once"
+    );
+    assert_eq!(rig.row().cost_micros as u64, result_micros(PLAIN)[0]);
+}

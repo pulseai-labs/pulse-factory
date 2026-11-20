@@ -543,10 +543,9 @@ pub struct ChatHostCursor {
     /// the exit is stored; only this flag does. A cursor written before the flag reads `false`.
     #[serde(default)]
     pub exited: bool,
-    /// When the turn that runs in this host started, as UTC text: the mark of the turn's first
-    /// output line set it. `None` when no turn runs: a quiet point and the exit clear it. A
-    /// restart reads it, so the turn keeps its start. A cursor written before the field reads
-    /// `None`.
+    /// When the turn that runs in this host started, as UTC text: the marks of the turn's output
+    /// lines set it. `None` when no turn runs: a quiet point and the exit clear it. A restart
+    /// reads it, so the turn keeps its start. A cursor written before the field reads `None`.
     #[serde(default)]
     pub turn_since: Option<String>,
 }
@@ -563,8 +562,10 @@ pub struct ChatHostMark {
     pub checkpoint: Option<String>,
     /// The output is the host's exit: the store sets `exited` with it, and clears `turn_since`.
     pub exited: bool,
-    /// The output line started a turn at this time (UTC text): the store sets `turn_since` with
-    /// it. `None` for every other line, which leaves `turn_since` as it is.
+    /// The output line belongs to a turn that started at this time (UTC text): the store sets
+    /// `turn_since` with it. The mark of a turn's first line names it, and each later mark of the
+    /// turn names it again, so a start whose own write failed is stored with the turn's next
+    /// item. `None` for a line outside a turn, which leaves `turn_since` as it is.
     pub turn_since: Option<String>,
 }
 
@@ -714,8 +715,8 @@ pub struct NewChatItem {
     pub usage: Option<Usage>,
     /// An item written from host output: the store sets the session's `committed` to `at` in the
     /// same transaction. A mark of another unit or incarnation replaces the cursor, and a
-    /// `committed` never moves back within one unit. A mark that starts a turn sets `turn_since`,
-    /// and a quiet point or the exit clears it.
+    /// `committed` never moves back within one unit. A mark of a line in a turn sets
+    /// `turn_since`, and a quiet point or the exit clears it.
     pub host: Option<ChatHostMark>,
     pub created_at: String,
 }

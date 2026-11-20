@@ -1098,6 +1098,27 @@ fn a_turn_start_mark_sets_turn_since_and_a_quiet_point_or_the_exit_clears_it() {
         )
         .unwrap();
     assert_eq!(turn_since("S-2").as_deref(), Some(t2));
+    // Each mark of a turn names the start again. An item sets it when the start's own write never
+    // came (PR #80, round 1), and the result at a quiet point clears it although its mark names it.
+    let in_turn = |at, checkpoint| ChatHostMark {
+        turn_since: Some(t1.to_string()),
+        ..mark("pf-host-a-4", 4, at, checkpoint)
+    };
+    store
+        .append_chat_item(marked("S-2", ChatItemKind::AssistantText, in_turn(3, None)))
+        .unwrap();
+    assert_eq!(turn_since("S-2").as_deref(), Some(t1));
+    store
+        .append_chat_item(marked(
+            "S-2",
+            ChatItemKind::TurnResult,
+            in_turn(9, Some("c4")),
+        ))
+        .unwrap();
+    assert_eq!(
+        host_cursor(&store, "S-2"),
+        cursor("pf-host-a-4", 4, 9, 9, Some("c4"))
+    );
 }
 
 /// A cursor written before `turn_since` existed reads with none, and an older reader ignores the
