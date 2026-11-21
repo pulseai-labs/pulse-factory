@@ -131,6 +131,30 @@ pub fn first_assistant_text(name: &str) -> String {
     panic!("{name} has no assistant text");
 }
 
+/// The `process` record of the rig's session in `session list --json`, and what its line of
+/// `session list` says from `process since` on.
+pub fn listed(rig: &ChatRig) -> (Value, String) {
+    let listed = rig.json(&["session", "list"]);
+    let process = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == rig.session.as_str())
+        .unwrap_or_else(|| panic!("{listed}"))["process"]
+        .clone();
+    let out = rig.r.cli(&["session", "list"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with(&format!("{} ", rig.session)))
+        .unwrap_or_else(|| panic!("{text}"));
+    let tail = line
+        .find("process since")
+        .map_or(line, |i| &line[i..])
+        .to_string();
+    (process, tail)
+}
+
 pub fn alive(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "))
 }

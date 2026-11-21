@@ -355,6 +355,93 @@ fn in_turn_decoder() -> Decoder {
     d
 }
 
+/// An `init` of CLI 2.1.319. A turn a message started names the message in `user_message_uuids`;
+/// a turn the CLI started by itself has no such field (the `background_task` recording).
+fn init_line(uuids: Option<&[&str]>) -> Value {
+    let mut msg = json!({"type": "system", "subtype": "init", "apiKeySource": "none", "tools": [],
+        "claude_code_version": "2.1.319", "session_id": "s"});
+    if let Some(uuids) = uuids {
+        msg["user_message_uuids"] = json!(uuids);
+    }
+    msg
+}
+
+fn result_line(uuids: &[&str]) -> Value {
+    json!({"type": "result", "subtype": "success", "is_error": false, "stop_reason": "end_turn",
+        "duration_ms": 5, "total_cost_usd": 0.0, "modelUsage": {}, "user_message_uuids": uuids})
+}
+
+fn turn_causes(d: &mut Decoder, uuids: Option<&[&str]>) -> (TurnCause, TurnCause) {
+    let out = feed(d, init_line(uuids));
+    let [Out::Event(ChatEvent::TurnStarted { cause: started })] = out[..] else {
+        panic!("{out:?}");
+    };
+    let out = feed(d, result_line(uuids.unwrap_or(&[])));
+    let [Out::Event(ChatEvent::TurnResult { cause: ended, .. })] = out[..] else {
+        panic!("{out:?}");
+    };
+    (started, ended)
+}
+
+/// The d31 walk of 2026-11-20: a controller restart in a turn. The new decoder never saw the send
+/// (the store held no position yet, so there was no checkpoint and the `init` was not a re-read),
+/// and the operator's turn was stored with cause `task`.
+#[test]
+fn a_turn_whose_init_names_a_message_is_not_a_task_turn_when_the_decoder_never_saw_the_send() {
+    let both = (TurnCause::Operator, TurnCause::Operator);
+    // A decoder built from nothing, and the `init` is not a re-read.
+    let mut d = Decoder::new("2.1.319", "s", false);
+    assert_eq!(
+        turn_causes(&mut d, Some(&["sent-in-the-life-before"])),
+        both
+    );
+    // The same from a checkpoint taken before the send.
+    let checkpoint = Decoder::new("2.1.319", "s", false).checkpoint();
+    let mut d = Decoder::restore("2.1.319", false, &checkpoint).expect("a checkpoint");
+    assert_eq!(
+        turn_causes(&mut d, Some(&["sent-in-the-life-before"])),
+        both
+    );
+    // And as a re-read, which was right before.
+    let mut d = Decoder::new("2.1.319", "s", false);
+    d.set_reread(true);
+    assert_eq!(
+        turn_causes(&mut d, Some(&["sent-in-the-life-before"])),
+        both
+    );
+    // The CLI woke itself: the `init` names no message, and the turn is a task turn, re-read or not.
+    for reread in [false, true] {
+        let mut d = Decoder::new("2.1.319", "s", false);
+        d.set_reread(reread);
+        assert_eq!(
+            turn_causes(&mut d, None),
+            (TurnCause::Task, TurnCause::Task),
+            "reread {reread}"
+        );
+        assert_eq!(
+            turn_causes(&mut d, Some(&[])),
+            (TurnCause::Task, TurnCause::Task),
+            "reread {reread}, an empty list"
+        );
+    }
+}
+
+#[test]
+fn a_send_a_checkpoint_holds_keeps_its_own_kind_across_a_restore() {
+    let mut d = Decoder::new("2.1.319", "s", false);
+    d.note_send("n1", InputKind::Notice);
+    d.note_send("o1", InputKind::Operator);
+    let mut d = Decoder::restore("2.1.319", false, &d.checkpoint()).expect("a checkpoint");
+    assert_eq!(
+        turn_causes(&mut d, Some(&["n1"])),
+        (TurnCause::Notice, TurnCause::Notice)
+    );
+    assert_eq!(
+        turn_causes(&mut d, Some(&["o1"])),
+        (TurnCause::Operator, TurnCause::Operator)
+    );
+}
+
 #[test]
 fn a_cancelled_request_closes_an_open_one_and_ignores_an_unknown_one() {
     let mut d = in_turn_decoder();

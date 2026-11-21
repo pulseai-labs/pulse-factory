@@ -84,7 +84,9 @@ Each event is JSON with a `type` tag in snake case. These are the shapes:
 ```
 
 - `cause` of a turn is `operator` or `notice` (from the send it consumed) or `task` (a background task
-  the chat started finished, and the runtime started the turn itself).
+  the chat started finished, and the runtime started the turn itself). A turn that a message started
+  is never `task`: when the adapter no longer knows the send after a controller restart (the
+  checkpoint holds only the sends open at a quiet point), the cause is `operator`.
 - `reason` of an approval is the runtime's decision text, else the request's own description.
 - `stop` of a result is the result's `stop_reason`; for an error result it is the error subtype
   (`error_during_execution` for an interrupt), because an interrupt's `stop_reason` is `tool_use`.
@@ -428,7 +430,10 @@ small and opaque to the controller.
 
 **Commit, then acknowledge.** The controller writes each item with its `at` in one transaction and
 calls `ack(chat, at)` only for a delivery that carried a checkpoint, so the bytes of a running turn
-stay in the host until its `turn_result` is stored. After `Exited` it acknowledges the exit's cursor
+stay in the host until its `turn_result` is stored. A `TurnStarted` gives no item: the controller
+writes its `at` alone, with the time the turn started (`turn_since` in the session's cursor), and
+acknowledges nothing. Each later position of the turn names that time again, and a checkpoint or
+the exit clears it. After `Exited` it acknowledges the exit's cursor
 and the adapter sends `exit_ack`. The exit comes at the cursor of the last output line, so an
 exit at `committed` is a first exit unless the session's cursor holds `exited`, which the write of the
 exit's own notice sets in the same transaction; only an exit read again after that stores nothing.
@@ -439,7 +444,14 @@ exit's own notice sets in the same transaction; only an exit read again after th
 `point.acked`. A line that ends at or below `point.committed` is read again: the decoder updates its
 state and the adapter sends the same events, and sends no control response for an inbound request
 (the controller already answered or closed it). A host whose child ended while the controller was
-down is survived too: the adapter reads what the child left, then sends `Exited`.
+down is survived too: the adapter reads what the child left, then sends `Exited`. The controller
+keeps the process's start (the start of the host's registry row) and the start of the turn that ran
+at the restart (the cursor's `turn_since`): a rebind is no new process and no new turn. A cursor
+written before `turn_since` existed holds none, so a turn that ran across that upgrade counts from
+the rebind. When the host dropped the result of the turn that ran at the restart (`OutputLost`), the
+controller cannot see that the turn ended: the start stays until the next result or the exit, and a
+later turn in the lines that are left shows it until its own result. A chat with no host is never
+rebound: its times come from the controller's clock at its open.
 
 **Output lost.** A host `Gap` becomes `OutputLost` for the part above `committed`, and the adapter
 skips to the next newline. A request whose line was lost can still be answered from `point.pending`; a

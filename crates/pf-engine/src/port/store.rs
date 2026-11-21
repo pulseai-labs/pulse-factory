@@ -543,6 +543,11 @@ pub struct ChatHostCursor {
     /// the exit is stored; only this flag does. A cursor written before the flag reads `false`.
     #[serde(default)]
     pub exited: bool,
+    /// When the turn that runs in this host started, as UTC text: the marks of the turn's output
+    /// lines set it. `None` when no turn runs: a quiet point and the exit clear it. A restart
+    /// reads it, so the turn keeps its start. A cursor written before the field reads `None`.
+    #[serde(default)]
+    pub turn_since: Option<String>,
 }
 
 /// A position that comes with a write: the host, and the cursor after the output that gave it.
@@ -552,10 +557,16 @@ pub struct ChatHostMark {
     pub incarnation: u32,
     /// The cursor after the output line.
     pub at: u64,
-    /// The adapter's state at this quiet point. With it, the store also sets `acked`.
+    /// The adapter's state at this quiet point. With it, the store also sets `acked`, and clears
+    /// `turn_since`: no turn runs at a quiet point.
     pub checkpoint: Option<String>,
-    /// The output is the host's exit: the store sets `exited` with it.
+    /// The output is the host's exit: the store sets `exited` with it, and clears `turn_since`.
     pub exited: bool,
+    /// The output line belongs to a turn that started at this time (UTC text): the store sets
+    /// `turn_since` with it. The mark of a turn's first line names it, and each later mark of the
+    /// turn names it again, so a start whose own write failed is stored with the turn's next
+    /// item. `None` for a line outside a turn, which leaves `turn_since` as it is.
+    pub turn_since: Option<String>,
 }
 
 /// The kind of one chat item: the closed list of the display log. The store keeps it as text with
@@ -704,7 +715,8 @@ pub struct NewChatItem {
     pub usage: Option<Usage>,
     /// An item written from host output: the store sets the session's `committed` to `at` in the
     /// same transaction. A mark of another unit or incarnation replaces the cursor, and a
-    /// `committed` never moves back within one unit.
+    /// `committed` never moves back within one unit. A mark of a line in a turn sets
+    /// `turn_since`, and a quiet point or the exit clears it.
     pub host: Option<ChatHostMark>,
     pub created_at: String,
 }
@@ -1431,8 +1443,8 @@ pub trait Store: Send + Sync {
     /// to the session's totals, in one transaction. It makes no admission and no ledger line
     /// (ADR-0003). An error writes nothing.
     fn append_chat_item(&self, item: NewChatItem) -> Result<ChatItemRow, StoreError>;
-    /// Write a position that comes with no item (the adapter's state between turns), by the rules
-    /// of [`NewChatItem::host`]. It makes no admission and no ledger line: the display log and its
+    /// Write a position that comes with no item (the adapter's state between turns, the start of
+    /// a turn, or the exit), by the rules of [`NewChatItem::host`]. It makes no admission and no ledger line: the display log and its
     /// cursor are written outside admission (ADR-0003). An unknown session is an error.
     fn set_chat_host_mark(&self, session_id: &str, mark: ChatHostMark) -> Result<(), StoreError>;
 

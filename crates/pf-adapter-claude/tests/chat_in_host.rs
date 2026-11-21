@@ -381,6 +381,84 @@ fn a_second_adapter_rebinds_the_same_unit_and_reads_the_turn_again_with_no_secon
     second.stop(&again.chat).unwrap();
 }
 
+/// The d31 walk of 2026-11-20: the controller restarted while a reply streamed. A turn's start
+/// and its deltas store no item, so the store held no position for the host: nothing acknowledged,
+/// nothing committed and no checkpoint. The second adapter reads the `init` again as a new line,
+/// with a decoder that never saw the send. The message started the turn, so it stays an operator
+/// turn.
+#[test]
+fn a_rebind_with_nothing_committed_keeps_the_cause_of_the_turn_a_message_started() {
+    let root = tempfile::tempdir().unwrap();
+    let mut body: Vec<Line> = scene::open();
+    body.push(scene::user("u1", "go"));
+    body.push(scene::sys_init(&["u1"]));
+    body.push(scene::delta("hi"));
+    body.push(scene::text("hi"));
+    body.push(scene::result(0.5, 10, 20, &["u1"]));
+    let fixture = write_fixture(root.path(), "streamed_reply", &body);
+    let gate = root.path().join("gate-assistant");
+    let s = setup(
+        &fixture,
+        &format!("--gate assistant:{}", gate.display()),
+        BTreeMap::new(),
+    );
+    let first = hosted_with(s.cfg.clone());
+    let mut opened = first.open(&spec(s.work.path())).expect("open");
+    let unit = opened.host.clone().unwrap().unit;
+    first.send(&opened.chat, InputKind::Operator, "go").unwrap();
+    let before = deliveries(&mut opened.events, 15, |d| {
+        d.iter()
+            .any(|x| matches!(x.event, ChatEvent::TextDelta { .. }))
+    });
+    assert_eq!(
+        before[0].event,
+        ChatEvent::TurnStarted {
+            cause: TurnCause::Operator
+        }
+    );
+    assert!(
+        before.iter().all(|d| d.checkpoint.is_none()),
+        "no quiet point yet, so the controller has no checkpoint: {before:#?}"
+    );
+    first.detach(&opened.chat).unwrap();
+
+    let second = ClaudeChat::new(s.cfg.clone());
+    second.set_hosts(first.hosts.clone());
+    let point = ChatResumePoint {
+        runtime_session: opened.session.clone(),
+        acked: 0,
+        committed: 0,
+        checkpoint: None,
+        pending: Vec::new(),
+    };
+    let ChatRebind::Survived(mut again) = second.rebind(&unit, &point) else {
+        panic!("the host survived");
+    };
+    let mut all = deliveries(&mut again.events, 15, |d| d.len() >= before.len());
+    assert_eq!(
+        all[0].event,
+        ChatEvent::TurnStarted {
+            cause: TurnCause::Operator
+        },
+        "the turn read again is the operator's"
+    );
+    std::fs::write(&gate, b"").unwrap();
+    all.extend(deliveries(&mut again.events, 15, has_result));
+    check_order(&events_of(&all)).unwrap();
+    assert!(
+        matches!(
+            all.last().unwrap().event,
+            ChatEvent::TurnResult {
+                cause: TurnCause::Operator,
+                ..
+            }
+        ),
+        "{:?}",
+        all.last()
+    );
+    second.stop(&again.chat).unwrap();
+}
+
 #[test]
 fn a_rebind_from_a_checkpoint_takes_the_totals_and_a_pending_request_can_be_answered() {
     // Turn one ends (a quiet point, so a checkpoint); turn two asks for approval and waits.

@@ -124,3 +124,67 @@ fn a_host_that_dropped_output_gives_one_output_lost_notice_and_the_turn_is_still
     assert_eq!(result.payload["usage"]["cost_micros"].as_u64(), Some(want));
     assert_eq!(rig.chat_lines("turn").len(), 1);
 }
+
+/// PR #80, round 1: the host dropped the start of a turn that still runs. The decoder opens the
+/// turn again at the first line that is left, which gives a second `TurnStarted` for the same turn.
+/// The turn keeps the start the store holds: it is no new turn.
+#[test]
+fn a_turn_that_lost_output_at_a_restart_and_still_runs_keeps_its_start() {
+    let tmp = tempfile::tempdir().unwrap();
+    let big = tripled_big_output(tmp.path());
+    let fixture_path = big.as_str();
+    let mut rig = ChatRig::with(
+        fixture_path,
+        None,
+        &[("user", "g1"), ("result", "g2")],
+        &[],
+        &[("session.replay_bytes", "65536")],
+    );
+    rig.send("make some output");
+    rig.wait_progress(0, host_lines_before(fixture_path, "user"));
+    rig.r.wait_for(
+        "the turn in session list",
+        std::time::Duration::from_secs(30),
+        || listed(&rig).0["turn_since"].is_string(),
+    );
+    let (before, line_before) = listed(&rig);
+    let pid = rig.pid(0);
+    rig.r.kill9();
+    // The replay writes the big output, well past the buffer, and holds before the result.
+    rig.release("g1");
+    rig.wait_progress(0, host_lines_before(fixture_path, "result"));
+    rig.r.start_controller();
+    assert!(alive(pid), "the chat's process is the same");
+    rig.wait_items("the notice of the lost output", |i| {
+        i.iter()
+            .any(|x| x.kind == "notice" && x.payload["code"] == "output_lost")
+    });
+    // The lines after the gap are read: the turn was opened again.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(rig.count("turn_result"), 0, "the turn still runs");
+    let (after, line_after) = listed(&rig);
+    assert_eq!(after["since"], before["since"], "{after}");
+    assert_eq!(
+        after["turn_since"], before["turn_since"],
+        "the turn that lost output is the same turn: {after}"
+    );
+    assert_eq!(line_after, line_before);
+    assert_eq!(
+        rig.row().host_cursor.unwrap()["turn_since"],
+        before["turn_since"],
+        "the store holds the same start"
+    );
+
+    rig.release("g2");
+    rig.wait_items("the turn's result", |i| {
+        i.iter().any(|x| x.kind == "turn_result")
+    });
+    rig.r.wait_for(
+        "the end of the turn in session list",
+        std::time::Duration::from_secs(30),
+        || listed(&rig).0["turn_since"].is_null(),
+    );
+    assert!(rig.row().host_cursor.unwrap()["turn_since"].is_null());
+    assert_eq!(rig.count("turn_result"), 1);
+    assert_eq!(rig.row().cost_micros as u64, result_micros("big_output")[0]);
+}
