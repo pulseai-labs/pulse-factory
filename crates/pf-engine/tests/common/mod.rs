@@ -197,7 +197,11 @@ impl Store for FakeStore {
                 | Effect::LaunchRecordWrite(_)
                 | Effect::HostStarted(_)
                 | Effect::HostEnded { .. }
-                | Effect::HostPositionWrite { .. } => {}
+                | Effect::HostPositionWrite { .. }
+                | Effect::NoticeAdd(_)
+                | Effect::NoticeSupersede { .. }
+                | Effect::NoticeSend { .. }
+                | Effect::NoticeAck { .. } => {}
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
@@ -487,6 +491,34 @@ impl Store for FakeStore {
 
     fn host_position(&self, _unit: &str) -> Result<Option<HostPositionRow>, StoreError> {
         Ok(None)
+    }
+
+    fn notice(&self, _position: u64) -> Result<Option<NoticeRow>, StoreError> {
+        Ok(None)
+    }
+
+    fn notices_after(&self, _position: u64, _limit: u32) -> Result<Vec<NoticeRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn newest_notice(&self) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+
+    fn notice_deliveries(&self, _position: u64) -> Result<Vec<DeliveryRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn waiting_deliveries(&self, _channel: &str) -> Result<Vec<DeliveryRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn notice_targets(&self) -> Result<Vec<NoticeTargetRow>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn notice_sends(&self, _position: u64) -> Result<Vec<NoticeSendRow>, StoreError> {
+        Ok(Vec::new())
     }
 }
 

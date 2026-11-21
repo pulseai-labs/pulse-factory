@@ -172,6 +172,8 @@ impl Controller {
             "ack" => self.acted(device, Act::Ack, &request.args),
             // A device arms the run of a start card with a confirm code (`r1.s4.w2`).
             "arm" => self.device_arm(device, &request.args),
+            // A device acknowledges the notices it was sent (`r2.s11.w3`).
+            "notice_ack" => self.device_notice_ack(&device.id, &request.args),
             _ => {
                 use pf_ipc::Handler;
                 self.handle(request)

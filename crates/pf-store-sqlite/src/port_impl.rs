@@ -8,9 +8,10 @@ use std::collections::BTreeMap;
 use pf_engine::port::store::{
     ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatHostCursor,
     ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit,
-    Committed, DeviceRow, Effect, HostPositionRow, HostRow, LaunchRecordRow, LedgerLine, NEW_ID,
-    NewChatItem, NewChatSession, NewDevice, NewHost, NewLaunchRecord, NewProject, NewRequest,
-    NodeKind, NodeRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD,
+    Committed, DeliveryRow, DeliveryState, DeviceRow, Effect, HostPositionRow, HostRow,
+    LaunchRecordRow, LedgerLine, NEW_ID, NOTICE_EVENTS, NewChatItem, NewChatSession, NewDevice,
+    NewHost, NewLaunchRecord, NewNotice, NewProject, NewRequest, NodeKind, NodeRow, NoticeRow,
+    NoticeSendRow, NoticeTargetRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD,
     REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow,
     SessionWorktree, SettingRow, SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText,
     WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
@@ -1243,6 +1244,246 @@ fn host_position_write(
     Ok(())
 }
 
+/// Add a notice with its deliveries and return its position. The position is the highest of the
+/// table plus one, from 1: no row is ever deleted, so no position is used twice.
+fn notice_add(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    n: &NewNotice,
+) -> Result<String, EffectError> {
+    let reject = |why: String| Err(EffectError::Rejected(why));
+    if !NOTICE_EVENTS.contains(&n.event.as_str()) {
+        return reject(format!(
+            "notice event {:?} is not one of {}",
+            n.event,
+            NOTICE_EVENTS.join(", ")
+        ));
+    }
+    if n.revision == 0 {
+        return reject("a notice revision starts at 1".to_string());
+    }
+    if n.deliveries.is_empty() {
+        return reject("a notice needs at least one delivery".to_string());
+    }
+    let mut channels = std::collections::BTreeSet::new();
+    for d in &n.deliveries {
+        if d.channel.is_empty() {
+            return reject("a delivery needs a channel".to_string());
+        }
+        if !channels.insert(d.channel.as_str()) {
+            return reject(format!(
+                "the notice holds a delivery for channel {} twice",
+                d.channel
+            ));
+        }
+        if d.why.as_deref() == Some("") {
+            return reject("a superseded delivery needs a reason".to_string());
+        }
+    }
+    let taken: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM notices WHERE request_id = ?1 AND revision = ?2 AND event = ?3)",
+        params![n.request_id, i64::from(n.revision), n.event],
+        |r| r.get(0),
+    )?;
+    if taken {
+        return reject(format!(
+            "request {} at revision {} has a notice of the event {} already",
+            n.request_id, n.revision, n.event
+        ));
+    }
+    tx.execute(
+        "INSERT INTO notices (request_id, revision, event, run_id, project_id, created_at, command_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            n.request_id,
+            i64::from(n.revision),
+            n.event,
+            n.run_id,
+            n.project_id,
+            n.created_at,
+            command_id
+        ],
+    )
+    .map_err(backstop)?;
+    let position = tx.last_insert_rowid();
+    for d in &n.deliveries {
+        let state = if d.why.is_some() {
+            DeliveryState::Superseded
+        } else {
+            DeliveryState::Waiting
+        };
+        tx.execute(
+            "INSERT INTO notice_deliveries (position, channel, text, state, why, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                position,
+                d.channel,
+                d.text,
+                state.as_str(),
+                d.why,
+                n.created_at
+            ],
+        )
+        .map_err(backstop)?;
+    }
+    Ok(position.to_string())
+}
+
+/// Supersede one delivery that waits.
+fn notice_supersede(
+    tx: &Transaction<'_>,
+    position: u64,
+    channel: &str,
+    why: &str,
+    updated_at: &str,
+) -> Result<(), EffectError> {
+    if why.is_empty() {
+        return Err(EffectError::Rejected(
+            "a superseded delivery needs a reason".to_string(),
+        ));
+    }
+    let state: Option<String> = tx
+        .query_row(
+            "SELECT state FROM notice_deliveries WHERE position = ?1 AND channel = ?2",
+            params![to_i64(position), channel],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match state.as_deref() {
+        None => Err(EffectError::Rejected(format!(
+            "no delivery of notice {position} on channel {channel}"
+        ))),
+        Some("superseded") => Err(EffectError::Rejected(format!(
+            "the delivery of notice {position} on channel {channel} is superseded already"
+        ))),
+        Some(_) => {
+            tx.execute(
+                "UPDATE notice_deliveries SET state = 'superseded', why = ?3, updated_at = ?4 \
+                 WHERE position = ?1 AND channel = ?2",
+                params![to_i64(position), channel, why, updated_at],
+            )
+            .map_err(backstop)?;
+            Ok(())
+        }
+    }
+}
+
+/// Record one send of a notice to a target: the count is the stored one plus 1.
+fn notice_send(
+    tx: &Transaction<'_>,
+    position: u64,
+    target: &str,
+    sends: u64,
+    sent_at: &str,
+) -> Result<(), EffectError> {
+    let known: bool = tx.query_row(
+        "SELECT EXISTS (SELECT 1 FROM notices WHERE position = ?1)",
+        [to_i64(position)],
+        |r| r.get(0),
+    )?;
+    if !known {
+        return Err(EffectError::Rejected(format!("no notice {position}")));
+    }
+    if target.is_empty() {
+        return Err(EffectError::Rejected("a send needs a target".to_string()));
+    }
+    let stored: Option<i64> = tx
+        .query_row(
+            "SELECT sends FROM notice_sends WHERE position = ?1 AND target = ?2",
+            params![to_i64(position), target],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let next = stored.map_or(1, |s| to_u64(s) + 1);
+    if sends != next {
+        return Err(EffectError::Rejected(if stored.is_none() {
+            format!(
+                "sends {sends} of notice {position} to {target} is wrong: the first send starts at 1"
+            )
+        } else {
+            format!(
+                "sends {sends} of notice {position} to {target} is not the next count: {next} is next"
+            )
+        }));
+    }
+    match stored {
+        None => tx.execute(
+            "INSERT INTO notice_sends (position, target, sends, last_sent_at) VALUES (?1, ?2, ?3, ?4)",
+            params![to_i64(position), target, to_i64(sends), sent_at],
+        ),
+        Some(_) => tx.execute(
+            "UPDATE notice_sends SET sends = ?3, last_sent_at = ?4 WHERE position = ?1 AND target = ?2",
+            params![to_i64(position), target, to_i64(sends), sent_at],
+        ),
+    }
+    .map_err(backstop)?;
+    Ok(())
+}
+
+/// Make a target's row, or raise its position.
+fn notice_ack(
+    tx: &Transaction<'_>,
+    target: &str,
+    channel: &str,
+    position: u64,
+    outcome: &str,
+    updated_at: &str,
+) -> Result<(), EffectError> {
+    if target.is_empty() {
+        return Err(EffectError::Rejected(
+            "an acknowledgement needs a target".to_string(),
+        ));
+    }
+    if channel.is_empty() {
+        return Err(EffectError::Rejected(
+            "an acknowledgement needs a channel".to_string(),
+        ));
+    }
+    let newest: i64 = tx.query_row("SELECT COALESCE(MAX(position), 0) FROM notices", [], |r| {
+        r.get(0)
+    })?;
+    if position > to_u64(newest) {
+        return Err(EffectError::Rejected(format!(
+            "position {position} is above the newest notice, {newest}"
+        )));
+    }
+    let stored: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT acked, channel FROM notice_targets WHERE target = ?1",
+            [target],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match stored {
+        None => {
+            tx.execute(
+                "INSERT INTO notice_targets (target, channel, acked, outcome, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![target, channel, to_i64(position), outcome, updated_at],
+            )
+            .map_err(backstop)?;
+        }
+        Some((_, stored_channel)) if stored_channel != channel => {
+            return Err(EffectError::Rejected(format!(
+                "target {target} is on channel {stored_channel}, not {channel}"
+            )));
+        }
+        Some((acked, _)) if position <= to_u64(acked) => {
+            return Err(EffectError::Rejected(format!(
+                "position {position} does not rise: target {target} has {acked} already"
+            )));
+        }
+        Some(_) => {
+            tx.execute(
+                "UPDATE notice_targets SET acked = ?2, outcome = ?3, updated_at = ?4 WHERE target = ?1",
+                params![target, to_i64(position), outcome, updated_at],
+            )
+            .map_err(backstop)?;
+        }
+    }
+    Ok(())
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
 fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
@@ -1319,6 +1560,31 @@ fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assi
             position,
             updated_at,
         } => host_position_write(tx, command_id, unit, *seq, position, updated_at)?,
+        Effect::NoticeAdd(n) => {
+            return Ok(Assigned {
+                new_id: Some(notice_add(tx, command_id, n)?),
+                worktree_id: None,
+            });
+        }
+        Effect::NoticeSupersede {
+            position,
+            channel,
+            why,
+            updated_at,
+        } => notice_supersede(tx, *position, channel, why, updated_at)?,
+        Effect::NoticeSend {
+            position,
+            target,
+            sends,
+            sent_at,
+        } => notice_send(tx, *position, target, *sends, sent_at)?,
+        Effect::NoticeAck {
+            target,
+            channel,
+            position,
+            outcome,
+            updated_at,
+        } => notice_ack(tx, target, channel, *position, outcome, updated_at)?,
     }
     Ok(Assigned::default())
 }
@@ -1369,6 +1635,24 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
     {
         return Ok(Committed::Rejected(
             "a launch record, a host row or a host position is written only in an admission under @controller"
+                .to_string(),
+        ));
+    }
+    // A notice, its sends and its acknowledgements are the controller's to write: the effects are
+    // refused in any other scope, and the admission rolls back with them.
+    if c.run_id != CONTROLLER_SCOPE
+        && c.effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::NoticeAdd(_)
+                    | Effect::NoticeSupersede { .. }
+                    | Effect::NoticeSend { .. }
+                    | Effect::NoticeAck { .. }
+            )
+        })
+    {
+        return Ok(Committed::Rejected(
+            "a notice, a send or an acknowledgement is written only in an admission under @controller"
                 .to_string(),
         ));
     }
@@ -1761,6 +2045,40 @@ fn set_host_mark(
     }
     write_host_mark(&tx, session_id, mark)?;
     tx.commit().map_err(sql_error)
+}
+
+const NOTICE_COLUMNS: &str =
+    "position, request_id, revision, event, run_id, project_id, created_at, command_id";
+
+fn notice_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<NoticeRow> {
+    Ok(NoticeRow {
+        position: to_u64(r.get(0)?),
+        request_id: r.get(1)?,
+        revision: u32::try_from(r.get::<_, i64>(2)?).unwrap_or(0),
+        event: r.get(3)?,
+        run_id: r.get(4)?,
+        project_id: r.get(5)?,
+        created_at: r.get(6)?,
+        command_id: r.get(7)?,
+    })
+}
+
+const DELIVERY_COLUMNS: &str = "position, channel, text, state, why, updated_at";
+
+fn delivery_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryRow> {
+    let state: String = r.get(3)?;
+    Ok(DeliveryRow {
+        position: to_u64(r.get(0)?),
+        channel: r.get(1)?,
+        text: r.get(2)?,
+        state: match state.as_str() {
+            "waiting" => DeliveryState::Waiting,
+            "superseded" => DeliveryState::Superseded,
+            other => return Err(bad("delivery state", other)),
+        },
+        why: r.get(4)?,
+        updated_at: r.get(5)?,
+    })
 }
 
 fn collect<T>(
@@ -2396,6 +2714,112 @@ impl Store for SqliteStore {
                 },
             )
             .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn notice(&self, position: u64) -> Result<Option<NoticeRow>, StoreError> {
+        self.call(move |conn| {
+            conn.query_row(
+                &format!("SELECT {NOTICE_COLUMNS} FROM notices WHERE position = ?1"),
+                [to_i64(position)],
+                notice_from,
+            )
+            .optional()
+            .map_err(sql_error)
+        })?
+    }
+
+    fn notices_after(&self, position: u64, limit: u32) -> Result<Vec<NoticeRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {NOTICE_COLUMNS} FROM notices WHERE position > ?1 ORDER BY position LIMIT ?2"
+                ),
+                params![to_i64(position), i64::from(limit)],
+                notice_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn newest_notice(&self) -> Result<u64, StoreError> {
+        self.call(move |conn| {
+            conn.query_row("SELECT COALESCE(MAX(position), 0) FROM notices", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(to_u64)
+            .map_err(sql_error)
+        })?
+    }
+
+    fn notice_deliveries(&self, position: u64) -> Result<Vec<DeliveryRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {DELIVERY_COLUMNS} FROM notice_deliveries WHERE position = ?1 ORDER BY channel"
+                ),
+                [to_i64(position)],
+                delivery_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn waiting_deliveries(&self, channel: &str) -> Result<Vec<DeliveryRow>, StoreError> {
+        let channel = channel.to_string();
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {DELIVERY_COLUMNS} FROM notice_deliveries \
+                     WHERE channel = ?1 AND state = 'waiting' ORDER BY position"
+                ),
+                [&channel],
+                delivery_from,
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn notice_targets(&self) -> Result<Vec<NoticeTargetRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                "SELECT target, channel, acked, outcome, updated_at FROM notice_targets ORDER BY target",
+                [],
+                |r| {
+                    Ok(NoticeTargetRow {
+                        target: r.get(0)?,
+                        channel: r.get(1)?,
+                        acked: to_u64(r.get(2)?),
+                        outcome: r.get(3)?,
+                        updated_at: r.get(4)?,
+                    })
+                },
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn notice_sends(&self, position: u64) -> Result<Vec<NoticeSendRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                "SELECT position, target, sends, last_sent_at FROM notice_sends \
+                 WHERE position = ?1 ORDER BY target",
+                [to_i64(position)],
+                |r| {
+                    Ok(NoticeSendRow {
+                        position: to_u64(r.get(0)?),
+                        target: r.get(1)?,
+                        sends: to_u64(r.get(2)?),
+                        last_sent_at: r.get(3)?,
+                    })
+                },
+            )
             .map_err(sql_error)
         })?
     }

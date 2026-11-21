@@ -266,6 +266,16 @@ run, or null for a run that the CLI armed.
   `PF_HOST_LAUNCHER=systemd`. There is one more, `orphan sweep skipped: <why>`, when the sweep at the
   controller's start could not list the hosts (no user manager answered).
 
+`status --json` carries a third field from `r2.s11.w3`, `notices`: `{"waiting": [{"position", "request",
+"revision", "event", "target", "channel", "sends", "waiting_seconds"}], "blocked": ["<device>", …]}`
+(`requests.md`, "Notices"). `waiting` has one entry for each waiting delivery of the run's notices and
+each target of its channel whose position is below the notice: a paired device on the app channel (a
+revoked device is left out), the project's Orchestrator on the orchestrator channel. `waiting_seconds`
+is the age of the notice. `blocked` lists the live devices whose last `notice_ack` was `blocked`: they
+show no notifications until their next `shown`. The text output prints one line for each waiting
+notice and one for each blocked device, after the lines it printed before. With the controller's
+commands stopped, `warnings` holds a text that says no notice is written.
+
 A failed store read is an error, never an empty list. `status` reads the run, its nodes, sessions,
 admissions and requests, and when one read fails the controller answers `cannot read run <id> from the
 store: <cause>`, and the CLI exits 1 with that text and prints no unit list. A run whose units the
@@ -734,9 +744,11 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly seven in this release. Any other key is refused: `unknown setting <key>; the
+- **The keys.** Exactly twelve in this release. Any other key is refused: `unknown setting <key>; the
   settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
-  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds`. The confirm code, the
+  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds, notify.app.on,
+  notify.orchestrator.on, notify.app.max_words, notify.orchestrator.max_words,
+  notify.resend_seconds`. The confirm code, the
   caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
@@ -748,6 +760,24 @@ settings" in the common rules).
   | `session.exit_hold_minutes` | a JSON integer, 1 to 10080 | `1440` | `override` | at the next seat launch |
   | `session.attach_wait_ms` | a JSON integer, 100 to 30000 | `3000` | `override` | at the next seat launch |
   | `session.hook_wait_seconds` | a JSON integer, 1 to 120 | `15` | `override` | at the next seat launch |
+  | `notify.app.on` | a JSON integer, 0 or 1; `0` is off | `1` | `override` | at the next notice |
+  | `notify.orchestrator.on` | a JSON integer, 0 or 1; `0` is off | `1` | `override` | at the next notice |
+  | `notify.app.max_words` | a JSON integer, 5 to 200 | `30` | `override` | at the next notice |
+  | `notify.orchestrator.max_words` | a JSON integer, 10 to 500 | `100` | `override` | at the next notice |
+  | `notify.resend_seconds` | a JSON integer, 10 to 3600 | `60` | `override` | at the next re-send |
+
+  The five `notify.*` keys rule the channels of the request notices (`r2.s11.w3`, ADR-0016's amendment
+  of 2026-11-21; `requests.md`, "Notices"). `notify.app.on` and `notify.orchestrator.on` turn a
+  channel off: a notice that is written while its channel is off holds a delivery that is
+  `superseded` with the reason `channel_off`, and nothing is sent. `notify.app.max_words` and
+  `notify.orchestrator.max_words` cut the text of a notice to that many words, at white space.
+  `notify.resend_seconds` is the first wait before a notice that a device has not acknowledged is sent
+  again; the wait doubles with each send, and stops at 900 seconds. The context of a notice is its
+  run's project, or the server scope when the run has none. The two orchestrator keys also resolve at
+  the agent. `on` and `max_words` are read when a notice is written, and `resend_seconds` at each
+  re-send. A chat or a seat cannot set them. For a `notify.*` key, `applies` reads `next_turn`, and it
+  means the next notice: a third value of `applies` comes with the Settings page's text
+  (`r2.s11.w5`). Each `notify.*` key has the resume flag `current`.
 
   The four `session.*` keys set how a session host serves a seat (`r2.s2.w3`, ADR-0016's amendment
   of 2026-11-16). `session.replay_bytes` is the size of the host's output buffer: the host keeps that
@@ -832,7 +862,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (one of the seven keys, such as `chat.self_turn_cap`, or `other` for an unknown key
+  (one of the twelve keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -845,8 +875,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, sixteen
-  across the eight buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, twenty-six
+  across the thirteen buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where

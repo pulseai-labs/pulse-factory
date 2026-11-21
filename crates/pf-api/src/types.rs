@@ -1357,6 +1357,81 @@ pub enum RequestFrame {
     Claim { claim: Option<ClaimRecord> },
 }
 
+// ------------------------------------------------------------------ the notice frame (r2.s11.w3)
+
+/// One notice as a device reads it: the controller's record of one request event, with its own text
+/// and the IDs a reader needs. `project`, `unit` and `cause` are left out when absent. The text holds
+/// no seat's words (`docs/contracts/requests.md`, "Notices").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeRecord {
+    /// The notice's place in the store's one sequence, from 1. A device acknowledges a position.
+    #[ts(type = "number")]
+    pub position: u64,
+    /// `opened`, `revised` or `closed`. Only `opened` asks for an alert.
+    pub event: String,
+    pub request: String,
+    pub revision: u32,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unit: Option<String>,
+    /// The kind of the request.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cause: Option<String>,
+    pub text: String,
+    pub created_at: String,
+    /// How often the controller sent this notice to this device, this send included.
+    #[ts(type = "number")]
+    pub sends: u64,
+}
+
+/// A frame about notices on `GET /v1/stream`, beside the chat frames (`ChatFrame`) and the request
+/// frames (`RequestFrame`). A client that does not know the `type` skips it. A notice can arrive more
+/// than once: a reader keys it by `position`, and `sends` says which send it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum NoticeFrame {
+    Notice { notice: NoticeRecord },
+}
+
+/// What a device did with a notice it was sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum NoticeOutcome {
+    /// The device showed the notice.
+    Shown,
+    /// The device could not show it (no permission to notify). The re-send ends all the same.
+    Blocked,
+}
+
+/// The arguments of `notice_ack`: the position the device has dealt with, and what it did. It
+/// acknowledges every notice at or below the position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeAckArgs {
+    #[ts(type = "number")]
+    pub position: u64,
+    pub outcome: NoticeOutcome,
+}
+
+/// The answer of `notice_ack`. `admitted` is false when the position did not rise: nothing was
+/// written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeAcked {
+    pub schema_version: u32,
+    pub device: String,
+    #[ts(type = "number")]
+    pub position: u64,
+    pub outcome: NoticeOutcome,
+    pub admitted: bool,
+}
+
 // ------------------------------------------------------------------ the run list (r1.s4.w3)
 
 /// The arguments of `run_list`: none. An unknown field is ignored.
@@ -1491,6 +1566,11 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     DeviceAckArgs::export_all(cfg)?;
     RequestActed::export_all(cfg)?;
     RequestFrame::export_all(cfg)?;
+    NoticeRecord::export_all(cfg)?;
+    NoticeFrame::export_all(cfg)?;
+    NoticeOutcome::export_all(cfg)?;
+    NoticeAckArgs::export_all(cfg)?;
+    NoticeAcked::export_all(cfg)?;
     RunListArgs::export_all(cfg)?;
     RunSummary::export_all(cfg)?;
     RunList::export_all(cfg)?;

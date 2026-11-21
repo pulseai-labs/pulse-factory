@@ -138,6 +138,26 @@ holds `cause` and `summary` for a request that has a decision block, and leaves 
   `(id, revision, status)`. A request frame goes to every stream, whatever session it follows. A
   stream that lags closes with 4002, as for the chat frames.
 
+The stream carries one more wire type, the **notice frame** (`NoticeFrame`, `r2.s11.w3`; ADR-0012's
+amendment of 2026-11-21). It goes to one device, and a client that does not know the `type` skips it.
+A notice is sent again until the device acknowledges it with `notice_ack`, so a client keys it by
+`position`, and `sends` says which send it is.
+
+```json
+{"type":"notice","notice":{"position":7,"event":"opened","request":"R-4","revision":1,"run":"r1-s4","project":"P-1","unit":"u1","kind":"stop","cause":"stop_file","text":"Unit u1 stopped at stage implement and wrote a stop file.","created_at":"2026-11-21T10:02:11.402Z","sends":1}}
+```
+
+- `position` is the notice's place in the store's one sequence, from 1. `event` is `opened`,
+  `revised` or `closed`. **Only `opened` asks for an alert**: `revised` and `closed` do not. `project`,
+  `unit` and `cause` are left out when absent. `text` is the controller's own text, redacted and cut
+  to `notify.app.max_words` (`requests.md`, "Notices").
+- A new stream gets, after the `requests` frame, each notice that waits for its device, oldest first.
+  A device's first stream joins at the newest position and gets no old notice. A notice goes to every
+  connected device at the tick that writes it, and again after `notify.resend_seconds × 2^(sends − 1)`
+  seconds, at most 900, until the device acknowledges it or the request closes. A `closed` notice is
+  sent once.
+- A notice frame never moves the `seq` of a reconnect, and a revoked device gets none.
+
 - `hello` comes first. It names the server, holds every live session as a `ChatSessionRecord`
   (id, project, worktree, branch, state, process with its `qualified` flag and holders, model,
   effort, permission mode, runtime options, pending options, summed usage, the cache-warm time,
@@ -238,6 +258,7 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `settings_get` | `settings get` |
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
+| `notice_ack` | none (API only); the device says it dealt with a notice (`r2.s11.w3`) |
 | `run_list` | none (API only); on the host, `status` shows the same runs |
 | `folder_list` | none (API only); the CLI user has a shell (`r1.s5.w5`) |
 
@@ -309,6 +330,18 @@ second merge.
 - **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
   `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
   CLI's `ack`.
+- **`notice_ack`** (`r2.s11.w3`): `{"position", "outcome"}` (`NoticeAckArgs`). The `outcome` is `shown` or
+  `blocked`. It carries no command ID: the controller makes the admission's ID,
+  `notice-ack:<device>:<position>`. The device deals with every notice at or below `position`, so the
+  re-send of each ends. The answer is a `NoticeAcked`: `schema_version`, `device`, `position`,
+  `outcome` and `admitted`. `admitted` is false, with nothing written, when the position is at or below
+  the one stored. A position above the newest notice is a 422. The controller reads the device again, so
+  a revoked device gets the refusal `device_revoked`. `blocked` raises the position as `shown` does, so
+  the re-send ends; the target's row keeps the outcome, and `status` lists the device as showing no
+  notifications until its next `shown`. The verb takes no confirm code: it changes no run state and
+  moves no claim. A client calls it only on a server that has sent it a notice frame. On the Unix socket
+  it is refused: `notice_ack is for paired devices`. The request ledger has one `api.ledger` line for
+  each call, with `verb=notice_ack`.
 - **`run_list`** (`r1.s4.w3`): `{}` (`RunListArgs`; unknown fields are ignored). The answer is a
   `RunList`: `schema_version` 1 and `runs`, oldest first, one `RunSummary` for every run the controller
   holds (an ended run too, while the controller holds it). A `RunSummary` has exactly nine fields: `id`,

@@ -225,6 +225,31 @@ degrade wins over the stored value.
 - **`NextTurn`** (the degrade, for a CLI that queues or refuses a mid-turn message): the message
   becomes the next turn, with its own `TurnStarted` and `TurnResult`.
 
+## Request notices ride an `Operator` send
+
+The port has one text for each `send`, and `InputKind::Notice` is **still unsent**: nothing calls it,
+and a notice starts no turn (`r2.s3` owns the wake). A request notice (`requests.md`, "Notices")
+reaches an Orchestrator chat as a marked block before the operator's own text, in the same `Operator`
+send (`r2.s11.w3`):
+
+```
+[Pulse Factory notice. The controller wrote this, not the operator.]
+<one line for each open request, newest first, at most ten>
+and <n> more: pulse-factory requests
+[End of notice]
+
+<the text the operator typed>
+```
+
+The controller builds the block when the chat is the built-in Orchestrator's, no turn is open and
+`notify.orchestrator.on` is 1. The line `and <n> more: pulse-factory requests` is there only when more
+than ten requests wait. The adapter sees one text and cannot tell the block from the rest: a new part
+of the message would change the Claude Code adapter's input shape, and no probe has qualified that.
+The mark is the frame. The Orchestrator's persona says that a block with that first line is the
+controller's, that it lists requests which wait in Needs you, and that the Orchestrator can answer
+none of them. The stored `OperatorMessage` item holds the typed text alone, and the adapter's own
+transcript holds the block. A message sent while a turn is open carries nothing.
+
 ## Errors
 
 | Error | Meaning |

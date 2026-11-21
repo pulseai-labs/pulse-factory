@@ -78,7 +78,9 @@ impl Client {
                 let left = end.saturating_duration_since(tokio::time::Instant::now());
                 match tokio::time::timeout(left, stream.next()).await {
                     Ok(Some(StreamEvent::RequestFrame { frame })) => frames.push(frame),
-                    Ok(Some(StreamEvent::Frame { .. })) => {}
+                    // A notice frame follows each new request (`r2.s11.w3`): this test is about the
+                    // request frames.
+                    Ok(Some(StreamEvent::Frame { .. } | StreamEvent::NoticeFrame { .. })) => {}
                     Ok(other) => panic!("{other:?} while waiting for {what}"),
                     Err(_) => panic!("timed out waiting for {what}"),
                 }

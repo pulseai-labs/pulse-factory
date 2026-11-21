@@ -18,6 +18,7 @@ pub mod driver;
 pub mod files;
 pub mod folders;
 pub mod hosts;
+pub mod notices;
 pub mod ports;
 pub mod projects;
 pub mod proposals;
@@ -866,6 +867,8 @@ impl Handler for Controller {
             "api_status" => self.verb_api_status(),
             // A confirm code is for a paired device, on the API (`r1.s4.w1`).
             "confirm_code" => Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "confirm_code")),
+            // A notice is acknowledged by the device it was sent to (`r2.s11.w3`).
+            "notice_ack" => Controller::socket_notice_ack(),
             // These change who acts and what runs. They need to know who calls.
             "arm" | "propose" | "claim" | "answer" | "clear" | "ack" | "device_pair"
             | "device_revoke" | "settings_set" | "settings_unset" => Response::err(format!(

@@ -163,3 +163,22 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
 - **Plugin defaults.** A plugin may register keys of its own, named `plugin.<id>.<key>`, with types
   from a closed set (ADR-0017). Their defaults resolve at a scope just above the built-in. The
   controller and the engine never read them for their own decisions. A plugin never sets a core key.
+
+## Amendment, 2026-11-21 (Proposed): the notify keys
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+- **Five keys join the registry**, each a whole number, merge mode `override`, resume flag `current`:
+  `notify.app.on` and `notify.orchestrator.on` (0 or 1; built-in 1), `notify.app.max_words` (5 to 200;
+  30), `notify.orchestrator.max_words` (10 to 500; 100) and `notify.resend_seconds` (10 to 3600; 60). The
+  registry holds twelve keys.
+- **The context of a notice is its run's project**, or the server scope when the run has none. The two
+  orchestrator keys also resolve at the agent. `on` and `max_words` are read when a notice is written,
+  and `resend_seconds` at each re-send.
+- **A chat or a seat cannot set them**, as for every key. The caller check's refusal buckets are one for
+  each key and `other`: thirteen.
+- **`applies` reads `next_turn` for these keys.** A third wire value of `SettingApplies` would break the
+  UI's typecheck, which this work does not own. For a `notify.*` key `next_turn` means the next notice.
+  `r2.s11.w5` adds the value with its Settings text.

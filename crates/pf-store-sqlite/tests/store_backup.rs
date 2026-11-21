@@ -23,15 +23,15 @@ fn locked() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-const TWELVE: Migration = Migration {
-    version: 12,
-    name: "test twelve",
-    sql: "CREATE TABLE extra_twelve (x INTEGER NOT NULL) STRICT;",
-};
 const THIRTEEN: Migration = Migration {
     version: 13,
     name: "test thirteen",
     sql: "CREATE TABLE extra_thirteen (x INTEGER NOT NULL) STRICT;",
+};
+const FOURTEEN: Migration = Migration {
+    version: 14,
+    name: "test fourteen",
+    sql: "CREATE TABLE extra_fourteen (x INTEGER NOT NULL) STRICT;",
 };
 
 /// The backups beside a store, by name.
@@ -96,7 +96,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 #[test]
-fn opening_a_version_eight_store_with_a_binary_at_eleven_writes_one_checked_backup() {
+fn opening_a_version_eight_store_with_a_binary_at_twelve_writes_one_checked_backup() {
     let _env = locked();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
@@ -104,7 +104,7 @@ fn opening_a_version_eight_store_with_a_binary_at_eleven_writes_one_checked_back
     let before = dump(&path);
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    assert_eq!(store.schema_version().unwrap(), 12);
     drop(store);
 
     let found = backups(dir.path());
@@ -112,7 +112,7 @@ fn opening_a_version_eight_store_with_a_binary_at_eleven_writes_one_checked_back
     let backup = &found[0];
     let file = name(backup);
     assert!(
-        file.starts_with("run.db.v8-v11.") && file.ends_with("Z.bak"),
+        file.starts_with("run.db.v8-v12.") && file.ends_with("Z.bak"),
         "{file}"
     );
     assert_eq!(mode(backup), 0o600);
@@ -127,7 +127,7 @@ fn opening_a_version_eight_store_with_a_binary_at_eleven_writes_one_checked_back
     assert_eq!(dump(backup), before);
     assert!(!has_table(backup, "launch_records"));
     // The store itself is migrated.
-    assert_eq!(version(&path), 11);
+    assert_eq!(version(&path), 12);
     assert!(has_table(&path, "launch_records"));
     assert!(has_table(&path, "host_positions"));
     // The backup is the only file the migration added beside the store.
@@ -206,9 +206,10 @@ fn the_newest_backups_stay_and_the_count_is_an_environment_setting() {
     // SAFETY: every case of this file holds `ENV`, so no other thread of this process opens a store
     // or reads the environment while the variable is set.
     unsafe { std::env::set_var("PF_STORE_BACKUP_KEEP", "2") };
-    // Three upgrades: 8 to 11, 11 to 12 and 12 to 13. Each writes its backup, then the store keeps
+    // Three upgrades: 8 to 12, 12 to 13 and 13 to 14. Each writes its backup, then the store keeps
     // the newest two.
-    let upgrades: [(&[Migration], usize); 3] = [(&[], 1), (&[TWELVE], 2), (&[TWELVE, THIRTEEN], 2)];
+    let upgrades: [(&[Migration], usize); 3] =
+        [(&[], 1), (&[THIRTEEN], 2), (&[THIRTEEN, FOURTEEN], 2)];
     for (extra, kept) in upgrades {
         drop(SqliteStore::open_with_migrations(&path, extra).unwrap());
         assert_eq!(
@@ -225,9 +226,9 @@ fn the_newest_backups_stay_and_the_count_is_an_environment_setting() {
     let mut left: Vec<String> = backups(dir.path()).iter().map(|p| name(p)).collect();
     left.sort_by_key(|n| n.rsplit('.').nth(1).unwrap_or("").to_string());
     assert_eq!(left.len(), 2, "{left:?}");
-    assert!(left[0].contains(".v11-v12."), "{left:?}");
-    assert!(left[1].contains(".v12-v13."), "{left:?}");
-    assert!(!left.iter().any(|n| n.contains(".v8-v11.")), "{left:?}");
+    assert!(left[0].contains(".v12-v13."), "{left:?}");
+    assert!(left[1].contains(".v13-v14."), "{left:?}");
+    assert!(!left.iter().any(|n| n.contains(".v8-v12.")), "{left:?}");
 }
 
 #[test]
@@ -283,7 +284,7 @@ fn a_backup_that_cannot_be_written_fails_the_open_and_leaves_the_store_at_versio
         panic!("{err:?}");
     };
     assert!(
-        at.contains("run.db.v8-v11."),
+        at.contains("run.db.v8-v12."),
         "the error names the path: {at}"
     );
     assert!(!why.is_empty(), "the error names the cause");
@@ -300,7 +301,7 @@ fn a_backup_that_cannot_be_written_fails_the_open_and_leaves_the_store_at_versio
         .unwrap()
         .flatten()
         .map(|e| name(&e.path()))
-        .filter(|n| n.contains(".v8-v11."))
+        .filter(|n| n.contains(".v8-v12."))
         .collect();
     assert!(leftover.is_empty(), "{leftover:?}");
 }
@@ -327,7 +328,7 @@ fn a_backup_that_fails_its_check_is_removed_and_no_migration_is_applied() {
     let OpenError::Backup { path: at, why } = &err else {
         panic!("{err:?}");
     };
-    assert!(at.contains("run.db.v8-v11."), "{at}");
+    assert!(at.contains("run.db.v8-v12."), "{at}");
     assert!(!why.is_empty());
     assert_eq!(
         backups(dir.path()),
@@ -355,7 +356,7 @@ fn a_backup_that_fails_its_check_is_removed_and_no_migration_is_applied() {
 
     // With no damage, the same store opens and migrates.
     drop(SqliteStore::open(&path).unwrap());
-    assert_eq!(version(&path), 11);
+    assert_eq!(version(&path), 12);
     assert_eq!(backups(dir.path()).len(), 1);
 }
 
@@ -378,7 +379,7 @@ fn an_active_run_still_refuses_the_migration_and_writes_no_backup() {
         err,
         OpenError::RunActive {
             current: 8,
-            pending: 11
+            pending: 12
         }
     );
     assert_eq!(backups(dir.path()), Vec::<PathBuf>::new());

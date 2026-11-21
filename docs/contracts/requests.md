@@ -213,6 +213,10 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Park a unit | `park:<unit>:<park generation>` |
 | Merge a unit | `merge:<unit>:<park generation>` |
 | Record a merge result | `merge-result:<unit>:<park generation>` |
+| Add a notice (`@controller`) | `notice:<R-n>:<revision>:<event>` |
+| Record a send of a notice | `notice-send:<position>:<target>:<n>` (n is the stored count plus 1) |
+| Acknowledge a notice, or join a target | `notice-ack:<device>:<position>` for a device, `notice-ack:<project>.<agent>:<position>` for an agent |
+| Supersede a delivery | `notice-supersede:<position>:<channel>` |
 
 The **park generation** counts the times a claim resumed the unit (from 0). It is engine-owned
 unit detail (see `unit-record.md`), and it makes a second park of the same unit a new command.
@@ -392,6 +396,144 @@ the way on.
 
 An answer's text is data. The engine stores it and shows it, and never runs or renders it as a
 template.
+
+## Notices
+
+A request that waits for an answer is of no use if nobody knows. The controller derives a **notice**
+from each request event and delivers it on two channels (ADR-0006's amendment of 2026-11-21). The
+**app** channel sends a `notice` frame to each paired device with a stream open (`api.md`, "The
+stream") and waits for its `notice_ack`. The **orchestrator** channel writes a `notice` item into the
+project's Orchestrator chat and carries the waiting notices into the operator's next message. A notice
+starts no turn and no run, so `halt` does not stop one. A notice that its target has not acknowledged
+is sent again until the target acknowledges it or the request closes.
+
+### The events
+
+A notice records one event of one request, and `(request, revision, event)` is unique:
+
+| Event | When the controller adds it |
+|---|---|
+| `opened` | An open request has no `opened` notice. The revision is the request's revision at that tick. |
+| `revised` | An open request is at a revision above the highest revision any notice of it holds. A revision that came and went between two ticks gets none, as it gets no `request` frame. |
+| `closed` | A request is answered or withdrawn, has an `opened` notice and has no `closed` one. |
+
+A request that closed before the controller saw it open gets nothing: nobody was told it opened. So
+the first tick after an upgrade writes notices for the requests that are open then, and none for the
+history. The controller derives notices at the end of each tick and after each request verb, from the
+store alone. A crash between a request and its notice loses nothing: the next tick adds the notice. A
+write that fails is printed once and tried again at the next tick. A controller whose commands are
+stopped writes no notice, and `status` says so in `warnings`.
+
+A notice is one admitted command, `notice:<R-n>:<revision>:<event>`, under the admission scope
+`@controller`. A replay returns the first record. The store gives each notice its **position**, one
+sequence for the whole store from 1. The ledger line is:
+
+```
+notice <position> request=<R-n>@<revision> event=<event> run=<run> project=<P-n|-> app=<state> orchestrator=<state> command=<id>
+```
+
+`<state>` is `waiting`, or `superseded:<why>`. The line holds no text.
+
+### The text
+
+The controller writes one text for each channel when it adds the notice. The source is the request's
+decision block: its `summary`, which holds no seat's words (see "The decision block"). A request with
+no block gets `Request <R-n> of run <run> is open.` The reason, the stop text and the gaps never enter
+a notice. The text is redacted once, then cut to the channel's word cap: words are split at white
+space, whole words are kept, and a cut text ends with `…`. A `revised` text starts `Changed: `. A
+`closed` text is `Request <R-n> closed: <answered|withdrawn>.` The caps are the settings
+`notify.app.max_words` (5 to 200, built-in 30) and `notify.orchestrator.max_words` (10 to 500, built-in
+100). The IDs are not part of the capped text. The frame carries them as fields, and the chat item and
+the carry add them after the text.
+
+### The channel states
+
+Each notice has one **delivery** for each channel, and a delivery is `waiting` or `superseded`. The
+one change a delivery allows is `waiting` to `superseded`, with a reason:
+
+- `channel_off`: the setting `notify.<channel>.on` is 0 when the notice is written;
+- `no_project`: the orchestrator channel of a run that has no project;
+- `request_closed`: the notice is a `closed` notice (it never waits), or its request closed while the
+  delivery waited.
+
+The reasons are tried in this order. When a request closes, each delivery of its earlier notices that
+still waits is superseded with `request_closed`. Each one is a command,
+`notice-supersede:<position>:<channel>`, with the line
+`notice_superseded <position> channel=<channel> why=request_closed`.
+
+### Targets and positions
+
+A **target** is `device:<D-n>` on the app channel, or `agent:<P-n>:orchestrator` on the orchestrator
+channel (the built-in Orchestrator only). A target has one **position**, `acked`, which only rises. A
+target acknowledges a position, and that acknowledges every notice of its channel at or below it.
+
+- A device's row is made at its first stream after this item, at the newest position, with the
+  outcome `joined`. It is told of the open requests by the `requests` frame, not by old notices. A
+  device that pairs later joins the same way.
+- An agent's row is made with the first notice of one of its project's runs, just below that notice,
+  so that the notice waits for it.
+- A target's **waiting set** is the deliveries of its channel that are `waiting`, above its `acked`
+  and, for an agent, of its own project.
+- Each acknowledgement is one command, with the line
+  `notice_ack <target> position=<n> outcome=<outcome>`. The outcome is `joined`, `shown`, `blocked` or
+  `carried`. A position at or below the stored one admits nothing: the controller checks first and
+  commits nothing, and the store refuses it as well. A position above the newest notice is refused.
+
+### The app channel and the re-send rule
+
+A device with a stream open gets a waiting notice as a `notice` frame at the tick that writes it, and
+a new stream gets each notice of its waiting set after the `requests` frame, oldest first. Each send is
+one command, `notice-send:<position>:<target>:<n>`, with the line
+`notice_send <position> target=<target> attempt=<n>`. A device with several streams gets the frame on
+each, as one send.
+
+A notice that the device has not acknowledged is sent again when
+`min(900, notify.resend_seconds × 2^(sends − 1))` seconds have passed since its last send. The built-in
+`notify.resend_seconds` is 60, so the waits are 60, 120, 240, 480 and then 900 seconds. The value is
+read at each re-send. A reconnect sends at once. The timer runs only while the device has a stream
+open: an absent device costs no send and no line. The time comes from a clock that a test can move.
+There is no give-up while the request is open.
+
+A `closed` notice is sent once to each connected device and never again, with no acknowledgement owed.
+
+### The orchestrator channel
+
+Each notice of a project's run is written once as a `notice` item (`request_opened`, `request_revised`
+or `request_closed`) into the project's newest Orchestrator session that has not ended. The text of
+the item is the channel's text, then `(request <R-n>, run <run>, unit <unit>, stage <stage>, PR <pr>)
+Read it: pulse-factory show <R-n>`, with each ID that exists. With no such session the item waits, and
+it is written into the session that next carries the notice. A send row means the item is stored.
+
+When the operator sends a message to an Orchestrator session and no turn is open, the controller builds
+a block from the agent's waiting set: one line for each open request, newest first, at most ten, and
+then `and <n> more: pulse-factory requests`. The block starts
+`[Pulse Factory notice. The controller wrote this, not the operator.]` and ends `[End of notice]`. The
+controller sends the block, a blank line and the typed text as one `Operator` send (`chat-adapter.md`).
+The stored `OperatorMessage` holds the typed text alone. A message that is sent while a turn is open
+carries nothing. Each carry is one `notice-send` command for each notice it lists.
+
+The live chat remembers the highest position that the send carried. When the next `turn_result` item
+with the cause `operator` is **stored**, the controller acknowledges that position for the agent, with
+the outcome `carried`. A send that fails, a session that ends first and a controller restart in the
+turn each leave the notices waiting for the next message. No notice starts a turn, and the channel has
+no timer.
+
+### Settings
+
+Five keys rule the channels (`cli.md`, `settings`): `notify.app.on`, `notify.orchestrator.on`,
+`notify.app.max_words`, `notify.orchestrator.max_words` and `notify.resend_seconds`. The context of a
+notice is its run's project, or the server scope with none. `on` and `max_words` are read when a notice
+is written, and `resend_seconds` at each re-send. A chat or a seat cannot set them.
+
+### Known limits
+
+- A client that connects and never acknowledges (an app from before this contract) gets each waiting
+  notice again at most every 15 minutes while its request is open, and each send is one admission.
+  Nothing gives up while the request is open. The admission-rows debt line covers the growth.
+- A stored turn result proves that the input arrived. It does not prove that the model heeded it.
+- A carry can repeat after a controller restart in the turn.
+- The text of an `opened` notice is the summary of the block as it was when the notice was written.
+  A later change of a cap or a setting changes no notice that is written.
 
 ## Known limit
 

@@ -109,11 +109,12 @@ fn the_migration_adds_one_nullable_column_and_leaves_every_existing_row_null() {
         .collect();
     drop(before);
 
-    assert_eq!(MIGRATIONS.len(), 11);
+    assert_eq!(MIGRATIONS.len(), 12);
     assert_eq!(MIGRATIONS[10].version, 11);
     assert_eq!(MIGRATIONS[10].name, "chat_host_cursor");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 11);
+    // The plain open applies 0012 too.
+    assert_eq!(store.schema_version().unwrap(), 12);
     drop(store);
 
     let after = Connection::open(&path).unwrap();
@@ -136,12 +137,22 @@ fn the_migration_adds_one_nullable_column_and_leaves_every_existing_row_null() {
         .unwrap();
     assert_eq!(nulls, count(&after, "chat_sessions"));
     assert_eq!(nulls, 1);
-    // No table and no trigger came or went, and no row changed in number.
-    assert_eq!(names(&after, "table"), tables_before);
-    assert_eq!(names(&after, "trigger"), triggers_before);
+    // No table and no trigger of 0011 came or went (0012's came: the plain open applies it), and no
+    // row changed in number.
+    let not_notices = |set: BTreeSet<String>| -> BTreeSet<String> {
+        set.into_iter()
+            .filter(|n| !n.starts_with("notice"))
+            .collect()
+    };
+    assert_eq!(not_notices(names(&after, "table")), tables_before);
+    assert_eq!(not_notices(names(&after, "trigger")), triggers_before);
     for (table, n) in &counts_before {
         if table == "schema_version" {
-            assert_eq!(count(&after, table), n + 1, "the new version is recorded");
+            assert_eq!(
+                count(&after, table),
+                n + 2,
+                "versions 11 and 12 are recorded"
+            );
         } else {
             assert_eq!(count(&after, table), *n, "{table} keeps every row");
         }

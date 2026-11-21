@@ -250,3 +250,29 @@ it lands, and that work's close marks it Accepted. It needs the session hosts of
 
 **Consequences.** A full restart has what it needs to resume each session as it was. No secret value
 enters the store.
+
+## Amendment, 2026-11-21 (Proposed): the notices tables, admitted writes
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+- **Migration 0012 adds four tables**, forward-only (ADR-0007): `notices` (one row for each request
+  event, in one sequence for the store from 1), `notice_deliveries` (one row for each notice and
+  channel, `waiting` or `superseded` with a reason), `notice_targets` (one row for each device or agent,
+  with a position that only rises and the last outcome) and `notice_sends` (one row for each notice and
+  target, with a count that rises by one and the time of the last send).
+- **The engine's port names no channel.** A channel and a target are opaque text to the store. The
+  port gains four effects and seven reads, and each effect is allowed only in an admission under
+  `@controller`: add a notice with its deliveries, supersede a delivery, record a send, and acknowledge
+  (make a target's row or raise its position).
+- **Triggers hold each rule**, as migration 0010 does for host positions: a notice never changes and
+  is never deleted; a delivery changes only from `waiting` to `superseded`; a position never falls; a
+  send count rises by one and starts at one; `INSERT OR REPLACE` cannot rewrite a row. A second notice of
+  one `(request, revision, event)`, an acknowledgement above the newest notice, and an acknowledgement at
+  or below the stored position each make the commit `Rejected`.
+- **Each write passes admission** with a command ID (`requests.md`, "Command IDs"). No secret enters a
+  table: a text is controller-made and redacted before it is stored.
+- **The rows are bounded:** one notice for each request event, one target for each device or agent, and
+  one send row for each notice and target. A re-send updates the send row. It adds an admission, and
+  the admission-rows debt line (canonical #67) covers that growth.

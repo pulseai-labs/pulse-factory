@@ -188,17 +188,25 @@ impl World {
         self.live.controller.store().claims().unwrap()
     }
 
+    /// The admissions of the act under test. The notices that a request event brings
+    /// (`r2.s11.w3`: `notice`, `notice_send`, `notice_ack`, `notice_supersede`) are the
+    /// controller's own steps of the tick, with their own tests: they are not counted here.
     fn admissions(&self) -> usize {
         self.live
             .controller
             .store()
             .admissions(CONTROLLER_SCOPE)
             .unwrap()
-            .len()
+            .iter()
+            .filter(|a| !a.kind.starts_with("notice"))
+            .count()
     }
 
     fn ledger_lines(&self) -> usize {
-        controller_ledger(&self.live).len()
+        controller_ledger(&self.live)
+            .iter()
+            .filter(|l| !l.contains(" notice"))
+            .count()
     }
 
     fn request(&self, req: usize) -> pf_engine::port::store::RequestRow {

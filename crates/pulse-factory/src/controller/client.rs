@@ -117,6 +117,26 @@ pub fn status_text(v: &Value) -> String {
         ));
     }
     line(format!("total cost: {}", s(&v["total"]["cost"])));
+    // The notices that wait, and the devices that cannot show one (`r2.s11.w3`).
+    for n in v["notices"]["waiting"].as_array().into_iter().flatten() {
+        line(format!(
+            "notice {}: {} of request {} (revision {}) waits for {} on the {} channel, sent {} times, waiting {} s",
+            n["position"],
+            s(&n["event"]),
+            s(&n["request"]),
+            n["revision"],
+            s(&n["target"]),
+            s(&n["channel"]),
+            n["sends"],
+            n["waiting_seconds"],
+        ));
+    }
+    for d in v["notices"]["blocked"].as_array().into_iter().flatten() {
+        line(format!(
+            "device {}: shows no notifications until its next shown notice",
+            s(d)
+        ));
+    }
     t
 }
 
