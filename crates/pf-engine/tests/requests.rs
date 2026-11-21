@@ -10,7 +10,7 @@ use common::*;
 use pf_engine::claim::sha256_hex;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::forge::PrRef;
-use pf_engine::port::store::{RequestKind, RequestRow, RequestStatus, Store};
+use pf_engine::port::store::{Cause, RequestKind, RequestRow, RequestStatus, Store};
 use pf_engine::unit::Signal;
 use pf_engine::{Command, CommandBody, EndStatus, EngineError, Status};
 use serde_json::{Value, json};
@@ -25,6 +25,18 @@ fn item_env(units: &[&str]) -> Env {
         .collect();
     env.engine.ingest(&mut FakeUnitSource { records }).unwrap();
     env
+}
+
+/// The cause a test park of `kind` names.
+fn cause_of(kind: RequestKind) -> Cause {
+    match kind {
+        RequestKind::Stop => Cause::StopFile,
+        RequestKind::Stall => Cause::Stalled,
+        RequestKind::SeatLost => Cause::SeatLost,
+        RequestKind::MergeFailed => Cause::MergeError,
+        RequestKind::MergeAck => Cause::MergeWaitsAck,
+        RequestKind::Park | RequestKind::Gaps | RequestKind::RedGate => Cause::ParkFile,
+    }
 }
 
 fn requests(env: &Env) -> Vec<RequestRow> {
@@ -42,7 +54,9 @@ fn token_hash(text: &str) -> String {
 /// Launch the unit's stage, park it, and end the stage's session, as the driver does.
 fn park_ended(env: &Env, id: &str, kind: RequestKind) {
     env.engine.start_stage(id).unwrap();
-    env.engine.park_as(id, kind, "stalled").unwrap();
+    env.engine
+        .park_as(id, kind, cause_of(kind), "stalled")
+        .unwrap();
     env.engine
         .end(&format!("{id}/implement#1"), EndStatus::Failed, "stalled")
         .unwrap();
@@ -67,7 +81,12 @@ fn each_kind_opens_its_request_in_the_commit_that_parks_the_unit() {
         let id = &ids[i];
         env.engine.start_stage(id).unwrap();
         env.engine
-            .park_as(id, *kind, &format!("because of {}", kind.as_str()))
+            .park_as(
+                id,
+                *kind,
+                cause_of(*kind),
+                &format!("because of {}", kind.as_str()),
+            )
             .unwrap();
 
         // One commit: the unit is parked and its request is open.
@@ -93,9 +112,11 @@ fn each_kind_opens_its_request_in_the_commit_that_parks_the_unit() {
         let body = body_of(&r);
         assert_eq!(body["reason"], r.reason);
         match kind {
-            // Their structure comes with the answers that use it: the reason only.
+            // Their structure comes with the answers that use it: the reason, and the decision
+            // block every park with a cause carries (`request_decision.rs`).
             RequestKind::Gaps | RequestKind::Stop => {
-                assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+                let keys: Vec<&String> = body.as_object().unwrap().keys().collect();
+                assert_eq!(keys, ["decision", "reason"], "{body}");
             }
             _ => {
                 assert_eq!(body["stage"], "implement");
@@ -110,7 +131,9 @@ fn each_kind_opens_its_request_in_the_commit_that_parks_the_unit() {
 fn a_generic_park_opens_a_park_request() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stop file said wait").unwrap();
+    env.engine
+        .park("u1", Cause::StopFile, "stop file said wait")
+        .unwrap();
     let r = &requests(&env)[0];
     assert_eq!(r.kind, RequestKind::Park);
     assert_eq!(r.unit_id.as_deref(), Some("u1"));
@@ -120,7 +143,9 @@ fn a_generic_park_opens_a_park_request() {
 fn a_unit_parked_between_stages_names_the_next_stage() {
     let env = item_env(&["u1"]);
     // Nothing launched: the unit waits for its first launch.
-    env.engine.park("u1", "a hook failed").unwrap();
+    env.engine
+        .park("u1", Cause::HookFailed, "a hook failed")
+        .unwrap();
     assert_eq!(requests(&env)[0].stage, "implement");
 }
 
@@ -184,7 +209,11 @@ fn reconcile_opens_a_seat_lost_request() {
 fn a_merge_ack_request_is_not_a_unit_park() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    let why = rejected(env.engine.park_as("u1", RequestKind::MergeAck, "ack"));
+    let why =
+        rejected(
+            env.engine
+                .park_as("u1", RequestKind::MergeAck, Cause::MergeWaitsAck, "ack"),
+        );
     assert!(why.contains("merge_ack"), "{why}");
     assert_eq!(env.status_of("u1").0, Status::Running);
     assert!(requests(&env).is_empty());
@@ -195,7 +224,10 @@ fn a_store_failure_between_the_park_and_its_request_leaves_neither() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
     env.store.fail_on_open_request.store(true, Ordering::SeqCst);
-    let err = env.engine.park("u1", "stalled").unwrap_err();
+    let err = env
+        .engine
+        .park("u1", Cause::Stalled, "stalled")
+        .unwrap_err();
     assert!(matches!(err, EngineError::Degraded(_)), "{err:?}");
     assert_eq!(env.status_of("u1").0, Status::Running, "no parked unit");
     assert!(env.store.all_requests().is_empty(), "no request");
@@ -209,7 +241,7 @@ fn a_store_failure_between_the_park_and_its_request_leaves_neither() {
 fn a_unit_has_at_most_one_open_request() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     let why = rejected(env.engine.open_request(
         Some("u1"),
         RequestKind::Stop,
@@ -340,14 +372,17 @@ fn a_secret_in_an_answer_text_stays_out_of_the_ledger() {
 fn a_replayed_command_returns_its_receipt_and_the_same_id_with_other_content_conflicts() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    let first = env.engine.park("u1", "stalled").unwrap();
+    let first = env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     assert!(!first.replayed);
-    let again = env.engine.park("u1", "stalled").unwrap();
+    let again = env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     assert!(again.replayed);
     assert_eq!(again.row, first.row);
     assert_eq!(requests(&env).len(), 1, "a replay opens no second request");
 
-    let err = env.engine.park("u1", "another reason").unwrap_err();
+    let err = env
+        .engine
+        .park("u1", Cause::Stalled, "another reason")
+        .unwrap_err();
     assert_eq!(
         err,
         EngineError::Conflict {
@@ -403,7 +438,7 @@ fn a_run_level_request_has_no_unit_and_ends_with_the_run() {
 fn a_request_can_be_withdrawn_once() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     env.engine
         .withdraw_request("R-1", "the unit moved on")
         .unwrap();
@@ -461,7 +496,7 @@ fn a_new_claim_fences_the_old_one_with_the_next_generation() {
 fn nobody_answers_before_the_first_claim() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     let why = rejected(env.engine.answer_request("R-1", 1, 1, "ruling"));
     assert!(why.contains("no claim has been made"), "{why}");
     assert_eq!(env.status_of("u1").0, Status::Parked);
@@ -495,7 +530,7 @@ fn a_claim_needs_a_real_hash_and_the_next_generation() {
 fn an_answer_needs_text() {
     let env = item_env(&["u1"]);
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     let generation = env.engine.claim("op", &token_hash("t")).unwrap().generation;
     let why = rejected(env.engine.answer_request("R-1", 1, generation, "   "));
     assert!(why.contains("needs text"), "{why}");

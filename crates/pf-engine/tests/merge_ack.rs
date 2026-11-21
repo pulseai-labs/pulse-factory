@@ -6,6 +6,7 @@
 mod common;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::claim::sha256_hex;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::forge::{Checks, ForgeOutcome, Mergeable, PrRef};
@@ -463,7 +464,10 @@ fn a_merge_that_does_not_land_parks_with_merge_failed_and_clear_reopens_a_merge_
 #[test]
 fn a_unit_park_cannot_open_a_merge_ack() {
     let env = ready();
-    let why = match env.engine.park_as("spine", RequestKind::MergeAck, "ack") {
+    let why = match env
+        .engine
+        .park_as("spine", RequestKind::MergeAck, Cause::MergeWaitsAck, "ack")
+    {
         Err(EngineError::Rejected(why)) => why,
         other => panic!("{other:?}"),
     };

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::port::agent::Usage;
 use crate::port::forge::PrRef;
 use crate::port::store::{
-    AdmissionRow, ClaimRow, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus, RunRow,
-    SessionRow,
+    AdmissionRow, Cause, ClaimRow, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus,
+    RunRow, SessionRow,
 };
 use crate::port::unit_source::UnitRecord;
 use crate::status::{EndStatus, Status};
@@ -85,6 +85,11 @@ pub enum CommandBody {
         reason: String,
         #[serde(default)]
         request_kind: RequestKind,
+        /// Why the unit parks. The engine derives the request's decision block from it. A park
+        /// stored before the cause existed has none, and its request holds no block; a park with
+        /// none has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<Cause>,
         /// More facts for the request body, a JSON object: the gap list of a `gaps` park, or
         /// the text of a `stop` park. A park with none has no such field in its stored content.
         #[serde(default, skip_serializing_if = "Option::is_none")]

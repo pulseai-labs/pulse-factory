@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use pf_api::types::{ClaimRecord, RequestDetail, RequestList, RequestSummary};
+use pf_api::types::{ClaimRecord, Decision, RequestDetail, RequestList, RequestSummary};
 use pf_engine::claim::{check_claim_in, claim_of_hash, holder_device, sha256_hex};
 use pf_engine::merge::blocked_by;
 use pf_engine::port::agent::SessionRef;
@@ -552,6 +552,7 @@ impl Controller {
                 .flatten()
                 .and_then(|b| b.get(key).and_then(Value::as_str).map(str::to_string))
         };
+        let decision = decision_of(&r.body);
         RequestSummary {
             id: r.id.clone(),
             revision: r.revision,
@@ -568,6 +569,8 @@ impl Controller {
             pr: body("pr"),
             base: body("base"),
             head_sha: body("head_sha"),
+            cause: decision.as_ref().map(|d| d.cause.clone()),
+            summary: decision.map(|d| d.summary),
         }
     }
 
@@ -664,9 +667,22 @@ impl Controller {
             body: parse(&request.body),
             answer: request.answer.as_deref().map_or(Value::Null, parse),
             answer_generation: request.answer_generation,
+            decision: decision_of(&request.body),
         };
         Response::ok(serde_json::to_value(detail).unwrap_or(Value::Null))
     }
+}
+
+/// The decision block of a request's body. `None` when the body holds none (a park stored before
+/// the cause existed), when the block is of a version this binary does not read, and when it does
+/// not decode: a reader then sees the request as it saw one with no block, and no error.
+pub(super) fn decision_of(body: &str) -> Option<Decision> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let block = value.get(pf_engine::claim::KEY_DECISION)?;
+    if block.get("v").and_then(Value::as_u64) != Some(pf_engine::claim::DECISION_VERSION) {
+        return None;
+    }
+    serde_json::from_value(block.clone()).ok()
 }
 
 /// The verbs that answer a request: a unit's request takes `answer` and `clear`; a `merge_ack`

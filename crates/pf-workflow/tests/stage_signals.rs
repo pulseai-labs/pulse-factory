@@ -12,7 +12,7 @@ use common::{Env, TrackedSource, env, item_workflow, unit};
 use pf_engine::Status;
 use pf_engine::launch::LaunchStep;
 use pf_engine::port::forge::PrRef;
-use pf_engine::port::store::RequestKind;
+use pf_engine::port::store::{Cause, RequestKind};
 use pf_engine::render::{RenderContext, UnitView};
 use pf_engine::unit::Signal;
 use pf_workflow::commands::{CommandFailure, CommandSpec};
@@ -297,6 +297,7 @@ fn the_stop_file_wins_over_a_done_file() {
         StageVerdict::Park {
             reason: "the plan has no spec".to_string(),
             kind: RequestKind::Stop,
+            cause: Cause::StopFile,
         }
     );
 }
@@ -317,6 +318,7 @@ fn a_park_file_parks_with_its_reason() {
         StageVerdict::Park {
             reason: "gaps surfaced for u1".to_string(),
             kind: RequestKind::Gaps,
+            cause: Cause::ParkFile,
         }
     );
     // The stop file still wins over it.
@@ -326,6 +328,7 @@ fn a_park_file_parks_with_its_reason() {
         StageVerdict::Park {
             reason: "stopped".to_string(),
             kind: RequestKind::Stop,
+            cause: Cause::StopFile,
         }
     );
 }
@@ -346,6 +349,7 @@ fn a_park_file_wins_over_a_done_file() {
         StageVerdict::Park {
             reason: "correction needed".to_string(),
             kind: RequestKind::RedGate,
+            cause: Cause::ParkFile,
         }
     );
 }
@@ -357,6 +361,7 @@ fn a_turn_end_with_no_done_condition_parks() {
     let expected = StageVerdict::Park {
         reason: "seat ended with no done signal".to_string(),
         kind: RequestKind::Park,
+        cause: Cause::NoDoneSignal,
     };
     assert_eq!(v(&s, &SystemProbe, &TURN_ENDED), expected);
     // A session that ended without a turn end counts too.
@@ -391,6 +396,7 @@ fn an_exit0_that_says_not_yet_waits_and_parks_only_at_the_turn_end() {
         StageVerdict::Park {
             reason: "seat ended with no done signal".to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
     let s = stage(dir.path(), vec![exit0_cond("true")], vec![]);
@@ -411,13 +417,14 @@ fn a_command_that_cannot_run_parks_with_its_failure() {
         vec![exit0_cond("definitely-not-a-program-xyz")],
         vec![],
     );
-    let StageVerdict::Park { reason, .. } = v(&s, &SystemProbe, &WAITING) else {
+    let StageVerdict::Park { reason, cause, .. } = v(&s, &SystemProbe, &WAITING) else {
         panic!("park")
     };
     assert!(
         reason.contains("done condition 1") && reason.contains("could not start"),
         "{reason}"
     );
+    assert_eq!(cause, Cause::HookFailed);
 
     // A value from the record that starts with a dash is refused.
     let s = stage(
@@ -429,17 +436,21 @@ fn a_command_that_cannot_run_parks_with_its_failure() {
         vec![],
     );
     let vars = BTreeMap::from([("x".to_string(), "--evil".to_string())]);
-    let StageVerdict::Park { reason, .. } = verdict(&s, &vars, &SystemProbe, &WAITING) else {
+    let StageVerdict::Park { reason, cause, .. } = verdict(&s, &vars, &SystemProbe, &WAITING)
+    else {
         panic!("park")
     };
     assert!(reason.contains("starts with"), "{reason}");
+    assert_eq!(cause, Cause::RenderFailed);
 
     // A record that lacks a variable parks too.
-    let StageVerdict::Park { reason, .. } = verdict(&s, &BTreeMap::new(), &SystemProbe, &WAITING)
+    let StageVerdict::Park { reason, cause, .. } =
+        verdict(&s, &BTreeMap::new(), &SystemProbe, &WAITING)
     else {
         panic!("park")
     };
     assert!(reason.contains("x"), "{reason}");
+    assert_eq!(cause, Cause::RenderFailed);
 }
 
 // ------------------------------------------------------------------ against a real engine
@@ -662,6 +673,7 @@ fn a_stage_whose_outcomes_match_nothing_is_done_as_before() {
         StageVerdict::Park {
             reason: "seat ended with no done signal".to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
 }
@@ -696,10 +708,17 @@ fn a_when_command_that_cannot_run_parks_with_its_place() {
     write(dir.path(), "u1", "a.done", "");
     let mut probe = Scripted::default();
     probe.missing.insert("blocked".to_string());
-    let StageVerdict::Park { reason, kind } = v(&s, &probe, &TURN_ENDED) else {
+    let StageVerdict::Park {
+        reason,
+        kind,
+        cause,
+    } = v(&s, &probe, &TURN_ENDED)
+    else {
         panic!("park")
     };
     assert_eq!(kind, RequestKind::Park);
+    // The condition's command could not run: a failed command, not a render failure.
+    assert_eq!(cause, Cause::HookFailed);
     assert!(
         reason.contains("outcome 1 condition 1") && reason.contains("blocked"),
         "{reason}"
@@ -828,6 +847,7 @@ fn once_the_commands_ran_the_stage_parks_as_it_did_before() {
         StageVerdict::Park {
             reason: NO_SIGNAL_REASON.to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
     // Even with nudges left in the count: the commands ran, so there is no second chance.
@@ -836,6 +856,7 @@ fn once_the_commands_ran_the_stage_parks_as_it_did_before() {
         StageVerdict::Park {
             reason: NO_SIGNAL_REASON.to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
 }
@@ -853,6 +874,7 @@ fn a_stage_that_declares_a_nudge_and_no_commands_parks_when_the_nudges_are_spent
         StageVerdict::Park {
             reason: NO_SIGNAL_REASON.to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
 }
@@ -872,6 +894,7 @@ fn a_stage_without_no_signal_parks_with_the_generic_reason_as_before() {
             StageVerdict::Park {
                 reason: NO_SIGNAL_REASON.to_string(),
                 kind: RequestKind::Park,
+                cause: Cause::NoDoneSignal,
             }
         );
     }
@@ -911,6 +934,7 @@ fn a_stop_file_a_park_file_and_a_done_signal_win_over_every_no_signal_verdict() 
             StageVerdict::Park {
                 reason: "gaps".to_string(),
                 kind: RequestKind::Gaps,
+                cause: Cause::ParkFile,
             },
             "{st:?}"
         );
@@ -924,6 +948,7 @@ fn a_stop_file_a_park_file_and_a_done_signal_win_over_every_no_signal_verdict() 
             StageVerdict::Park {
                 reason: "the seat says stop".to_string(),
                 kind: RequestKind::Stop,
+                cause: Cause::StopFile,
             },
             "{st:?}"
         );
@@ -940,6 +965,7 @@ fn the_stop_file_a_command_wrote_parks_as_a_stop_after_the_commands_ran() {
         StageVerdict::Park {
             reason: NO_SIGNAL_REASON.to_string(),
             kind: RequestKind::Park,
+            cause: Cause::NoDoneSignal,
         }
     );
     write(
@@ -953,6 +979,7 @@ fn the_stop_file_a_command_wrote_parks_as_a_stop_after_the_commands_ran() {
         StageVerdict::Park {
             reason: "stranded: the PR was never opened".to_string(),
             kind: RequestKind::Stop,
+            cause: Cause::StopFile,
         }
     );
 }
@@ -978,10 +1005,16 @@ fn a_nudge_that_cannot_render_parks_with_the_stage_named() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = nudging_stage(dir.path(), 1, &["explain"]);
     s.no_signal.as_mut().unwrap().nudge = Some("Finish {unit.vars.missing}.".to_string());
-    let StageVerdict::Park { reason, kind } = v(&s, &SystemProbe, &TURN_ENDED) else {
+    let StageVerdict::Park {
+        reason,
+        kind,
+        cause,
+    } = v(&s, &SystemProbe, &TURN_ENDED)
+    else {
         panic!("a park")
     };
     assert_eq!(kind, RequestKind::Park);
+    assert_eq!(cause, Cause::RenderFailed);
     assert!(
         reason.contains("stage build") && reason.contains("nudge"),
         "{reason}"

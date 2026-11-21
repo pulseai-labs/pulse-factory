@@ -55,7 +55,9 @@ data: redacted, bounded, stored as JSON strings, and never rendered or run (ADR-
   string cut to 2,000 characters. A file that is missing, over 1 MiB, not JSON or not that shape
   leaves `{"reason":…}` and adds `"gaps_error": "<cause>"`.
 - `stop`: the body gains `"stop_text"`, the stop file's text, at most 64 KiB. A stop file that cannot
-  be read adds nothing.
+  be read adds nothing. A stop file that ends with an options block (see "A stop's options") also
+  gains `"stop_options"`, `[{"text","recommended"}]` in file order, or `"stop_options_error"`, the
+  cause in engine words, when the block breaks a rule. `stop_text` holds the whole file in both cases.
 - `show` prints both, one line for a gap and an indented block for the stop text, with every control
   character replaced.
 
@@ -96,6 +98,100 @@ known writes `ack <R-n>@<revision> by claim <generation> refused: <cause>`. The 
 only when the request is `open` and the revision is its current one. Another revision is refused,
 and the refusal names the current one. `ReviseRequest` raises the revision by one and replaces the
 body.
+
+## The decision block
+
+Every park names a **cause** from a closed list, and the engine stores a **decision block** in the
+request's body under the key `decision`. The block is data for a reader: it says why the work stopped,
+what each possible answer does, and what a fresh session needs to pick the request up. Nothing acts on
+an option. Every verb works as before, and no verb changes with the block (ADR-0006, amended
+2026-11-21).
+
+The command carries inputs only: the cause, and the facts in its `detail`. The engine derives the block
+when it decides the command, so a replay of the command ID returns the stored request and derives
+nothing. A park command with no cause (a command stored before the cause existed) opens a request with
+no block, and its content bytes hold no `cause` key. `decision` is a reserved body key: a fact of that
+name in a park's `detail` cannot replace the block. A revision of a `merge_ack` request (see "The
+revision rule") stores a block built from the new facts, at the new revision.
+
+| Field | Meaning |
+|---|---|
+| `v` | The version of the block's shape. It is 1. A reader that finds a larger number reads no block. |
+| `cause` | The cause code (the table below). |
+| `summary` | One sentence the controller writes from the cause and its own facts: the unit, the stage, the attempt, a cap's number, a PR. It never holds a seat's words: the seat's text stays in `stop_text` and `gaps`. At most 300 characters. |
+| `options` | 0 to 4 objects `{id, label, detail, effect}`. `effect` is `{"verb":"answer","text":…}`, `{"verb":"resume"}`, `{"verb":"resume","to":<stage>}` or `{"verb":"ack"}`. |
+| `recommended` | Absent, or `{option, by, why}`. `by` is `controller`, `workflow` or `seat`. |
+| `refs` | `{project, run, unit, stage, pr}`. A fact that does not exist is left out: `project` for a run armed from the CLI, `stage` when empty, `pr` before a PR is recorded. |
+| `attempt` | The number of stage nodes of the parked stage for the unit. It is 0 for a park at the merge. |
+| `asked_by` | `{"kind":"seat","role":…,"unit":…}` for `stop_file` and `park_file`, where the seat's own file opened the request. `{"kind":"controller"}` for every other cause. |
+| `about` | `{"role":…,"unit":…}`, the seat the halt concerns. Present only for `stalled`, `no_done_signal`, `seat_lost` and `host_unreachable`, and only when a stage node of the unit exists. |
+| `options_error` | Present only for `stop_file`, when the stop file's options could not be read: the cause from `stop_options_error`. |
+| `takes_text` | True when the controller says the request's own file declares an `on_answer` hook, so a typed answer reaches a seat. False otherwise. |
+
+A seat's option text may be in `label` and in the `answer` effect's `text`: it is the seat's own line,
+redacted and bounded. Every other string of the block is written by the controller and holds no seat
+text. `show` prints a label with every control character replaced.
+
+### The causes
+
+The cause, the kind of the request it opens, the options and the recommendation. A recommendation is
+`controller` only for the four causes that ADR-0006's amendment of 2026-11-16 lists as below the line.
+
+| Cause | Kind | Options | Recommendation |
+|---|---|---|---|
+| `stop_file` | `stop` | The seat's options (see "A stop's options"), `s1` to `s4` in file order, each `answer` with the option's text. None when the file names none. | The seat's mark, `by: "seat"`. |
+| `park_file` | `gaps`, `red_gate` or `park`, by the file's name | None when `takes_text` is true: the typed answer is the act. Otherwise `resume`, and its `detail` says the file must be gone first or the unit parks again. | None. |
+| `no_done_signal` | `park` | `resume` | None. |
+| `stalled` | `stall` | `resume` | `resume`, `by: "controller"`. |
+| `launch_refused` | `park` | `resume` | None. |
+| `launch_failed` | `park` | `resume` | None. The agent port's launch error does not say that its cause is transient. |
+| `outcome_cap` | `park` | `again` (`resume` to the capped target stage, from the facts `cap_to` and `cap_max`) and `go_on` (`resume`) | None. |
+| `hook_failed` | `park` | `resume` | None. |
+| `answer_hook_failed` | `park` | `resume` | None. |
+| `pins_changed` | `park` | `resume` | None. |
+| `base_push_failed` | `park` | `resume` | None. |
+| `base_moved` | `park` | `resume` | None. |
+| `render_failed` | `park` | `resume` | None. |
+| `decisions_too_large` | `park` | `resume` | None. |
+| `no_pr` | `park` | `resume` | None. |
+| `merge_conflict` | `merge_failed` | `resume` | None. |
+| `merge_checks_red` | `merge_failed` | `resume` | `resume`, `by: "controller"`. |
+| `merge_refused` | `merge_failed` | `resume` | None. |
+| `merge_error` | `merge_failed` | `resume` | None. A forge error, and an outcome no other merge cause fits. |
+| `seat_lost` | `seat_lost` | `resume` | `resume`, `by: "controller"`. |
+| `host_unreachable` | `seat_lost` | `resume` | `resume`, `by: "controller"`. |
+| `merge_waits_ack` | `merge_ack` | `approve` (`ack`) | Never. |
+
+The outcome cap's `again` and `go_on` say that a resume grants a new budget: the outcome counters
+start again. The merge summary names the first 12 characters of the head SHA, so a revision changes the
+block.
+
+### A stop's options
+
+A stop file may end with this block, and nothing but blank lines after it:
+
+```text
+Options:
+- <one line of text>
+- [recommended] <one line of text>
+```
+
+- The line `Options:` stands alone at the start of a line. The last such line of the file opens the block.
+- Two to four lines follow, each starting with `- `. At most one carries `[recommended] `.
+- Each option's text is redacted first, then must hold 1 to 200 characters and no control character.
+  The text is all there is: no label, no stage, no verb.
+- A block that breaks a rule yields no option, and the body gains `stop_options_error` with the cause in
+  engine words: an `Options:` line that is not alone on its line, a line that does not start with `- `,
+  text after the block, an empty option, an option over 200 characters, a control character, fewer than
+  two or more than four options, or more than one `[recommended]` mark. The stop itself stands, with
+  its text as before, and the request's block gains `options_error`.
+- A valid block gives `stop_options`, and the block's options are `s1` to `s4` in file order. The marked
+  option is the recommendation, `by: "seat"`.
+- A stop file with no `Options:` line gives neither `stop_options` nor an error.
+
+**Known limit:** the controller reads at most 64 KiB of a stop file. A file over that bound that holds
+an `Options:` line gives `stop_options_error` (its block may be cut). A file over the bound whose
+options block starts after the first 64 KiB is not read, and gives no error.
 
 ## Command IDs
 

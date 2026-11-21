@@ -89,3 +89,24 @@ close passed it.
 - **Every halt still becomes a request**, and every end status still carries its reason. A stage with
   no `no_signal` parks as before. The engine knows no nudge and no command: the controller's driver
   carries both out (ADR-0001), and the workflow file declares them (ADR-0004).
+
+## Amendment, 2026-11-21 (Proposed): a request carries a cause and a decision block
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17). It takes
+effect when the code that builds it lands, and that work's close marks it Accepted.
+
+- **Every park names a cause** from a closed list, set in code at the site that makes the halt. No code
+  reads the reason text to find it. A park stored before this amendment has no cause and reads as no
+  block.
+- **A request holds a decision block** in its body: the cause, a summary the controller writes, the
+  options, the recommendation with its source, the IDs of the project, run, unit, stage and PR, the
+  attempt, who asked, and whether a text would reach a seat. The block is data for readers. The engine
+  derives it when it decides the park command, so a replay of the command ID derives nothing.
+- **No verb changes with the block.** `answer`, `clear`, `ack` and the clear grant act as before. An
+  option names an act that an existing verb already does. Who may settle a request does not change.
+- **The line class of the 2026-11-16 amendment attaches to the cause.** A cause is `below` or `above`
+  the line; the four causes that carry a `controller` recommendation are the ones that amendment lists
+  as below the line. A recommendation never changes a class.
+- **Every halt still becomes a request**, and every end status still carries its reason. A seat's text
+  stays in the request's body as data (ADR-0005): the summary never holds it, and a seat's stop options
+  are redacted and bounded before they are stored.

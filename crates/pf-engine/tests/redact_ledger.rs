@@ -4,6 +4,7 @@
 mod common;
 
 use common::{Env, FakeUnitSource, env, unit, workflow};
+use pf_engine::Cause;
 use pf_engine::admission::PushOutcome;
 
 const SECRET: &str = "s3cr3tvalue";
@@ -60,6 +61,7 @@ fn a_park_reason_with_a_bare_token_url_is_absent_from_the_ledger_and_the_admissi
     e.engine
         .park(
             "u1",
+            Cause::HookFailed,
             &format!("fatal: unable to access 'https://{SECRET}@github.com/o/r': 403"),
         )
         .unwrap();

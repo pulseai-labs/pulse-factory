@@ -936,7 +936,7 @@ impl Controller {
                 },
                 Err(why) => Response::err(why),
             },
-            // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).
+            // A seat cannot drive a chat, and neither can a chat (ADR-0015, Q2 rule 2).
             verb @ ("session_start" | "session_send" | "session_answer" | "session_interrupt"
             | "session_set" | "session_end" | "session_redact") => {
                 match self.check_chat_caller(verb, peer) {
@@ -945,7 +945,7 @@ impl Controller {
                 }
             }
             // `project_remove` with `end_sessions` ends chat sessions, so a seat or a chat cannot
-            // call it that way (ADR-0005, Q2 rule 2). Without the field it ends nothing, and the
+            // call it that way (ADR-0015, Q2 rule 2). Without the field it ends nothing, and the
             // verb is as it was.
             "project_remove"
                 if request.args.get("end_sessions").and_then(Value::as_bool) == Some(true) =>

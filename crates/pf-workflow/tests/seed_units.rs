@@ -7,6 +7,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Env, TrackedSource, env, unit};
+use pf_engine::Cause;
 use pf_engine::capacity::Settings;
 use pf_engine::launch::LaunchStep;
 use pf_engine::unit::Signal;
@@ -193,7 +194,9 @@ fn it_re_admits_as_id_dot_2_only_when_every_condition_holds() {
 
     // A parked unit blocks it too.
     e.engine.start_stage("i2").unwrap();
-    e.engine.park("i2", "needs a person").unwrap();
+    e.engine
+        .park("i2", Cause::Stalled, "needs a person")
+        .unwrap();
     assert_eq!(step(&e, &s, false), SeedStep::Wait, "i2 is parked");
 
     // A second run, where both items finish, checks the `until_file` and the new ID.

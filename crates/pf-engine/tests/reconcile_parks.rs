@@ -7,6 +7,7 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::ledger::FsLedger;
 use pf_engine::port::agent::{AgentPort, NO_SESSION_HOST, RebindOutcome, SessionRef};
 use pf_engine::port::store::{AdmissionOutcome, RequestKind, Store};
@@ -54,7 +55,9 @@ fn first_controller() -> Env {
     env.engine
         .end("u-stopped", EndStatus::Stopped, "operator stopped it")
         .unwrap();
-    env.engine.park("u-parked", "stalled").unwrap();
+    env.engine
+        .park("u-parked", Cause::Stalled, "stalled")
+        .unwrap();
 
     // u-unattached: the launch was admitted, and the controller stopped before the adapter
     // handed back a session handle. u-idle never launched.

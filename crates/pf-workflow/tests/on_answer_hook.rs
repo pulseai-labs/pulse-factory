@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use common::{Env, TrackedSource, env, item_workflow, unit};
+use pf_engine::Cause;
 use pf_engine::claim::sha256_hex;
 use pf_engine::launch::LaunchStep;
 use pf_engine::port::store::{RequestKind, RequestRow, RequestStatus};
@@ -423,6 +424,7 @@ fn parked(kind: RequestKind) -> (Env, RequestRow, u64) {
         .park_with(
             "u1",
             kind,
+            Cause::ParkFile,
             "needs an answer",
             Some(&serde_json::json!({ "gaps": [{"section": "s", "question": "q", "severity": "blocking"}] })),
         )

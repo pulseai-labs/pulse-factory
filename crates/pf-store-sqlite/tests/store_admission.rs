@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pf_engine::Cause;
 use pf_engine::capacity::Settings;
 use pf_engine::port::agent::*;
 use pf_engine::port::forge::*;
@@ -142,6 +143,7 @@ fn park(id: &str, unit: &str, reason: &str) -> Command {
             unit_id: unit.to_string(),
             reason: reason.to_string(),
             request_kind: pf_engine::RequestKind::Park,
+            cause: None,
             detail: None,
         },
     }
@@ -415,7 +417,7 @@ fn the_transition_its_command_and_its_outbox_line_commit_together_or_not_at_all(
             .unwrap()
             .execute_batch(trigger)
             .unwrap();
-        let err = engine.park("u1", "stalled").unwrap_err();
+        let err = engine.park("u1", Cause::Stalled, "stalled").unwrap_err();
         assert!(matches!(err, EngineError::Degraded(_)), "{name}: {err:?}");
 
         let after = (

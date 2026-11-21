@@ -15,7 +15,7 @@
 use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::agent::{AgentError, LaunchPlan};
-use crate::port::store::{AdmissionOutcome, Effect, NodeKind, NodeRow};
+use crate::port::store::{AdmissionOutcome, Cause, Effect, NodeKind, NodeRow};
 use crate::render::{RenderContext, UnitView, render};
 use crate::status::{EndStatus, REASON_RUN_HALTED, Status, check_reason};
 use crate::unit::{UnitDetail, stage_node_id};
@@ -337,7 +337,7 @@ impl Engine {
                 // A launch that cannot render never reaches the adapter. Park first: a stop
                 // between the two leaves a parked unit, never a running unit with no session.
                 let reason = format!("launch refused: {why}");
-                self.park(unit_id, &reason)?;
+                self.park(unit_id, Cause::LaunchRefused, &reason)?;
                 self.end(&session_id, EndStatus::Failed, &reason)?;
                 return Ok(LaunchStep::Parked { reason });
             }
@@ -372,13 +372,17 @@ impl Engine {
                 })
             }
             Err(e) => {
-                let reason = match e {
-                    AgentError::Refused(why) => format!("launch refused: {why}"),
-                    AgentError::Failed(why) => format!("launch failed: {why}"),
+                let (cause, reason) = match e {
+                    AgentError::Refused(why) => {
+                        (Cause::LaunchRefused, format!("launch refused: {why}"))
+                    }
+                    AgentError::Failed(why) => {
+                        (Cause::LaunchFailed, format!("launch failed: {why}"))
+                    }
                 };
                 // Park first: a stop between the two leaves a parked unit, never a running
                 // unit with no session.
-                self.park(unit_id, &reason)?;
+                self.park(unit_id, cause, &reason)?;
                 self.end(&session_id, EndStatus::Failed, &reason)?;
                 Ok(LaunchStep::Parked { reason })
             }

@@ -7,6 +7,7 @@ use common::ctl::*;
 use common::rig::*;
 use common::*;
 use pf_adapter_fake::Step;
+use pf_engine::Cause;
 use pf_engine::port::agent::{SessionRef, Usage};
 use pf_forge_bare::PrChecks;
 use serde_json::{Value, json};
@@ -333,7 +334,10 @@ fn a_restart_parks_a_running_unit_relaunches_nothing_and_ends_a_stale_session() 
     // The lane runs. A second unit is parked by hand, with its session left open.
     queue_item(&live, "u1", 1);
     live.controller.tick_all();
-    live.handle().engine.park("u1", "parked by hand").unwrap();
+    live.handle()
+        .engine
+        .park("u1", Cause::Stalled, "parked by hand")
+        .unwrap();
     let open = |c: &pulse_factory::controller::Controller| {
         c.store()
             .sessions(&run)

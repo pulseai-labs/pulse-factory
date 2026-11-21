@@ -894,10 +894,19 @@ pub struct RequestSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub head_sha: Option<String>,
+    /// Why the unit parked, from the closed list of causes (`docs/contracts/requests.md`). Left
+    /// out for a request with no decision block, and for a block this binary cannot read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cause: Option<String>,
+    /// The controller's one-sentence summary of the halt. It holds no seat's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
 }
 
-/// The answer of `show`: the summary, the request's body and answer, and the generation that
-/// answered it.
+/// The answer of `show`: the summary, the request's body and answer, the decision block, and the
+/// generation that answered it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RequestDetail {
     pub schema_version: u32,
@@ -910,6 +919,111 @@ pub struct RequestDetail {
     pub answer: serde_json::Value,
     #[ts(type = "number | null")]
     pub answer_generation: Option<u64>,
+    /// The decision block of the request's body. Left out when the body holds none, or holds a
+    /// block of a version this binary does not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub decision: Option<Decision>,
+}
+
+/// The decision block of a request (`docs/contracts/requests.md`, "The decision block"): why the
+/// work stopped, what each possible answer does, and what a fresh session needs to pick the request
+/// up. It is data for a reader. Nothing in it acts, and no verb changes with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Decision {
+    /// The version of the block's shape. A block of another version is not decoded.
+    pub v: u32,
+    pub cause: String,
+    /// One sentence the controller writes. It never holds a seat's words.
+    pub summary: String,
+    /// Zero to four options.
+    pub options: Vec<DecisionOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recommended: Option<Recommended>,
+    pub refs: DecisionRefs,
+    /// The number of stage nodes of the parked stage for the unit. 0 for a park at the merge.
+    #[ts(type = "number")]
+    pub attempt: u64,
+    pub asked_by: AskedBy,
+    /// The seat the halt concerns, when the controller asked and a stage node of the unit exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub about: Option<DecisionAbout>,
+    /// Why a stop file's options could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub options_error: Option<String>,
+    /// True when a text answer reaches a seat, because the request's own file declares an answer
+    /// hook.
+    pub takes_text: bool,
+}
+
+/// One option of a decision block.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionOption {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub effect: OptionEffect,
+}
+
+/// What an option does when it is taken. Nothing acts on it in this version: it says which verb
+/// would carry the option out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum OptionEffect {
+    /// Answer with this text.
+    Answer { text: String },
+    /// Resume the unit, at the stage `to` when it is set.
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to: Option<String>,
+    },
+    /// Ack the merge.
+    Ack,
+}
+
+/// The option that is recommended, and who recommends it: `controller`, `workflow` or `seat`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Recommended {
+    pub option: String,
+    pub by: String,
+    pub why: String,
+}
+
+/// The IDs a fresh session needs. A fact that does not exist is left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionRefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project: Option<String>,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<String>,
+}
+
+/// Who asked: the seat, when its own file opened the request, and the controller otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AskedBy {
+    Seat { role: String, unit: String },
+    Controller,
+}
+
+/// The seat a halt concerns, when the controller is the one who asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionAbout {
+    pub role: String,
+    pub unit: String,
 }
 
 /// The answer of `requests`: the requests (the open ones, or all with `all`), newest last, the count of
@@ -1344,6 +1458,13 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ClaimRecord::export_all(cfg)?;
     RequestSummary::export_all(cfg)?;
     RequestDetail::export_all(cfg)?;
+    Decision::export_all(cfg)?;
+    DecisionOption::export_all(cfg)?;
+    OptionEffect::export_all(cfg)?;
+    Recommended::export_all(cfg)?;
+    DecisionRefs::export_all(cfg)?;
+    AskedBy::export_all(cfg)?;
+    DecisionAbout::export_all(cfg)?;
     RequestList::export_all(cfg)?;
     RequestsArgs::export_all(cfg)?;
     ShowArgs::export_all(cfg)?;
