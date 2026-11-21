@@ -223,6 +223,117 @@ impl RequestKind {
     }
 }
 
+/// Why a unit parked: the closed list of the causes of a park (`docs/contracts/requests.md`, "The
+/// decision block"). Every park site names one in code. Nothing reads the reason text to find it.
+/// The cause is the key of a request's options and of its recommendation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    /// The seat wrote its stop file.
+    StopFile,
+    /// The seat wrote a file the stage lists under `park_on`.
+    ParkFile,
+    /// The seat's turn ended and no done signal holds.
+    NoDoneSignal,
+    /// The seat stalled after its one relaunch.
+    Stalled,
+    /// The agent port refused the launch.
+    LaunchRefused,
+    /// The agent port failed the launch.
+    LaunchFailed,
+    /// A stage outcome reached its cap.
+    OutcomeCap,
+    /// A command hook of a stage failed.
+    HookFailed,
+    /// The answer hook of a request failed.
+    AnswerHookFailed,
+    /// A pinned copy of the run changed after arm.
+    PinsChanged,
+    /// The push of a stage's base branch failed.
+    BasePushFailed,
+    /// The default branch moved during a push.
+    BaseMoved,
+    /// A path or a condition of a stage cannot render.
+    RenderFailed,
+    /// The decisions file is over its bound.
+    DecisionsTooLarge,
+    /// The unit is ready to merge and no PR is recorded for it.
+    NoPr,
+    /// The forge reports a merge conflict.
+    MergeConflict,
+    /// The checks of the PR are red.
+    MergeChecksRed,
+    /// The forge refused the merge.
+    MergeRefused,
+    /// A forge error, or an outcome no other cause fits.
+    MergeError,
+    /// The seat's process is gone.
+    SeatLost,
+    /// The seat's host did not answer.
+    HostUnreachable,
+    /// A merge waits on the claim's ack.
+    MergeWaitsAck,
+}
+
+impl Cause {
+    /// Every cause, in the order the contract lists them.
+    pub const ALL: [Cause; 22] = [
+        Cause::StopFile,
+        Cause::ParkFile,
+        Cause::NoDoneSignal,
+        Cause::Stalled,
+        Cause::LaunchRefused,
+        Cause::LaunchFailed,
+        Cause::OutcomeCap,
+        Cause::HookFailed,
+        Cause::AnswerHookFailed,
+        Cause::PinsChanged,
+        Cause::BasePushFailed,
+        Cause::BaseMoved,
+        Cause::RenderFailed,
+        Cause::DecisionsTooLarge,
+        Cause::NoPr,
+        Cause::MergeConflict,
+        Cause::MergeChecksRed,
+        Cause::MergeRefused,
+        Cause::MergeError,
+        Cause::SeatLost,
+        Cause::HostUnreachable,
+        Cause::MergeWaitsAck,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cause::StopFile => "stop_file",
+            Cause::ParkFile => "park_file",
+            Cause::NoDoneSignal => "no_done_signal",
+            Cause::Stalled => "stalled",
+            Cause::LaunchRefused => "launch_refused",
+            Cause::LaunchFailed => "launch_failed",
+            Cause::OutcomeCap => "outcome_cap",
+            Cause::HookFailed => "hook_failed",
+            Cause::AnswerHookFailed => "answer_hook_failed",
+            Cause::PinsChanged => "pins_changed",
+            Cause::BasePushFailed => "base_push_failed",
+            Cause::BaseMoved => "base_moved",
+            Cause::RenderFailed => "render_failed",
+            Cause::DecisionsTooLarge => "decisions_too_large",
+            Cause::NoPr => "no_pr",
+            Cause::MergeConflict => "merge_conflict",
+            Cause::MergeChecksRed => "merge_checks_red",
+            Cause::MergeRefused => "merge_refused",
+            Cause::MergeError => "merge_error",
+            Cause::SeatLost => "seat_lost",
+            Cause::HostUnreachable => "host_unreachable",
+            Cause::MergeWaitsAck => "merge_waits_ack",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Cause> {
+        Cause::ALL.into_iter().find(|c| c.as_str() == text)
+    }
+}
+
 /// Where a request stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

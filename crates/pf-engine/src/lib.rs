@@ -23,6 +23,6 @@ pub use admission::{
     Admission, Command, CommandBody, EngineError, OpenRequestBody, PushOutcome, RunView,
 };
 pub use engine::{Clock, Engine, EngineConfig, IngestReport, system_clock};
-pub use port::store::{ClaimRow, RequestKind, RequestRow, RequestStatus};
+pub use port::store::{Cause, ClaimRow, RequestKind, RequestRow, RequestStatus};
 pub use status::{EndStatus, Status};
 pub use workflow::{MergeDef, MergeRule, OutcomeDef, StageDef, Track, Workflow};

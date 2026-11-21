@@ -9,6 +9,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
+use crate::claim::decision::{KEY_STOP_OPTIONS, KEY_STOP_OPTIONS_ERROR};
 use crate::status::redact;
 
 /// The most a gap file may hold, in bytes. A bigger file gives `gaps_error`.
@@ -24,6 +25,18 @@ pub const KEY_GAPS: &str = "gaps";
 pub const KEY_GAPS_ERROR: &str = "gaps_error";
 /// The key of the stop file's text in a request body.
 pub const KEY_STOP_TEXT: &str = "stop_text";
+/// The fewest options a stop file's options block holds.
+pub const STOP_OPTIONS_MIN: usize = 2;
+/// The most options a stop file's options block holds.
+pub const STOP_OPTIONS_MAX: usize = 4;
+/// The longest option text, in characters, after redaction.
+pub const STOP_OPTION_MAX_CHARS: usize = 200;
+/// The line that opens a stop file's options block.
+const OPTIONS_LINE: &str = "Options:";
+/// The start of every option line.
+const OPTION_PREFIX: &str = "- ";
+/// The mark of the seat's recommended option, after the line's prefix.
+const RECOMMENDED_MARK: &str = "[recommended] ";
 
 /// Read a seat's gap file and return the facts to add to the request body: `{"gaps": [...]}`,
 /// or `{"gaps_error": "<cause>"}` when the file is missing, too large or not in the shape.
@@ -96,18 +109,110 @@ pub fn gaps_of(parsed: &Value) -> Result<Vec<Value>, String> {
 /// Read a stop file and return the facts to add to the request body: `{"stop_text": "<text>"}`,
 /// at most [`STOP_TEXT_MAX_BYTES`] bytes of it, redacted. `None` when the file cannot be read: the
 /// request keeps its reason, which says so.
+///
+/// A stop file may end with an options block (`docs/contracts/requests.md`, "A stop's options").
+/// A block that holds the rules gives `stop_options`, `[{"text", "recommended"}]` in file order. A
+/// block that breaks a rule gives `stop_options_error`, a cause in engine words, and no option.
+/// A file with no block gives neither key. The stop itself stands in each case: `stop_text` holds
+/// the whole file, the block included.
 pub fn stop_detail(path: &Path) -> Option<Value> {
     let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
-    file.take(STOP_TEXT_MAX_BYTES)
+    // One byte more than the bound tells a file that is cut from one that just fits.
+    file.take(STOP_TEXT_MAX_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
+    let cut = bytes.len() as u64 > STOP_TEXT_MAX_BYTES;
+    let raw = String::from_utf8_lossy(&bytes[..bytes.len().min(STOP_TEXT_MAX_BYTES as usize)])
+        .into_owned();
+    let options = stop_options_of(&raw, cut);
     // Redaction can lengthen a text, so the cut comes last, on a character boundary.
-    let mut text = redact(&String::from_utf8_lossy(&bytes));
+    let mut text = redact(&raw);
     let mut end = text.len().min(STOP_TEXT_MAX_BYTES as usize);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     text.truncate(end);
-    Some(json!({ KEY_STOP_TEXT: text }))
+    let mut facts = json!({ KEY_STOP_TEXT: text });
+    if let Some(object) = facts.as_object_mut() {
+        match options {
+            Some(Ok(list)) => {
+                object.insert(KEY_STOP_OPTIONS.to_string(), Value::Array(list));
+            }
+            Some(Err(why)) => {
+                object.insert(KEY_STOP_OPTIONS_ERROR.to_string(), json!(why));
+            }
+            None => {}
+        }
+    }
+    Some(facts)
+}
+
+/// The options a stop file's text names. `None` when the text holds no options block, `Some(Err)`
+/// when it holds one that breaks a rule. `cut` says the text is the first bytes of a longer file:
+/// a block there may be cut, so it is refused and never read as a shorter block.
+fn stop_options_of(text: &str, cut: bool) -> Option<Result<Vec<Value>, String>> {
+    let lines: Vec<&str> = text.lines().collect();
+    // The block ends the file, so the last line that opens one is the one that counts.
+    let start = lines.iter().rposition(|l| l.starts_with(OPTIONS_LINE))?;
+    if cut {
+        return Some(Err(format!(
+            "the stop file is over {STOP_TEXT_MAX_BYTES} bytes, so its options block may be cut"
+        )));
+    }
+    Some(read_options(&lines[start..]))
+}
+
+/// The block from its `Options:` line to the end of the file.
+fn read_options(lines: &[&str]) -> Result<Vec<Value>, String> {
+    if lines[0].trim_end() != OPTIONS_LINE {
+        return Err(format!("the {OPTIONS_LINE} line is not alone on its line"));
+    }
+    let mut options: Vec<Value> = Vec::new();
+    let mut marks = 0;
+    let mut ended = false;
+    for line in &lines[1..] {
+        if line.trim().is_empty() {
+            ended = true;
+            continue;
+        }
+        if ended {
+            return Err("the options block has text after it".to_string());
+        }
+        let Some(rest) = line.strip_prefix(OPTION_PREFIX) else {
+            return Err(format!(
+                "a line of the options block does not start with {OPTION_PREFIX:?}"
+            ));
+        };
+        let (marked, rest) = match rest.strip_prefix(RECOMMENDED_MARK) {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
+        marks += usize::from(marked);
+        // Redact first, then count: a secret that is cut to a mark must not decide the length.
+        let text = redact(rest.trim());
+        let chars = text.chars().count();
+        if chars == 0 {
+            return Err("an option is empty".to_string());
+        }
+        if chars > STOP_OPTION_MAX_CHARS {
+            return Err(format!(
+                "an option holds {chars} characters; the most is {STOP_OPTION_MAX_CHARS}"
+            ));
+        }
+        if text.chars().any(char::is_control) {
+            return Err("an option holds a control character".to_string());
+        }
+        options.push(json!({ "text": text, "recommended": marked }));
+    }
+    if !(STOP_OPTIONS_MIN..=STOP_OPTIONS_MAX).contains(&options.len()) {
+        return Err(format!(
+            "the options block holds {} options, not {STOP_OPTIONS_MIN} to {STOP_OPTIONS_MAX}",
+            options.len()
+        ));
+    }
+    if marks > 1 {
+        return Err("more than one option is marked [recommended]".to_string());
+    }
+    Ok(options)
 }

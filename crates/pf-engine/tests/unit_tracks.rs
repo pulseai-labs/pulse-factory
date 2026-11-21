@@ -5,6 +5,7 @@
 mod common;
 
 use common::{FakeUnitSource, PrScript, TrackedSource, env, two_track_workflow, unit, workflow};
+use pf_engine::Cause;
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::{MergeStep, Next, next_in_order};
 use pf_engine::port::forge::PrRef;
@@ -161,7 +162,9 @@ fn a_parked_lane_unit_does_not_block_a_merge_and_a_parked_item_unit_does() {
         })
         .unwrap();
     e.engine.start_stage("L1").unwrap();
-    e.engine.park("L1", "lane seat stopped").unwrap();
+    e.engine
+        .park("L1", Cause::Stalled, "lane seat stopped")
+        .unwrap();
     for id in ["I1", "I2"] {
         e.engine.start_stage(id).unwrap();
         e.engine.signal(id, "build", done("b"), None).unwrap();
@@ -176,7 +179,9 @@ fn a_parked_lane_unit_does_not_block_a_merge_and_a_parked_item_unit_does() {
         MergeStep::Waiting { unit, .. } if unit == "I1"
     ));
     // Park I1: a parked unit on the merge track blocks the order.
-    e.engine.park("I1", "needs a person").unwrap();
+    e.engine
+        .park("I1", Cause::Stalled, "needs a person")
+        .unwrap();
     let view = e.engine.view().unwrap();
     assert_eq!(
         next_in_order(&view, e.engine.workflow()),

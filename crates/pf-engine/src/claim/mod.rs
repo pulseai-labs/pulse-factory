@@ -17,12 +17,18 @@
 //! **The claim token** never reaches the engine. The controller makes it, hashes it and sends the
 //! hash. The engine stores the hash and compares generations.
 
+mod decision;
 mod detail;
 mod sha256;
 
+pub use decision::{
+    DECISION_VERSION, KEY_CAP_MAX, KEY_CAP_TO, KEY_DECISION, KEY_STOP_OPTIONS,
+    KEY_STOP_OPTIONS_ERROR, KEY_TAKES_TEXT, OPTIONS_MAX, SUMMARY_MAX_CHARS,
+};
 pub use detail::{
     GAP_TEXT_MAX_CHARS, GAPS_FILE_MAX_BYTES, KEY_GAPS, KEY_GAPS_ERROR, KEY_STOP_TEXT,
-    STOP_TEXT_MAX_BYTES, gaps_detail, gaps_of, stop_detail,
+    STOP_OPTION_MAX_CHARS, STOP_OPTIONS_MAX, STOP_OPTIONS_MIN, STOP_TEXT_MAX_BYTES, gaps_detail,
+    gaps_of, stop_detail,
 };
 pub use sha256::sha256_hex;
 
@@ -31,7 +37,7 @@ use serde_json::{Value, json};
 use crate::admission::{Admission, Command, CommandBody, Decision, EngineError, RunView};
 use crate::engine::Engine;
 use crate::port::store::{
-    ClaimRow, Effect, NewRequest, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus,
+    Cause, ClaimRow, Effect, NewRequest, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus,
 };
 use crate::status::{REASON_RUN_HALTED, Status, check_reason, one_line_reason};
 use crate::workflow::Workflow;
@@ -191,15 +197,19 @@ pub(crate) fn parked_stage(view: &RunView, workflow: &Workflow, unit: &NodeRow) 
 }
 
 /// The keys of a request body that the engine sets. A park's `detail` may not set them.
-const RESERVED_BODY_KEYS: [&str; 3] = ["reason", "stage", "park_generation"];
+const RESERVED_BODY_KEYS: [&str; 4] = ["reason", "stage", "park_generation", KEY_DECISION];
 
 /// The effects of a park: the unit becomes `parked` and its request opens, in one commit.
-/// `detail` holds more facts for the request body, such as a gap list or a stop file's text.
+/// `detail` holds more facts for the request body, such as a gap list or a stop file's text. The
+/// request holds a decision block built from `cause`; a park with no cause (a command stored
+/// before the cause existed) opens a request with no block.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn park_effects(
     view: &RunView,
     workflow: &Workflow,
     unit: &NodeRow,
     kind: RequestKind,
+    cause: Option<Cause>,
     reason: &str,
     detail_facts: Option<&Value>,
     now: &str,
@@ -207,15 +217,17 @@ pub(crate) fn park_effects(
     if kind == RequestKind::MergeAck {
         return Err("a unit park cannot open a merge_ack request".to_string());
     }
-    park_with_request(view, workflow, unit, kind, reason, detail_facts, now)
+    park_with_request(view, workflow, unit, kind, cause, reason, detail_facts, now)
 }
 
 /// [`park_effects`] for any kind. Only the merge rule `claim_ack` calls it with `MergeAck`.
+#[allow(clippy::too_many_arguments)]
 fn park_with_request(
     view: &RunView,
     workflow: &Workflow,
     unit: &NodeRow,
     kind: RequestKind,
+    cause: Option<Cause>,
     reason: &str,
     detail_facts: Option<&Value>,
     now: &str,
@@ -237,6 +249,7 @@ fn park_with_request(
             "park_generation": detail.park_generation,
         }),
     };
+    let mut facts_object = serde_json::Map::new();
     if let Some(facts) = detail_facts {
         let facts = facts
             .as_object()
@@ -247,6 +260,22 @@ fn park_with_request(
         if let Some(object) = body.as_object_mut() {
             object.extend(facts.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
+        facts_object.extend(facts.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    // The engine derives the block from the cause and the facts, here, so a replay of the park
+    // command returns the stored request and derives nothing.
+    if let Some(cause) = cause
+        && let Some(object) = body.as_object_mut()
+    {
+        let block = decision::build(&decision::Inputs {
+            view,
+            workflow,
+            unit,
+            cause,
+            stage: &stage,
+            facts: &facts_object,
+        });
+        object.insert(KEY_DECISION.to_string(), block);
     }
     let mut parked = unit.clone();
     parked.status = Status::Parked;
@@ -328,19 +357,29 @@ fn open_at<'a>(view: &'a RunView, id: &str, revision: u32) -> Result<&'a Request
 
 pub(crate) fn decide_revise(
     view: &RunView,
+    workflow: &Workflow,
     id: &str,
     revision: u32,
     body: &str,
     reason: Option<&str>,
 ) -> Result<Decision, Rejected> {
     let request = open_at(view, id, revision)?;
-    serde_json::from_str::<Value>(body)
+    let mut revised = serde_json::from_str::<Value>(body)
         .ok()
         .filter(Value::is_object)
         .ok_or_else(|| "the request's body is not a JSON object".to_string())?;
+    // A request that holds a block gets a block built from the new facts, at the new revision.
+    // A body with no block to rebuild is stored as given.
+    let mut stored = body.to_string();
+    if let Some(object) = revised.as_object_mut()
+        && let Some(block) = decision::rebuilt(view, workflow, request, object)
+    {
+        object.insert(KEY_DECISION.to_string(), block);
+        stored = revised.to_string();
+    }
     let mut next = request.clone();
     next.revision += 1;
-    next.body = body.to_string();
+    next.body = stored;
     if let Some(reason) = reason {
         next.reason = check_reason(reason)
             .map_err(|e| format!("the request's reason: {e}"))?
@@ -518,9 +557,9 @@ pub(crate) fn decide_answer(
                     )?
                     .0
                 }
-                Some(cause) => {
-                    parked_again_effects(view, unit, request, generation, answer, cause, now)?
-                }
+                Some(cause) => parked_again_effects(
+                    view, workflow, unit, request, generation, answer, cause, now,
+                )?,
             };
         }
         None => {
@@ -545,8 +584,10 @@ pub(crate) fn decide_answer(
 /// resume. The unit stays parked and a new `park` request opens for it, in the same commit, with
 /// the hook's cause. The park generation rises, as it does for a resume, so the new request has
 /// its own command IDs.
+#[allow(clippy::too_many_arguments)]
 fn parked_again_effects(
     view: &RunView,
+    workflow: &Workflow,
     unit: &NodeRow,
     request: &RequestRow,
     generation: u64,
@@ -582,6 +623,15 @@ fn parked_again_effects(
     closed.answered_at = Some(now.to_string());
     closed.answer = Some(answer.to_string());
     closed.answer_generation = Some(generation);
+    // The new request is a park of its own cause. The facts are the unit's, as they stand.
+    let block = decision::build(&decision::Inputs {
+        view,
+        workflow,
+        unit,
+        cause: Cause::AnswerHookFailed,
+        stage: &request.stage,
+        facts: &serde_json::Map::new(),
+    });
     Ok(vec![
         Effect::PutNode(parked),
         Effect::PutRequest(closed),
@@ -595,6 +645,7 @@ fn parked_again_effects(
                 "reason": reason,
                 "stage": request.stage,
                 "park_generation": detail.park_generation,
+                KEY_DECISION: block,
             })
             .to_string(),
             opened_at: now.to_string(),
@@ -731,6 +782,7 @@ pub(crate) fn decide_open_merge_ack(
             workflow,
             unit,
             RequestKind::MergeAck,
+            Some(Cause::MergeWaitsAck),
             reason,
             Some(facts),
             now,
@@ -852,18 +904,21 @@ impl Engine {
         &self,
         unit_id: &str,
         kind: RequestKind,
+        cause: Cause,
         reason: &str,
     ) -> Result<Admission, EngineError> {
-        self.park_with(unit_id, kind, reason, None)
+        self.park_with(unit_id, kind, cause, reason, None)
     }
 
     /// [`Engine::park_as`], with more facts for the request body: a JSON object, such as the
     /// result of [`gaps_detail`] or [`stop_detail`]. The facts are data and may not set `reason`,
-    /// `stage` or `park_generation`.
+    /// `stage`, `park_generation` or `decision`. The `cause` is the park's reason in code: the
+    /// request holds a decision block built from it.
     pub fn park_with(
         &self,
         unit_id: &str,
         kind: RequestKind,
+        cause: Cause,
         reason: &str,
         detail: Option<&Value>,
     ) -> Result<Admission, EngineError> {
@@ -875,6 +930,7 @@ impl Engine {
                 unit_id: unit_id.to_string(),
                 reason: one_line_reason(reason),
                 request_kind: kind,
+                cause: Some(cause),
                 detail: detail.cloned(),
             },
         })

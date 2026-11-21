@@ -304,7 +304,7 @@ answered and withdrawn requests, each marked with its status. With nothing open 
 `no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
 `requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
 `opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
-`merge_ack`), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
+`merge_ack`, and `cause` and `summary` for a request that holds a decision block), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
 null), `revoked` and `claimed_at`; null when none). The new fields join the old ones: none is
 removed and `schema_version` stays 1. The API serves the same JSON (`api.md`). It needs no claim.
 
@@ -317,8 +317,27 @@ pulse-factory show <R-n> [--json]
 Prints every field of one request: the body, the answer if there is one, and the verbs that answer
 it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
 holds and the text of a `stop` request. The JSON adds `body`, `answer`,
-`answer_generation` to the fields of `requests` (`verbs` and a `merge_ack`'s `pr`, `base` and
-`head_sha` are in them already). An unknown ID exits 1 and names it. It needs no claim.
+`answer_generation` and `decision` to the fields of `requests` (`verbs`, `cause`, `summary` and a
+`merge_ack`'s `pr`, `base` and `head_sha` are in them already). An unknown ID exits 1 and names it. It
+needs no claim.
+
+A request that holds a decision block (`requests.md`, "The decision block") also prints these lines,
+after every line above, with every control character of a value replaced:
+
+```
+cause: <cause>
+summary: <one sentence>
+asked by: seat <role> (unit <unit>)      or      asked by: controller
+attempt: <n>
+takes text: yes|no
+about: seat <role> (unit <unit>)         only when the block has `about`
+options error: <cause>                   only when a stop's options could not be read
+option <id>: <label> (<what it does>[; recommended by <by>: <why>])
+```
+
+`<what it does>` is `answers with the text "<text>"`, `resumes the unit`, `resumes the unit at stage
+<stage>` or `acks the merge`. One `option` line prints for each option, in the block's order. A request
+with no block prints none of these lines. No line that `show` or `requests` printed before changes.
 
 ## `claim`
 
@@ -501,7 +520,8 @@ command ID and one line of the controller ledger (see Common rules).
   live worktree rows removed in the same command.
 - **`--end-sessions`** (`r1.s5.w5`) ends the project's live chat sessions first, in session order, each
   through the code of `session end` with the command ID `<command-id>:end:<S-n>`, then removes the
-  project. The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
+  project. `project remove --end-sessions` is refused for a caller that is, or descends from, a seat or
+  a live chat process (ADR-0015, Q2 rule 2). The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
   its derived IDs is refused before any end.
 - **The run refusal** (`r1.s5.w5`), for `remove` with or without `--end-sessions`: a project with an active
   run is not removed, and no session is ended (`project P-1 has an active run <run>; remove it after the
@@ -664,7 +684,7 @@ stream (`api.md`).
   closes each pending request as `lost` and adds a `host_lost` notice. A host that does not answer
   does the same with a `host_unreachable` notice and nothing starts; the next `send` stops it first.
   A session with no host row is set `idle` as before. Each outcome is one `chat rebind` line. The next
-  `send` of a lost session resumes it from the newest revision of its launch record: a `current` key
+  `send` of a lost session resumes it with the model, effort, permission mode and options of the session row (`session set` writes them): a `current` key
   (`chat.deny_commands`, `chat.self_turn_cap`, `chat.propose_per_min`) is read now, a `record` key
   (`session.*`) comes from the record, and the CLI copy the chat was launched with must still be in
   place with the same SHA-256, or the resume fails with `RuntimeNotReady` and starts nothing. A

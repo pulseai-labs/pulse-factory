@@ -11,6 +11,7 @@ mod common;
 use std::collections::HashSet;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::admission::body_of_content;
 use pf_engine::claim::sha256_hex;
 use pf_engine::port::store::{RequestKind, RequestStatus};
@@ -135,7 +136,9 @@ fn run_ops(ops: &[Op]) -> Result<(), TestCaseError> {
                     replayed: true,
                 }
             }),
-            Op::Park(i) => env.engine.park_as("u1", KINDS[*i], "random park"),
+            Op::Park(i) => env
+                .engine
+                .park_as("u1", KINDS[*i], Cause::HookFailed, "random park"),
             Op::EndSession => {
                 let view = env.engine.view().unwrap();
                 match view.running_stage_of("u1") {

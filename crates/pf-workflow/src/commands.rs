@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use pf_engine::Engine;
 use pf_engine::admission::EngineError;
-use pf_engine::port::store::RequestRow;
+use pf_engine::port::store::{Cause, RequestRow};
 use pf_engine::render::{AnswerView, RenderContext, render, render_with};
 
 /// The timeout of a command that sets none.
@@ -382,7 +382,7 @@ pub fn run_unit_hook(
         Ok(_) => Ok(HookOutcome::Passed),
         Err(failure) => {
             let reason = failure.to_string();
-            engine.park(unit_id, &reason)?;
+            engine.park(unit_id, Cause::HookFailed, &reason)?;
             Ok(HookOutcome::Failed(reason))
         }
     }

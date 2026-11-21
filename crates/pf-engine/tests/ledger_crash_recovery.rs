@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::ledger::{FsLedger, LedgerFile, format_line, parse_seq};
 use pf_engine::port::store::{
     AdmissionOutcome, Commit, Committed, LedgerEntry, NewAdmission, Store,
@@ -219,7 +220,10 @@ fn a_failed_commit_leaves_no_line_in_the_file() {
     let outbox_before = old.store.outbox();
 
     old.store.fail_writes.store(true, Ordering::SeqCst);
-    let err = old.engine.park("u1", "stalled").unwrap_err();
+    let err = old
+        .engine
+        .park("u1", Cause::Stalled, "stalled")
+        .unwrap_err();
     assert!(matches!(err, EngineError::Degraded(_)), "{err:?}");
     assert_eq!(std::fs::read(old.ledger_path()).unwrap(), file_before);
     assert_eq!(old.store.outbox(), outbox_before);

@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use pf_engine::Cause;
 use pf_engine::capacity::Settings;
 use pf_engine::port::agent::*;
 use pf_engine::port::forge::*;
@@ -151,7 +152,7 @@ fn a_forced_write_failure_stops_admission_and_writes_health_json_with_the_reason
     let before = admissions(&f);
 
     f.force_failure(FAIL_ADMISSION);
-    let err = f.engine.park("u1", "stalled").unwrap_err();
+    let err = f.engine.park("u1", Cause::Stalled, "stalled").unwrap_err();
     let EngineError::Degraded(reason) = err else {
         panic!("expected the engine to stop admitting work");
     };
@@ -187,7 +188,7 @@ fn a_forced_write_failure_stops_admission_and_writes_health_json_with_the_reason
 fn later_commands_are_refused_even_when_the_store_works_again() {
     let f = fixture();
     f.force_failure(FAIL_ADMISSION);
-    f.engine.park("u1", "stalled").unwrap_err();
+    f.engine.park("u1", Cause::Stalled, "stalled").unwrap_err();
     f.heal();
     let before = admissions(&f);
 
@@ -195,7 +196,7 @@ fn later_commands_are_refused_even_when_the_store_works_again() {
     let results = [
         f.engine.halt("kill switch").map(|_| ()),
         f.engine.start_stage("u1").map(|_| ()),
-        f.engine.park("u1", "stalled").map(|_| ()),
+        f.engine.park("u1", Cause::Stalled, "stalled").map(|_| ()),
         f.engine.open_run().map(|_| ()),
         f.engine.ingest(&mut OneUnit).map(|_| ()),
     ];
@@ -275,7 +276,7 @@ fn child_that_fails_a_write() {
     };
     let f = fixture_in_path(Path::new(&dir));
     f.force_failure(FAIL_ADMISSION);
-    let _ = f.engine.park("u1", "stalled");
+    let _ = f.engine.park("u1", Cause::Stalled, "stalled");
 }
 
 fn fixture_in_path(path: &Path) -> Fixture {

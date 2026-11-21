@@ -349,7 +349,77 @@ pub fn show_text(v: &Value) -> String {
             ));
         }
     }
+    // The decision block, after every line that `show` printed before it existed. A request with
+    // no block prints none of these lines. A seat's text, an option's label among it, is tamed.
+    if v["decision"].is_object() {
+        decision_lines(&v["decision"], &mut |x: String| {
+            t.push_str(&x);
+            t.push('\n');
+        });
+    }
     t
+}
+
+/// The lines of a request's decision block (`docs/contracts/cli.md`, `show`): the cause, the
+/// summary, who asked, the attempt, whether a text answer reaches a seat, the seat the halt is
+/// about, why a stop's options could not be read, and one line for each option.
+fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
+    let s = |p: &Value| tame(p.as_str().unwrap_or(""));
+    line(format!("cause: {}", s(&d["cause"])));
+    line(format!("summary: {}", s(&d["summary"])));
+    let asked = &d["asked_by"];
+    line(match asked["kind"].as_str() {
+        Some("seat") => format!(
+            "asked by: seat {} (unit {})",
+            s(&asked["role"]),
+            s(&asked["unit"])
+        ),
+        _ => "asked by: controller".to_string(),
+    });
+    line(format!("attempt: {}", d["attempt"]));
+    line(format!(
+        "takes text: {}",
+        if d["takes_text"].as_bool() == Some(true) {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    if d["about"].is_object() {
+        line(format!(
+            "about: seat {} (unit {})",
+            s(&d["about"]["role"]),
+            s(&d["about"]["unit"])
+        ));
+    }
+    if let Some(why) = d["options_error"].as_str() {
+        line(format!("options error: {}", tame(why)));
+    }
+    for option in d["options"].as_array().into_iter().flatten() {
+        let id = s(&option["id"]);
+        let does = match option["effect"]["verb"].as_str() {
+            Some("answer") => format!("answers with the text {:?}", s(&option["effect"]["text"])),
+            Some("resume") => match option["effect"]["to"].as_str() {
+                Some(to) => format!("resumes the unit at stage {}", tame(to)),
+                None => "resumes the unit".to_string(),
+            },
+            Some("ack") => "acks the merge".to_string(),
+            _ => "does an act this client does not know".to_string(),
+        };
+        let recommended = if d["recommended"]["option"].as_str() == Some(id.as_str()) {
+            format!(
+                "; recommended by {}: {}",
+                s(&d["recommended"]["by"]),
+                s(&d["recommended"]["why"])
+            )
+        } else {
+            String::new()
+        };
+        line(format!(
+            "option {id}: {} ({does}{recommended})",
+            s(&option["label"])
+        ));
+    }
 }
 
 /// A seat's text for the terminal: line breaks become ` / `, and any other control character

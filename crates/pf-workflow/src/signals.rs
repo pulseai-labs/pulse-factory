@@ -29,7 +29,7 @@ use std::io::Read;
 use pf_engine::Engine;
 use pf_engine::admission::EngineError;
 use pf_engine::port::forge::PrRef;
-use pf_engine::port::store::RequestKind;
+use pf_engine::port::store::{Cause, RequestKind};
 use pf_engine::render::{RenderContext, render};
 use pf_engine::status::one_line_reason;
 use pf_engine::unit::Signal;
@@ -75,6 +75,8 @@ pub enum StageVerdict {
         reason: String,
         /// The kind of the request the park opens.
         kind: RequestKind,
+        /// Why the unit parks, in code: the request's decision block is built from it.
+        cause: Cause,
     },
     /// The turn ended with no done signal, and the stage has a nudge left for this session. The
     /// driver delivers `text` into the session.
@@ -194,10 +196,22 @@ pub fn parse_pr(text: &str) -> Option<PrRef> {
     Some(PrRef { repo, number })
 }
 
-fn park(kind: RequestKind, reason: impl AsRef<str>) -> StageVerdict {
+fn park(kind: RequestKind, cause: Cause, reason: impl AsRef<str>) -> StageVerdict {
     StageVerdict::Park {
         reason: one_line_reason(reason.as_ref()),
         kind,
+        cause,
+    }
+}
+
+/// The cause of a park for a command that did not run to a result: an argv that cannot render is
+/// a render failure, and a command that did not start, timed out or ended badly is a failed hook.
+fn cause_of_failure(failure: &CommandFailure) -> Cause {
+    match failure {
+        CommandFailure::Render(_)
+        | CommandFailure::Dash { .. }
+        | CommandFailure::ProgramFromRecord => Cause::RenderFailed,
+        _ => Cause::HookFailed,
     }
 }
 
@@ -212,6 +226,7 @@ pub fn evaluate(
     let broken = |what: &str, why: &dyn std::fmt::Display| {
         park(
             RequestKind::Park,
+            Cause::RenderFailed,
             format!("stage {} {what}: {why}", stage.name),
         )
     };
@@ -223,9 +238,10 @@ pub fn evaluate(
     };
     if probe.file_exists(&stop) {
         return match probe.read_text(&stop) {
-            Ok(content) => park(RequestKind::Stop, content),
+            Ok(content) => park(RequestKind::Stop, Cause::StopFile, content),
             Err(e) => park(
                 RequestKind::Stop,
+                Cause::StopFile,
                 format!("the stop file {stop} exists and cannot be read: {e}"),
             ),
         };
@@ -239,7 +255,7 @@ pub fn evaluate(
         };
         if probe.file_exists(&path) {
             return match text(&entry.reason) {
-                Ok(reason) => park(park_on_kind(&path), reason),
+                Ok(reason) => park(park_on_kind(&path), Cause::ParkFile, reason),
                 Err(e) => broken("park_on reason cannot render", &e),
             };
         }
@@ -319,6 +335,7 @@ fn probe_cond(
         let program = spec.argv.first().map_or("", String::as_str);
         Probed::Park(park(
             RequestKind::Park,
+            cause_of_failure(&f),
             format!("stage {} {what} ({program}) {f}", stage.name),
         ))
     };
@@ -329,6 +346,7 @@ fn probe_cond(
                 Err(e) => {
                     return Probed::Park(park(
                         RequestKind::Park,
+                        Cause::RenderFailed,
                         format!("stage {} {what} cannot render: {e}", stage.name),
                     ));
                 }
@@ -379,7 +397,11 @@ fn not_done(stage: &StageSpec, ctx: &RenderContext, session: &SessionState) -> S
         return StageVerdict::Wait;
     }
     let Some(no_signal) = stage.no_signal.as_ref().filter(|_| !session.no_signal_ran) else {
-        return park(RequestKind::Park, REASON_NO_DONE_SIGNAL);
+        return park(
+            RequestKind::Park,
+            Cause::NoDoneSignal,
+            REASON_NO_DONE_SIGNAL,
+        );
     };
     // A message reaches a live session only: a session whose process ended goes to the commands.
     if !session.ended
@@ -394,12 +416,17 @@ fn not_done(stage: &StageSpec, ctx: &RenderContext, session: &SessionState) -> S
             },
             Err(e) => park(
                 RequestKind::Park,
+                Cause::RenderFailed,
                 format!("stage {} nudge cannot render: {e}", stage.name),
             ),
         };
     }
     if no_signal.run.is_empty() {
-        park(RequestKind::Park, REASON_NO_DONE_SIGNAL)
+        park(
+            RequestKind::Park,
+            Cause::NoDoneSignal,
+            REASON_NO_DONE_SIGNAL,
+        )
     } else {
         StageVerdict::RunThenPark
     }
@@ -435,8 +462,12 @@ pub fn apply(
             engine.outcome(unit_id, stage, *entry, signal.clone(), pr.clone())?;
             Ok(ApplyResult::Signalled)
         }
-        StageVerdict::Park { reason, kind } => {
-            engine.park_as(unit_id, *kind, reason)?;
+        StageVerdict::Park {
+            reason,
+            kind,
+            cause,
+        } => {
+            engine.park_as(unit_id, *kind, *cause, reason)?;
             let stored = one_line_reason(reason);
             Ok(ApplyResult::Parked(stored))
         }

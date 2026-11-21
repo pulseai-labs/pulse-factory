@@ -117,7 +117,9 @@ already holds (default 0). With no `session` the stream carries the overview onl
 
 The same stream carries three more frames, the **request frames** (`RequestFrame`, a separate wire
 type; the chat frames above do not change). Each holds a `RequestSummary`, as `requests` rows do, and
-a `ClaimRecord`. A client that does not know a `type` skips it.
+a `ClaimRecord`. A client that does not know a `type` skips it. A `RequestSummary` in a request frame
+holds `cause` and `summary` for a request that has a decision block, and leaves them out for any other
+(a client that does not know them decodes the frame as before).
 
 ```json
 {"type":"requests","requests":[{"id":"R-4","revision":1,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR waits for the claim's ack","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"9f2c0d1e5b7a43c8d6e1f0a2b3c4d5e6f7a8b9c0"}],"claim":{"generation":2,"holder":"device D-1 (MacBook)","device":"D-1","revoked":false,"claimed_at":"2026-11-09T21:04:50.118Z"}}
@@ -270,10 +272,14 @@ returns the first record with `replayed` true and acts on nothing, with no secon
 second merge.
 
 - **`requests`**: `{"run"?: "<run>", "all"?: true}`. The answer is a `RequestList`: `schema_version`,
-  `open`, `requests` (each a `RequestSummary` with `verbs`, and `pr`, `base` and `head_sha` for a
-  `merge_ack`) and `claim` (the current claim, or null). It is the JSON of the CLI's `requests --json`.
-- **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer` and
-  `answer_generation`. It is the JSON of `show --json`.
+  `open`, `requests` (each a `RequestSummary` with `verbs`, `pr`, `base` and `head_sha` for a
+  `merge_ack`, and `cause` and `summary` for a request that holds a decision block) and `claim` (the
+  current claim, or null). It is the JSON of the CLI's `requests --json`.
+- **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer`,
+  `answer_generation` and `decision`. `decision` is the request's decision block (`requests.md`, "The
+  decision block") as a `Decision`, with `DecisionOption`, `OptionEffect`, `Recommended`,
+  `DecisionRefs`, `AskedBy` and `DecisionAbout`. It is left out when the request holds no block, and
+  when the block's `v` is above 1. It is the JSON of `show --json`.
 - **`confirm_code`**: `{"subject": {"kind":"request","request":"R-4","revision":1,"verb":"ack"},
   "command_id": "<id>"}`. The `verb` is `answer`, `clear` or `ack`, and it must be one that the
   request takes (`ack` for a `merge_ack`, `answer` or `clear` for the rest). An `answer` subject
@@ -364,7 +370,7 @@ second merge.
   answer is a `ProjectChanged` with `ended`, the sessions this call ended (an empty list when none was live;
   absent when the call had no `end_sessions`). On the socket, a `project_remove` with `end_sessions: true` is
   refused for a caller that is, or descends from, a seat or a live chat process, as `session_end` is
-  (ADR-0005, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
+  (ADR-0015, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
   is refused and the sessions before it stay ended. There is no archive.
 - **`arm`** (`r1.s4.w2`): a `DeviceArmArgs`, `{"proposal","plan_sha256","code","command_id"}`. The
   answer is an `ArmActed`: `schema_version`, `replayed`, `device`, `proposal`, `run_id` and

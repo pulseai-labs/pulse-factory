@@ -5,4 +5,13 @@
  * `ack` for a `merge_ack`, `answer` and `clear` for a unit's request, `answer` alone for a run-level
  * request, none once it is closed. A `merge_ack` row also names its PR, its base and its head SHA.
  */
-export type RequestSummary = { id: string, revision: number, kind: string, status: string, run: string, unit: string | null, stage: string, blocks: Array<string>, opened_at: string, answered_at: string | null, reason: string, verbs: Array<string>, pr?: string, base?: string, head_sha?: string, };
+export type RequestSummary = { id: string, revision: number, kind: string, status: string, run: string, unit: string | null, stage: string, blocks: Array<string>, opened_at: string, answered_at: string | null, reason: string, verbs: Array<string>, pr?: string, base?: string, head_sha?: string, 
+/**
+ * Why the unit parked, from the closed list of causes (`docs/contracts/requests.md`). Left
+ * out for a request with no decision block, and for a block this binary cannot read.
+ */
+cause?: string, 
+/**
+ * The controller's one-sentence summary of the halt. It holds no seat's words.
+ */
+summary?: string, };
