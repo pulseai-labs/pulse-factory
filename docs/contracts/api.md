@@ -284,12 +284,19 @@ second merge.
   "command_id": "<id>"}`. The `verb` is `answer`, `clear` or `ack`, and it must be one that the
   request takes (`ack` for a `merge_ack`, `answer` or `clear` for the rest). An `answer` subject
   adds `"text_sha256": "<64 lower-case hex digits>"`, the SHA-256 of the answer text; the text never
-  reaches the controller at issue. A `clear` subject adds `"to": "<stage>"` or no `to`. The answer
+  reaches the controller at issue; it may add `"to": "<stage>"`, which the code binds. A `clear`
+  subject adds `"to": "<stage>"` or no `to`. **An option:** a request subject may add `"option":
+  "<id>"`, an option of the request's decision block (`requests.md`, "Acting on an option"). The code
+  then binds the option's ID in place of a `text_sha256`, a `to` and a head of its own: a subject with
+  an option and a `text_sha256` or a `to` is refused. The controller checks at issue that the option
+  exists at that revision and that its effect fits the verb (`answer` for an `answer` effect, `clear`
+  for `resume`, `ack` for `ack`). A code for a text, or for an option whose effect is `answer`, on a
+  request that takes no text is refused at issue (`requests.md`, "Resuming a unit"). The answer
   is a `ConfirmIssued`: `schema_version`, `replayed`, `code` (null on a replay), `expires_at`,
   `device`, `generation` (the claim generation the code binds, or null), `holder` (the claim at
   the issue, so a dialog can say whom the act takes the claim from) and `subject` (the request,
   revision, kind, run, unit, reason, and for a `merge_ack` the `pr`, `base`, `head_branch` and
-  `head_sha`). **Issuing a code moves no claim.** A replay of the command ID returns this first
+  `head_sha`; for an option also `option` and `option_label`). **Issuing a code moves no claim.** A replay of the command ID returns this first
   record with `replayed` true and `code` null, whatever moved since; after a restart, or 10 minutes
   past the code's expiry, the first record is gone and a replay carries the facts the store still
   has, with `expires_at` and `generation` null.
@@ -300,15 +307,23 @@ second merge.
   `spine` and `plan_sha256`, so a dialog can name what the code starts. A proposal that is unknown
   (a restart), withdrawn, failed, being armed, already armed or whose plan hash differs is refused
   `subject_moved`, and the refusal text names the cause.
-- **`answer`**: `{"request","rev","text","code","command_id"}`. The answer is a `RequestActed`:
-  `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record after the act),
-  and `resumed`, `hook` for an answer. Fields that do not belong to the verb, and every field on a
-  replay, are null.
-- **`clear`**: `{"request","rev","to"?,"code","command_id"}`. The request names the unit and must be
-  its open request. The answer is a `RequestActed` with `to_stage`.
-- **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
-  `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
-  CLI's `ack`.
+- **`answer`**: `{"request","rev","text","to"?,"option"?,"code","command_id"}`. The answer is a
+  `RequestActed`: `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record
+  after the act), `option` (the option the act took, or null), and `resumed`, `hook` for an answer.
+  Fields that do not belong to the verb, and every field on a replay, are null. An act with an
+  `"option"` sends an empty `text` (an empty text is no text); a text, or a `to`, beside an option is
+  another subject than the code's (`code_subject`).
+- **`clear`**: `{"request","rev","to"?,"option"?,"code","command_id"}`. The request names the unit and
+  must be its open request. The answer is a `RequestActed` with `to_stage` and `option`.
+- **`ack`**: `{"request","rev","option"?,"code","command_id"}`. The answer is a `RequestActed` with
+  `merged`, `head_sha`, `pr`, `base`, `outcome` and `option`. The ack merges the spine PR through the
+  engine path of the CLI's `ack`. `"option": "approve"` is the `ack` verb under the same fresh code.
+
+At the spend, the call's option must be the code's (`code_subject` otherwise), and the controller reads
+the request again: a revision between the card's render and the press is `subject_moved`. The
+`controller.ledger` line of an act or an issue for an option adds ` option=<id>`. No token, code or
+answer text is in it. The new fields are optional on the wire: a client that does not know them still
+works.
 - **`run_list`** (`r1.s4.w3`): `{}` (`RunListArgs`; unknown fields are ignored). The answer is a
   `RunList`: `schema_version` 1 and `runs`, oldest first, one `RunSummary` for every run the controller
   holds (an ended run too, while the controller holds it). A `RunSummary` has exactly nine fields: `id`,
@@ -394,7 +409,7 @@ code is a 422 and no guard failure.
 ### Confirm codes
 
 A device must hold a one-use confirm code to act on a request, or to arm a run from a start card. The code binds one request, its
-revision, one verb with its parameters (`text_sha256` or `to`), the device, the claim generation
+revision, one verb with its parameters (`text_sha256` and `to`, or `to`, or an option's ID), the device, the claim generation
 current at issue and, for an ack, the PR's head SHA. It is `pfc1-` and 32 hex digits, it works once,
 and it expires 120 seconds after issue. At most 4 codes of a device are live. Codes live in memory,
 and a restart voids them. The full rules are in `requests.md`, "Confirm codes".

@@ -34,6 +34,15 @@ fn me() -> Peer {
     }
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 struct Rig {
     live: Live,
     bridge: Arc<ApiBridge>,
@@ -72,7 +81,7 @@ fn rig() -> Rig {
 }
 
 fn rig_with(tweak: impl FnOnce(&mut Config) + Send + 'static) -> Rig {
-    let live = Live::start_config(BIN.into(), move |cfg| {
+    let live = Live::start_package(BIN.into(), &noted(), move |cfg| {
         cfg.api_listen = Some("127.0.0.1:0".to_string());
         tweak(cfg);
     });

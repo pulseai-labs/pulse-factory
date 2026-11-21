@@ -19,9 +19,18 @@ fn json_of(live: &Live, args: &[&str]) -> Value {
     v
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 /// Three units in a row, and u2 and u3 parked: u1 keeps running.
 fn live_with_two_parks() -> Live {
-    let live = Live::start();
+    let live = Live::start_package(BIN.into(), &noted(), |_| {});
     live.arm_with_units(&["u1", "u2", "u3"]);
     live.park_unit("u2", "the reviewer found a defect");
     live.park_unit("u3", "line one\nline two");

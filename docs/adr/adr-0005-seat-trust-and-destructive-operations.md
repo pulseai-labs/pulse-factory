@@ -212,8 +212,9 @@ ADR-0012 adds a second kind of caller beside the operator's OS user and the seat
 - **A device is a principal.** A device that paired with a one-use code holds a token, and the
   controller's API takes the token as the operator's authority for the verbs on the allowlist. The
   claim carries the same authority for `answer`, `clear` and `ack`, and a device has none of those:
-  no ack, answer, claim, clear, arm or halt is on the allowlist. A device has no scope of its own
-  in this spine (ADR-0009, amended). The human confirm of a merge-ack on a device comes with
+  no ack, answer, claim, clear, arm or halt is on the allowlist
+  (superseded by the amendment of 2026-11-21). A device has no scope of its own in this spine
+  (ADR-0009, amended). The human confirm of a merge-ack on a device comes with
   `r1.s4`.
 - **Seats cannot pair or revoke.** `device pair` and `device revoke` refuse when `PF_SEAT_TOKEN` is
   in the CLI's environment. The controller checks the caller again, as it does for `claim`: a caller
@@ -361,3 +362,28 @@ the seat denials and the merge rule do not change.
 
 **Consequences.** A mechanical halt no longer waits for the operator once the grant is given. Every
 act of the grant is in the ledger and visible to the operator.
+
+## Amendment, 2026-11-21 (Proposed): a confirm code binds an option, and a seat's options are data
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17, with Q16's audit).** It
+takes effect when the code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted.
+It goes with ADR-0004's and ADR-0012's amendments of the same date.
+
+- **A confirm code binds an option.** A code for an option binds the request, its revision, the verb and
+  the option's ID, in place of a text hash, a stage and a head of its own. The controller checks at issue
+  that the option exists at that revision and that its effect fits the verb. At the spend the call's option
+  must be the code's, and the request is read again: a revision between the card's render and the press is
+  `subject_moved`. No new refusal word exists. `approve` is the `ack` verb under the same fresh code, so a
+  merge from a device still needs the human confirm.
+- **A seat's option is data.** A seat writes the options of a stop file, so its words reach an admitted
+  answer when the operator presses one. The residue of the planning audit (row 3) is this: the text of the
+  seat's option becomes the text of an answer that the operator's press admitted, and the operator's
+  press is the control. The note a seat reads says so: `rule.sh` writes ` — option <id>, written by the
+  seat` in the entry's heading, so a seat reads the seat's option, pressed under claim `g`, and not an
+  operator's sentence. Seat text stays data: it is stored, shown with control characters replaced and
+  never run or rendered as a template.
+- **A text that no hook would deliver is refused.** An answer to a unit's request is stored only when a
+  hook would deliver it to a seat. Before this amendment it was stored and reached no seat.
+- **The sentence of the amendment of 2026-11-07, "no ack, answer, claim, clear, arm or halt is on the
+  allowlist", no longer holds** (canonical #42 C9). `answer`, `clear`, `ack` and `arm` are on the device
+  allowlist, each with a confirm code, since `r1.s4.w1` and `r1.s4.w2`. `claim` and `halt` are not.

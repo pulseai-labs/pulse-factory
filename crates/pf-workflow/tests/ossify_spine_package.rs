@@ -454,7 +454,7 @@ fn answer_route_problems(package: &Package, common_brief: &str) -> Vec<String> {
             match rule {
                 None => p.push(format!("stage {} has no rule.sh stop hook", stage.name)),
                 Some(c) => {
-                    if c.argv.last().map(String::as_str) != Some(stage.name.as_str()) {
+                    if c.argv.get(7).map(String::as_str) != Some(stage.name.as_str()) {
                         p.push(format!(
                             "the stop hook of stage {} does not name its stage",
                             stage.name
@@ -532,7 +532,7 @@ fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
             "{param.spine_dir}",
         ]
     );
-    // rule.sh <rulings_file> <stop_file> <answer_file> <request> <generation> <stage>
+    // rule.sh <rulings_file> <stop_file|-> <answer_file> <request> <generation> <stage> <source>
     for track in &package.file.tracks {
         for stage in &track.stages {
             assert_eq!(
@@ -552,6 +552,30 @@ fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
                     "{answer.request}",
                     "{answer.generation}",
                     stage.name.as_str(),
+                    "{answer.source}",
+                ]
+            );
+            // The stage's fallback hook: a text typed on a park no file opened (a stall, a cap, a
+            // failed launch) reaches the next seat as a note. The park has no file, so the stop
+            // path is `-`: the entry quotes nothing and renames nothing.
+            assert_eq!(
+                stage.on_answer.len(),
+                1,
+                "stage {} has a fallback hook",
+                stage.name
+            );
+            assert_eq!(
+                stage.on_answer[0].argv,
+                [
+                    "sh",
+                    "{run.package}/scripts/rule.sh",
+                    "{run.dir}/out/{unit.id}/rulings.md",
+                    "-",
+                    "{answer.file}",
+                    "{answer.request}",
+                    "{answer.generation}",
+                    stage.name.as_str(),
+                    "{answer.source}",
                 ]
             );
             // The hook retires the file that the stage's stop_file names.
@@ -589,6 +613,7 @@ fn the_package_loads_with_the_answer_hooks_and_pins_its_scripts() {
             "{answer.request}",
             "{answer.generation}",
             "close",
+            "{answer.source}",
         ]
     );
     // The redispatch counts toward the cap of 3 that `before` already checks.
@@ -664,7 +689,7 @@ fn the_answer_route_check_fires_on_inline_bad_samples() {
     );
     let mut bad = package.clone();
     let hook = &mut bad.file.tracks[1].stages[1].stop_on_answer[0];
-    *hook.argv.last_mut().unwrap() = "implement".to_string();
+    hook.argv[7] = "implement".to_string();
     assert!(
         answer_route_problems(&bad, &common)
             .iter()
@@ -1253,7 +1278,7 @@ fn review_and_fix_carry_the_stop_file_and_the_ruling_hook() {
         assert!(
             stage.stop_on_answer.iter().any(|c| {
                 c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")
-                    && c.argv.last().map(String::as_str) == Some(name)
+                    && c.argv.get(7).map(String::as_str) == Some(name)
             }),
             "{name} has no rule.sh hook naming itself"
         );
@@ -1400,7 +1425,7 @@ fn the_spine_close_stage_runs_as_the_close_role_on_the_spine_branch() {
     assert!(
         stage.stop_on_answer.iter().any(|c| {
             c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")
-                && c.argv.last().map(String::as_str) == Some("spine_close")
+                && c.argv.get(7).map(String::as_str) == Some("spine_close")
         }),
         "no rule.sh hook naming the stage"
     );
@@ -1656,6 +1681,7 @@ fn the_close_stage_stop_file_and_its_answer_hook_are_unchanged() {
             "{answer.request}",
             "{answer.generation}",
             "close",
+            "{answer.source}",
         ]
     );
 }

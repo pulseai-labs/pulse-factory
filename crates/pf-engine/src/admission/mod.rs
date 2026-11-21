@@ -156,7 +156,9 @@ pub enum CommandBody {
         id: String,
         revision: u32,
         generation: u64,
-        /// `{"verb":"answer","text":…}`.
+        /// `{"verb":"answer","text":…}`, the same with `"to_stage":<stage>`, or
+        /// `{"verb":"answer","option":<id>}`: an option stands in place of the answer's own
+        /// parameters, and the engine reads what it does from the stored request.
         answer: serde_json::Value,
         /// Set when the workflow's answer hook failed. The request is answered, and the unit
         /// parks again with this cause and a new request, instead of resuming.
@@ -190,6 +192,13 @@ pub enum CommandBody {
         to_stage: Option<String>,
         generation: u64,
         request_id: String,
+        /// The option of the request's decision block that this clear takes. With it, `to_stage`
+        /// stays `None` and `revision` names the revision the option belongs to. A clear with no
+        /// option has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u32>,
     },
     /// Park a ready unit at its merge and open its `merge_ack` request, in one commit. The merge
     /// rule `claim_ack` sends this; a unit park cannot open this kind of request.
@@ -207,6 +216,10 @@ pub enum CommandBody {
         generation: u64,
         /// The head SHA the request names. The merge that follows pins it.
         head_sha: String,
+        /// The option of the request's decision block that this ack takes. An ack with no option
+        /// has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
     },
     /// An ack that was refused. It changes no state; it writes the ledger line. `attempt`
     /// counts the refusals of this request and revision.

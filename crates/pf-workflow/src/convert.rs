@@ -64,6 +64,9 @@ impl WorkflowFile {
             })
             .collect();
         def.entered_by_outcome = stage.entered_by_outcome;
+        // A stage's fallback hook delivers a text to the next seat, on a park its own file did not
+        // open. The engine knows no hook: it reads this flag for the decision block.
+        def.takes_text = !stage.on_answer.is_empty();
         def
     }
 }

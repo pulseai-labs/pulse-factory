@@ -125,12 +125,25 @@ same run (next section). Nothing needs a new run.
 3. Decide with the operator, then use `answer` or `clear`:
 
    ```bash
-   pulse-factory answer <R-n> --rev <k> --text "<the ruling>"   # records the ruling and resumes the unit
-   pulse-factory clear <run> <item> [--to <stage>]              # resumes the unit with no ruling
+   pulse-factory answer <R-n> --rev <k> --text "<the ruling>" [--to <stage>]  # records the ruling and resumes the unit
+   pulse-factory answer <R-n> --rev <k> --option <id>                         # takes an option of the request
+   pulse-factory clear <run> <item> [--to <stage>]                            # resumes the unit with no ruling
+   pulse-factory clear <run> <item> --option <id> --rev <k>                   # takes a resume option
    ```
 
-   `--rev` is the revision that `show` printed. A request with an `on_answer` hook in the workflow
-   file runs that hook first. In the `ossify-spine` workflow, a `gaps` answer is appended to the
+   `--rev` is the revision that `show` printed. `show` also lists the request's options, each with its
+   ID, who wrote it (`controller`, `workflow` or `seat`) and what it does. `--option <id>` takes one in
+   place of a text and a stage: the controller reads what it does from the stored request, so an option
+   with `--text` or `--to` is refused. An option that answers is taken with `answer`, one that resumes
+   with `clear` (which needs `--rev`), and `approve` with `ack`. `--text` may start with `-`.
+   `--to <stage>` resumes at that stage of the unit's track.
+
+   A text is a note for the next seat, and it is delivered only when a hook carries it: the request's
+   own file has an `on_answer` hook, or the stage declares a fallback `on_answer`. In the `ossify-spine`
+   workflow every stage has the fallback, so a note typed on a stall, a cap or a failed launch is
+   appended to the unit's `rulings.md`. A text no hook would deliver is refused, and the refusal names
+   `clear`: resume the unit with `clear` and no text. A request with an `on_answer` hook in the
+   workflow file runs that hook first. In the `ossify-spine` workflow, a `gaps` answer is appended to the
    handoff's `## Clarifications`, and the item runs `implement` again, within the cap of 3 dispatches.
    A `stop` answer is appended to the unit's `rulings.md`, and the stop file is renamed. A hook that
    fails leaves the request answered and parks the unit again, with `answer hook failed:` and the
@@ -149,7 +162,7 @@ holder acks.
    the base branch, the head branch and the head SHA the ack will merge. Check them against the
    forge. Review the PR and drive it to a mergeable state as you would any PR.
 2. `pulse-factory claim`, if this session does not hold the claim.
-3. `pulse-factory ack <R-n> --rev <k>`, with the revision that `show` printed. The controller reads
+3. `pulse-factory ack <R-n> --rev <k> [--option approve]`, with the revision that `show` printed. The controller reads
    the PR again. If the head moved, it revises the request to the new SHA and refuses; `show` the
    request and ack the new revision. If the checks are not green, or the PR has a conflict, or the
    base or head branch changed, it refuses with the cause and the request stays open. Otherwise it

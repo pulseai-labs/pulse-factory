@@ -22,7 +22,7 @@ One row in the store's `requests` table (migration `0002_requests.sql`).
 | `status` | string | `open`, `answered` or `withdrawn`. |
 | `opened_at` | string | UTC time, to the millisecond. |
 | `answered_at` | string or null | When the request left `open`. |
-| `answer` | JSON object or null | `{"verb":"answer","text":…}`, `{"verb":"clear","to_stage":…}` or `{"verb":"withdraw","reason":…}`. |
+| `answer` | JSON object or null | `{"verb":"answer","text":…}` (it gains `"to_stage"` when the answer named a stage, and `"option":{"id","by","recommended"}` when it took an option: see "Acting on an option"), `{"verb":"clear","to_stage":…}` (it gains the same `option` key), `{"verb":"ack","head_sha":…}` (with the same `option` key) or `{"verb":"withdraw","reason":…}`. |
 | `answer_generation` | integer or null | The claim generation that answered. |
 
 A unit has at most one open request. The store enforces it with a unique index. A request leaves
@@ -103,9 +103,10 @@ body.
 
 Every park names a **cause** from a closed list, and the engine stores a **decision block** in the
 request's body under the key `decision`. The block is data for a reader: it says why the work stopped,
-what each possible answer does, and what a fresh session needs to pick the request up. Nothing acts on
-an option. Every verb works as before, and no verb changes with the block (ADR-0006, amended
-2026-11-21).
+what each possible answer does, and what a fresh session needs to pick the request up. An act can name
+one of its options (`--option`, see "Acting on an option"): the engine reads what the option does from
+the stored block, never from the caller. An act with no option works as before (ADR-0004, ADR-0006,
+amended 2026-11-21).
 
 The command carries inputs only: the cause, and the facts in its `detail`. The engine derives the block
 when it decides the command, so a replay of the command ID returns the stored request and derives
@@ -119,14 +120,14 @@ revision rule") stores a block built from the new facts, at the new revision.
 | `v` | The version of the block's shape. It is 1. A reader that finds a larger number reads no block. |
 | `cause` | The cause code (the table below). |
 | `summary` | One sentence the controller writes from the cause and its own facts: the unit, the stage, the attempt, a cap's number, a PR. It never holds a seat's words: the seat's text stays in `stop_text` and `gaps`. At most 300 characters. |
-| `options` | 0 to 4 objects `{id, label, detail, effect}`. `effect` is `{"verb":"answer","text":…}`, `{"verb":"resume"}`, `{"verb":"resume","to":<stage>}` or `{"verb":"ack"}`. |
+| `options` | 0 to 4 objects `{id, label, detail, effect, by}`. `effect` is `{"verb":"answer","text":…}` (it may hold `"to":<stage>`: resume there), `{"verb":"resume"}`, `{"verb":"resume","to":<stage>}` or `{"verb":"ack"}`. `by` says who wrote the option: `controller`, `workflow` or `seat`. The builder writes `seat` for a stop file's option and `controller` for every other. A block stored before `by` existed has none: a reader takes `seat` when the cause is `stop_file` and `controller` otherwise. |
 | `recommended` | Absent, or `{option, by, why}`. `by` is `controller`, `workflow` or `seat`. |
 | `refs` | `{project, run, unit, stage, pr}`. A fact that does not exist is left out: `project` for a run armed from the CLI, `stage` when empty, `pr` before a PR is recorded. |
 | `attempt` | The number of stage nodes of the parked stage for the unit. It is 0 for a park at the merge. |
 | `asked_by` | `{"kind":"seat","role":…,"unit":…}` for `stop_file` and `park_file`, where the seat's own file opened the request. `{"kind":"controller"}` for every other cause. |
 | `about` | `{"role":…,"unit":…}`, the seat the halt concerns. Present only for `stalled`, `no_done_signal`, `seat_lost` and `host_unreachable`, and only when a stage node of the unit exists. |
 | `options_error` | Present only for `stop_file`, when the stop file's options could not be read: the cause from `stop_options_error`. |
-| `takes_text` | True when the controller says the request's own file declares an `on_answer` hook, so a typed answer reaches a seat. False otherwise. |
+| `takes_text` | True when a typed answer reaches a seat: the request's own file declares an `on_answer` hook, or the parked stage declares a fallback `on_answer` (`workflow-file.md`, "Answer hooks"). False otherwise, and always for a park at the stage `merge`. The `park_file` option rule reads the file's own hook alone. |
 
 A seat's option text may be in `label` and in the `answer` effect's `text`: it is the seat's own line,
 redacted and bounded. Every other string of the block is written by the controller and holds no seat
@@ -193,6 +194,41 @@ Options:
 an `Options:` line gives `stop_options_error` (its block may be cut). A file over the bound whose
 options block starts after the first 64 KiB is not read, and gives no error.
 
+### Acting on an option
+
+`answer`, `clear` and `ack` take `--option <id>` (`cli.md`). The act names the option **in place of** its
+own parameters, and the engine reads the option from the request's stored block: its effect decides what
+the act does. The caller never says what an option means. An option ID is 1 to 32 characters of `a-z`,
+`0-9`, `_` and `-`; any other ID is refused before a read.
+
+| Verb | The option's effect must be | The act |
+|---|---|---|
+| `answer --option` | `answer` | The answer's text is the effect's `text`, and its stage is the effect's `to`, if any. |
+| `clear --option --rev` | `resume` | The unit resumes at the effect's `to`, or at the stage it parked in. `--rev` is required and must be the request's current revision: an option belongs to one revision. |
+| `ack --option` | `ack` | Today's ack, with its PR read. Only a `merge_waits_ack` request holds an `ack` option. |
+
+- **A wrong verb is refused and names the right one:** `option "resume" of request R-3 resumes the unit:
+  take it with `clear``.
+- **An act with an option carries no parameters of its own:** a text, a stage or a `to_stage` beside an
+  option is refused (`an act with an option carries no parameters of its own`), and nothing changes. An
+  unknown option is refused (`request <R-n> holds no option "<id>" at revision <k>`). So is an option on a
+  request with no block, on a block of another version, and on a request with no unit.
+- **`answer --text … --to <stage>`** resumes at that stage. A stage outside the unit's track is refused,
+  and so is a stage on a request with no unit.
+- **The stored answer** gains `"option": {"id", "by", "recommended"}` beside `text`, `to_stage` and
+  `head_sha`. An option's `answer` stores the resolved text, so a reader needs no second lookup. A typed
+  answer stores no `option` key. `recommended` is true when the block's `recommended.option` names the
+  option.
+- **The ledger line** of a typed act does not change. With an option it reads `answer <R-n>@<revision> by
+  claim <g>: option <id> by <by>[, recommended]: <what was done>`, where "what was done" is today's text
+  (`clear <unit> --to <stage>`, or the first 200 characters of the text). An answer with a stage ends
+  ` --to <stage>`. An ack's line gains ` option=<id>` at its end.
+- **Command IDs do not change** (`answer:<id>:<revision>`, `clear:<unit>:<park generation>`,
+  `ack:<id>:<revision>`), so one request takes one act, with an option or without. A stored `ClearUnit` or
+  `AckRequest` with no option holds no `option` key in its content, so a replay of a typed act is as before.
+- A halted run admits an option act as it admits the typed one: the unit is left with the reason `run
+  halted`, and nothing launches. An ack on a halted run is refused as today.
+
 ## Command IDs
 
 Every change is an admitted command. Its ID is in the admissions table, and a replay with the same
@@ -231,7 +267,8 @@ unit detail (see `unit-record.md`), and it makes a second park of the same unit 
 - Each claim writes the ledger line `claim <generation> by <holder>`. Each answer writes
   `answer <R-n>@<revision> by claim <generation>: <what was done>`. For `clear` the text is
   `clear <unit> --to <stage>`. For `answer` it is the first 200 characters of the text, folded to
-  one line and redacted.
+  one line and redacted. An act that took an option adds the option's words (see "Acting on an
+  option").
 - **The claim is one for the whole store.** The `claims` table has no run or project column, and at
   most one row has no `fenced_at`. A claim taken for any run fences the holder of every other run.
 - **A holder may be a paired device.** The holder label is then `device D-n (<name>)`, with the name
@@ -252,7 +289,8 @@ unit detail (see `unit-record.md`), and it makes a second park of the same unit 
 - A device act writes one `controller.ledger` line, `device_<verb> D-n <R-n>@<revision>
   generation=<g> from=<n>|held|none admitted command=<id>` (an ack adds `pr=`, `base=`, `head=`). A
   code issue writes `confirm_code D-n request=<R-n>@<revision> verb=<verb> generation=<g>|none
-  command=<id>`. The run ledger keeps the engine's `answer`/`ack … by claim <generation>` line. A
+  command=<id>`. An act or an issue for an option adds ` option=<id>`. The run ledger keeps the
+  engine's `answer`/`ack … by claim <generation>` line. A
   device claim has no `claim <n> by <holder>` run-ledger line: its record is the `controller.ledger`
   line and the `claims` row.
 - **The fenced holder's refusal.** A CLI token that a device fenced is refused with `claim <old> was
@@ -320,7 +358,16 @@ generic over its subject: `r1.s4.w2` adds the `arm` variant and nothing else cha
   claim generation current at issue (or none), the device, and for a `merge_ack` the PR's head SHA.
   The verbs are `answer`, `clear` and `ack`. An `answer` code binds the SHA-256 of the answer text
   (`text_sha256`: the device sends the hash at issue, and the text never enters the code table). A
-  `clear` code binds the target stage `to`, or its absence.
+  `clear` code binds the target stage `to`, or its absence. An `answer` code also binds `to`.
+- **An option.** A code for an option binds the option's ID **instead of** a text hash, a stage and a
+  head of its own (G8). At issue the controller checks that the option exists at that revision and that
+  its effect fits the verb; a subject with an option and a `text_sha256` or a `to` is refused. A code
+  for a text, or for an option whose effect is `answer`, on a request that takes no text is refused at
+  issue with the words of "Resuming a unit", so a device never spends a code on it. At the spend the
+  call's option must be the code's (`code_subject` otherwise), and the request is read again: a revision
+  between the card's render and the press is `subject_moved`. A device's option act sends an empty
+  `text`. The refusal words do not change. `approve` is the `ack` verb: it runs today's ack under a
+  fresh code, with the head SHA the code bound.
 - **The `arm` subject** (`r1.s4.w2`). A code can bind a start card instead of a request: the
   proposal (`sp-…`) and its `plan_sha256`. An arm code takes no claim: it binds no generation, the
   spend reads no claim, and the arm leaves the claim with its holder (W6). It is refused
@@ -376,7 +423,14 @@ generic over its subject: `r1.s4.w2` adds the `arm` variant and nothing else cha
   names the file and changes nothing.
 
 An `answer` (not a `clear`) first runs the workflow's `on_answer` hook for the request, if it
-declares one (`workflow-file.md`, "Answer hooks"). If the hook fails, the request is answered and
+declares one (`workflow-file.md`, "Answer hooks"). The hook is the request's own file's, or else the
+parked stage's fallback `on_answer`: a park that no file opened (a stall, a cap, a failed launch, a lost
+seat) takes a typed text as a note for the next seat when its stage declares the fallback. **A text no
+hook would deliver is refused**, and nothing is recorded: `request <R-n> takes no text: no answer hook
+of stage <stage> would deliver it to a seat; resume the unit with pulse-factory clear <run> <unit>`. The
+rule holds for a typed text and for an option whose effect is `answer`, and the engine checks the
+revision, the claim and the pins first. A request with no unit keeps today's `answer`. A run armed
+before a fallback existed has none, so its parks with no file hook refuse a text. If the hook fails, the request is answered and
 the unit parks again with a new `park` request whose reason is `answer hook failed: <cause>`; the
 unit does not resume. The hook's run is a ledger line, `answer hook <R-n>: rc <n>`.
 
@@ -387,8 +441,8 @@ resume does not remove a stop file or a correction packet. The operator does, or
 hook retires it (`workflow-file.md`, "Answer hooks"): the `ossify-spine` hooks rename a stop file
 to `stop.answered-<R-n>` and a correction packet to `correction.txt.answered-<R-n>`. So after a
 `clear` the operator moves the packet away first, or the stage parks on it again. A `park` whose
-cause is a cap (`<stage>: <to> cap <max> reached`) has no hook: its stage has ended, and `clear` is
-the way on.
+cause is a cap (`<stage>: <to> cap <max> reached`) takes a text only through the stage's fallback hook;
+with none, `clear` is the way on.
 
 An answer's text is data. The engine stores it and shows it, and never runs or renders it as a
 template.

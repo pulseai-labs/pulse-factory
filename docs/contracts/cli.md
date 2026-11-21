@@ -339,6 +339,14 @@ option <id>: <label> (<what it does>[; recommended by <by>: <why>])
 <stage>` or `acks the merge`. One `option` line prints for each option, in the block's order. A request
 with no block prints none of these lines. No line that `show` or `requests` printed before changes.
 
+An answered request whose answer took an option prints two more lines after the answer lines that it
+printed before (`requests.md`, "Acting on an option"):
+
+```
+option: <id> by <by>
+recommended: yes|no
+```
+
 ## `claim`
 
 ```
@@ -363,12 +371,24 @@ the latest that has not ended.
 ## `answer`
 
 ```
-pulse-factory answer <R-n> --rev <k> --text <ruling> [--claim-token-file <path>] [--json]
+pulse-factory answer <R-n> --rev <k> (--text <ruling> [--to <stage>] | --option <id>) [--claim-token-file <path>] [--json]
 ```
 
 Records the ruling in the request and writes the ledger line. A request that has a unit resumes the
-unit at the stage it parked in, as `clear` does. The text is untrusted data: it is stored and shown,
-never run. `--rev` must be the request's current revision.
+unit at the stage it parked in, as `clear` does, or at `--to`. The text is untrusted data: it is stored
+and shown, never run. `--text` takes a value that starts with `-`: it is the text, not a flag. `--rev`
+must be the request's current revision.
+
+`--option <id>` takes an option of the request's decision block (`show` prints them) in place of a text
+and a stage. The engine reads the option's text and stage from the stored request, so `--option` with
+`--text` or `--to` is refused, and so is an ID that is not 1 to 32 characters of `a-z`, `0-9`, `_` and
+`-`. The option's effect must be `answer`: another effect is refused and names the right verb
+(`requests.md`, "Acting on an option"). The text output names the option: `answered <R-n>@<rev> by claim
+<g> with option <id>; unit <unit> resumes`.
+
+A text that no hook would deliver to a seat is refused and nothing is recorded: the request's own file
+has no `on_answer` hook and the parked stage declares no fallback (`workflow-file.md`, "Answer hooks").
+The refusal names `clear`.
 
 - **Refusals** (exit 1, nothing recorded): the refusals of `claim`; a token file that is missing or
   empty (the message names the path); a token that matches no claim; a fenced token
@@ -381,12 +401,13 @@ never run. `--rev` must be the request's current revision.
   "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
   parks again with a new request, and `resumed` is `false`.
 - The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `resumed`,
-  `hook` (`none`, `passed` or `failed`) and `hook_failure` (the cause, or null).
+  `hook` (`none`, `passed` or `failed`), `hook_failure` (the cause, or null), `option` (the ID, or
+  null) and `to_stage` (the stage the stored answer names, or null).
 
 ## `clear`
 
 ```
-pulse-factory clear <run> <item> [--to <stage>] [--claim-token-file <path>] [--json]
+pulse-factory clear <run> <item> [--to <stage> | --option <id> --rev <k>] [--claim-token-file <path>] [--json]
 ```
 
 Resumes a parked unit in the same run. It answers the unit's open request with
@@ -395,22 +416,30 @@ ledger line `answer <R-n>@<rev> by claim <generation>: clear <unit> --to <stage>
 is the one the unit parked in. The next tick launches it. A halted run accepts the clear and
 launches nothing.
 
+`--option <id>` takes an option of the unit's open request in place of a stage: its effect must be
+`resume`, and the stage is the effect's `to`. **`--option` needs `--rev`**: an option belongs to one
+revision of the request, and `clear` named none until now. The revision must be the current one (the
+refusal names it). `--option` with `--to` is refused. The text output adds ` with option <id>` after the
+claim generation.
+
 - **Refusals** (exit 1, nothing recorded): those of `answer`, the refusal that names `the claim
   moved to device D-n` included; a unit that is not parked or has no
   open request; a `--to` that is not a stage of the unit's track; a `merge_ack` request (the
   message names `ack`).
-- The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation` and
-  `to_stage`.
+- The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation`, `to_stage`
+  and `option` (the ID, or null).
 
 ## `ack`
 
 ```
-pulse-factory ack <R-n> --rev <k> [--claim-token-file <path>] [--json]
+pulse-factory ack <R-n> --rev <k> [--option <id>] [--claim-token-file <path>] [--json]
 ```
 
 Merges the spine PR that an open `merge_ack` request names, with the head SHA of the request
 pinned. It takes the claim as `answer` does: the same token file, the same caller check and the same
-refusals. `--rev` must be the request's current revision. The controller, in order:
+refusals. `--rev` must be the request's current revision. `--option <id>` names the request's `ack`
+option (`approve`): its effect must be `ack`, it is checked before the PR is read, and everything else is
+today's ack. Another effect is refused and names the right verb. The controller, in order:
 
 1. refuses a halted or ended run, and names the state;
 2. reads the PR again. If its head SHA is not the request's `head_sha`, it revises the request (the
@@ -435,7 +464,7 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
   (`merge of unit <unit>: repo=… branch=… sha=… outcome=landed`).
 - The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `verb`
   (`ack`), `pr`, `base`, `head_sha`, `merged` (true when the merge landed), `outcome` (`landed`, or
-  the cause of the park) and `after_merge_failure` (the cause, or null).
+  the cause of the park), `after_merge_failure` (the cause, or null) and `option` (the ID, or null).
 
 ## `project`
 

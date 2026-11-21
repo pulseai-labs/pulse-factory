@@ -499,6 +499,19 @@ impl Engine {
         revision: u32,
         generation: u64,
     ) -> Result<MergeStep, EngineError> {
+        self.ack_merge_option(id, revision, generation, None)
+    }
+
+    /// [`Engine::ack_merge`] that takes an option of the request's decision block. The option is
+    /// checked before the PR is read: it must be the request's, and its effect must be `ack`. A
+    /// refusal after the request is known writes the `ack … refused` line, as every refusal does.
+    pub fn ack_merge_option(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        option: Option<&str>,
+    ) -> Result<MergeStep, EngineError> {
         let rejected = |why: String| EngineError::Rejected(why);
         let view = self.view()?;
         let run_id = &self.cfg.run_id;
@@ -543,6 +556,11 @@ impl Engine {
             )));
         }
         check_claim(&view, generation).map_err(&refuse)?;
+        if let Some(option_id) = option {
+            crate::claim::stored_option(request, option_id)
+                .and_then(|o| o.check_verb(id, VERB_ACK))
+                .map_err(&refuse)?;
+        }
 
         let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
         let unit_id = request
@@ -616,6 +634,7 @@ impl Engine {
                 revision,
                 generation,
                 head_sha: acked.clone(),
+                option: option.map(str::to_string),
             },
         })?;
         self.merge_pinned(&unit_id, &pr, &status.repo, &status.branch, &acked)

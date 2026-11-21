@@ -3,4 +3,17 @@
 /**
  * The arguments of `answer` from a device.
  */
-export type DeviceAnswerArgs = { request: string, rev: number, text: string, code: string, command_id: string, };
+export type DeviceAnswerArgs = { request: string, rev: number, 
+/**
+ * The ruling. An act that takes an option sends it empty: an empty text is no text, and a
+ * text beside an option is refused.
+ */
+text: string, 
+/**
+ * Resume at this stage of the unit's track. The code binds it.
+ */
+to?: string, 
+/**
+ * The option of the request's decision block this answer takes, in place of a text.
+ */
+option?: string, code: string, command_id: string, };

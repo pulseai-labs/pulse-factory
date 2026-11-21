@@ -23,7 +23,8 @@ mod sha256;
 
 pub use decision::{
     DECISION_VERSION, KEY_CAP_MAX, KEY_CAP_TO, KEY_DECISION, KEY_STOP_OPTIONS,
-    KEY_STOP_OPTIONS_ERROR, KEY_TAKES_TEXT, OPTIONS_MAX, SUMMARY_MAX_CHARS,
+    KEY_STOP_OPTIONS_ERROR, KEY_TAKES_TEXT, OPTION_ID_MAX, OPTIONS_MAX, OptionEffect,
+    SUMMARY_MAX_CHARS, StoredOption, check_option_id, stored_option,
 };
 pub use detail::{
     GAP_TEXT_MAX_CHARS, GAPS_FILE_MAX_BYTES, KEY_GAPS, KEY_GAPS_ERROR, KEY_STOP_TEXT,
@@ -58,6 +59,51 @@ pub const VERB_ACK: &str = "ack";
 
 /// The stage a request names when the unit parked at its merge, with every stage done.
 pub const STAGE_MERGE: &str = "merge";
+
+/// The refusal of an act that names an option and carries parameters of its own.
+const OPTION_WITH_PARAMETERS: &str = "an act with an option carries no parameters of its own";
+
+/// An answer: a text with an optional stage, or an option of the request's decision block. An
+/// option stands in place of the text and the stage: the engine reads what it does from the stored
+/// request, never from the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerAct<'a> {
+    Text {
+        text: &'a str,
+        /// Resume at this stage of the unit's track. `None` is the stage the unit parked in.
+        to_stage: Option<&'a str>,
+    },
+    Option(&'a str),
+}
+
+impl AnswerAct<'_> {
+    /// The `answer` of an `AnswerRequest` command. A typed answer with no stage is the form it
+    /// always had.
+    fn to_json(self) -> Value {
+        match self {
+            AnswerAct::Text {
+                text,
+                to_stage: None,
+            } => json!({ "verb": VERB_ANSWER, "text": text }),
+            AnswerAct::Text {
+                text,
+                to_stage: Some(stage),
+            } => json!({ "verb": VERB_ANSWER, "text": text, "to_stage": stage }),
+            AnswerAct::Option(id) => json!({ "verb": VERB_ANSWER, "option": id }),
+        }
+    }
+}
+
+/// What a `clear` names, for the decision: the unit and its open request, and either a stage or an
+/// option with the revision the option belongs to.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClearAct<'a> {
+    pub unit_id: &'a str,
+    pub to_stage: Option<&'a str>,
+    pub request_id: &'a str,
+    pub option: Option<&'a str>,
+    pub revision: Option<u32>,
+}
 
 // ------------------------------------------------------------------ the claim
 
@@ -523,17 +569,20 @@ pub(crate) fn decide_answer(
             "an answer carries the verb {VERB_ANSWER:?}, not {verb:?}"
         ));
     }
-    let text = answer
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| "an answer needs text".to_string())?;
-    // The text is the operator's own words. It is stored as given, and the ledger line carries
-    // its first characters, flat and redacted.
-    let brief: String = one_line_reason(text)
+    let resolved = resolve_answer(request, answer)?;
+    // The text is the operator's own words, or the text of the option they took. It is stored as
+    // given, and the ledger line carries its first characters, flat and redacted.
+    let brief: String = one_line_reason(&resolved.text)
         .chars()
         .take(ANSWER_LEDGER_CHARS)
         .collect();
+    let stage_tail = resolved
+        .to_stage
+        .as_deref()
+        .map(|stage| format!(" --to {stage}"))
+        .unwrap_or_default();
+    let what = format!("{brief}{stage_tail}");
+    let stored = resolved.stored();
     let mut d = Decision::admitted();
     d.unit_id = request.unit_id.clone();
     match &request.unit_id {
@@ -549,16 +598,16 @@ pub(crate) fn decide_answer(
                         workflow,
                         unit,
                         request,
-                        None,
+                        resolved.to_stage.as_deref(),
                         generation,
                         false,
-                        |_| answer.clone(),
+                        |_| stored.clone(),
                         now,
                     )?
                     .0
                 }
                 Some(cause) => parked_again_effects(
-                    view, workflow, unit, request, generation, answer, cause, now,
+                    view, workflow, unit, request, generation, &stored, cause, now,
                 )?,
             };
         }
@@ -566,18 +615,112 @@ pub(crate) fn decide_answer(
             let mut closed = request.clone();
             closed.status = RequestStatus::Answered;
             closed.answered_at = Some(now.to_string());
-            closed.answer = Some(answer.to_string());
+            closed.answer = Some(stored.to_string());
             closed.answer_generation = Some(generation);
             d.effects.push(Effect::PutRequest(closed));
         }
     }
+    let who = match &resolved.option {
+        Some(option) => format!("{}: ", option.ledger()),
+        None => String::new(),
+    };
     d.ledger = Some(match hook_failed {
-        None => format!("answer {id}@{revision} by claim {generation}: {brief}"),
+        None => format!("answer {id}@{revision} by claim {generation}: {who}{what}"),
         Some(_) => format!(
-            "answer {id}@{revision} by claim {generation}: {brief} (the answer hook failed; the unit parked again)"
+            "answer {id}@{revision} by claim {generation}: {who}{what} (the answer hook failed; the unit parked again)"
         ),
     });
     Ok(d)
+}
+
+/// An answer as the engine reads it: the text, the stage it resumes at, and the option it took.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedAnswer {
+    pub text: String,
+    pub to_stage: Option<String>,
+    pub option: Option<StoredOption>,
+}
+
+impl ResolvedAnswer {
+    /// Where the answer came from, as an answer hook's `{answer.source}` says it: `typed`, or
+    /// `option:<id>:<by>`.
+    pub fn source(&self) -> String {
+        match &self.option {
+            Some(option) => format!("option:{}:{}", option.id, option.by),
+            None => "typed".to_string(),
+        }
+    }
+
+    /// The answer as the request stores it. A typed answer with no stage is stored as it always
+    /// was; a stage is stored as `to_stage`; an option adds `{id, by, recommended}`.
+    fn stored(&self) -> Value {
+        let mut stored = json!({ "verb": VERB_ANSWER, "text": self.text });
+        if let Some(stage) = &self.to_stage {
+            stored["to_stage"] = json!(stage);
+        }
+        if let Some(option) = &self.option {
+            stored["option"] = option.stored();
+        }
+        stored
+    }
+}
+
+/// Read an act against a stored request, as the engine reads it when it decides the answer: the
+/// controller calls it for the text a hook delivers, so the hook's text and the admitted answer
+/// cannot differ.
+pub fn resolve_act(request: &RequestRow, act: &AnswerAct) -> Result<ResolvedAnswer, String> {
+    resolve_answer(request, &act.to_json())
+}
+
+/// Read an answer command's `answer` against the stored request. A text answer needs text. An
+/// option stands in place of the text and the stage: it is read from the stored block, its effect
+/// must be `answer`, and the answer carries no text or stage of its own. A request with no unit
+/// takes no option and no stage.
+pub(crate) fn resolve_answer(
+    request: &RequestRow,
+    answer: &Value,
+) -> Result<ResolvedAnswer, Rejected> {
+    let id = &request.id;
+    if let Some(option_id) = answer.get("option") {
+        if answer.get("text").is_some() || answer.get("to_stage").is_some() {
+            return Err(OPTION_WITH_PARAMETERS.to_string());
+        }
+        let option_id = option_id
+            .as_str()
+            .ok_or_else(|| "an answer's option is an option ID".to_string())?;
+        if request.unit_id.is_none() {
+            return Err(format!("request {id} names no unit, so it takes no option"));
+        }
+        let option = stored_option(request, option_id)?;
+        option.check_verb(id, VERB_ANSWER)?;
+        let OptionEffect::Answer { text, to } = option.effect.clone() else {
+            return Err(format!(
+                "option {option_id:?} of request {id} does not answer"
+            ));
+        };
+        return Ok(ResolvedAnswer {
+            text,
+            to_stage: to,
+            option: Some(option),
+        });
+    }
+    let text = answer
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "an answer needs text".to_string())?;
+    let to_stage = answer
+        .get("to_stage")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if to_stage.is_some() && request.unit_id.is_none() {
+        return Err(format!("request {id} names no unit, so it takes no stage"));
+    }
+    Ok(ResolvedAnswer {
+        text: text.to_string(),
+        to_stage,
+        option: None,
+    })
 }
 
 /// The effects of an answer whose hook failed. The request is answered, as it would be for a
@@ -676,12 +819,17 @@ pub(crate) fn decide_answer_hook(
 pub(crate) fn decide_clear(
     view: &RunView,
     workflow: &Workflow,
-    unit_id: &str,
-    to_stage: Option<&str>,
+    act: ClearAct,
     generation: u64,
-    request_id: &str,
     now: &str,
 ) -> Result<Decision, Rejected> {
+    let ClearAct {
+        unit_id,
+        to_stage,
+        request_id,
+        option,
+        revision,
+    } = act;
     check_claim(view, generation)?;
     let unit = view
         .node(unit_id)
@@ -709,23 +857,64 @@ pub(crate) fn decide_clear(
             request.id
         ));
     }
+    // An option stands in place of the stage. It belongs to one revision of the request, and its
+    // effect must be `resume`.
+    let (taken, stage) = match option {
+        None => (None, to_stage.map(str::to_string)),
+        Some(option_id) => {
+            if to_stage.is_some() {
+                return Err(OPTION_WITH_PARAMETERS.to_string());
+            }
+            let named = revision.ok_or_else(|| {
+                format!(
+                    "an option belongs to one revision: name the revision of request {}",
+                    request.id
+                )
+            })?;
+            if named != request.revision {
+                return Err(format!(
+                    "request {} is at revision {}, not {named}",
+                    request.id, request.revision
+                ));
+            }
+            let option = stored_option(request, option_id)?;
+            option.check_verb(&request.id, VERB_CLEAR)?;
+            let OptionEffect::Resume { to } = option.effect.clone() else {
+                return Err(format!(
+                    "option {option_id:?} of request {} does not resume the unit",
+                    request.id
+                ));
+            };
+            (Some(option), to)
+        }
+    };
     // The stored answer names the stage the unit resumed at, also when the caller left it out.
     let (effects, resolved) = resume_effects(
         view,
         workflow,
         unit,
         request,
-        to_stage,
+        stage.as_deref(),
         generation,
         true,
-        |resolved| json!({ "verb": VERB_CLEAR, "to_stage": resolved }),
+        |resolved| {
+            let mut stored = json!({ "verb": VERB_CLEAR, "to_stage": resolved });
+            if let Some(option) = &taken {
+                stored["option"] = option.stored();
+            }
+            stored
+        },
         now,
     )?;
     let mut d = Decision::admitted();
     d.unit_id = Some(unit_id.to_string());
     d.effects = effects;
+    let who = match &taken {
+        Some(option) => format!("{}: ", option.ledger()),
+        None => String::new(),
+    };
     d.ledger = Some(format!(
-        "answer {}@{} by claim {generation}: clear {unit_id} --to {resolved}",
+        "answer {}@{} by claim {generation}: {who}clear {unit_id} --to {resolved}",
         request.id, request.revision
     ));
     Ok(d)
@@ -801,6 +990,7 @@ pub(crate) fn decide_open_merge_ack(
 
 /// The claim holder's ack: the request is answered and the unit is `running` again, ready for
 /// the merge that pins the acked SHA. A halted run admits no ack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decide_ack(
     view: &RunView,
     workflow: &Workflow,
@@ -808,6 +998,7 @@ pub(crate) fn decide_ack(
     revision: u32,
     generation: u64,
     head_sha: &str,
+    option: Option<&str>,
     now: &str,
 ) -> Result<Decision, Rejected> {
     if view.is_halted() {
@@ -821,6 +1012,15 @@ pub(crate) fn decide_ack(
             request.kind.as_str()
         ));
     }
+    // An option stands in for nothing the ack carries: its effect must be `ack`.
+    let taken = match option {
+        Some(option_id) => {
+            let option = stored_option(request, option_id)?;
+            option.check_verb(id, VERB_ACK)?;
+            Some(option)
+        }
+        None => None,
+    };
     let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
     let named = body_text(&body, "head_sha");
     if named.is_empty() || named != head_sha {
@@ -844,7 +1044,13 @@ pub(crate) fn decide_ack(
         None,
         generation,
         false,
-        |_| json!({ "verb": VERB_ACK, "head_sha": head_sha }),
+        |_| {
+            let mut stored = json!({ "verb": VERB_ACK, "head_sha": head_sha });
+            if let Some(option) = &taken {
+                stored["option"] = option.stored();
+            }
+            stored
+        },
         now,
     )?;
     let mut d = Decision::admitted();
@@ -856,6 +1062,12 @@ pub(crate) fn decide_ack(
         body_text(&body, "base"),
         body_text(&body, "head_branch"),
     ));
+    // The option an ack took ends its line.
+    if let Some(option) = &taken
+        && let Some(line) = d.ledger.as_mut()
+    {
+        line.push_str(&format!(" option={}", option.id));
+    }
     Ok(d)
 }
 
@@ -1044,6 +1256,19 @@ impl Engine {
         self.answer_request_after_hook(id, revision, generation, text, None)
     }
 
+    /// Answer a request with an act: a text with an optional stage, or an option of the request's
+    /// decision block. The claim `generation` must be the current one. One request takes one
+    /// answer, with an option or without: the command ID is the same.
+    pub fn answer_act(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        act: &AnswerAct,
+    ) -> Result<Admission, EngineError> {
+        self.answer_act_after_hook(id, revision, generation, act, None)
+    }
+
     /// [`Engine::answer_request`] after the workflow's answer hook ran. With `hook_failed` set,
     /// the request is answered, the unit stays parked, and a new `park` request opens with
     /// `answer hook failed: <cause>`, all in one commit.
@@ -1055,13 +1280,36 @@ impl Engine {
         text: &str,
         hook_failed: Option<&str>,
     ) -> Result<Admission, EngineError> {
+        self.answer_act_after_hook(
+            id,
+            revision,
+            generation,
+            &AnswerAct::Text {
+                text,
+                to_stage: None,
+            },
+            hook_failed,
+        )
+    }
+
+    /// [`Engine::answer_act`] after the workflow's answer hook ran. With `hook_failed` set, the
+    /// request is answered, the unit stays parked, and a new `park` request opens with
+    /// `answer hook failed: <cause>`, all in one commit.
+    pub fn answer_act_after_hook(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        act: &AnswerAct,
+        hook_failed: Option<&str>,
+    ) -> Result<Admission, EngineError> {
         self.submit(Command {
             id: format!("answer:{id}:{revision}"),
             body: CommandBody::AnswerRequest {
                 id: id.to_string(),
                 revision,
                 generation,
-                answer: json!({ "verb": VERB_ANSWER, "text": text }),
+                answer: act.to_json(),
                 hook_failed: hook_failed.map(one_line_reason),
             },
         })
@@ -1077,8 +1325,27 @@ impl Engine {
         generation: u64,
         text: &str,
     ) -> Result<(), EngineError> {
+        self.check_answer_act(
+            id,
+            revision,
+            generation,
+            &AnswerAct::Text {
+                text,
+                to_stage: None,
+            },
+        )
+    }
+
+    /// [`Engine::check_answer`] for an act: a text with an optional stage, or an option.
+    pub fn check_answer_act(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        act: &AnswerAct,
+    ) -> Result<(), EngineError> {
         let view = self.view()?;
-        let answer = json!({ "verb": VERB_ANSWER, "text": text });
+        let answer = act.to_json();
         decide_answer(
             &view,
             &self.cfg.workflow,
@@ -1174,6 +1441,34 @@ impl Engine {
                 to_stage: to_stage.map(str::to_string),
                 generation,
                 request_id: request_id.to_string(),
+                option: None,
+                revision: None,
+            },
+        })
+    }
+
+    /// Resume a parked unit with an option of its open request's decision block, in the name of the
+    /// claim `generation`. The option belongs to `revision`, which must be the request's current
+    /// one, and its effect must be `resume`. The option stands in place of the stage.
+    pub fn clear_unit_option(
+        &self,
+        unit_id: &str,
+        option: &str,
+        revision: u32,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Admission, EngineError> {
+        let view = self.view()?;
+        let park_generation = self.park_generation_of(&view, unit_id)?;
+        self.submit(Command {
+            id: format!("clear:{unit_id}:{park_generation}"),
+            body: CommandBody::ClearUnit {
+                unit_id: unit_id.to_string(),
+                to_stage: None,
+                generation,
+                request_id: request_id.to_string(),
+                option: Some(option.to_string()),
+                revision: Some(revision),
             },
         })
     }

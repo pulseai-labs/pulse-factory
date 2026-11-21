@@ -13,7 +13,7 @@ use super::base_push;
 use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
-use pf_engine::claim::{KEY_TAKES_TEXT, gaps_detail, stop_detail};
+use pf_engine::claim::{AnswerAct, KEY_TAKES_TEXT, gaps_detail, stop_detail};
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
@@ -1278,6 +1278,23 @@ impl Driver {
             .map_err(|e| e.to_string())
     }
 
+    /// [`Driver::clear_unit`] with an option of the request's decision block in place of a stage.
+    /// The option belongs to `revision`. The pins are checked first, as for a clear.
+    pub fn clear_option(
+        &self,
+        unit_id: &str,
+        option: &str,
+        revision: u32,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Admission, String> {
+        self.check_pins()?;
+        self.cfg
+            .engine
+            .clear_unit_option(unit_id, option, revision, generation, request_id)
+            .map_err(|e| e.to_string())
+    }
+
     /// Ack a `merge_ack` request in the name of the claim `generation` (ADR-0005). The engine checks
     /// the PR again, answers the request and merges with the acked SHA pinned. A merge that lands
     /// ends the unit `done`, and the track's `after_merge` commands run. The pins of the run's whole
@@ -1291,12 +1308,24 @@ impl Driver {
         revision: u32,
         generation: u64,
     ) -> Result<Acked, String> {
+        self.ack_option(request_id, revision, generation, None)
+    }
+
+    /// [`Driver::ack_request`] that takes an option of the request's decision block. The pins are
+    /// checked first, and the engine checks the option before it reads the PR.
+    pub fn ack_option(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        option: Option<&str>,
+    ) -> Result<Acked, String> {
         self.check_pins()?;
         let _held = locked(&self.state);
         let step = self
             .cfg
             .engine
-            .ack_merge(request_id, revision, generation)
+            .ack_merge_option(request_id, revision, generation, option)
             .map_err(|e| match e {
                 EngineError::Rejected(why) => why,
                 other => other.to_string(),
@@ -1351,6 +1380,31 @@ impl Driver {
         generation: u64,
         text: &str,
     ) -> Result<Answered, String> {
+        self.answer_act(
+            request_id,
+            revision,
+            generation,
+            &AnswerAct::Text {
+                text,
+                to_stage: None,
+            },
+        )
+    }
+
+    /// [`Driver::answer_request`] for an act: a text with an optional stage, or an option of the
+    /// request's decision block.
+    ///
+    /// The engine is asked first, so a stale revision, a fenced claim, a changed pin or an option
+    /// the request does not hold gives its own refusal. Then, for a request with a unit, an answer
+    /// that no hook would deliver is refused and nothing is recorded: the answer would be stored
+    /// and reach no seat. `clear` is the way on. A request with no unit keeps its plain answer.
+    pub fn answer_act(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        act: &AnswerAct,
+    ) -> Result<Answered, String> {
         let engine = &self.cfg.engine;
         let request = engine
             .requests()
@@ -1364,14 +1418,41 @@ impl Driver {
         if let Some(request) = request.filter(|r| resumes && r.status == RequestStatus::Open) {
             // One tick at a time: the stage must not launch between the hook and the resume.
             let _held = locked(&self.state);
-            if let Some(answered) = self.answer_with_hook(&request, revision, generation, text)? {
-                return Ok(answered);
-            }
+            engine
+                .check_answer_act(request_id, revision, generation, act)
+                .map_err(|e| e.to_string())?;
+            return match self.answer_with_hook(&request, revision, generation, act)? {
+                Some(answered) => Ok(answered),
+                None => Err(takes_no_text(&request)),
+            };
         }
         engine
-            .answer_request(request_id, revision, generation, text)
+            .answer_act(request_id, revision, generation, act)
             .map_err(|e| e.to_string())?;
         Ok(Answered::default())
+    }
+
+    /// Would a text answer to this request reach a seat through a hook? A request with no unit
+    /// keeps its plain answer. The refusal is the one `answer` gives, so a device never spends a
+    /// confirm code on a text that no seat would read.
+    pub fn check_takes_text(&self, request: &RequestRow) -> Result<(), String> {
+        let Some(unit_id) = request.unit_id.as_deref() else {
+            return Ok(());
+        };
+        let view = self.cfg.engine.view().map_err(|e| e.to_string())?;
+        let Some(unit) = view.node(unit_id) else {
+            return Ok(());
+        };
+        let Ok(detail) = view.unit_detail(unit) else {
+            return Ok(());
+        };
+        let run_dir = self.run_dir_text();
+        let ctx = self.ctx(&run_dir, Some((&unit.id, &detail.record.vars)));
+        if self.answer_hook(&detail.track, request, &ctx).is_empty() {
+            Err(takes_no_text(request))
+        } else {
+            Ok(())
+        }
     }
 
     /// Answer a request through its hook. `None` when the workflow declares no hook for it.
@@ -1380,7 +1461,7 @@ impl Driver {
         request: &RequestRow,
         revision: u32,
         generation: u64,
-        text: &str,
+        act: &AnswerAct,
     ) -> Result<Option<Answered>, String> {
         let engine = &self.cfg.engine;
         let view = engine.view().map_err(|e| e.to_string())?;
@@ -1401,7 +1482,7 @@ impl Driver {
             request,
             revision,
             generation,
-            text,
+            act,
             &hook,
             &ctx,
             &self.cfg.run_dir.join("answers"),
@@ -1416,11 +1497,12 @@ impl Driver {
         }))
     }
 
-    /// The `on_answer` commands the workflow declares for a request, or none. The stop file's
-    /// hook goes with a `stop` request. A `park_on` entry's hook goes with the request its file
-    /// opens: the entry whose file name gives the request's kind (`park_on_kind`), and for the
-    /// generic `park` kind also the entry whose reason is the request's reason. The first such
-    /// entry wins.
+    /// The `on_answer` commands the workflow declares for a request, or none. The hook of the
+    /// request's own file comes first: the stop file's hook goes with a `stop` request, and a
+    /// `park_on` entry's hook goes with the request its file opens (the entry whose file name gives
+    /// the request's kind (`park_on_kind`), and for the generic `park` kind also the entry whose
+    /// reason is the request's reason; the first such entry wins). With none, the stage's
+    /// fallback hook goes: a park that no file opened (a stall, a cap, a failed launch) uses it.
     fn answer_hook(
         &self,
         track: &str,
@@ -1430,12 +1512,18 @@ impl Driver {
         let Some(stage) = self.stage_spec(track, &request.stage) else {
             return Vec::new();
         };
-        if request.kind == RequestKind::Stop {
-            return stage.stop_on_answer.clone();
+        let own = if request.kind == RequestKind::Stop {
+            stage.stop_on_answer.clone()
+        } else {
+            park_on_entry(stage, ctx, request.kind, &request.reason)
+                .map(|entry| entry.on_answer.clone())
+                .unwrap_or_default()
+        };
+        if own.is_empty() {
+            stage.on_answer.clone()
+        } else {
+            own
         }
-        park_on_entry(stage, ctx, request.kind, &request.reason)
-            .map(|entry| entry.on_answer.clone())
-            .unwrap_or_default()
     }
 
     /// End each session still open under a unit that is not running (start-up, and a replaced run).
@@ -1452,6 +1540,18 @@ impl Driver {
 }
 
 // ------------------------------------------------------------------ files
+
+/// The refusal of a text answer that no hook would deliver to a seat. The answer would be stored
+/// and reach nobody, so it is refused and nothing is recorded.
+fn takes_no_text(request: &RequestRow) -> String {
+    format!(
+        "request {} takes no text: no answer hook of stage {} would deliver it to a seat; resume the unit with pulse-factory clear {} {}",
+        request.id,
+        request.stage,
+        request.run_id,
+        request.unit_id.as_deref().unwrap_or_default()
+    )
+}
 
 /// The `park_on` entry that opened a request of `kind` with this `reason`: the entry whose file
 /// name gives the request's kind (`park_on_kind`), and for the generic `park` kind also the entry

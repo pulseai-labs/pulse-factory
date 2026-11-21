@@ -188,15 +188,34 @@ pub struct AnswerArgs {
     /// The revision you read with `show`. Another revision is refused.
     #[arg(long, value_name = "N")]
     pub rev: u32,
-    /// Your ruling. It is stored and shown as data and never run.
-    #[arg(long)]
-    pub text: String,
+    /// Your ruling, or a note for the next seat. It is stored and shown as data and never run. A
+    /// text that starts with `-` is the text, not a flag.
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required_unless_present = "option",
+        conflicts_with = "option"
+    )]
+    pub text: Option<String>,
+    /// Resume at this stage of the unit's track, in place of the stage it parked in. Only with
+    /// `--text`.
+    #[arg(long, value_name = "STAGE", requires = "text")]
+    pub to: Option<String>,
+    /// Take this option of the request in place of a text: its ID from `show`. The option carries
+    /// no text or stage of its own to name.
+    #[arg(long, value_name = "ID", value_parser = option_id, conflicts_with_all = ["text", "to"])]
+    pub option: Option<String>,
     /// The file that holds the claim token. The default is `<state dir>/claim-token`.
     #[arg(long, value_name = "FILE")]
     pub claim_token_file: Option<PathBuf>,
     /// Print JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// An option ID a caller names: 1 to 32 characters of `a-z`, `0-9`, `_` and `-`.
+fn option_id(id: &str) -> Result<String, String> {
+    pf_engine::claim::check_option_id(id).map(|()| id.to_string())
 }
 
 #[derive(Args, Debug, Clone)]
@@ -206,8 +225,14 @@ pub struct ClearArgs {
     /// The item (the parked unit).
     pub item: String,
     /// The stage to resume at. The default is the stage the unit parked in.
-    #[arg(long, value_name = "STAGE")]
+    #[arg(long, value_name = "STAGE", conflicts_with = "option")]
     pub to: Option<String>,
+    /// Take this option of the request in place of a stage: its ID from `show`. It needs `--rev`.
+    #[arg(long, value_name = "ID", value_parser = option_id, requires = "rev")]
+    pub option: Option<String>,
+    /// The revision you read with `show`. An option belongs to one revision.
+    #[arg(long, value_name = "N", requires = "option")]
+    pub rev: Option<u32>,
     /// The file that holds the claim token. The default is `<state dir>/claim-token`.
     #[arg(long, value_name = "FILE")]
     pub claim_token_file: Option<PathBuf>,
@@ -223,6 +248,9 @@ pub struct AckArgs {
     /// The revision you read with `show`. Another revision is refused.
     #[arg(long, value_name = "N")]
     pub rev: u32,
+    /// Take this option of the request: its ID from `show`. Its effect must be `ack`.
+    #[arg(long, value_name = "ID", value_parser = option_id)]
+    pub option: Option<String>,
     /// The file that holds the claim token. The default is `<state dir>/claim-token`.
     #[arg(long, value_name = "FILE")]
     pub claim_token_file: Option<PathBuf>,

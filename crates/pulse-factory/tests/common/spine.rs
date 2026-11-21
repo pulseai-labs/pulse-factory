@@ -41,9 +41,17 @@ impl Spine {
     pub fn start_with(
         tweak: impl FnOnce(&mut pulse_factory::controller::Config) + Send + 'static,
     ) -> Spine {
+        Spine::start_options(Options::default(), tweak)
+    }
+
+    /// Start on the fixture package of `o`, with the spine-close pieces added.
+    pub fn start_options(
+        o: Options,
+        tweak: impl FnOnce(&mut pulse_factory::controller::Config) + Send + 'static,
+    ) -> Spine {
         let o = Options {
             spine_close: true,
-            ..Options::default()
+            ..o
         };
         let live = Live::start_package(BIN.into(), &o, tweak);
         let work = live.sb.root.path().join("work");

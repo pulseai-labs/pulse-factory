@@ -4,16 +4,19 @@
 # when the method records the spine as closed. Every path is a placeholder. The arm step supplies
 # the parameters.
 #
-# An answer reaches the seat that needs it through three hooks (`on_answer`), all POSIX `sh`
-# scripts in `scripts/`. The controller runs a hook when an answer resumes a unit, before the
-# unit runs again. The scripts call no method tool.
+# An answer reaches the seat that needs it through `on_answer` hooks, all POSIX `sh` scripts in
+# `scripts/`. The controller runs a hook when an answer resumes a unit, before the unit runs again.
+# The scripts call no method tool. `{answer.source}` tells a hook whether a person typed the answer
+# (`typed`) or took an option (`option:<id>:<by>`), so the note says who wrote the words.
 #   gaps.json       `clarify.sh` appends the answer to the work item handoff's `## Clarifications`.
 #   stop file       `rule.sh` appends the ruling to {run.dir}/out/{unit.id}/rulings.md, which every
 #                   brief tells a seat to read first, and renames the stop file.
 #   correction.txt  `rule.sh` does the same for the close stage's correction packet: it quotes the
 #                   packet in the rulings file and renames the packet.
-# A park with no file has no hook: the review cap park (`<stage>: <to> cap <max> reached`) ends its
-# stage `done`, so no seat of that stage is left to read an answer. `clear` is its way on.
+#   any other park  each stage declares a fallback `on_answer`: a stall, a cap, a failed launch or a
+#                   lost seat takes a typed note. `rule.sh` appends it to the same rulings file with
+#                   the stop path `-`: it quotes no file and renames none. A park the fallback does
+#                   not reach, such as a request with no unit, takes `clear`.
 version: 1
 name: ossify-spine
 
@@ -140,6 +143,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - lane
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - lane
+            - "{answer.source}"
         stall_minutes: 15
         first_turn_seconds: 180
         skills: [run-spine]
@@ -190,6 +207,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - implement
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - implement
+            - "{answer.source}"
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [work-item]
@@ -244,6 +275,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - verify
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - verify
+            - "{answer.source}"
         stall_minutes: 20
         first_turn_seconds: 180
         skills: [close]
@@ -292,6 +337,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - close
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - close
+            - "{answer.source}"
         # A close seat that ends its turn with the item PR not open, no stop file and no correction
         # packet gets one nudge into the same session. When that does not finish the stage,
         # `stranded.sh` writes the stop file: what the seat left in the worktree, and the next step.
@@ -348,6 +407,7 @@ tracks:
                 - "{answer.request}"
                 - "{answer.generation}"
                 - close
+                - "{answer.source}"
 
       # The reviewer reads the item PR at its head and writes `review.md`. The verdict is line 1 of
       # that file and nothing else counts: `scripts/verdict.sh` reads it for `done` and for the block
@@ -388,6 +448,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - review
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - review
+            - "{answer.source}"
         stall_minutes: 20
         first_turn_seconds: 180
         # No `worktree` setting: the reviewer has no worktree write. It reads the worktree through `cwd`.
@@ -452,6 +526,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - fix
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - fix
+            - "{answer.source}"
         stall_minutes: 20
         first_turn_seconds: 180
         settings:
@@ -517,6 +605,20 @@ tracks:
               - "{answer.request}"
               - "{answer.generation}"
               - spine_close
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened (a stall, a cap, a
+        # failed launch, a lost seat) reaches the next seat as a note in the same rulings file. The
+        # park has no file, so the stop path is `-`: the entry quotes nothing and renames nothing.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - spine_close
+            - "{answer.source}"
         stall_minutes: 30
         first_turn_seconds: 180
         skills: [close]
