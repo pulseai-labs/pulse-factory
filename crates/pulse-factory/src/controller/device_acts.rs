@@ -19,7 +19,9 @@ use pf_api::types::{
     ConfirmCodeArgs, ConfirmIssued, ConfirmSubjectArg, ConfirmSubjectShown, ConfirmVerb,
     DeviceAckArgs, DeviceAnswerArgs, DeviceClearArgs, DeviceRecord, RequestActed, SCHEMA_VERSION,
 };
-use pf_engine::claim::{claim_effects, device_holder, holder_device, sha256_hex};
+use pf_engine::claim::{
+    AnswerAct, StoredOption, claim_effects, device_holder, holder_device, sha256_hex, stored_option,
+};
 use pf_engine::port::store::{
     CONTROLLER_SCOPE, ClaimRow, DeviceRow, RequestKind, RequestRow, RequestStatus, Store,
 };
@@ -103,6 +105,7 @@ struct ActArgs {
     rev: u32,
     text: Option<String>,
     to: Option<String>,
+    option: Option<String>,
     code: String,
     command_id: String,
 }
@@ -116,7 +119,8 @@ fn parse_act(act: Act, args: &Value) -> Result<ActArgs, String> {
                 request: a.request,
                 rev: a.rev,
                 text: Some(a.text),
-                to: None,
+                to: a.to,
+                option: a.option,
                 code: a.code,
                 command_id: a.command_id,
             }
@@ -128,6 +132,7 @@ fn parse_act(act: Act, args: &Value) -> Result<ActArgs, String> {
                 rev: a.rev,
                 text: None,
                 to: a.to,
+                option: a.option,
                 code: a.code,
                 command_id: a.command_id,
             }
@@ -139,6 +144,7 @@ fn parse_act(act: Act, args: &Value) -> Result<ActArgs, String> {
                 rev: a.rev,
                 text: None,
                 to: None,
+                option: a.option,
                 code: a.code,
                 command_id: a.command_id,
             }
@@ -224,14 +230,15 @@ impl Controller {
         if let Err(why) = check_command_id(&args.command_id) {
             return Response::err(why);
         }
-        let (request_id, revision, verb, text_sha256, to) = match args.subject {
+        let (request_id, revision, verb, text_sha256, to, option) = match args.subject {
             ConfirmSubjectArg::Request {
                 request,
                 revision,
                 verb,
                 text_sha256,
                 to,
-            } => (request, revision, verb, text_sha256, to),
+                option,
+            } => (request, revision, verb, text_sha256, to, option),
             ConfirmSubjectArg::Arm {
                 proposal,
                 plan_sha256,
@@ -251,7 +258,7 @@ impl Controller {
             Ok(d) => d,
             Err(r) => return r,
         };
-        let content = json!({
+        let mut content = json!({
             "device": dev.id,
             "subject": {
                 "kind": "request",
@@ -261,8 +268,12 @@ impl Controller {
                 "text_sha256": text_sha256,
                 "to": to,
             },
-        })
-        .to_string();
+        });
+        // A typed act's content bytes are as they were: the option key is there only when set.
+        if let Some(option) = &option {
+            content["subject"]["option"] = json!(option);
+        }
+        let content = content.to_string();
         // A command the store has seen is decided by its record: a replay, a conflict, or the first refusal.
         let existing = matches!(
             self.store.admission(CONTROLLER_SCOPE, &args.command_id),
@@ -275,7 +286,13 @@ impl Controller {
                 content,
                 Plan::Refuse(String::new()),
             ) {
-                Ok((_, true)) => self.replayed_issue(&dev, &args.command_id, &request_id, revision),
+                Ok((_, true)) => self.replayed_issue(
+                    &dev,
+                    &args.command_id,
+                    &request_id,
+                    revision,
+                    option.as_deref(),
+                ),
                 Ok((_, false)) => {
                     Response::err("confirm_code refused: the store answered a replay as new")
                 }
@@ -318,14 +335,59 @@ impl Controller {
                 taken.join(" or ")
             ));
         }
+        // A code for an option binds the option's ID and nothing of its own beside it. The
+        // option must be in the block at this revision, and its effect must fit the verb.
+        let taken = match &option {
+            Some(id) => {
+                if text_sha256.is_some() || to.is_some() {
+                    return Response::err(
+                        "confirm_code refused: a code for an option binds no text hash and no stage of its own",
+                    );
+                }
+                match stored_option(&row, id)
+                    .and_then(|o| o.check_verb(&row.id, wanted).map(|()| o))
+                {
+                    Ok(o) => Some(o),
+                    Err(why) => return Response::err(format!("confirm_code refused: {why}")),
+                }
+            }
+            None => None,
+        };
         let verb = match verb {
             ConfirmVerb::Answer => {
-                let Some(hash) = text_sha256.filter(|h| is_sha256_hex(h)) else {
-                    return Response::err(
-                        "confirm_code refused: an answer code needs text_sha256, 64 lower-case hex digits",
-                    );
+                // A text that no hook would deliver to a seat is refused here, so the device never
+                // spends a code on it. An option whose effect is a text is that text.
+                let handle = match self.find(Some(&row.run_id)) {
+                    Ok(h) => h,
+                    Err(why) => return Response::err(format!("confirm_code refused: {why}")),
                 };
-                RequestVerb::Answer { text_sha256: hash }
+                if let Err(why) = handle.driver.check_takes_text(&row) {
+                    return Response::err(format!("confirm_code refused: {why}"));
+                }
+                match &taken {
+                    Some(_) => RequestVerb::Answer {
+                        text_sha256: String::new(),
+                        to: None,
+                        option: option.clone(),
+                    },
+                    None => {
+                        let Some(hash) = text_sha256.filter(|h| is_sha256_hex(h)) else {
+                            return Response::err(
+                                "confirm_code refused: an answer code needs text_sha256, 64 lower-case hex digits",
+                            );
+                        };
+                        if let Some(to) = &to
+                            && let Err(why) = self.check_stage(&row, to)
+                        {
+                            return Response::err(format!("confirm_code refused: {why}"));
+                        }
+                        RequestVerb::Answer {
+                            text_sha256: hash,
+                            to,
+                            option: None,
+                        }
+                    }
+                }
             }
             ConfirmVerb::Clear => {
                 if let Some(to) = &to
@@ -333,9 +395,14 @@ impl Controller {
                 {
                     return Response::err(format!("confirm_code refused: {why}"));
                 }
-                RequestVerb::Clear { to }
+                RequestVerb::Clear {
+                    to,
+                    option: option.clone(),
+                }
             }
-            ConfirmVerb::Ack => RequestVerb::Ack,
+            ConfirmVerb::Ack => RequestVerb::Ack {
+                option: option.clone(),
+            },
         };
         let head_sha = (row.kind == RequestKind::MergeAck)
             .then(|| body_text(&row, "head_sha"))
@@ -354,6 +421,9 @@ impl Controller {
             generation.map_or_else(|| "none".to_string(), |g| g.to_string()),
             args.command_id
         );
+        if let Some(option) = &option {
+            line.push_str(&format!(" option={}", field(option)));
+        }
         if row.kind == RequestKind::MergeAck {
             line.push_str(&format!(
                 " pr={} base={} head={}",
@@ -368,7 +438,13 @@ impl Controller {
             line,
         };
         match self.run_command("confirm_code", &args.command_id, content, plan) {
-            Ok((_, true)) => self.replayed_issue(&dev, &args.command_id, &request_id, revision),
+            Ok((_, true)) => self.replayed_issue(
+                &dev,
+                &args.command_id,
+                &request_id,
+                revision,
+                option.as_deref(),
+            ),
             Ok((_, false)) => {
                 let code = format!("{CODE_PREFIX}{}", hex(&bytes));
                 let at = std::time::SystemTime::now()
@@ -384,6 +460,7 @@ impl Controller {
                     Some(code.clone()),
                     Some(expires_at),
                     generation,
+                    taken.as_ref(),
                 ) {
                     Ok(a) => a,
                     Err(r) => return r,
@@ -424,11 +501,26 @@ impl Controller {
         command_id: &str,
         request_id: &str,
         revision: u32,
+        option: Option<&str>,
     ) -> Response {
         if let Some(first) = self.confirm.first_answer(&dev.id, command_id) {
             return Response::ok(serde_json::to_value(first).unwrap_or(Value::Null));
         }
-        match self.issued_answer(dev, request_id, revision, true, None, None, None) {
+        // The first answer is gone: the option's label is read from the store, if it is still there.
+        let shown = option.and_then(|id| {
+            let row = self.store.request(request_id).ok().flatten()?;
+            stored_option(&row, id).ok()
+        });
+        match self.issued_answer(
+            dev,
+            request_id,
+            revision,
+            true,
+            None,
+            None,
+            None,
+            shown.as_ref(),
+        ) {
             Ok(a) => Response::ok(serde_json::to_value(a).unwrap_or(Value::Null)),
             Err(r) => r,
         }
@@ -444,6 +536,7 @@ impl Controller {
         code: Option<String>,
         expires_at: Option<String>,
         generation: Option<u64>,
+        option: Option<&StoredOption>,
     ) -> Result<ConfirmIssued, Response> {
         let row = match self.store.request(request_id) {
             Ok(Some(r)) => r,
@@ -470,6 +563,8 @@ impl Controller {
                 base: body_text(&row, "base"),
                 head_branch: body_text(&row, "head_branch"),
                 head_sha: body_text(&row, "head_sha"),
+                option: option.map(|o| o.id.clone()),
+                option_label: option.map(|o| o.label.clone()),
             },
         };
         Ok(issued)
@@ -520,12 +615,26 @@ impl Controller {
             Err(r) => return r,
         };
         let code_sha = sha256_hex(a.code.as_bytes());
+        let text = a.text.as_deref().unwrap_or_default();
         let call_verb = match act {
+            // A typed answer binds the hash of its text and its stage. An option binds neither: a
+            // text or a stage beside an option is another subject than the code's.
             Act::Answer => RequestVerb::Answer {
-                text_sha256: sha256_hex(a.text.as_deref().unwrap_or_default().as_bytes()),
+                text_sha256: if a.option.is_some() && text.is_empty() {
+                    String::new()
+                } else {
+                    sha256_hex(text.as_bytes())
+                },
+                to: a.to.clone(),
+                option: a.option.clone(),
             },
-            Act::Clear => RequestVerb::Clear { to: a.to.clone() },
-            Act::Ack => RequestVerb::Ack,
+            Act::Clear => RequestVerb::Clear {
+                to: a.to.clone(),
+                option: a.option.clone(),
+            },
+            Act::Ack => RequestVerb::Ack {
+                option: a.option.clone(),
+            },
         };
         let mut content = json!({
             "verb": verb,
@@ -534,11 +643,22 @@ impl Controller {
             "code_sha256": code_sha,
             "device": dev.id,
         });
-        if let RequestVerb::Answer { text_sha256 } = &call_verb {
+        if let RequestVerb::Answer { text_sha256, .. } = &call_verb {
             content["text_sha256"] = json!(text_sha256);
         }
         if act == Act::Clear {
             content["to"] = json!(a.to);
+        }
+        // A typed act's content bytes are as they were: the option key is there only when set.
+        if let Some(option) = &a.option {
+            content["option"] = json!(option);
+        }
+        // A typed answer that names a stage binds it too.
+        if act == Act::Answer
+            && a.option.is_none()
+            && let Some(to) = &a.to
+        {
+            content["to"] = json!(to);
         }
         let content = content.to_string();
         let kind = act.admission_kind();
@@ -647,6 +767,9 @@ impl Controller {
             from,
             a.command_id
         );
+        if let Some(option) = &a.option {
+            line.push_str(&format!(" option={}", field(option)));
+        }
         if act == Act::Ack
             && let Ok(Some(row)) = self.store.request(id)
         {
@@ -697,13 +820,23 @@ impl Controller {
             resumed: None,
             hook: None,
             to_stage: None,
+            option: a.option.clone(),
         };
         match act {
             Act::Answer => {
                 let text = a.text.as_deref().unwrap_or_default();
+                // An option stands in place of the text and the stage: the engine reads them from
+                // the stored request.
+                let answer = match a.option.as_deref() {
+                    Some(id) => AnswerAct::Option(id),
+                    None => AnswerAct::Text {
+                        text,
+                        to_stage: a.to.as_deref(),
+                    },
+                };
                 match handle
                     .driver
-                    .answer_request(&a.request, a.rev, generation, text)
+                    .answer_act(&a.request, a.rev, generation, &answer)
                 {
                     Ok(answered) => {
                         acted.resumed =
@@ -724,10 +857,15 @@ impl Controller {
                 let Some(unit) = request.unit_id.as_deref() else {
                     return Response::err("clear refused: the request names no unit");
                 };
-                match handle
-                    .driver
-                    .clear_unit(unit, a.to.as_deref(), generation, &a.request)
-                {
+                let cleared = match a.option.as_deref() {
+                    Some(id) => handle
+                        .driver
+                        .clear_option(unit, id, a.rev, generation, &a.request),
+                    None => handle
+                        .driver
+                        .clear_unit(unit, a.to.as_deref(), generation, &a.request),
+                };
+                match cleared {
                     Ok(_) => {
                         acted.to_stage = self
                             .store
@@ -745,27 +883,32 @@ impl Controller {
                     Err(why) => return Response::err(format!("clear refused: {why}")),
                 }
             }
-            Act::Ack => match handle.driver.ack_request(&a.request, a.rev, generation) {
-                Ok(acked) => {
-                    acted.merged = Some(acked.landed);
-                    acted.head_sha = Some(acked.head_sha);
-                    acted.outcome = Some(acked.outcome);
+            Act::Ack => {
+                match handle
+                    .driver
+                    .ack_option(&a.request, a.rev, generation, a.option.as_deref())
+                {
+                    Ok(acked) => {
+                        acted.merged = Some(acked.landed);
+                        acted.head_sha = Some(acked.head_sha);
+                        acted.outcome = Some(acked.outcome);
+                    }
+                    Err(why) => {
+                        // A head that moved at the forge revises the request inside the merge step.
+                        let moved = self
+                            .store
+                            .request(&a.request)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|r| r.revision > a.rev);
+                        return if moved {
+                            refusal("subject_moved", format!("ack refused: {why}"))
+                        } else {
+                            Response::err(format!("ack refused: {why}"))
+                        };
+                    }
                 }
-                Err(why) => {
-                    // A head that moved at the forge revises the request inside the merge step.
-                    let moved = self
-                        .store
-                        .request(&a.request)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|r| r.revision > a.rev);
-                    return if moved {
-                        refusal("subject_moved", format!("ack refused: {why}"))
-                    } else {
-                        Response::err(format!("ack refused: {why}"))
-                    };
-                }
-            },
+            }
         }
         if let Ok(Some(after)) = self.store.request(&a.request) {
             if act == Act::Ack {
@@ -795,6 +938,7 @@ fn replay_response(act: Act, device: &str) -> Response {
         resumed: None,
         hook: None,
         to_stage: None,
+        option: None,
     };
     Response::ok(serde_json::to_value(acted).unwrap_or(Value::Null))
 }

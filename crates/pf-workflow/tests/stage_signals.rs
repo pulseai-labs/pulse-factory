@@ -34,6 +34,7 @@ fn stage(dir: &Path, done: Vec<DoneCond>, park_on: Vec<ParkOn>) -> StageSpec {
         after_first_turn: Vec::new(),
         stop_file: format!("{d}/{{unit.id}}/stop"),
         stop_on_answer: Vec::new(),
+        on_answer: Vec::new(),
         stall_minutes: 10,
         first_turn_seconds: 60,
         skills: Vec::new(),

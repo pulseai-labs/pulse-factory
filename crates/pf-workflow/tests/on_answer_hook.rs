@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use common::{Env, TrackedSource, env, item_workflow, unit};
 use pf_engine::Cause;
-use pf_engine::claim::sha256_hex;
+use pf_engine::claim::{AnswerAct, sha256_hex};
 use pf_engine::launch::LaunchStep;
 use pf_engine::port::store::{RequestKind, RequestRow, RequestStatus};
 use pf_engine::render::{RenderContext, UnitView, render};
@@ -136,12 +136,15 @@ fn on_answer_is_refused_anywhere_else() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    // On the stage itself.
+    // On the stage itself: since `r2.s11.w2` a stage declares a fallback hook there, in the answer
+    // scope (`stage_on_answer.rs`). The stage's own hook is not the stop file's.
     let stage = flow(&format!("{STOP_PLAIN}\n{}", at(8, hook)), "");
-    let err = refused(&stage);
+    let file = parse(&stage).unwrap_or_else(|e| panic!("{e}"));
+    let spec = &file.track("item").unwrap().stages[0];
+    assert_eq!(spec.on_answer.len(), 1);
     assert!(
-        err.contains("unknown field `on_answer`") && err.contains("a stage"),
-        "{err}"
+        spec.stop_on_answer.is_empty(),
+        "the stop file has no hook of its own"
     );
     // In a done condition.
     let done = flow(STOP_PLAIN, "").replace(
@@ -488,7 +491,10 @@ fn run_hook(
         request,
         request.revision,
         generation,
-        text,
+        &AnswerAct::Text {
+            text,
+            to_stage: None,
+        },
         specs,
         &r.ctx(),
         files_dir,

@@ -5,7 +5,13 @@ import type { ConfirmVerb } from "./ConfirmVerb";
  * What a confirm code is for. The tag `kind` names the subject, so a later subject is a new tag and
  * not a new field. A request subject binds the request, its revision, the verb and the verb's own
  * parameters: for `answer` the SHA-256 of the answer text (64 lower-case hex digits: the text never
- * reaches the controller's code table), for `clear` the target stage `to` or its absence, for `ack`
- * nothing (the code binds the PR's head SHA the controller reads when it issues the code).
+ * reaches the controller's code table) and the stage `to` or its absence, for `clear` the target
+ * stage `to` or its absence, for `ack` nothing (the code binds the PR's head SHA the controller
+ * reads when it issues the code). A code for an option binds the option's ID instead of a text
+ * hash, a stage and a head of its own: the controller reads what the option does from the request.
  */
-export type ConfirmSubjectArg = { "kind": "request", request: string, revision: number, verb: ConfirmVerb, text_sha256?: string, to?: string, } | { "kind": "arm", proposal: string, plan_sha256: string, };
+export type ConfirmSubjectArg = { "kind": "request", request: string, revision: number, verb: ConfirmVerb, text_sha256?: string, to?: string, 
+/**
+ * The option of the request's decision block the code is for.
+ */
+option?: string, } | { "kind": "arm", proposal: string, plan_sha256: string, };

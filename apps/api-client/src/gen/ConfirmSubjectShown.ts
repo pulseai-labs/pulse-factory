@@ -4,4 +4,8 @@
  * The subject of a confirm code as the dialog shows it: the request, and for a `merge_ack` the PR, its
  * base, its head branch and its head SHA.
  */
-export type ConfirmSubjectShown = { request: string, revision: number, kind: string, run: string, unit: string | null, reason: string, pr?: string, base?: string, head_branch?: string, head_sha?: string, };
+export type ConfirmSubjectShown = { request: string, revision: number, kind: string, run: string, unit: string | null, reason: string, pr?: string, base?: string, head_branch?: string, head_sha?: string, 
+/**
+ * A code for an option: the option's ID, and its label as the dialog shows it.
+ */
+option?: string, option_label?: string, };

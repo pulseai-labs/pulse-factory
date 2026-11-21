@@ -928,7 +928,8 @@ pub struct RequestDetail {
 
 /// The decision block of a request (`docs/contracts/requests.md`, "The decision block"): why the
 /// work stopped, what each possible answer does, and what a fresh session needs to pick the request
-/// up. It is data for a reader. Nothing in it acts, and no verb changes with it.
+/// up. It is data for a reader. An act names one of its options (`--option`), and the engine reads
+/// what the option does from the stored block, never from the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Decision {
     /// The version of the block's shape. A block of another version is not decoded.
@@ -955,7 +956,7 @@ pub struct Decision {
     #[ts(optional)]
     pub options_error: Option<String>,
     /// True when a text answer reaches a seat, because the request's own file declares an answer
-    /// hook.
+    /// hook, or because the stage declares a fallback hook.
     pub takes_text: bool,
 }
 
@@ -966,15 +967,25 @@ pub struct DecisionOption {
     pub label: String,
     pub detail: String,
     pub effect: OptionEffect,
+    /// Who wrote the option: `controller`, `workflow` or `seat`. A block stored before the field
+    /// existed has none: a reader takes `seat` for a stop and `controller` for any other cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub by: Option<String>,
 }
 
-/// What an option does when it is taken. Nothing acts on it in this version: it says which verb
-/// would carry the option out.
+/// What an option does when it is taken: it says which verb carries the option out. The engine reads
+/// the effect from the stored request, never from the caller.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "verb", rename_all = "snake_case")]
 pub enum OptionEffect {
-    /// Answer with this text.
-    Answer { text: String },
+    /// Answer with this text, and resume the unit at the stage `to` when it is set.
+    Answer {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to: Option<String>,
+    },
     /// Resume the unit, at the stage `to` when it is set.
     Resume {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1068,8 +1079,10 @@ pub enum ConfirmVerb {
 /// What a confirm code is for. The tag `kind` names the subject, so a later subject is a new tag and
 /// not a new field. A request subject binds the request, its revision, the verb and the verb's own
 /// parameters: for `answer` the SHA-256 of the answer text (64 lower-case hex digits: the text never
-/// reaches the controller's code table), for `clear` the target stage `to` or its absence, for `ack`
-/// nothing (the code binds the PR's head SHA the controller reads when it issues the code).
+/// reaches the controller's code table) and the stage `to` or its absence, for `clear` the target
+/// stage `to` or its absence, for `ack` nothing (the code binds the PR's head SHA the controller
+/// reads when it issues the code). A code for an option binds the option's ID instead of a text
+/// hash, a stage and a head of its own: the controller reads what the option does from the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case")]
@@ -1084,6 +1097,10 @@ pub enum ConfirmSubjectArg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         to: Option<String>,
+        /// The option of the request's decision block the code is for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        option: Option<String>,
     },
     /// A start card's proposal and the hash of its plan. An arm code takes no claim.
     Arm {
@@ -1121,6 +1138,13 @@ pub struct ConfirmSubjectShown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub head_sha: Option<String>,
+    /// A code for an option: the option's ID, and its label as the dialog shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option_label: Option<String>,
 }
 
 /// The answer of `confirm_code`. Issuing a code changes no claim. `code` is shown once: it is `pfc1-` and
@@ -1282,7 +1306,18 @@ pub struct ArmActed {
 pub struct DeviceAnswerArgs {
     pub request: String,
     pub rev: u32,
+    /// The ruling. An act that takes an option sends it empty: an empty text is no text, and a
+    /// text beside an option is refused.
+    #[serde(default)]
     pub text: String,
+    /// Resume at this stage of the unit's track. The code binds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub to: Option<String>,
+    /// The option of the request's decision block this answer takes, in place of a text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1295,6 +1330,10 @@ pub struct DeviceClearArgs {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub to: Option<String>,
+    /// The option of the request's decision block this clear takes, in place of a stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1304,6 +1343,10 @@ pub struct DeviceClearArgs {
 pub struct DeviceAckArgs {
     pub request: String,
     pub rev: u32,
+    /// The option of the request's decision block this ack takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1334,6 +1377,10 @@ pub struct RequestActed {
     pub hook: Option<String>,
     /// `clear`: the stage the unit resumes at.
     pub to_stage: Option<String>,
+    /// The option the act took, when it took one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
 }
 
 /// One frame about requests on `GET /v1/stream`, beside the chat frames (`ChatFrame`). A reader keys

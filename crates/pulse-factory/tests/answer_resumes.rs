@@ -315,8 +315,11 @@ fn a_refused_answer_runs_no_hook() {
     assert!(read(&handoff).contains("## Clarifications"));
 }
 
+/// Since `r2.s11.w2` (Q5) a text answer to a unit's request that no hook would deliver is refused:
+/// it used to be stored and reach no seat. The refusal names `clear`, records nothing and leaves
+/// the unit parked.
 #[test]
-fn a_request_without_a_hook_resumes_as_before() {
+fn a_text_answer_to_a_request_without_a_hook_is_refused_and_records_nothing() {
     let r = rig();
     queue_with_handoff(&r, &handoff_path(&r));
     dispatches(&r, 0);
@@ -326,13 +329,21 @@ fn a_request_without_a_hook_resumes_as_before() {
     let req = open_request(&r);
     assert_eq!(req.kind, RequestKind::RedGate);
     let generation = claim(&r);
-    let answered = r
+    let err = r
         .driver
         .answer_request(&req.id, 1, generation, "fixed the gate")
-        .unwrap();
-    assert!(!answered.hook_ran && answered.hook_failed.is_none());
-    assert_eq!(r.unit("u1").0, Status::Running);
+        .unwrap_err();
+    assert!(err.contains("takes no text"), "{err}");
+    assert!(err.contains("pulse-factory clear"), "{err}");
+    assert_eq!(request(&r, &req.id).status, RequestStatus::Open);
+    assert_eq!(r.unit("u1").0, Status::Parked);
     assert_eq!(read(&handoff_path(&r)), HANDOFF);
+    assert!(r.ledger_lines(&format!("answer {}", req.id)).is_empty());
+    // `clear` is the way to resume it.
+    r.driver
+        .clear_unit("u1", None, generation, &req.id)
+        .unwrap();
+    assert_eq!(r.unit("u1").0, Status::Running);
 }
 
 #[test]
@@ -447,14 +458,19 @@ fn a_link_inside_the_spine_dir_that_points_outside_fails_the_hook_and_parks() {
     r.queue_item_with("u1", 1, &[("handoff_path", link.to_str().unwrap())]);
     failed_hook_case(&r, "the handoff is a symbolic link", &outside);
 
-    // The next request is answered like any other and resumes the unit.
+    // The next request has no hook (Q5 of `r2.s11.w2`): it takes no text, and `clear` resumes the
+    // unit.
     let generation = claim(&r);
     let next = open_request(&r);
-    let answered = r
+    let err = r
         .driver
         .answer_request(&next.id, 1, generation, "fixed the link")
+        .unwrap_err();
+    assert!(err.contains("takes no text"), "{err}");
+    assert_eq!(r.unit("u1").0, Status::Parked);
+    r.driver
+        .clear_unit("u1", None, generation, &next.id)
         .unwrap();
-    assert!(!answered.hook_ran, "{answered:?}");
     assert_eq!(r.unit("u1").0, Status::Running);
 }
 

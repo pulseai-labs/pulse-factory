@@ -3,4 +3,8 @@
 /**
  * The arguments of `clear` from a device. `request` names the unit's open request.
  */
-export type DeviceClearArgs = { request: string, rev: number, to?: string | null, code: string, command_id: string, };
+export type DeviceClearArgs = { request: string, rev: number, to?: string | null, 
+/**
+ * The option of the request's decision block this clear takes, in place of a stage.
+ */
+option?: string, code: string, command_id: string, };

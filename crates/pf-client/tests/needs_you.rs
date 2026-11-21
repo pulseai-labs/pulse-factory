@@ -510,6 +510,7 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
                         verb: ConfirmVerb::Answer,
                         text_sha256: Some("a".repeat(64)),
                         to: None,
+                        option: None,
                     },
                     command_id: "c-1".into(),
                 })
@@ -525,6 +526,8 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
                     request: "R-1".into(),
                     rev: 1,
                     text: "main".into(),
+                    to: None,
+                    option: None,
                     code: CODE.into(),
                     command_id: "c-2".into(),
                 })
@@ -540,6 +543,7 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
                     request: "R-1".into(),
                     rev: 1,
                     to: Some("implement".into()),
+                    option: None,
                     code: CODE.into(),
                     command_id: "c-3".into(),
                 })
@@ -554,6 +558,7 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
                 t.ack(DeviceAckArgs {
                     request: "R-9".into(),
                     rev: 1,
+                    option: None,
                     code: CODE.into(),
                     command_id: "c-4".into(),
                 })
@@ -630,6 +635,87 @@ async fn each_typed_method_posts_its_verb_with_its_arguments_and_parses_the_answ
     }
 }
 
+/// An option act carries `option` on the wire, an empty text for `answer` and no stage; a typed
+/// act leaves the key out (`r2.s11.w2`). The answer parses the option the host names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_option_act_posts_its_option_and_a_typed_act_posts_none() {
+    let server = Server::start().await;
+    let c = client(&server);
+    let t = &c.transport;
+    let acted = |verb: &str, option: Value| {
+        json!({"schema_version": 1, "replayed": false, "verb": verb, "device": "D-1",
+               "generation": 2, "request": summary("R-1", 2, "answered"), "merged": null,
+               "head_sha": null, "pr": null, "base": null, "outcome": null, "resumed": true,
+               "hook": "none", "to_stage": null, "option": option})
+    };
+    server
+        .fake
+        .answer("answer", ok(acted("answer", json!("s2"))));
+    server
+        .fake
+        .answer("clear", ok(acted("clear", json!("again"))));
+    server
+        .fake
+        .answer("ack", ok(acted("ack", json!("approve"))));
+    let answered = t
+        .answer(DeviceAnswerArgs {
+            request: "R-1".into(),
+            rev: 1,
+            text: String::new(),
+            to: None,
+            option: Some("s2".into()),
+            code: CODE.into(),
+            command_id: "c-2".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(answered.option.as_deref(), Some("s2"));
+    let cleared = t
+        .clear(DeviceClearArgs {
+            request: "R-1".into(),
+            rev: 1,
+            to: None,
+            option: Some("again".into()),
+            code: CODE.into(),
+            command_id: "c-3".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cleared.option.as_deref(), Some("again"));
+    let acked = t
+        .ack(DeviceAckArgs {
+            request: "R-1".into(),
+            rev: 1,
+            option: Some("approve".into()),
+            code: CODE.into(),
+            command_id: "c-4".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(acked.option.as_deref(), Some("approve"));
+
+    let calls = server.fake.calls();
+    let body = |i: usize| {
+        let mut sent = calls[i].1.clone();
+        if let Some(object) = sent.as_object_mut() {
+            object.retain(|_, v| !v.is_null());
+        }
+        sent
+    };
+    assert_eq!(
+        body(0),
+        json!({"request": "R-1", "rev": 1, "text": "", "option": "s2", "code": CODE, "command_id": "c-2"})
+    );
+    assert_eq!(
+        body(1),
+        json!({"request": "R-1", "rev": 1, "option": "again", "code": CODE, "command_id": "c-3"})
+    );
+    assert_eq!(
+        body(2),
+        json!({"request": "R-1", "rev": 1, "option": "approve", "code": CODE, "command_id": "c-4"})
+    );
+}
+
 // ---- the refusal word ---------------------------------------------------------------------------
 
 fn refused_with(word: Option<&str>, text: &str) -> pf_ipc::Response {
@@ -644,6 +730,7 @@ fn ack_args() -> DeviceAckArgs {
     DeviceAckArgs {
         request: "R-9".into(),
         rev: 1,
+        option: None,
         code: CODE.into(),
         command_id: "c-4".into(),
     }
@@ -783,6 +870,7 @@ async fn ack_waits_for_the_long_timeout_and_confirm_code_does_not() {
                 verb: ConfirmVerb::Ack,
                 text_sha256: None,
                 to: None,
+                option: None,
             },
             command_id: "c-7".into(),
         })
@@ -813,6 +901,7 @@ async fn a_changed_key_on_confirm_code_is_key_changed_and_the_host_saw_no_call()
                 verb: ConfirmVerb::Ack,
                 text_sha256: None,
                 to: None,
+                option: None,
             },
             command_id: "c-8".into(),
         })

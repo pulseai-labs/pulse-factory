@@ -64,8 +64,21 @@ impl Drop for Rig {
     }
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 fn rig() -> Rig {
-    let s = Spine::start_with(|cfg| cfg.api_listen = Some("127.0.0.1:0".to_string()));
+    rig_with(Options::default())
+}
+
+fn rig_with(o: Options) -> Rig {
+    let s = Spine::start_options(o, |cfg| cfg.api_listen = Some("127.0.0.1:0".to_string()));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let controller = s.live.controller.clone();
     let thread = std::thread::spawn(move || {
@@ -591,7 +604,7 @@ fn the_refusals_are_one_api_ledger_line_each_and_leave_main_alone() {
 
 #[test]
 fn a_stop_rule_request_is_answered_from_a_device_and_the_stream_shows_it() {
-    let rig = rig();
+    let rig = rig_with(noted());
     let s = &rig.s;
     let d1 = rig.pair("MacBook");
     let mut socket = rig.stream(&d1);

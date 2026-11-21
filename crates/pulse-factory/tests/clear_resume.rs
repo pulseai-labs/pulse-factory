@@ -50,9 +50,22 @@ fn stop_file(r: &Rig, unit: &str, text: &str) {
     std::fs::write(r.out(unit, "stop"), text).unwrap();
 }
 
-/// A rig whose `u1` is parked by its stop file in `implement`.
+/// A rig whose `u1` is parked by its stop file in `implement`. The stop file has no answer hook.
 fn parked_by_stop() -> (Rig, RequestRow) {
-    let r = Rig::new();
+    parked_by_stop_with(&Options::default())
+}
+
+/// The same, with a stop file whose hook delivers a text to no script: a text answer to a unit's
+/// request needs a hook since `r2.s11.w2` (Q5).
+fn parked_by_hooked_stop() -> (Rig, RequestRow) {
+    parked_by_stop_with(&Options {
+        implement_stop: "        stop_file:\n          file: \"{run.dir}/out/{unit.id}/stop\"\n          on_answer:\n            - [\"true\"]\n".to_string(),
+        ..Options::default()
+    })
+}
+
+fn parked_by_stop_with(o: &Options) -> (Rig, RequestRow) {
+    let r = Rig::with(o, |_| {});
     r.queue_item("u1", 1);
     r.tick();
     stop_file(&r, "u1", "need a human to look");
@@ -361,9 +374,28 @@ fn a_restart_on_a_new_adapter_parks_as_seat_lost_and_a_clear_relaunches() {
 
 // ------------------------------------------------------------------ answer
 
+/// A text answer to a request whose stop file has no hook is refused (Q5 of `r2.s11.w2`): it used
+/// to be stored and reach no seat. Nothing is recorded and the unit stays parked.
+#[test]
+fn answer_text_to_a_request_with_no_hook_is_refused_and_records_nothing() {
+    let (r, req) = parked_by_stop();
+    std::fs::remove_file(r.out("u1", "stop")).unwrap();
+    let generation = claim(&r);
+    let err = r
+        .driver
+        .answer_request(&req.id, 1, generation, "go on")
+        .unwrap_err();
+    assert!(err.contains("takes no text"), "{err}");
+    assert!(err.contains("pulse-factory clear"), "{err}");
+    assert_eq!(r.unit("u1").0, Status::Parked);
+    assert_eq!(request(&r, &req.id).status, RequestStatus::Open);
+    assert!(request(&r, &req.id).answer.is_none());
+    assert!(r.ledger_lines("answer ").is_empty(), "{}", r.ledger_text());
+}
+
 #[test]
 fn answer_text_resumes_the_unit_and_the_text_stays_literal() {
-    let (r, req) = parked_by_stop();
+    let (r, req) = parked_by_hooked_stop();
     std::fs::remove_file(r.out("u1", "stop")).unwrap();
     let generation = claim(&r);
     let sentinel = r.root.path().join("sentinel");
@@ -381,7 +413,7 @@ fn answer_text_resumes_the_unit_and_the_text_stays_literal() {
     assert_eq!(answer["text"], text.as_str(), "stored as given");
     assert!(!sentinel.exists(), "nothing ran the text");
 
-    let line = &r.ledger_lines("answer ")[0];
+    let line = &r.ledger_lines(&format!("answer {}@", req.id))[0];
     assert!(
         line.contains(&format!(
             "answer {}@1 by claim {generation}: use {{param.repo}} and $(rm -rf x)",
@@ -397,7 +429,7 @@ fn answer_text_resumes_the_unit_and_the_text_stays_literal() {
 
 #[test]
 fn the_ledger_line_of_an_answer_is_one_line_cut_and_redacted() {
-    let (r, req) = parked_by_stop();
+    let (r, req) = parked_by_hooked_stop();
     std::fs::remove_file(r.out("u1", "stop")).unwrap();
     let generation = claim(&r);
     let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
@@ -405,7 +437,7 @@ fn the_ledger_line_of_an_answer_is_one_line_cut_and_redacted() {
     r.driver
         .answer_request(&req.id, 1, generation, &text)
         .unwrap();
-    let line = r.ledger_lines("answer ")[0].clone();
+    let line = r.ledger_lines(&format!("answer {}@", req.id))[0].clone();
     assert!(!line.contains(token), "{line}");
     let body = line.split_once(": ").unwrap().1;
     assert!(body.starts_with("first / second"), "{line}");

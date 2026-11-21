@@ -195,7 +195,8 @@ impl Package {
                     .park_on
                     .iter()
                     .map(|p| &p.on_answer)
-                    .chain(std::iter::once(&stage.stop_on_answer));
+                    .chain(std::iter::once(&stage.stop_on_answer))
+                    .chain(std::iter::once(&stage.on_answer));
                 for command in hooks.flatten() {
                     for item in &command.argv {
                         let Some(rest) = item.strip_prefix(PACKAGE_REF) else {

@@ -1,9 +1,17 @@
 #!/bin/sh
-# rule.sh <rulings_file> <stop_file> <answer_file> <request> <generation> <stage>
+# rule.sh <rulings_file> <stop_file|-> <answer_file> <request> <generation> <stage> [<source>]
 #
-# The answer hook of a stop file. It appends the operator's ruling to the unit's rulings file,
-# which every brief tells a seat to read first. Then it retires the stop file, so the next launch
-# does not park on it again.
+# An answer hook. It appends the operator's ruling to the unit's rulings file, which every brief
+# tells a seat to read first. For a stop file it also retires the file, so the next launch does not
+# park on it again.
+#
+# A stop path of `-` means the park has no file (a stall, a cap, a failed launch): the entry quotes
+# nothing and renames nothing, and the ruling is a note for the next seat.
+#
+# <source> is the controller's `{answer.source}`: `typed`, or `option:<id>:<by>` when the operator
+# took an option of the request. A hook with no source reads `typed`. For an option the heading
+# says who wrote the words, so a seat reads "the seat's option, pressed under claim g" and not an
+# operator's sentence. The words of an option are data a seat, a workflow or the controller wrote.
 #
 # The stop text was written by a seat, so every line of it is quoted: a seat cannot start a
 # heading of its own. Nothing here passes a text to a shell or to `eval`.
@@ -14,13 +22,17 @@ die() {
     exit 1
 }
 
-[ "$#" -eq 6 ] || die "needs <rulings_file> <stop_file> <answer_file> <request> <generation> <stage>"
+[ "$#" -eq 6 ] || [ "$#" -eq 7 ] || die "needs <rulings_file> <stop_file|-> <answer_file> <request> <generation> <stage> [<source>]"
 rulings=$1
 stop=$2
 answer=$3
 request=$4
 generation=$5
 stage=$6
+source=typed
+if [ "$#" -eq 7 ]; then
+    source=$7
+fi
 
 case $request in
 R-[0-9]*) ;;
@@ -32,6 +44,27 @@ esac
 case $stage in
 '' | *[!A-Za-z0-9._-]*) die "the stage name holds a character other than A-Z a-z 0-9 . _ -" ;;
 esac
+# The source is `typed`, or `option:<id>:<by>`: an ID of 1 to 32 characters of a-z 0-9 _ -, and the
+# one who wrote the option.
+option_id=
+option_by=
+case $source in
+typed) ;;
+option:*:*)
+    rest=${source#option:}
+    option_id=${rest%%:*}
+    option_by=${rest#*:}
+    case $option_id in
+    '' | *[!a-z0-9_-]*) die "the source names an option ID that is not 1 to 32 characters of a-z 0-9 _ -" ;;
+    esac
+    [ "${#option_id}" -le 32 ] || die "the source names an option ID of more than 32 characters"
+    case $option_by in
+    controller | workflow | seat) ;;
+    *) die "the source names an option written by neither the controller, the workflow nor the seat" ;;
+    esac
+    ;;
+*) die "the source is neither typed nor option:<id>:<by>" ;;
+esac
 [ -f "$answer" ] || die "the answer file is missing"
 case $rulings in
 /*) ;;
@@ -42,9 +75,13 @@ if [ -e "$rulings" ] && [ ! -f "$rulings" ]; then
     die "the rulings path is not a file"
 fi
 
-# The stop file may be gone already: an operator can remove it after reading it.
+# The stop file may be gone already: an operator can remove it after reading it. A stop path of
+# `-` is a park with no file: there is nothing to quote or rename.
 have_stop=no
-if [ -e "$stop" ] || [ -L "$stop" ]; then
+no_file=no
+if [ "$stop" = - ]; then
+    no_file=yes
+elif [ -e "$stop" ] || [ -L "$stop" ]; then
     [ -f "$stop" ] && [ ! -L "$stop" ] || die "the stop path is not a plain file"
     have_stop=yes
 fi
@@ -65,9 +102,17 @@ trap 'rm -f "$entry"' EXIT HUP INT TERM
     if [ -s "$rulings" ] && [ -n "$(tail -c 1 "$rulings")" ]; then
         printf '\n'
     fi
-    printf '\n## %s — %s — stage %s — claim %s\n\n' "$request" "$time_utc" "$stage" "$generation"
-    printf '%s\n' "$stop_text" | sed 's/^/> /'
-    printf '\n%s\n' "$text"
+    if [ -n "$option_id" ]; then
+        printf '\n## %s — %s — stage %s — claim %s — option %s, written by the %s\n\n' \
+            "$request" "$time_utc" "$stage" "$generation" "$option_id" "$option_by"
+    else
+        printf '\n## %s — %s — stage %s — claim %s\n\n' "$request" "$time_utc" "$stage" "$generation"
+    fi
+    if [ "$no_file" = no ]; then
+        printf '%s\n' "$stop_text" | sed 's/^/> /'
+        printf '\n'
+    fi
+    printf '%s\n' "$text"
 } >"$entry" || die "cannot compose the entry"
 
 cat -- "$entry" >>"$rulings" || die "cannot append to the rulings file"

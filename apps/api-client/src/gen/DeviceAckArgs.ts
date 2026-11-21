@@ -3,4 +3,8 @@
 /**
  * The arguments of `ack` from a device.
  */
-export type DeviceAckArgs = { request: string, rev: number, code: string, command_id: string, };
+export type DeviceAckArgs = { request: string, rev: number, 
+/**
+ * The option of the request's decision block this ack takes.
+ */
+option?: string, code: string, command_id: string, };

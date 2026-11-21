@@ -340,6 +340,24 @@ pub fn show_text(v: &Value) -> String {
             v["answer_generation"],
             s(&v["answered_at"])
         ));
+        // An answer that took an option names it, who wrote it and whether it was the one the
+        // block recommended. The lines come after every line `show` prints for a typed answer.
+        let option = &v["answer"]["option"];
+        if option.is_object() {
+            line(format!(
+                "option: {} by {}",
+                tame(&s(&option["id"])),
+                tame(&s(&option["by"]))
+            ));
+            line(format!(
+                "recommended: {}",
+                if option["recommended"].as_bool() == Some(true) {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ));
+        }
     }
     let verbs: Vec<String> = v["verbs"]
         .as_array()
@@ -611,7 +629,17 @@ pub fn answer(a: &AnswerArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "request": a.id, "rev": a.rev, "text": a.text, "token": token });
+    // An option stands in place of the text and the stage: send only what the act names.
+    let mut args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    if let Some(text) = &a.text {
+        args["text"] = json!(text);
+    }
+    if let Some(to) = &a.to {
+        args["to"] = json!(to);
+    }
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
     match call("answer", args) {
         Ok(v) => {
             if a.json {
@@ -625,8 +653,12 @@ pub fn answer(a: &AnswerArgs) -> i32 {
                     (Some(u), None) => format!("; unit {u} resumes"),
                     (None, _) => String::new(),
                 };
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "answered {}@{} by claim {}{unit}",
+                    "answered {}@{} by claim {}{with}{unit}",
                     v["request"].as_str().unwrap_or(""),
                     v["revision"],
                     v["generation"]
@@ -652,14 +684,24 @@ pub fn clear(a: &ClearArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "run": a.run, "unit": a.item, "to": a.to, "token": token });
+    let mut args = json!({ "run": a.run, "unit": a.item, "to": a.to, "token": token });
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
+    if let Some(rev) = a.rev {
+        args["rev"] = json!(rev);
+    }
     match call("clear", args) {
         Ok(v) => {
             if a.json {
                 print_json(&v);
             } else {
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "cleared {} of run {} ({}@{} by claim {}); it resumes at stage {}",
+                    "cleared {} of run {} ({}@{} by claim {}{with}); it resumes at stage {}",
                     v["unit"].as_str().unwrap_or(""),
                     v["run"].as_str().unwrap_or(""),
                     v["request"].as_str().unwrap_or(""),
@@ -688,7 +730,10 @@ pub fn ack(a: &AckArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    let mut args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
     match call("ack", args) {
         Ok(v) => {
             if a.json {
@@ -703,8 +748,12 @@ pub fn ack(a: &AckArgs) -> i32 {
                         s_of(&v["unit"])
                     )
                 };
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "acked {}@{} by claim {}; {merged}",
+                    "acked {}@{} by claim {}{with}; {merged}",
                     s_of(&v["request"]),
                     v["revision"],
                     v["generation"]

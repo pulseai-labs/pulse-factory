@@ -27,9 +27,18 @@ fn read_token(live: &Live) -> String {
         .to_string()
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 /// A controller with a unit `u1` that is parked, and its request.
 fn parked() -> (Live, String, u32) {
-    let live = Live::start();
+    let live = Live::start_package(BIN.into(), &noted(), |_| {});
     live.arm_with_units(&["u1"]);
     live.park_unit("u1", "the reviewer found a defect");
     let view = live.handle().engine.view().unwrap();

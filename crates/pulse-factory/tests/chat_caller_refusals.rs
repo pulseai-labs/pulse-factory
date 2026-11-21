@@ -387,12 +387,9 @@ fn the_operators_verbs_are_refused_below_a_chat_process() {
         !why.contains("descends from") && !why.contains("cannot tell"),
         "{why}"
     );
-    let ran = rig.cli_below(
-        Style::Direct,
-        false,
-        false,
-        &["answer", &rig.request, "--rev", &rev, "--text", "go on"],
-    );
+    // `answer --text` is not the control here: a stop takes no text when no hook would deliver it
+    // (r2.s11.w2), so the clear is the call that resumes the unit from a shell that is not a chat.
+    let ran = rig.cli_below(Style::Direct, false, false, &["clear", &rig.run, "u1"]);
     assert_eq!(ran.rc, 0, "{}", ran.err);
     assert_eq!(rig.live.unit_status("u1"), "running");
 }

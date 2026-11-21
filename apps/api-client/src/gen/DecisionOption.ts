@@ -4,4 +4,9 @@ import type { OptionEffect } from "./OptionEffect";
 /**
  * One option of a decision block.
  */
-export type DecisionOption = { id: string, label: string, detail: string, effect: OptionEffect, };
+export type DecisionOption = { id: string, label: string, detail: string, effect: OptionEffect, 
+/**
+ * Who wrote the option: `controller`, `workflow` or `seat`. A block stored before the field
+ * existed has none: a reader takes `seat` for a stop and `controller` for any other cause.
+ */
+by?: string, };

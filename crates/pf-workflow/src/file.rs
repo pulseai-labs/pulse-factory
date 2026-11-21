@@ -124,6 +124,10 @@ pub struct StageSpec {
     /// Commands that run when an answer resumes a unit parked by the stop file, before the unit
     /// becomes `running`. Empty declares no hook.
     pub stop_on_answer: Vec<CommandSpec>,
+    /// The stage's fallback answer hook: commands that run when an answer resumes a unit parked at
+    /// this stage by a request whose own file declares no hook (a stall, a cap, a failed launch).
+    /// A stage that declares one takes a text answer on every park. Empty declares none.
+    pub on_answer: Vec<CommandSpec>,
     pub stall_minutes: u32,
     pub first_turn_seconds: u32,
     pub skills: Vec<String>,
@@ -1006,6 +1010,7 @@ const STAGE_FIELDS: &[&str] = &[
     "before",
     "after_first_turn",
     "stop_file",
+    "on_answer",
     "stall_minutes",
     "first_turn_seconds",
     "skills",
@@ -1085,6 +1090,8 @@ fn read_stage(
             Vec::new(),
         ),
     };
+    // The stage's own fallback, in the answer scope.
+    let on_answer = read_on_answer(&f, check, scope)?;
     let stall_minutes = small_uint(f.req("stall_minutes")?, "`stall_minutes`", 1)?;
     let first_turn_seconds = small_uint(f.req("first_turn_seconds")?, "`first_turn_seconds`", 1)?;
     let skills = match f.get("skills") {
@@ -1165,6 +1172,7 @@ fn read_stage(
         after_first_turn,
         stop_file,
         stop_on_answer,
+        on_answer,
         stall_minutes,
         first_turn_seconds,
         skills,
@@ -1284,7 +1292,7 @@ fn read_outcomes(
     Ok((outcomes, targets))
 }
 
-/// The optional `on_answer` list of a `park_on` entry or a `stop_file`. Its commands may use the
+/// The optional `on_answer` list of a stage, a `park_on` entry or a `stop_file`. Its commands may use the
 /// answer placeholders, so they are checked in the answer scope.
 fn read_on_answer(
     f: &Fields,
