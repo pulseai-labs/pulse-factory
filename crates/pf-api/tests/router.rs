@@ -472,6 +472,8 @@ async fn every_verb_off_the_allowlist_answers_403_and_names_the_verb_without_rea
         "settings_get",
         "settings_set",
         "settings_unset",
+        // `r2.s11.w3`: a device tells the controller how far it has dealt with notices.
+        "notice_ack",
     ] {
         assert!(ALLOWLIST.contains(&verb), "{verb} is not on the allowlist");
     }
@@ -547,6 +549,39 @@ async fn every_settings_verb_on_the_allowlist_reaches_call_with_its_name_and_bod
     let seen = fake.seen.lock().unwrap();
     let names: Vec<&str> = seen.calls.iter().map(|(v, _)| v.as_str()).collect();
     assert_eq!(names, verbs);
+}
+
+#[tokio::test]
+async fn notice_ack_is_on_the_allowlist_once_and_reaches_call_with_its_name_and_body() {
+    // `r2.s11.w3`: the verb is a device's. It is on the list once, and the router passes it like any
+    // other verb: the token check and the peer guard come first, and the body goes to `call` as sent.
+    assert_eq!(ALLOWLIST.iter().filter(|v| **v == "notice_ack").count(), 1);
+    assert!(pf_api::host::is_allowed("notice_ack"));
+    let (app, fake) = rig();
+    let body = json!({ "position": 3, "outcome": "shown" });
+    let reply = send(
+        &app,
+        request(
+            "POST",
+            "/v1/verbs/notice_ack",
+            Some(TOKEN),
+            serde_json::to_vec(&body).unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.error());
+    {
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.calls, [("notice_ack".to_string(), body)]);
+    }
+    // With no token it never reaches the host.
+    let reply = send(
+        &app,
+        request("POST", "/v1/verbs/notice_ack", None, b"{}".to_vec()),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(calls(&fake), 1);
 }
 
 #[tokio::test]

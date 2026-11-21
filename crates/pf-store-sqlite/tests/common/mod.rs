@@ -4,9 +4,9 @@
 
 use pf_engine::port::store::{
     AdmissionOutcome, AdmissionRow, CONTROLLER_SCOPE, ChatItemKind, Commit, Committed, Effect,
-    LedgerEntry, LedgerLine, NEW_ID, NewAdmission, NewChatItem, NewChatSession, NewHost,
-    NewLaunchRecord, NewProject, ORCHESTRATOR_AGENT, ProjectKind, SessionWorktree, Store,
-    WORKTREE_ID, WorktreeCreatedBy,
+    LedgerEntry, LedgerLine, NEW_ID, NewAdmission, NewChatItem, NewChatSession, NewDelivery,
+    NewHost, NewLaunchRecord, NewNotice, NewProject, ORCHESTRATOR_AGENT, ProjectKind,
+    SessionWorktree, Store, WORKTREE_ID, WorktreeCreatedBy,
 };
 use pf_store_sqlite::SqliteStore;
 
@@ -420,6 +420,143 @@ pub fn position_commit(command_id: &str, unit: &str, seq: u64, position: &str) -
             updated_at: "t5".to_string(),
         }],
         None,
+    )
+}
+
+// ------------------------------------------------------------------ notices (r2.s11.w3)
+
+/// A delivery that waits.
+pub fn waiting(channel: &str, text: &str) -> NewDelivery {
+    NewDelivery {
+        channel: channel.to_string(),
+        text: text.to_string(),
+        why: None,
+    }
+}
+
+/// A delivery that is superseded at birth.
+pub fn superseded(channel: &str, text: &str, why: &str) -> NewDelivery {
+    NewDelivery {
+        channel: channel.to_string(),
+        text: text.to_string(),
+        why: Some(why.to_string()),
+    }
+}
+
+/// The commit that adds one notice with its deliveries, as the controller builds it: the position
+/// is the store's, so the ledger line holds [`NEW_ID`].
+pub fn notice_commit(
+    command_id: &str,
+    request: &str,
+    revision: u32,
+    event: &str,
+    deliveries: Vec<NewDelivery>,
+) -> Commit {
+    commit(
+        "notice",
+        command_id,
+        &format!("{{\"event\":\"{event}\",\"request\":\"{request}\",\"revision\":{revision}}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(NEW_ID),
+        vec![Effect::NoticeAdd(NewNotice {
+            request_id: request.to_string(),
+            revision,
+            event: event.to_string(),
+            run_id: "run-1".to_string(),
+            project_id: Some("P-1".to_string()),
+            created_at: "t6".to_string(),
+            deliveries,
+        })],
+        Some(format!(
+            "notice {NEW_ID} request={request}@{revision} event={event} command={command_id}"
+        )),
+    )
+}
+
+/// Add an `opened` notice of a request with two waiting deliveries, and answer its position.
+pub fn add_notice(store: &SqliteStore, request: &str, revision: u32, event: &str) -> u64 {
+    let command = format!("notice:{request}:{revision}:{event}");
+    let c = notice_commit(
+        &command,
+        request,
+        revision,
+        event,
+        vec![
+            waiting("app", "App text."),
+            waiting("orchestrator", "Chat text."),
+        ],
+    );
+    let (admission, _) = applied(store.commit(c).unwrap());
+    admission.unit_id.unwrap().parse().unwrap()
+}
+
+pub fn send_commit(position: u64, target: &str, sends: u64) -> Commit {
+    commit(
+        "notice_send",
+        &format!("notice-send:{position}:{target}:{sends}"),
+        &format!("{{\"position\":{position},\"sends\":{sends},\"target\":\"{target}\"}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(&position.to_string()),
+        vec![Effect::NoticeSend {
+            position,
+            target: target.to_string(),
+            sends,
+            sent_at: format!("t{}", 10 + sends),
+        }],
+        Some(format!(
+            "notice_send {position} target={target} attempt={sends}"
+        )),
+    )
+}
+
+pub fn ack_commit(
+    command_id: &str,
+    target: &str,
+    channel: &str,
+    position: u64,
+    outcome: &str,
+) -> Commit {
+    commit(
+        "notice_ack",
+        command_id,
+        &format!(
+            "{{\"channel\":\"{channel}\",\"outcome\":\"{outcome}\",\"position\":{position},\"target\":\"{target}\"}}"
+        ),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(target),
+        vec![Effect::NoticeAck {
+            target: target.to_string(),
+            channel: channel.to_string(),
+            position,
+            outcome: outcome.to_string(),
+            updated_at: "t20".to_string(),
+        }],
+        Some(format!(
+            "notice_ack {target} position={position} outcome={outcome}"
+        )),
+    )
+}
+
+pub fn supersede_commit(command_id: &str, position: u64, channel: &str, why: &str) -> Commit {
+    commit(
+        "notice_supersede",
+        command_id,
+        &format!("{{\"channel\":\"{channel}\",\"position\":{position},\"why\":\"{why}\"}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(&position.to_string()),
+        vec![Effect::NoticeSupersede {
+            position,
+            channel: channel.to_string(),
+            why: why.to_string(),
+            updated_at: "t30".to_string(),
+        }],
+        Some(format!(
+            "notice_superseded {position} channel={channel} why={why}"
+        )),
     )
 }
 

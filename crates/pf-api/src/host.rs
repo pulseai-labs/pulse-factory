@@ -43,6 +43,9 @@ pub const ALLOWLIST: &[&str] = &[
     // `r1.s5.w5`: the folders inside the server's home folder, for the app's Add a project picker. A
     // read, confined to the home folder (ADR-0012, `docs/contracts/api.md`).
     "folder_list",
+    // `r2.s11.w3`: a device tells the controller how far it has dealt with notices. It takes no
+    // confirm code: it changes no run state and moves no claim.
+    "notice_ack",
 ];
 
 /// The words a device verb gives for a refusal, a closed list (`r1.s4.w1`, R7). The controller puts one

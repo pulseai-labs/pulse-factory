@@ -333,7 +333,7 @@ fn a_request_frame_holds_the_cause_and_the_summary() {
                     }
                     _ => {}
                 },
-                Ok(Some(StreamEvent::Frame { .. })) => {}
+                Ok(Some(StreamEvent::Frame { .. } | StreamEvent::NoticeFrame { .. })) => {}
                 Ok(other) => panic!("{other:?} while waiting for the request frame"),
                 Err(_) => panic!("timed out waiting for the request frame"),
             }

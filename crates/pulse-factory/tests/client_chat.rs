@@ -210,6 +210,8 @@ async fn collect(
             // The controller sends a `requests` frame after every `hello` (`r1.s4.w1`), and the
             // client carries it as its own event (`r1.s4.w3`): this test is about the chat.
             StreamEvent::RequestFrame { .. } => {}
+            // A notice frame follows each new request (`r2.s11.w3`); the chat is not about it.
+            StreamEvent::NoticeFrame { .. } => {}
             other => panic!("{other:?} while waiting for {what}: {}", summary(&frames)),
         }
     }
@@ -508,7 +510,7 @@ fn a_dropped_connection_reconnects_and_every_item_arrives_once_in_order() {
                         }
                     }
                 }
-                StreamEvent::RequestFrame { .. } => {}
+                StreamEvent::RequestFrame { .. } | StreamEvent::NoticeFrame { .. } => {}
                 StreamEvent::Reconnecting { reason, .. } => {
                     assert_eq!(reason, "the connection dropped");
                     reconnecting += 1;

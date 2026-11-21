@@ -33,10 +33,10 @@ pub struct Migration {
 /// chat sessions and chat items. Migration `0006` adds the session's own runtime options. Migration
 /// `0007` adds the scoped settings. Migration `0008` links a run to a project. Migration `0009` adds
 /// the launch records and the host registry. Migration `0010` adds the host positions. Migration
-/// `0011` adds the position of a chat's output in its host. `RunActive` covers every migration,
-/// `0011` too: the store never migrates under an active run. Before it applies a pending migration,
-/// the store writes
-/// a checked backup of the file (see [`backup_keep`]).
+/// `0011` adds the position of a chat's output in its host. Migration `0012` adds the notices.
+/// `RunActive` covers every migration, `0012` too: the store never migrates under an active run.
+/// Before it applies a pending migration, the store writes a checked backup of the file (see
+/// [`backup_keep`]).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -92,6 +92,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 11,
         name: "chat_host_cursor",
         sql: include_str!("../migrations/0011_chat_host_cursor.sql"),
+    },
+    Migration {
+        version: 12,
+        name: "notices",
+        sql: include_str!("../migrations/0012_notices.sql"),
     },
 ];
 

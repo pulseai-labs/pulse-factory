@@ -73,7 +73,12 @@ fn the_four_keys_read_their_built_ins_and_the_resume_flag_is_in_the_registry() {
             REPLAY,
             HOLD,
             WAIT,
-            HOOK
+            HOOK,
+            "notify.app.on",
+            "notify.orchestrator.on",
+            "notify.app.max_words",
+            "notify.orchestrator.max_words",
+            "notify.resend_seconds",
         ]
     );
     let built_ins = [

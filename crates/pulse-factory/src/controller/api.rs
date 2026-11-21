@@ -65,6 +65,7 @@ pub const VERBS: &[&str] = &[
     "answer",
     "clear",
     "ack",
+    "notice_ack",
     "device_pair",
     "device_revoke",
     "confirm_code",

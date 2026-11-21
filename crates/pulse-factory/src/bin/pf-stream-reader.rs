@@ -5,6 +5,7 @@
 //!
 //! ```text
 //! pf-stream-reader --url wss://<addr>/v1/stream?... --pin <spki hex> --token-file <file> [--max-seconds <n>]
+//!                  [--ack-notices] [--withhold-acks <n>]
 //! ```
 //!
 //! It builds its TLS config with `pf_client::pin::client_config(PinVerifier::new(pin))`, so the pin
@@ -13,6 +14,11 @@
 //! `status <code>` and exits 1. A key that is not the pinned one prints `server key changed:
 //! re-pair` and exits 90. The time limit exits 2. The token is read from a file, never from argv; an
 //! empty file sends no token.
+//!
+//! With `--ack-notices` it answers each `notice` frame it prints with `notice_ack` (`shown`, at the
+//! frame's position), through `pf_client::http::pinned_call` with the token and the pin it has
+//! already, except the first `--withhold-acks <n>` frames. The demo d32 uses that as its fault: a
+//! device that never acknowledges, and then one that does (`r2.s11.w3`).
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -20,6 +26,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pf_client::http::{Timeouts, pinned_call};
 use pf_client::pin::{PinVerifier, client_config, parse_pin};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -27,7 +34,7 @@ use tokio_tungstenite::tungstenite::{self, Error, HandshakeError};
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: pf-stream-reader --url wss://<addr>/v1/stream[?session=S-1&after=0] --pin <spki hex> --token-file <file> [--max-seconds <n>]"
+        "usage: pf-stream-reader --url wss://<addr>/v1/stream[?session=S-1&after=0] --pin <spki hex> --token-file <file> [--max-seconds <n>] [--ack-notices] [--withhold-acks <n>]"
     );
     ExitCode::from(64)
 }
@@ -37,6 +44,10 @@ struct Args {
     pin: String,
     token_file: String,
     max_seconds: Option<u64>,
+    /// Acknowledge each `notice` frame as `shown`.
+    ack_notices: bool,
+    /// The first frames that are not acknowledged.
+    withhold_acks: u64,
 }
 
 fn parse_args() -> Option<Args> {
@@ -44,14 +55,21 @@ fn parse_args() -> Option<Args> {
     let mut pin = None;
     let mut token_file = None;
     let mut max_seconds = None;
+    let mut ack_notices = false;
+    let mut withhold_acks = 0;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
+        if flag == "--ack-notices" {
+            ack_notices = true;
+            continue;
+        }
         let value = it.next()?;
         match flag.as_str() {
             "--url" => url = Some(value),
             "--pin" => pin = Some(value),
             "--token-file" => token_file = Some(value),
             "--max-seconds" => max_seconds = Some(value.parse().ok()?),
+            "--withhold-acks" => withhold_acks = value.parse().ok()?,
             _ => return None,
         }
     }
@@ -60,7 +78,57 @@ fn parse_args() -> Option<Args> {
         pin: pin?,
         token_file: token_file?,
         max_seconds,
+        ack_notices,
+        withhold_acks,
     })
+}
+
+/// The position of a `notice` frame line, or `None` for any other line.
+fn notice_position(line: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("type")?.as_str()? != "notice" {
+        return None;
+    }
+    value.get("notice")?.get("position")?.as_u64()
+}
+
+/// `notice_ack` as `shown`, at `position`. A failure prints one line on stderr and costs the read
+/// nothing: the server sends the notice again.
+fn acknowledge(addr: &str, pin: &[u8; 32], token: &str, position: u64) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("pf-stream-reader: cannot acknowledge: {e}");
+            return;
+        }
+    };
+    let body = serde_json::json!({ "position": position, "outcome": "shown" })
+        .to_string()
+        .into_bytes();
+    let bearer = (!token.is_empty()).then_some(token);
+    let sent = runtime.block_on(pinned_call(
+        addr,
+        pin,
+        "POST",
+        "/v1/verbs/notice_ack",
+        bearer,
+        Some(body),
+        Timeouts::default(),
+    ));
+    match sent {
+        Ok(response) if response.status == 200 => {}
+        Ok(response) => eprintln!(
+            "pf-stream-reader: notice_ack {position} answered {}",
+            response.status
+        ),
+        Err(e) => eprintln!(
+            "pf-stream-reader: notice_ack {position} failed: {}",
+            e.message
+        ),
+    }
 }
 
 /// `host:port` of a `wss://` URL.
@@ -161,6 +229,7 @@ fn main() -> ExitCode {
         .max_seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
     let stdout = std::io::stdout();
+    let mut notices_seen: u64 = 0;
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return ExitCode::from(2);
@@ -170,6 +239,15 @@ fn main() -> ExitCode {
                 let mut out = stdout.lock();
                 let _ = writeln!(out, "{}", text.as_str());
                 let _ = out.flush();
+                drop(out);
+                if args.ack_notices
+                    && let Some(position) = notice_position(text.as_str())
+                {
+                    notices_seen += 1;
+                    if notices_seen > args.withhold_acks {
+                        acknowledge(addr, &pin, &token, position);
+                    }
+                }
             }
             Ok(Message::Close(frame)) => {
                 match frame {

@@ -532,3 +532,26 @@ and ADR-0005's amendments of the same date. This amendment adds no verb to the a
   as before, and a replay of a typed act is unchanged.
 - **The `controller.ledger` line** of an issue or an act for an option adds ` option=<id>`. No token, code
   or answer text is in it.
+
+## Amendment, 2026-11-21 (Proposed): the notice frame and notice_ack
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+Per the allowlist rule, this amendment records each verb it adds.
+
+- **A third wire enum, `NoticeFrame`, rides `GET /v1/stream`.** One variant, `notice`, goes to one
+  device. `ChatFrame` and `RequestFrame` do not change. A client that does not know the `type` skips
+  it, and `pf-client` carries it as its own event that never moves the `seq` of a reconnect.
+- **`notice_ack` joins the allowlist**, with `{position, outcome}`, the outcome being `shown` or
+  `blocked`. It takes no confirm code: it changes no run state and moves no claim. The controller reads
+  the device again, so a revoked device gets the refusal `device_revoked`. It is refused on the Unix
+  socket. It is admitted under `@controller` with a command ID that the controller makes. Each call is
+  one `api.ledger` line.
+- **Only the frame's `event` says whether to alert.** `opened` alerts. `revised` and `closed` do not.
+  The alert is the app's.
+- **A client calls `notice_ack` only on a server that has sent it a notice frame**, so a newer app on an
+  older server never calls an unknown verb.
+- **The generated types** `NoticeRecord`, `NoticeFrame`, `NoticeOutcome`, `NoticeAckArgs` and
+  `NoticeAcked` join `apps/api-client/src/gen/` (ADR-0013).

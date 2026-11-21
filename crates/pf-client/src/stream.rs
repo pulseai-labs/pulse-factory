@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use pf_api::types::{ChatFrame, RequestFrame};
+use pf_api::types::{ChatFrame, NoticeFrame, RequestFrame};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
@@ -60,6 +60,10 @@ const KNOWN_FRAMES: [&str; 6] = [
 /// session it follows.
 const REQUEST_FRAMES: [&str; 3] = ["requests", "request", "claim"];
 
+/// The `type` of every notice frame (`NoticeFrame`, `r2.s11.w3`). They ride every stream, whatever
+/// session it follows.
+const NOTICE_FRAMES: [&str; 1] = ["notice"];
+
 /// What to follow: one session (and its items after `after`), or none.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamOptions {
@@ -81,6 +85,9 @@ pub enum StreamEvent {
     /// A request frame of the server, decoded: a separate event, so every `ChatFrame` reader stays
     /// as it is (`r1.s4.w3`, W2). It never moves the `seq` a reconnect asks `after`.
     RequestFrame { frame: RequestFrame },
+    /// A notice frame of the server, decoded (`r2.s11.w3`). A notice can arrive more than once, and
+    /// a reader keys it by `position`. It never moves the `seq` a reconnect asks `after`.
+    NoticeFrame { frame: NoticeFrame },
     /// The connection is gone and the client will try again in `retry_in_ms`.
     Reconnecting {
         after: u64,
@@ -290,6 +297,10 @@ enum Decoded {
     /// A request frame of a known `type` that does not decode. It is dropped: the requests state is
     /// a cache that the next `requests` snapshot repairs, and ending the stream would cut the chat.
     DroppedRequest,
+    Notice(Box<NoticeFrame>),
+    /// A notice frame of a known `type` that does not decode. It is dropped: the device is sent the
+    /// notice again until it acknowledges, and ending the stream would cut the chat.
+    DroppedNotice,
     Unreadable,
 }
 
@@ -304,6 +315,12 @@ fn decode(text: &str) -> Decoded {
         return match serde_json::from_value::<RequestFrame>(value) {
             Ok(frame) => Decoded::Request(Box::new(frame)),
             Err(_) => Decoded::DroppedRequest,
+        };
+    }
+    if NOTICE_FRAMES.contains(&kind) {
+        return match serde_json::from_value::<NoticeFrame>(value) {
+            Ok(frame) => Decoded::Notice(Box::new(frame)),
+            Err(_) => Decoded::DroppedNotice,
         };
     }
     if !KNOWN_FRAMES.contains(&kind) {
@@ -480,6 +497,18 @@ async fn connection<S: DeviceStore>(
                 Decoded::Request(frame) => {
                     if tx
                         .send(StreamEvent::RequestFrame { frame: *frame })
+                        .await
+                        .is_err()
+                    {
+                        return Attempt::Gone;
+                    }
+                }
+                Decoded::DroppedNotice => {
+                    // No frame text, and no count line: the server sends the notice again.
+                }
+                Decoded::Notice(frame) => {
+                    if tx
+                        .send(StreamEvent::NoticeFrame { frame: *frame })
                         .await
                         .is_err()
                     {

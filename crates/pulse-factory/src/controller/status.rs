@@ -48,6 +48,10 @@ pub fn build(c: &Controller, h: &RunHandle) -> Result<Value, String> {
     if let Some(why) = c.hosts.sweep_skipped() {
         warnings.push(format!("orphan sweep skipped: {why}"));
     }
+    if c.commands_stopped().is_some() {
+        warnings.push("notices are not written: the controller's commands are stopped".to_string());
+    }
+    let notices = c.notices_status(id)?;
     let end_reason = admissions
         .iter()
         .rev()
@@ -136,6 +140,7 @@ pub fn build(c: &Controller, h: &RunHandle) -> Result<Value, String> {
         "state": run.as_ref().map_or("unknown", |r| r.state.as_str()),
         "launcher": c.hosts.launcher_name(),
         "warnings": warnings,
+        "notices": notices,
         "driven": h.driven.load(Ordering::SeqCst),
         "halted_reason": run.as_ref().and_then(|r| r.halted_reason.clone()),
         "degraded": h.engine.degraded(),
