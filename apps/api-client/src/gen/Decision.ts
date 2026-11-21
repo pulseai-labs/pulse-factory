@@ -8,7 +8,8 @@ import type { Recommended } from "./Recommended";
 /**
  * The decision block of a request (`docs/contracts/requests.md`, "The decision block"): why the
  * work stopped, what each possible answer does, and what a fresh session needs to pick the request
- * up. It is data for a reader. Nothing in it acts, and no verb changes with it.
+ * up. It is data for a reader. An act names one of its options (`--option`), and the engine reads
+ * what the option does from the stored block, never from the caller.
  */
 export type Decision = { 
 /**
@@ -37,6 +38,6 @@ about?: DecisionAbout,
 options_error?: string, 
 /**
  * True when a text answer reaches a seat, because the request's own file declares an answer
- * hook.
+ * hook, or because the stage declares a fallback hook.
  */
 takes_text: boolean, };

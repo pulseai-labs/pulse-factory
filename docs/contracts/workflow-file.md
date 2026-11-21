@@ -144,6 +144,7 @@ Each stage of a track has these fields:
 | `settings` | no | A mapping with `env.<NAME>`, `push_dir`, `push_branch`, `report_dir`, `worktree`, `own_branch` and `decisions_file` keys. |
 | `done` | yes | One or more conditions. All of them must hold. |
 | `park_on` | no | A list of `{file, reason, on_answer}`. `on_answer` is optional. |
+| `on_answer` | no | The stage's fallback answer hook: a list of commands, in the answer scope. A text typed on a park of this stage that has no hook of its own reaches the next seat through it (see "Answer hooks"). |
 | `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
 | `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
 | `base_push` | no | `{dir, branch}`, both templates: a branch the controller puts on `origin` before the stage launches, when `origin` lacks it (see "`base_push`"). |
@@ -487,7 +488,8 @@ request (see "`no_signal`").
 
 A `park_on` entry and the stage's `stop_file` take an optional `on_answer`: a list of commands, in the
 form of "Commands". `stop_file` is then a mapping `{file, on_answer}`; a plain path declares no hook.
-`on_answer` is refused anywhere else.
+The stage itself takes an optional `on_answer` too, the **fallback** (see below). `on_answer` is refused
+at the track and at the top level, and anywhere else.
 
 ```yaml
 stop_file:
@@ -499,7 +501,15 @@ stop_file:
 - The hook runs when an `answer` resumes the unit, before the unit becomes `running`. The hook is
   the one of the file that opened the request: the stop file's for a `stop` request; for any other
   kind, the first `park_on` entry whose file name gives that kind (for the kind `park` the entry's
-  reason must also be the request's reason). A `clear` runs no hook.
+  reason must also be the request's reason). A park that no file opened (a stall, a cap, a failed
+  launch, a lost seat) has no such hook: it uses the stage's fallback `on_answer`, and so does a file
+  whose own hook is absent. A `clear` runs no hook.
+- **The fallback.** A stage that declares `on_answer` takes a typed text on any of its parks: the text
+  reaches the next seat as a note, and the request's block says `takes_text: true`. A stage with no
+  fallback, and a park with no hook of its own, takes **no** text: `answer` is refused, nothing is
+  recorded and the refusal names `clear` (`requests.md`, "Resuming a unit"). A park at the stage
+  `merge` has no stage and takes none. A request with no unit keeps today's `answer`. A run armed
+  before the fallback existed has none.
 - The commands run in order and the first failure stops the hook. Each has the usual bounds: 60
   seconds by default and at most 600, no retry. The answer placeholders hold controller-made values
   only, and each reaches the argv as one word. Nothing renders a value twice.
@@ -554,6 +564,7 @@ A placeholder is `{name}`. The names are a closed set:
 | `{answer.file}` | A file the controller writes (mode 0600) that holds the answer text. | An `on_answer` command only. |
 | `{answer.request}` | The request ID, `R-<n>`. | An `on_answer` command only. |
 | `{answer.revision}` | The revision the answer is bound to. | An `on_answer` command only. |
+| `{answer.source}` | `typed`, or `option:<id>:<by>` when the act took an option of the request's block. It reaches the argv as one word, so a hook can tell who wrote the words. | An `on_answer` command only. |
 | `{answer.generation}` | The claim generation that answered. | An `on_answer` command only. |
 | `{request.body_file}` | A file the controller writes (mode 0600) that holds the request body as JSON. | An `on_answer` command only. |
 

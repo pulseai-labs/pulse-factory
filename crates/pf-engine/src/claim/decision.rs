@@ -4,8 +4,10 @@
 //! when it decides the park command, and stores it under the body key `decision`. The command
 //! carries inputs only, so a replay of the command ID returns the stored request and derives
 //! nothing. The block is data for a reader: it says why the work stopped, what each possible
-//! answer does, and what a fresh session needs to pick the request up. Nothing here acts on an
-//! option, and no summary holds a seat's words: a seat's text stays in `stop_text` and `gaps`.
+//! answer does, and what a fresh session needs to pick the request up. No summary holds a seat's
+//! words: a seat's text stays in `stop_text` and `gaps`. Nothing here acts on an option:
+//! [`stored_option`] reads one back, and an act that names an option (`claim/mod.rs`) takes what the
+//! option does from there and never from its caller.
 
 use serde_json::{Map, Value, json};
 
@@ -110,11 +112,21 @@ pub(crate) fn build(inputs: &Inputs) -> Value {
         Cause::Stalled | Cause::NoDoneSignal | Cause::SeatLost | Cause::HostUnreachable
     ) && node_role.is_some();
 
-    let takes_text = facts
+    // The park's own fact: the request's own file declares an answer hook. The block also says a
+    // text reaches a seat when the stage declares a fallback hook, so a park no file opened (a
+    // stall, a cap, a lost seat) takes a note. A park at the merge has no stage and reads `false`.
+    let file_takes_text = facts
         .get(KEY_TAKES_TEXT)
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let (options, recommended) = options_of(inputs, takes_text);
+    let stage_takes_text = detail
+        .as_ref()
+        .and_then(|d| workflow.track(&d.track))
+        .and_then(|t| t.stages.iter().find(|s| s.name == *stage))
+        .is_some_and(|s| s.takes_text);
+    let takes_text = file_takes_text || stage_takes_text;
+    // The `park_file` option rule reads the file's fact alone.
+    let (options, recommended) = options_of(inputs, file_takes_text);
 
     let mut block = Map::new();
     block.insert("v".to_string(), json!(DECISION_VERSION));
@@ -233,15 +245,19 @@ fn summary_of(inputs: &Inputs, pr: Option<&str>) -> String {
     text.chars().take(SUMMARY_MAX_CHARS).collect()
 }
 
-fn option(id: &str, label: &str, detail: &str, effect: &Value) -> Value {
-    json!({ "id": id, "label": label, "detail": detail, "effect": effect })
+/// Who wrote an option, as the block stores it.
+const BY_CONTROLLER: &str = "controller";
+const BY_SEAT: &str = "seat";
+
+fn option(id: &str, label: &str, detail: &str, effect: &Value, by: &str) -> Value {
+    json!({ "id": id, "label": label, "detail": detail, "effect": effect, "by": by })
 }
 
 /// The options of the cause, and the recommendation (`docs/contracts/requests.md`, the cause
 /// table). One table, in engine words.
 fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) {
     let resume = json!({ "verb": "resume" });
-    let resume_option = |detail: &str| option("resume", "Resume", detail, &resume);
+    let resume_option = |detail: &str| option("resume", "Resume", detail, &resume, BY_CONTROLLER);
     match inputs.cause {
         // The seat's own options, in file order. The text is all there is.
         Cause::StopFile => {
@@ -263,6 +279,7 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
                     text,
                     "Answer the stop with this text.",
                     &json!({ "verb": "answer", "text": text }),
+                    BY_SEAT,
                 ));
                 if o.get("recommended").and_then(Value::as_bool) == Some(true)
                     && recommended.is_none()
@@ -296,12 +313,14 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
                         "Resume the unit at stage {to}. A resume grants a new budget: the outcome counters start again."
                     ),
                     &json!({ "verb": "resume", "to": to }),
+                    BY_CONTROLLER,
                 ),
                 None => option(
                     "again",
                     "Send it on again",
                     "Resume the unit. A resume grants a new budget: the outcome counters start again.",
                     &resume,
+                    BY_CONTROLLER,
                 ),
             };
             let go_on = option(
@@ -311,6 +330,7 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
                     "Resume the unit at stage {go_on_at}, where it parked. A resume grants a new budget: the outcome counters start again."
                 ),
                 &resume,
+                BY_CONTROLLER,
             );
             (vec![again, go_on], None)
         }
@@ -320,6 +340,7 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
                 "Approve the merge",
                 "Ack the request: the PR merges with the head named here pinned.",
                 &json!({ "verb": "ack" }),
+                BY_CONTROLLER,
             )],
             None,
         ),
@@ -376,4 +397,181 @@ pub(crate) fn rebuilt(
         stage: &request.stage,
         facts: body,
     }))
+}
+
+// ------------------------------------------------------------------ reading an option back
+
+/// The longest option ID a caller names, in characters.
+pub const OPTION_ID_MAX: usize = 32;
+
+/// What an option does, as the block stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionEffect {
+    /// Answer with this text, and resume at the stage `to` when it is set.
+    Answer { text: String, to: Option<String> },
+    /// Resume the unit, at the stage `to` when it is set.
+    Resume { to: Option<String> },
+    /// Ack the merge.
+    Ack,
+}
+
+/// One option of a stored block, as an act reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredOption {
+    pub id: String,
+    /// The label the block shows for the option.
+    pub label: String,
+    /// Who wrote the option: `controller`, `workflow` or `seat`.
+    pub by: String,
+    /// The block's `recommended.option` names this option.
+    pub recommended: bool,
+    pub effect: OptionEffect,
+}
+
+impl StoredOption {
+    /// The verb that carries the option out.
+    pub fn verb(&self) -> &'static str {
+        match self.effect {
+            OptionEffect::Answer { .. } => super::VERB_ANSWER,
+            OptionEffect::Resume { .. } => super::VERB_CLEAR,
+            OptionEffect::Ack => super::VERB_ACK,
+        }
+    }
+
+    /// Check that `verb` is the one that carries the option out. A refusal names the right one.
+    pub fn check_verb(&self, request_id: &str, verb: &str) -> Result<(), String> {
+        if self.verb() == verb {
+            return Ok(());
+        }
+        let does = match self.effect {
+            OptionEffect::Answer { .. } => "answers with a text",
+            OptionEffect::Resume { .. } => "resumes the unit",
+            OptionEffect::Ack => "acks the merge",
+        };
+        Err(format!(
+            "option {:?} of request {request_id} {does}: take it with `{}`",
+            self.id,
+            self.verb()
+        ))
+    }
+
+    /// The part of the option a stored answer keeps: `{id, by, recommended}`.
+    pub fn stored(&self) -> Value {
+        json!({ "id": self.id, "by": self.by, "recommended": self.recommended })
+    }
+
+    /// The words a ledger line names the option with: `option <id> by <by>[, recommended]`.
+    pub fn ledger(&self) -> String {
+        let recommended = if self.recommended {
+            ", recommended"
+        } else {
+            ""
+        };
+        format!("option {} by {}{recommended}", self.id, self.by)
+    }
+}
+
+/// Is `id` an option ID a caller may name: 1 to [`OPTION_ID_MAX`] characters of `a-z`, `0-9`, `_`
+/// and `-`? A caller's ID is checked before any read.
+pub fn check_option_id(id: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.chars().count() <= OPTION_ID_MAX
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "the option ID {id:?} is not 1 to {OPTION_ID_MAX} characters of a-z, 0-9, _ and -"
+        ))
+    }
+}
+
+/// The option `id` of a request's stored decision block. The engine and the controller both read
+/// an option here, so the text a hook delivers and the text an answer stores cannot differ. It
+/// refuses an ID of the wrong form, a request with no block, a block whose version this binary does
+/// not read, and an ID the block does not hold.
+pub fn stored_option(request: &RequestRow, id: &str) -> Result<StoredOption, String> {
+    check_option_id(id)?;
+    let rid = &request.id;
+    let body: Value = serde_json::from_str(&request.body).unwrap_or(Value::Null);
+    let block = body
+        .get(KEY_DECISION)
+        .filter(|b| b.is_object())
+        .ok_or_else(|| {
+            format!("request {rid} holds no decision block, so it holds no option {id:?}")
+        })?;
+    match block.get("v").and_then(Value::as_u64) {
+        Some(DECISION_VERSION) => {}
+        other => {
+            return Err(format!(
+                "request {rid} holds a decision block of version {}, which this binary does not read",
+                other.map_or_else(|| "none".to_string(), |v| v.to_string())
+            ));
+        }
+    }
+    let option = block
+        .get("options")
+        .and_then(Value::as_array)
+        .and_then(|all| {
+            all.iter()
+                .find(|o| o.get("id").and_then(Value::as_str) == Some(id))
+        })
+        .ok_or_else(|| {
+            format!(
+                "request {rid} holds no option {id:?} at revision {}",
+                request.revision
+            )
+        })?;
+    let unknown =
+        || format!("option {id:?} of request {rid} holds an effect this binary does not know");
+    let effect = option.get("effect").ok_or_else(unknown)?;
+    let to = effect
+        .get("to")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
+    let effect = match effect.get("verb").and_then(Value::as_str) {
+        Some("answer") => OptionEffect::Answer {
+            text: effect
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(unknown)?
+                .to_string(),
+            to,
+        },
+        Some("resume") => OptionEffect::Resume { to },
+        Some("ack") => OptionEffect::Ack,
+        _ => return Err(unknown()),
+    };
+    // A block stored before `by` existed has none: a stop file's options were the seat's, the rest the
+    // controller's.
+    let by = option
+        .get("by")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if block.get("cause").and_then(Value::as_str) == Some(Cause::StopFile.as_str()) {
+                BY_SEAT.to_string()
+            } else {
+                BY_CONTROLLER.to_string()
+            }
+        });
+    let recommended = block
+        .get("recommended")
+        .and_then(|r| r.get("option"))
+        .and_then(Value::as_str)
+        == Some(id);
+    Ok(StoredOption {
+        id: id.to_string(),
+        label: option
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        by,
+        recommended,
+        effect,
+    })
 }

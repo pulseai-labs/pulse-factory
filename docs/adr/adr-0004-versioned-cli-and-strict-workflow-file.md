@@ -89,3 +89,28 @@ ADR-0017.
 - **A workflow file can come from an installed plugin.** It is read as strictly as before, and a run
   pins the plugin's content-hash manifest with it (ADR-0007). The plugins the workflow file declares for
   its seats are harness plugins, as before; a Pulse Factory plugin does not install them.
+
+## Amendment, 2026-11-21 (Proposed): an act names an option, an answer names a stage, and a stage declares a fallback answer hook
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It takes effect when
+the code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted. It goes with
+ADR-0005's and ADR-0012's amendments of the same date and ADR-0006's amendment of 2026-11-21.
+
+- **`answer`, `clear` and `ack` take `--option <id>`.** The option is one of the request's stored decision
+  block. The act names it **in place of** its own parameters: an option beside a text or a stage is
+  refused. The engine reads what the option does from the stored request, never from the caller, so a
+  caller cannot make an option say what it does not.
+- **`answer` takes `--to <stage>`** beside `--text`, and `--text` takes a value that starts with `-`
+  (canonical #42 C4).
+- **`clear --option` needs `--rev`.** An option belongs to one revision of a request, and `clear` named
+  none until now. Each of the three forms keeps its flags, its refusals and its JSON for an act with no
+  option; the JSON gains an `option` key, null for a typed act.
+- **The workflow file gains one key.** A stage may declare `on_answer`, a fallback answer hook in the
+  answer scope. A text typed on a park of that stage that has no hook of its own reaches the next seat
+  through it. A new answer placeholder, `{answer.source}`, is `typed` or `option:<id>:<by>`. It is
+  controller-made, reaches the argv as one word and is allowed only in an answer hook. The strict reading
+  of ADR-0004 is unchanged: the key is refused at the track and at the top level, and an unknown key is
+  still an error.
+- **An answer whose text no hook would deliver is refused** and names `clear`. It used to be stored and
+  reach no seat. A run pinned before this amendment has no fallback, so its parks with no file hook refuse
+  a text.

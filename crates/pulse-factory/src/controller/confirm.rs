@@ -32,15 +32,37 @@ pub const CODE_PREFIX: &str = "pfc1-";
 /// The random bytes of a code: 128 bits.
 pub const CODE_BYTES: usize = 16;
 
-/// The verb a request code is for, with the parameters it binds (R12).
+/// The verb a request code is for, with the parameters it binds (R12). A code for an option binds
+/// the option's ID and nothing of its own beside it: the controller reads what the option does from
+/// the stored request, so a text hash, a stage or a head is empty there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestVerb {
-    /// `text_sha256` is the SHA-256 hex of the answer text's UTF-8 bytes. The text never enters the table.
-    Answer { text_sha256: String },
-    /// The target stage, or `None` for the stage the unit parked in.
-    Clear { to: Option<String> },
+    /// `text_sha256` is the SHA-256 hex of the answer text's UTF-8 bytes. The text never enters the
+    /// table. `to` is the stage the answer resumes the unit at, or `None`. For an option,
+    /// `text_sha256` is empty and `to` is `None`.
+    Answer {
+        text_sha256: String,
+        to: Option<String>,
+        option: Option<String>,
+    },
+    /// The target stage, or `None` for the stage the unit parked in. For an option, `None`.
+    Clear {
+        to: Option<String>,
+        option: Option<String>,
+    },
     /// The head SHA of the subject binds the merge.
-    Ack,
+    Ack { option: Option<String> },
+}
+
+impl RequestVerb {
+    /// The option the code is for, when it is for one.
+    pub fn option(&self) -> Option<&str> {
+        match self {
+            RequestVerb::Answer { option, .. }
+            | RequestVerb::Clear { option, .. }
+            | RequestVerb::Ack { option } => option.as_deref(),
+        }
+    }
 }
 
 impl RequestVerb {
@@ -48,7 +70,7 @@ impl RequestVerb {
         match self {
             RequestVerb::Answer { .. } => "answer",
             RequestVerb::Clear { .. } => "clear",
-            RequestVerb::Ack => "ack",
+            RequestVerb::Ack { .. } => "ack",
         }
     }
 }
@@ -99,7 +121,12 @@ impl Subject {
                         row.revision
                     ));
                 }
-                if matches!(verb, RequestVerb::Ack) {
+                // An option the code binds must still be in the block: the same revision holds the
+                // same block, and this reads it again.
+                if let Some(option) = verb.option() {
+                    pf_engine::claim::stored_option(&row, option)?;
+                }
+                if matches!(verb, RequestVerb::Ack { .. }) {
                     let body: Value = serde_json::from_str(&row.body).unwrap_or(Value::Null);
                     let now = body.get("head_sha").and_then(Value::as_str);
                     if row.kind != RequestKind::MergeAck || now != head_sha.as_deref() {
