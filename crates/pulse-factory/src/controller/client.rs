@@ -400,7 +400,8 @@ pub fn show_text(v: &Value) -> String {
 
 /// The lines of a request's decision block (`docs/contracts/cli.md`, `show`): the cause, the
 /// summary, who asked, the attempt, whether a text answer reaches a seat, the seat the halt is
-/// about, why a stop's options could not be read, and one line for each option.
+/// about, why a stop's options could not be read, and one line for each option. An option line
+/// names who wrote the option, and for an answer the text and the stage it sends the unit to.
 fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
     let s = |p: &Value| tame(p.as_str().unwrap_or(""));
     line(format!("cause: {}", s(&d["cause"])));
@@ -435,8 +436,21 @@ fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
     }
     for option in d["options"].as_array().into_iter().flatten() {
         let id = s(&option["id"]);
+        // Who wrote the option. A block stored before `by` existed reads `seat` for a stop file and
+        // `controller` for every other cause.
+        let by = match option["by"].as_str() {
+            Some(by) => tame(by),
+            None if d["cause"].as_str() == Some("stop_file") => "seat".to_string(),
+            None => "controller".to_string(),
+        };
         let does = match option["effect"]["verb"].as_str() {
-            Some("answer") => format!("answers with the text {:?}", s(&option["effect"]["text"])),
+            Some("answer") => {
+                let text = format!("answers with the text {:?}", s(&option["effect"]["text"]));
+                match option["effect"]["to"].as_str() {
+                    Some(to) => format!("{text}, then resumes the unit at stage {}", tame(to)),
+                    None => text,
+                }
+            }
             Some("resume") => match option["effect"]["to"].as_str() {
                 Some(to) => format!("resumes the unit at stage {}", tame(to)),
                 None => "resumes the unit".to_string(),
@@ -454,7 +468,7 @@ fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
             String::new()
         };
         line(format!(
-            "option {id}: {} ({does}{recommended})",
+            "option {id}: {} (by {by}; {does}{recommended})",
             s(&option["label"])
         ));
     }

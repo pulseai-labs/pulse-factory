@@ -143,7 +143,7 @@ Each stage of a track has these fields:
 | `skills` | no | The skill names the seat may use. |
 | `settings` | no | A mapping with `env.<NAME>`, `push_dir`, `push_branch`, `report_dir`, `worktree`, `own_branch` and `decisions_file` keys. |
 | `done` | yes | One or more conditions. All of them must hold. |
-| `park_on` | no | A list of `{file, reason, on_answer}`. `on_answer` is optional. |
+| `park_on` | no | A list of `{file, reason, on_answer, options}`. `on_answer` and `options` are optional. |
 | `on_answer` | no | The stage's fallback answer hook: a list of commands, in the answer scope. A text typed on a park of this stage that has no hook of its own reaches the next seat through it (see "Answer hooks"). |
 | `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
 | `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
@@ -474,7 +474,7 @@ The strict reader refuses each of these, and each error names the stage and the 
 
 ### `park_on`
 
-Each entry is `{file, reason}`. When the file exists, the unit parks with the reason. The stop file
+Each entry is `{file, reason}`, with the optional `on_answer` and `options`. When the file exists, the unit parks with the reason. The stop file
 parks with its own text and wins over every other condition.
 
 The park opens a request (`requests.md`). Its kind comes from the file's name: `gaps.json` opens a
@@ -483,6 +483,58 @@ stop file opens a `stop` request. A turn that ends with no `done`
 condition, no `park_on` file and no stop file parks with "seat ended with no done signal", unless the
 stage declares `no_signal`, which may nudge the seat first and may turn the park into a `stop`
 request (see "`no_signal`").
+
+A `park_on` entry may also name the options of its own park, with `options` (below).
+
+#### `options` of a `park_on` entry
+
+An entry is `{file, reason, on_answer, options}`. `options` is optional. When the file opens a request,
+the request's decision block lists the options, each marked `by: "workflow"`, and an operator takes one
+in a single act (`requests.md`, "A workflow's options").
+
+```yaml
+park_on:
+  - file: "{run.dir}/out/{unit.id}/hold.txt"
+    reason: "the hold needs a ruling"
+    on_answer: [...]
+    options:
+      - label: "Take the change back to the first stage"
+        answer: "Do the first stage again with this change."
+        to: build
+        recommended: true
+      - label: "Run this stage again"
+        to: check
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `label` | yes | The words of the button. One line of 1 to 80 characters. |
+| `answer` | no | The text the option answers with. 1 to 2,000 characters. A line break is allowed, and no other control character. |
+| `to` | no | A stage of the same track. The unit resumes there. |
+| `recommended` | no | `true` or `false`. The default is `false`. |
+
+- **What an option does.** With `answer`, the option answers with that text. With `to` as well, the unit
+  then resumes at that stage. With `to` alone, the option resumes the unit at that stage. An option
+  holds at least one of the two. The file names no verb, so no option can ack a merge.
+- **The texts are literal.** `label` and `answer` take no placeholder: a `{name}` that reads as a
+  placeholder is refused, and a literal brace text stays literal ("Literal braces"). A text that the
+  redactor (`pf_engine::status::redact`) would change is refused: a workflow file holds no secret. The
+  stored option is the pinned file's text, byte for byte.
+- **No reason field.** An entry may mark one option `recommended: true`. It writes no reason: the
+  block's reason is a fixed text, `The workflow marked this option.` A field other than the four
+  above, such as `why`, `reason`, `id` or `effect`, is refused as an unknown field.
+- **Refusals,** each with the line and the column of the text it blames: an empty list, or more than 4
+  options; an option with neither `answer` nor `to`; a `label` or an `answer` outside its bound, or a
+  `label` with a line break; a placeholder in either text; a text the redactor would change; a `to`
+  that is not a stage of the same track (checked when every stage of the track is read, as an
+  outcome's `to` is); more than one `recommended: true`; a `recommended` that is not a boolean.
+- **An `answer` option needs a hook that would deliver it.** It is refused at load when neither the
+  entry nor its stage declares `on_answer`. A `to`-only option needs no hook.
+- **A `gaps.json` entry takes no options.** A `gaps` request is answered with a typed text.
+- `options` is refused everywhere else: on a `stop_file` mapping, at the stage, at the track and at the
+  top level. A seat names the options of its own stop.
+- The file version stays 1. A file with no `options` loads and runs as before. A run armed before the
+  field existed keeps its pinned copy, so its parks gain no option.
 
 ### Answer hooks
 

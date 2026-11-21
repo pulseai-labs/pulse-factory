@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::claim::decision::{KEY_STOP_OPTIONS, KEY_STOP_OPTIONS_ERROR};
+use crate::claim::decision::{KEY_PARK_OPTIONS, KEY_STOP_OPTIONS, KEY_STOP_OPTIONS_ERROR};
 use crate::status::redact;
 
 /// The most a gap file may hold, in bytes. A bigger file gives `gaps_error`.
@@ -31,6 +31,12 @@ pub const STOP_OPTIONS_MIN: usize = 2;
 pub const STOP_OPTIONS_MAX: usize = 4;
 /// The longest option text, in characters, after redaction.
 pub const STOP_OPTION_MAX_CHARS: usize = 200;
+/// The most options a workflow's `park_on` entry declares.
+pub const PARK_OPTIONS_MAX: usize = 4;
+/// The longest label of a declared option, in characters.
+pub const PARK_OPTION_LABEL_MAX_CHARS: usize = 80;
+/// The longest answer text of a declared option, in characters.
+pub const PARK_OPTION_ANSWER_MAX_CHARS: usize = 2_000;
 /// The line that opens a stop file's options block.
 const OPTIONS_LINE: &str = "Options:";
 /// The start of every option line.
@@ -215,4 +221,39 @@ fn read_options(lines: &[&str]) -> Result<Vec<Value>, String> {
         return Err("more than one option is marked [recommended]".to_string());
     }
     Ok(options)
+}
+
+/// One option that a workflow's `park_on` entry declares: a label, and an answer text, a stage, or
+/// both. The workflow file's reader makes it. The engine knows nothing of the file's form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkOptionDecl {
+    pub label: String,
+    /// The text the option answers with.
+    pub answer: Option<String>,
+    /// The stage the unit resumes at.
+    pub to: Option<String>,
+    /// The workflow marks this option as the one it recommends.
+    pub recommended: bool,
+}
+
+/// The facts of a park that its workflow's options add: `{"park_options": [{"label", "answer",
+/// "to", "recommended"}, ...]}` in file order. An absent `answer` or `to` is left out. The decision
+/// block reads this fact as data (`docs/contracts/requests.md`, "A workflow's options").
+pub fn park_options_detail(options: &[ParkOptionDecl]) -> Value {
+    let list: Vec<Value> = options
+        .iter()
+        .map(|o| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("label".to_string(), json!(o.label));
+            if let Some(answer) = &o.answer {
+                entry.insert("answer".to_string(), json!(answer));
+            }
+            if let Some(to) = &o.to {
+                entry.insert("to".to_string(), json!(to));
+            }
+            entry.insert("recommended".to_string(), json!(o.recommended));
+            Value::Object(entry)
+        })
+        .collect();
+    json!({ KEY_PARK_OPTIONS: list })
 }

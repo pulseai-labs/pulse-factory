@@ -175,6 +175,11 @@ fn edit(paper: &Path, rel: &str, f: impl FnOnce(String) -> String) {
 /// trap must stop its own server's hosts: a controller stop ends no seat now (G6). The test fails when a
 /// host of the script is still live 15 s after the script ended.
 fn interrupted_demo_leaves_no_host(name: &str, package: &str) {
+    interrupted_demo_with_env(name, package, &[]);
+}
+
+/// [`interrupted_demo_leaves_no_host`] for a script that needs more binaries than `PF_BIN`.
+fn interrupted_demo_with_env(name: &str, package: &str, env: &[(&str, &str)]) {
     let _tamper =
         (name == "seat-tamper.sh").then(|| TAMPER.lock().unwrap_or_else(|e| e.into_inner()));
     let _stranded =
@@ -196,6 +201,7 @@ fn interrupted_demo_leaves_no_host(name: &str, package: &str) {
         .env("PF_BIN", env!("CARGO_BIN_EXE_pulse-factory"))
         .env("XDG_RUNTIME_DIR", &rt.0)
         .env("PAPER_SRC", &paper)
+        .envs(env.iter().copied())
         .env_remove("PF_SEAT_TOKEN")
         .env_remove("PF_STATE_DIR")
         .env_remove("PF_SHARE_DIR")
@@ -1109,6 +1115,135 @@ fn needs_you_api_passes() {
     }
 }
 
+/// The limit of `needs-you-options.sh` (d32): one controller start, one replayed chat turn, a wait of 10 s
+/// for a notice to come again, four requests and about sixty `curl` calls. The script's own limit is
+/// 60 seconds.
+const NEEDS_YOU_OPTIONS_LIMIT: Duration = Duration::from_secs(75);
+
+/// The binaries d32 takes by variable. The replay binary is built beside the controller's; a missing
+/// one fails the test, never skips it (`cargo build -p pf-adapter-claude --bin pf-claude-replay`).
+fn options_binaries() -> [(&'static str, String); 2] {
+    let target_dir = Path::new(env!("CARGO_BIN_EXE_pulse-factory"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let replay = target_dir.join("pf-claude-replay");
+    assert!(
+        replay.is_file(),
+        "{} is missing: run `cargo build -p pf-adapter-claude --bin pf-claude-replay` first",
+        replay.display()
+    );
+    [
+        ("PF_REPLAY_BIN", replay.to_str().unwrap().to_string()),
+        (
+            "PF_STREAM_BIN",
+            env!("CARGO_BIN_EXE_pf-stream-reader").to_string(),
+        ),
+    ]
+}
+
+#[test]
+fn needs_you_options_passes() {
+    // d32: a paired device takes a seat's option, a note, a workflow's option and a merge ack, with a
+    // notice of each request on the app channel and in the project's Orchestrator chat.
+    let binaries = options_binaries();
+    let env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (out, took) = run("needs-you-options.sh", &env);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < NEEDS_YOU_OPTIONS_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+        "step 6:",
+        "step 7:",
+        "step 8:",
+        "needs-you-options: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    let last = text.lines().last().unwrap_or_default();
+    assert!(last.starts_with("needs-you-options: ok"), "{last}");
+}
+
+/// A copy of `scripts/demo/paper-options` that a test may break.
+fn paper_options_copy() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-options");
+    copy_dir(&root().join("scripts/demo/paper-options"), &paper);
+    (dir, paper)
+}
+
+/// Run d32 on a broken copy of its package, and return its output.
+fn options_fails_with(paper: &Path) -> Output {
+    let binaries = options_binaries();
+    let mut env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    env.push(("PAPER_SRC", paper.to_str().unwrap()));
+    let (out, _) = run("needs-you-options.sh", &env);
+    out
+}
+
+#[test]
+fn needs_you_options_fails_when_the_red_gate_declares_no_options() {
+    let (_dir, paper) = paper_options_copy();
+    edit(&paper, "workflow/workflow.yaml", |t| {
+        let start = t
+            .find("            options:\n")
+            .expect("the package declares options");
+        let end = t[start..]
+            .find("        settings:")
+            .expect("the settings follow")
+            + start;
+        format!("{}{}", &t[..start], &t[end..])
+    });
+    let out = options_fails_with(&paper);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("needs-you-options: FAIL: step 5: the red gate's block is not the workflow's"),
+        "{err}"
+    );
+}
+
+#[test]
+fn needs_you_options_fails_when_the_stop_names_no_options() {
+    let (_dir, paper) = paper_options_copy();
+    edit(&paper, "seats/implementer.sh", |t| {
+        t.lines()
+            .filter(|l| {
+                !l.contains("Options:")
+                    && !l.contains("- [recommended]")
+                    && !l.contains("- Write the word stop")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    });
+    let out = options_fails_with(&paper);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("needs-you-options: FAIL: step 3: the stop's block is not the seat's"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_interrupted_needs_you_options_stops_its_hosts() {
+    let binaries = options_binaries();
+    let env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    interrupted_demo_with_env("needs-you-options.sh", "paper-options", &env);
+}
+
 /// The limit of `start-api.sh`: one controller start, one replayed chat turn, a 4 s wait for a confirm
 /// code to expire and about forty `curl` calls. The script's own limit is 150 seconds.
 const START_API_LIMIT: Duration = Duration::from_secs(150);
@@ -1279,6 +1414,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "pair-api.sh",
         "chat-api.sh",
         "needs-you-api.sh",
+        "needs-you-options.sh",
         "start-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();

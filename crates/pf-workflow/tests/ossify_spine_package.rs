@@ -1759,3 +1759,130 @@ fn the_close_brief_states_the_finish_line_and_the_verdict_contract() {
         "it quotes the pinned line"
     );
 }
+
+// ------------------------------------------------------------------ the options of the red gate (r2.s11.w4)
+
+/// The `park_on` entry of the close stage that waits for the correction packet.
+fn correction_entry(file: &WorkflowFile) -> pf_workflow::ParkOn {
+    item_stage(file, "close")
+        .park_on
+        .into_iter()
+        .find(|e| e.file.ends_with("/correction.txt"))
+        .expect("the close stage parks on the correction packet")
+}
+
+#[test]
+fn the_correction_entry_declares_two_options_each_an_answer_to_close_and_only_the_first_is_recommended()
+ {
+    let entry = correction_entry(&load().file);
+    assert_eq!(entry.options.len(), 2, "{:?}", entry.options);
+    for option in &entry.options {
+        assert!(!option.label.is_empty());
+        assert!(
+            option.answer.as_deref().is_some_and(|a| !a.is_empty()),
+            "{option:?}"
+        );
+        assert_eq!(option.to.as_deref(), Some("close"), "{option:?}");
+    }
+    assert!(entry.options[0].recommended);
+    assert!(!entry.options[1].recommended);
+    // The options are taken through the entry's own hook, which retires the packet.
+    assert!(
+        entry
+            .on_answer
+            .iter()
+            .any(|c| c.argv.iter().any(|a| a == "{run.package}/scripts/rule.sh")),
+        "{:?}",
+        entry.on_answer
+    );
+}
+
+#[test]
+fn no_other_park_on_entry_of_the_package_declares_options() {
+    let file = load().file;
+    let mut seen = 0;
+    for track in &file.tracks {
+        for stage in &track.stages {
+            for entry in &stage.park_on {
+                seen += 1;
+                if entry.file.ends_with("/correction.txt") {
+                    continue;
+                }
+                assert!(
+                    entry.options.is_empty(),
+                    "stage {} entry {}",
+                    stage.name,
+                    entry.file
+                );
+            }
+        }
+    }
+    assert!(seen >= 2, "the package declares more than one park_on file");
+}
+
+#[test]
+fn the_option_texts_are_the_files_own_literal_words() {
+    // Nothing a seat wrote can reach an option: the texts hold no placeholder.
+    let options = correction_entry(&load().file).options;
+    assert_eq!(options.len(), 2);
+    for option in options {
+        for text in [Some(option.label), option.answer].into_iter().flatten() {
+            assert!(!text.contains('{') && !text.contains('}'), "{text}");
+            assert_eq!(pf_engine::status::redact(&text), text);
+        }
+    }
+}
+
+/// The example block of the common brief, with the words that stand before it left out.
+fn brief_example(common: &str) -> String {
+    let lines: Vec<&str> = common.lines().map(str::trim_start).collect();
+    let start = lines
+        .iter()
+        .position(|l| *l == "Options:")
+        .expect("the common brief holds an example options block");
+    let block: Vec<&str> = lines[start..]
+        .iter()
+        .take_while(|l| **l == "Options:" || l.starts_with("- "))
+        .copied()
+        .collect();
+    format!("I cannot pick a branch.\n\n{}\n", block.join("\n"))
+}
+
+#[test]
+fn the_common_briefs_example_block_reads_through_stop_detail_as_two_options_with_one_recommended() {
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stop");
+    std::fs::write(&path, brief_example(&common)).unwrap();
+    let facts = pf_engine::claim::stop_detail(&path).expect("the file is readable");
+    assert!(
+        facts
+            .get(pf_engine::claim::KEY_STOP_OPTIONS_ERROR)
+            .is_none(),
+        "{facts}"
+    );
+    let options = facts[pf_engine::claim::KEY_STOP_OPTIONS]
+        .as_array()
+        .unwrap_or_else(|| panic!("no options in {facts}"));
+    assert_eq!(options.len(), 2, "{facts}");
+    let marked: Vec<bool> = options
+        .iter()
+        .map(|o| o["recommended"].as_bool().unwrap())
+        .collect();
+    assert_eq!(marked, [false, true], "{facts}");
+}
+
+#[test]
+fn the_brief_names_the_200_character_bound_the_mark_and_the_one_press() {
+    let common = std::fs::read_to_string(package_dir().join("briefs/common.md")).unwrap();
+    assert!(common.contains("200 characters"), "{common}");
+    assert!(common.contains("[recommended]"), "{common}");
+    assert!(common.contains("Two to four"), "{common}");
+    assert!(common.contains("stand alone"), "{common}");
+    assert!(
+        common.contains("what clears"),
+        "the first line of a stop still says what clears it"
+    );
+    // The rulings rule stays.
+    assert!(common.contains("Its last entry answers your last stop"));
+}
