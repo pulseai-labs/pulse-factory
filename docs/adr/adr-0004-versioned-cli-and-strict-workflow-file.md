@@ -114,3 +114,27 @@ ADR-0005's and ADR-0012's amendments of the same date and ADR-0006's amendment o
 - **An answer whose text no hook would deliver is refused** and names `clear`. It used to be stored and
   reach no seat. A run pinned before this amendment has no fallback, so its parks with no file hook refuse
   a text.
+
+## Amendment, 2026-11-21 (Proposed): a park_on entry declares its options
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q2 to Q5 and Q7).** It takes effect
+when the code that builds it lands (`r2.s11.w4`), and that work's close marks it Accepted. It follows the
+amendment of the same date that lets an act name an option, and it goes with ADR-0005's amendment: a
+workflow's option holds no seat text.
+
+- **A `park_on` entry takes one new optional key, `options`.** It is a list of one to four options. Each
+  option has a `label`, an `answer` text, a `to` stage of the same track, and a `recommended` mark. An
+  option holds an `answer`, a `to`, or both. The strict reading of ADR-0004 is unchanged: any other field
+  of an option is an error, and `options` is still refused at the stage, at the track, at the top level
+  and on a `stop_file` mapping. A `gaps.json` entry takes none: a gaps request keeps its typed answer.
+- **The file names no verb and no reason.** An option can answer or resume. It cannot ack, so a workflow
+  cannot spend the claim holder's confirm. The recommendation has a fixed reason that the controller
+  writes, so the file holds no free text that would pass as the controller's own.
+- **The texts are literal.** `label` and `answer` take no placeholder, and a text that the redactor would
+  change is refused at load. A unit variable comes from a record that a seat wrote, so a placeholder
+  would let seat words ride under `by: "workflow"`. The stored option is the pinned file's text, byte
+  for byte.
+- **An `answer` option needs a hook that would deliver it.** The load refuses it when neither the entry
+  nor its stage declares `on_answer`. A `to`-only option needs none.
+- **The file version stays 1.** A file with no `options` loads and runs as before. A run armed before this
+  amendment keeps its pinned copy, so its parks gain no option.

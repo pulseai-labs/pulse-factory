@@ -105,7 +105,7 @@ fn show_prints_the_block_after_every_line_it_printed_before() {
         "attempt: 1",
         "takes text: no",
         "about: seat implementer (unit u1)",
-        "option resume: Resume (resumes the unit; recommended by controller: ",
+        "option resume: Resume (by controller; resumes the unit; recommended by controller: ",
     ] {
         assert!(
             at(prefix) > last_old,
@@ -124,12 +124,12 @@ fn an_option_text_with_an_escape_sequence_prints_with_the_character_replaced() {
     let text = show_text(&live, &request_id(&live, "u3"));
     assert!(!text.contains('\u{1b}'), "{text:?}");
     assert!(
-        text.contains("option s1: go?[31m left (answers with the text"),
+        text.contains("option s1: go?[31m left (by seat; answers with the text"),
         "{text}"
     );
     assert!(
         text.contains(
-            "option s2: go right (answers with the text \"go right\"; recommended by seat: "
+            "option s2: go right (by seat; answers with the text \"go right\"; recommended by seat: "
         ),
         "{text}"
     );

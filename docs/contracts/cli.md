@@ -342,12 +342,16 @@ attempt: <n>
 takes text: yes|no
 about: seat <role> (unit <unit>)         only when the block has `about`
 options error: <cause>                   only when a stop's options could not be read
-option <id>: <label> (<what it does>[; recommended by <by>: <why>])
+option <id>: <label> (by <by>; <what it does>[; recommended by <by>: <why>])
 ```
 
-`<what it does>` is `answers with the text "<text>"`, `resumes the unit`, `resumes the unit at stage
-<stage>` or `acks the merge`. One `option` line prints for each option, in the block's order. A request
-with no block prints none of these lines. No line that `show` or `requests` printed before changes.
+`<by>` is who wrote the option: `controller`, `workflow` or `seat`. A block stored before options
+carried `by` reads `seat` for a `stop_file` request and `controller` for every other. `<what it does>` is
+`answers with the text "<text>"`, `answers with the text "<text>", then resumes the unit at stage
+<stage>`, `resumes the unit`, `resumes the unit at stage <stage>` or `acks the merge`. One `option` line
+prints for each option, in the block's order, so a reader sees every word an option sends and can tell a
+workflow's option from the controller's. A request with no block prints none of these lines. `show
+--json` does not change.
 
 An answered request whose answer took an option prints two more lines after the answer lines that it
 printed before (`requests.md`, "Acting on an option"):

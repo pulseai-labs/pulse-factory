@@ -8,8 +8,8 @@
 # chat (default: `crates/pf-adapter-claude/fixtures/start_proposal.jsonl`). The script builds nothing,
 # calls no `gh`, prints no secret and writes only under `<dir>` and `$PF_SHARE_DIR/workflows/`. It makes:
 #
-#   <dir>/paper                      a copy of scripts/demo/paper-d20 with the shipped rule.sh in
-#                                    workflow/scripts/, as d20 makes it
+#   <dir>/paper                      a copy of scripts/demo/paper-d20 (or of `$PAPER_SRC`, when set) with
+#                                    the shipped rule.sh in workflow/scripts/, as d20 makes it
 #   <dir>/paper/forge.git            a bare forge with `main` and `spine-s1` on one base commit
 #   <dir>/spine, <dir>/worktrees     the spine directory and the item worktrees
 #   <dir>/ledger.md                  the run ledger
@@ -50,7 +50,9 @@ abs() {
 pf_bin="$(abs "$PF_BIN")"
 replay_bin="$(abs "$PF_REPLAY_BIN")"
 fixture="${PF_START_FIXTURE:-$repo_root/crates/pf-adapter-claude/fixtures/start_proposal.jsonl}"
-src="$here/paper-d20"
+# `PAPER_SRC` names another paper package to copy (d32 passes `scripts/demo/paper-options`). The default is
+# `paper-d20`, so d22, d23 and `ui-start.sh` do not change.
+src="${PAPER_SRC:-$here/paper-d20}"
 shipped_scripts="$repo_root/workflows/ossify-spine/scripts"
 [ -f "$fixture" ] || fail "no fixture at $fixture"
 [ -d "$src/workflow" ] || fail "no paper workflow at $src"

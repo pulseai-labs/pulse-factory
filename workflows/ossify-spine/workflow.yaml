@@ -12,7 +12,10 @@
 #   stop file       `rule.sh` appends the ruling to {run.dir}/out/{unit.id}/rulings.md, which every
 #                   brief tells a seat to read first, and renames the stop file.
 #   correction.txt  `rule.sh` does the same for the close stage's correction packet: it quotes the
-#                   packet in the rulings file and renames the packet.
+#                   packet in the rulings file and renames the packet. The entry also names two
+#                   options, "the correction is made" (the recommended one) and "a flaky failure".
+#                   Each answers through the same hook and runs the close gate again. The typed
+#                   answer stays for any other ruling.
 #   any other park  each stage declares a fallback `on_answer`: a stall, a cap, a failed launch or a
 #                   lost seat takes a typed note. `rule.sh` appends it to the same rulings file with
 #                   the stop path `-`: it quotes no file and renames none. A park the fallback does
@@ -408,6 +411,17 @@ tracks:
                 - "{answer.generation}"
                 - close
                 - "{answer.source}"
+            # The two options the operator may take in one press. Each goes through the hook above
+            # and sends the item back to `close`: the close gate runs again. An answer that sends the
+            # item back to `implement` is the correction loop, which this file does not declare yet.
+            options:
+              - label: "The correction is made: run the close gate again"
+                answer: "The correction is made. Run the close gate again on the tree as it is now."
+                to: close
+                recommended: true
+              - label: "A flaky failure: run the close gate again with no change"
+                answer: "Treat the failure as a flaky run. Change nothing, and run the close gate again."
+                to: close
 
       # The reviewer reads the item PR at its head and writes `review.md`. The verdict is line 1 of
       # that file and nothing else counts: `scripts/verdict.sh` reads it for `done` and for the block

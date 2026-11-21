@@ -13,7 +13,9 @@ use super::base_push;
 use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
-use pf_engine::claim::{AnswerAct, KEY_TAKES_TEXT, gaps_detail, stop_detail};
+use pf_engine::claim::{
+    AnswerAct, KEY_TAKES_TEXT, ParkOptionDecl, gaps_detail, park_options_detail, stop_detail,
+};
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
@@ -576,7 +578,8 @@ impl Driver {
     /// or the text of the stop file and its options. The kind says which file parked the unit.
     /// A park the seat's own file caused (`stop_file`, `park_file`) also says whether a text
     /// answer reaches a seat: `takes_text` is true when the stage declares an `on_answer` hook
-    /// for that file.
+    /// for that file. A `park_file` request of a file that declares `options` also carries them, as
+    /// the fact `park_options`, from the one entry that opened the request.
     fn park_facts(
         &self,
         stage: &StageSpec,
@@ -609,16 +612,41 @@ impl Driver {
         if !matches!(cause, Cause::StopFile | Cause::ParkFile) {
             return file_facts;
         }
+        // The entry that opened a `park_file` request holds its hook and its options, so the two are of
+        // one entry. A `gaps` request takes a typed answer alone (Q3), whatever the file declares.
+        let entry = if kind == RequestKind::Stop {
+            None
+        } else {
+            park_on_entry(stage, ctx, kind, reason)
+        };
         let takes_text = if kind == RequestKind::Stop {
             !stage.stop_on_answer.is_empty()
         } else {
-            park_on_entry(stage, ctx, kind, reason).is_some_and(|entry| !entry.on_answer.is_empty())
+            entry.is_some_and(|entry| !entry.on_answer.is_empty())
         };
         let mut facts = match file_facts {
             Some(serde_json::Value::Object(object)) => object,
             _ => serde_json::Map::new(),
         };
         facts.insert(KEY_TAKES_TEXT.to_string(), serde_json::json!(takes_text));
+        if cause == Cause::ParkFile
+            && kind != RequestKind::Gaps
+            && let Some(entry) = entry.filter(|entry| !entry.options.is_empty())
+        {
+            let declared: Vec<ParkOptionDecl> = entry
+                .options
+                .iter()
+                .map(|o| ParkOptionDecl {
+                    label: o.label.clone(),
+                    answer: o.answer.clone(),
+                    to: o.to.clone(),
+                    recommended: o.recommended,
+                })
+                .collect();
+            if let serde_json::Value::Object(options) = park_options_detail(&declared) {
+                facts.extend(options);
+            }
+        }
         Some(serde_json::Value::Object(facts))
     }
 

@@ -21,6 +21,8 @@ pub const KEY_DECISION: &str = "decision";
 pub const KEY_STOP_OPTIONS: &str = "stop_options";
 /// The key that says why a stop file's options could not be read.
 pub const KEY_STOP_OPTIONS_ERROR: &str = "stop_options_error";
+/// The key of the options a workflow's `park_on` entry declared, in a park's facts.
+pub const KEY_PARK_OPTIONS: &str = "park_options";
 /// The key of the fact that a text answer reaches a seat, in a park's facts.
 pub const KEY_TAKES_TEXT: &str = "takes_text";
 /// The key of the stage an outcome cap sends the unit to, in the cap park's facts.
@@ -248,6 +250,7 @@ fn summary_of(inputs: &Inputs, pr: Option<&str>) -> String {
 /// Who wrote an option, as the block stores it.
 const BY_CONTROLLER: &str = "controller";
 const BY_SEAT: &str = "seat";
+const BY_WORKFLOW: &str = "workflow";
 
 fn option(id: &str, label: &str, detail: &str, effect: &Value, by: &str) -> Value {
     json!({ "id": id, "label": label, "detail": detail, "effect": effect, "by": by })
@@ -293,15 +296,27 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
             }
             (options, recommended)
         }
-        // Only the workflow knows what clears its own file. With a hook, the typed answer is the
-        // act; with none, the unit resumes once the file is gone.
-        Cause::ParkFile if takes_text => (Vec::new(), None),
-        Cause::ParkFile => (
-            vec![resume_option(
-                "Resume the unit at the stage it parked in. The park file must be gone first, or the unit parks again.",
-            )],
-            None,
-        ),
+        // Only the workflow knows what clears its own file. When its entry declares options, they
+        // are the block's options and the controller adds no `resume`: a clear runs no hook, so the
+        // file would park the unit again. With none declared and a hook, the typed answer is the act;
+        // with none declared and no hook, the unit resumes once the file is gone.
+        Cause::ParkFile => {
+            let declared = declared_options(inputs.facts);
+            if declared.0.is_empty() {
+                if takes_text {
+                    (Vec::new(), None)
+                } else {
+                    (
+                        vec![resume_option(
+                            "Resume the unit at the stage it parked in. The park file must be gone first, or the unit parks again.",
+                        )],
+                        None,
+                    )
+                }
+            } else {
+                declared
+            }
+        }
         Cause::OutcomeCap => {
             let again_to = text_of(inputs.facts, KEY_CAP_TO);
             let go_on_at = inputs.stage;
@@ -375,6 +390,64 @@ fn options_of(inputs: &Inputs, takes_text: bool) -> (Vec<Value>, Option<Value>) 
             (vec![resume_option(detail)], recommended)
         }
     }
+}
+
+/// The options a workflow declared, from the park's facts, and the recommendation. The fact is data:
+/// an entry with no label, or with neither an answer text nor a stage, is skipped, at most
+/// [`OPTIONS_MAX`] are read, and only `answer` and `resume` effects come from it, whatever keys an
+/// entry holds. An ID keeps the entry's place in the file: `w1` to `w4`.
+fn declared_options(facts: &Map<String, Value>) -> (Vec<Value>, Option<Value>) {
+    let named = facts
+        .get(KEY_PARK_OPTIONS)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut options = Vec::new();
+    let mut recommended = None;
+    for (i, o) in named.iter().take(OPTIONS_MAX).enumerate() {
+        let Some(label) = o
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|l| !l.is_empty())
+        else {
+            continue;
+        };
+        let answer = o
+            .get("answer")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty());
+        let to = o
+            .get("to")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty());
+        let (effect, detail) = match (answer, to) {
+            (Some(text), Some(to)) => (
+                json!({ "verb": "answer", "text": text, "to": to }),
+                format!("Answer with the workflow's text, then resume the unit at stage {to}."),
+            ),
+            (Some(text), None) => (
+                json!({ "verb": "answer", "text": text }),
+                "Answer with the workflow's text.".to_string(),
+            ),
+            (None, Some(to)) => (
+                json!({ "verb": "resume", "to": to }),
+                format!(
+                    "Resume the unit at stage {to}. The park file must be gone first, or the unit parks again."
+                ),
+            ),
+            (None, None) => continue,
+        };
+        let id = format!("w{}", i + 1);
+        options.push(option(&id, label, &detail, &effect, BY_WORKFLOW));
+        if o.get("recommended").and_then(Value::as_bool) == Some(true) && recommended.is_none() {
+            recommended = Some(json!({
+                "option": id,
+                "by": BY_WORKFLOW,
+                "why": "The workflow marked this option.",
+            }));
+        }
+    }
+    (options, recommended)
 }
 
 /// The block of a revised request, built at the new revision from the new facts. `None` when the

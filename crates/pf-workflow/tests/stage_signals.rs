@@ -310,6 +310,7 @@ fn a_park_file_parks_with_its_reason() {
         file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
         reason: "gaps surfaced for {unit.id}".to_string(),
         on_answer: Vec::new(),
+        options: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     assert_eq!(v(&s, &SystemProbe, &WAITING), StageVerdict::Wait);
@@ -341,6 +342,7 @@ fn a_park_file_wins_over_a_done_file() {
         file: format!("{}/{{unit.id}}/correction.txt", dir.path().display()),
         reason: "correction needed".to_string(),
         on_answer: Vec::new(),
+        options: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     write(dir.path(), "u1", "a.done", "");
@@ -544,6 +546,7 @@ fn a_park_file_and_a_turn_end_park_a_real_unit() {
         file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
         reason: "gaps surfaced\nanswer them".to_string(),
         on_answer: Vec::new(),
+        options: Vec::new(),
     };
     let s = stage(dir.path(), vec![file(dir.path(), "a.done")], vec![park]);
     let e = running_unit();
@@ -909,6 +912,7 @@ fn a_stop_file_a_park_file_and_a_done_signal_win_over_every_no_signal_verdict() 
         file: format!("{}/{{unit.id}}/gaps.json", dir.path().display()),
         reason: "gaps".to_string(),
         on_answer: Vec::new(),
+        options: Vec::new(),
     }];
     let states = [
         state(true, false, 0, false),

@@ -61,6 +61,11 @@ data: redacted, bounded, stored as JSON strings, and never rendered or run (ADR-
 - `show` prints both, one line for a gap and an indented block for the stop text, with every control
   character replaced.
 
+- `park_file` with declared options: the body gains `"park_options"`, `[{"label", "answer", "to",
+  "recommended"}, …]` in file order, from the `park_on` entry that opened the request (an absent `answer`
+  or `to` is left out), and `takes_text`, as every `park_file` request holds it. A `gaps` request gains no
+  `park_options`, whatever its file declares.
+
 ### The body of a `merge_ack` request
 
 The merge step opens one `merge_ack` request for the unit, in one commit with the unit's park at the
@@ -120,8 +125,8 @@ revision rule") stores a block built from the new facts, at the new revision.
 | `v` | The version of the block's shape. It is 1. A reader that finds a larger number reads no block. |
 | `cause` | The cause code (the table below). |
 | `summary` | One sentence the controller writes from the cause and its own facts: the unit, the stage, the attempt, a cap's number, a PR. It never holds a seat's words: the seat's text stays in `stop_text` and `gaps`. At most 300 characters. |
-| `options` | 0 to 4 objects `{id, label, detail, effect, by}`. `effect` is `{"verb":"answer","text":…}` (it may hold `"to":<stage>`: resume there), `{"verb":"resume"}`, `{"verb":"resume","to":<stage>}` or `{"verb":"ack"}`. `by` says who wrote the option: `controller`, `workflow` or `seat`. The builder writes `seat` for a stop file's option and `controller` for every other. A block stored before `by` existed has none: a reader takes `seat` when the cause is `stop_file` and `controller` otherwise. |
-| `recommended` | Absent, or `{option, by, why}`. `by` is `controller`, `workflow` or `seat`. |
+| `options` | 0 to 4 objects `{id, label, detail, effect, by}`. `effect` is `{"verb":"answer","text":…}` (it may hold `"to":<stage>`: resume there), `{"verb":"resume"}`, `{"verb":"resume","to":<stage>}` or `{"verb":"ack"}`. `by` says who wrote the option: `controller`, `workflow` or `seat`. The builder writes `seat` for a stop file's option, `workflow` for an option that a `park_on` entry declared (see "A workflow's options") and `controller` for every other. A block stored before `by` existed has none: a reader takes `seat` when the cause is `stop_file` and `controller` otherwise. |
+| `recommended` | Absent, or `{option, by, why}`. `by` is `controller`, `workflow` or `seat`. The builder writes `workflow` for the mark of a `park_on` entry's option, with the fixed reason `The workflow marked this option.` |
 | `refs` | `{project, run, unit, stage, pr}`. A fact that does not exist is left out: `project` for a run armed from the CLI, `stage` when empty, `pr` before a PR is recorded. |
 | `attempt` | The number of stage nodes of the parked stage for the unit. It is 0 for a park at the merge. |
 | `asked_by` | `{"kind":"seat","role":…,"unit":…}` for `stop_file` and `park_file`, where the seat's own file opened the request. `{"kind":"controller"}` for every other cause. |
@@ -141,7 +146,7 @@ The cause, the kind of the request it opens, the options and the recommendation.
 | Cause | Kind | Options | Recommendation |
 |---|---|---|---|
 | `stop_file` | `stop` | The seat's options (see "A stop's options"), `s1` to `s4` in file order, each `answer` with the option's text. None when the file names none. | The seat's mark, `by: "seat"`. |
-| `park_file` | `gaps`, `red_gate` or `park`, by the file's name | None when `takes_text` is true: the typed answer is the act. Otherwise `resume`, and its `detail` says the file must be gone first or the unit parks again. | None. |
+| `park_file` | `gaps`, `red_gate` or `park`, by the file's name | The entry's declared options (see "A workflow's options"), `w1` to `w4` in file order, each `by: "workflow"`, and no controller `resume` beside them. With none declared: none when `takes_text` is true, the typed answer being the act; otherwise `resume`, and its `detail` says the file must be gone first or the unit parks again. | The workflow's mark, `by: "workflow"`. None when no option is marked. |
 | `no_done_signal` | `park` | `resume` | None. |
 | `stalled` | `stall` | `resume` | `resume`, `by: "controller"`. |
 | `launch_refused` | `park` | `resume` | None. |
@@ -193,6 +198,39 @@ Options:
 **Known limit:** the controller reads at most 64 KiB of a stop file. A file over that bound that holds
 an `Options:` line gives `stop_options_error` (its block may be cut). A file over the bound whose
 options block starts after the first 64 KiB is not read, and gives no error.
+
+### A workflow's options
+
+A `park_on` entry of the workflow file may declare `options` (`workflow-file.md`, "`options` of a
+`park_on` entry"). The park command carries them as the fact `park_options` in its `detail`, as a stop's
+options ride as `stop_options`, so the engine derives the block when it decides the command and a replay of
+the command ID returns the stored request. The facts of a park come from the one entry that opened the
+request: its hook and its options are of one entry. A `gaps` request gets no such fact, whatever the file
+declares. The fact under any other cause adds nothing.
+
+- **The block's options are exactly the declared ones,** `w1` to `w4` in file order, each `by: "workflow"`.
+  An ID keeps the entry's place in the file. The builder reads the fact as data: it skips an entry with no
+  label or with neither an answer text nor a stage, reads at most 4, and writes only `answer` and `resume`
+  effects from it, whatever keys an entry holds. A workflow's option can never carry an `ack`.
+- **Three effects.** An option with `answer` has the effect `{"verb":"answer","text":<answer>}`, with
+  `"to":<stage>` when the option names a stage. An option with `to` alone has `{"verb":"resume","to":<stage>}`.
+  The `detail` is written by the controller: `Answer with the workflow's text.`, `Answer with the workflow's
+  text, then resume the unit at stage <stage>.` or `Resume the unit at stage <stage>. The park file must be
+  gone first, or the unit parks again.`
+- **Declared options replace the controller's `resume`.** A `clear` runs no hook, so the file would park the
+  unit again. A workflow that wants a resume declares a stage-only option. With no option declared, the block
+  is as it was: no option when the file's own hook takes a text, and otherwise one `resume` by the controller
+  with the warning that the park file must be gone first.
+- **The recommendation.** The first option marked `recommended: true` gives `{"option":"w<n>",
+  "by":"workflow","why":"The workflow marked this option."}`. The reason is that fixed text, as a seat's is
+  "The seat marked this option." A workflow's file writes no reason. No mark gives no recommendation.
+- `takes_text`, `asked_by` (the seat whose file opened the request), `summary`, `refs` and `v` do not change.
+  The typed answer stays beside the options whenever `takes_text` is true.
+- **Acting on one** is round 2's act path, which does not change ("Acting on an option"). `answer --option w1`
+  runs the entry's hook, or else the stage's fallback, with `{answer.source}` as `option:w1:workflow`, so the
+  note says that the workflow wrote the words. `clear --option <id> --rev <k>` takes a stage-only option. A
+  device's confirm code binds the option's ID. The engine still refuses a stage outside the unit's track at
+  the act.
 
 ### Acting on an option
 
