@@ -14,6 +14,9 @@ import type {
   DeviceRecord,
   FolderList,
   FolderListArgs,
+  NoticeAckArgs,
+  NoticeAcked,
+  NoticeFrame,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -121,6 +124,8 @@ export interface StreamOptions {
 export type StreamEvent =
   | { event: "frame"; frame: ChatFrame }
   | { event: "request_frame"; frame: RequestFrame }
+  /** A notice of a request event, beside the chat frames and the request frames (r2.s11.w5, Approach 9). */
+  | { event: "notice_frame"; frame: NoticeFrame }
   | { event: "reconnecting"; after: number; retry_in_ms: number; reason: string }
   | { event: "closed"; error: { kind: TransportErrorKind; message: string } };
 
@@ -163,8 +168,17 @@ function parseRequestFrame(value: unknown): RequestFrame | null {
   }
 }
 
+/** A notice frame, when its notice holds a number `position`, a string `event` and a string `request`. */
+function parseNoticeFrame(value: unknown): NoticeFrame | null {
+  if (!isObject(value) || value.type !== "notice") return null;
+  const n = value.notice;
+  return isObject(n) && typeof n.position === "number" && typeof n.event === "string" && typeof n.request === "string"
+    ? (value as unknown as NoticeFrame)
+    : null;
+}
+
 /**
- * A native value as a `StreamEvent`, or `null` when it is none of the four shapes. Both
+ * A native value as a `StreamEvent`, or `null` when it is none of the five shapes. Both
  * implementations use this, so a value of another shape is dropped the same way in each. A chat frame
  * is checked by its `type` only: the generated `ChatFrame` is the native side's to decode. A request
  * frame is checked by its type and the fields the requests state reads.
@@ -181,6 +195,10 @@ export function parseStreamEvent(value: unknown): StreamEvent | null {
   if (v.event === "request_frame") {
     const frame = parseRequestFrame(v.frame);
     return frame === null ? null : { event: "request_frame", frame };
+  }
+  if (v.event === "notice_frame") {
+    const frame = parseNoticeFrame(v.frame);
+    return frame === null ? null : { event: "notice_frame", frame };
   }
   if (v.event === "reconnecting") {
     if (typeof v.after !== "number" || typeof v.retry_in_ms !== "number" || typeof v.reason !== "string") return null;
@@ -229,6 +247,8 @@ export interface Transport {
   runList(): Promise<RunList>;
   /** Arms the run of a start card with a code from `confirmCode` (subject kind `start`). */
   arm(args: DeviceArmArgs): Promise<ArmActed>;
+  /** Tells the server what this device did with the notices up to `position`: `shown` or `blocked` (r2.s11.w5). */
+  noticeAck(args: NoticeAckArgs): Promise<NoticeAcked>;
   /**
    * Opens the chat stream. It never rejects for a stream failure: every failure arrives as one
    * `closed` event. The native side pushes and reconnects (with the last `seq` it holds), so the

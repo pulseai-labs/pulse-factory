@@ -46,6 +46,7 @@ export interface StreamOptions { session?: string | null; after?: number }
 export type StreamEvent =
   | { event: 'frame'; frame: ChatFrame }
   | { event: 'request_frame'; frame: RequestFrame }   // r1.s4.w3: requests, request, claim
+  | { event: 'notice_frame'; frame: NoticeFrame }     // r2.s11.w5: a notice of a request (api.md)
   | { event: 'reconnecting'; after: number; retry_in_ms: number; reason: string }
   | { event: 'closed'; error: { kind: TransportErrorKind; message: string } };
 export interface StreamHandle { close(): Promise<void> }
@@ -73,6 +74,8 @@ export interface Transport {
   settingsSet(args: SettingsSetArgs): Promise<SettingChanged>;
   settingsUnset(args: SettingsUnsetArgs): Promise<SettingChanged>;
   runList(): Promise<RunList>;
+  // r2.s11.w5: the app's acknowledgement of a notice batch (api.md, "The device verbs", `notice_ack`)
+  noticeAck(args: NoticeAckArgs): Promise<NoticeAcked>;
   // r1.s4.w2: the device `arm` of a start card (api.md, "The device `arm`")
   arm(args: DeviceArmArgs): Promise<ArmActed>;
   openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle>;
@@ -119,6 +122,14 @@ export interface Transport {
   frame of the one stream (next sections), beside `frame` and not inside it, so every consumer of a
   `ChatFrame` stays as it is. A request frame that does not have its shape is dropped, and the stream
   and the chat it carries go on.
+- **The notice frames (`r2.s11.w5`).** `{ event: 'notice_frame', frame }` carries a `notice` frame of the one
+  stream, beside `frame` and `request_frame`. `parseStreamEvent` accepts it when `frame.type` is `notice` and
+  `frame.notice` holds a number `position`, a string `event` and a string `request`; another shape is dropped,
+  never a closed stream. **`noticeAck`** posts `notice_ack` with a `position` and an `outcome` (`shown` or
+  `blocked`): the Tauri transport calls the generic `verb` command with the name `notice_ack`, and the bridge
+  serves `/bridge/verbs/notice_ack`. It carries no `command_id` and no confirm code: the server keeps the highest
+  position (`NoticeAcked.admitted` is false when the position did not rise). The app calls it only on a server
+  that sent it a `notice` frame. See "Notices and the notifier".
 - **The server.** `PairedServer.server` is the server that the last answer named (`pf-server-id` and
   `pf-server-name` on every answer, a `101` and each `hello` frame's `server` too). The native side keeps
   it in memory, only when its ID is the pin: a header that names another ID is ignored, because the TLS pin is
@@ -242,7 +253,27 @@ are open), with no call. The page's calls (W9) are:
   error (the banner reports the link); the page and the open dock ask for that body again when the link comes
   back, and the dock also when it opens. A closed dock asks for nothing, even when the link comes back.
 
-Nothing else: no timer, no focus handler, no second stream.
+Nothing else: no focus handler, no second stream, and no timer but one: the notice batch's, which a notice
+frame starts and which fires once ("Notices and the notifier").
+
+**Options on the Needs you page (`r2.s11.w5`).** A request whose `show` answers a `decision` draws one button
+for each option the card may offer (an `answer` option only when the block's `takes_text` is true and the
+request lists `answer`, a `resume` option while it lists `clear`), and `ack`'s `approve` as Approve merge. **A
+press still makes exactly two calls,** `confirmCode` then the act, each with a fresh `command_id`. **An option
+press sends the option and no text of its own.** The code's subject is `{kind: "request", request, revision,
+verb, option}` with no `text_sha256` and no `to`; `answer` sends `text: ""` and `option`, `clear` sends `option`,
+`ack` sends `option`. The request and the revision are those of the body the card drew its options from. **A
+note rides as a typed answer:** on a card the controller asked, a note typed beside a `resume` option makes the
+press one typed `answer` whose `text` is the note and whose `to` is the option's stage when it names one (the
+code binds the note's SHA-256 and that stage, and the stored answer names no option); with an empty note the
+press is the option's own act. After `subject_moved` the page reads `requests` once, the card reads the new
+revision's body, and an option of an older revision is never sent again. A request with no `decision` keeps
+today's card and calls.
+
+**The notice batch (`r2.s11.w5`).** A notice frame starts a batch; the batch ends 300 ms after its last frame
+and at most 1,000 ms after its first. When it ends, the app shows at most one notification and makes exactly
+one `noticeAck` call, with the highest position of the batch. While no frame arrives it sets no timer and makes
+no call.
 
 **One press (`r1.s5.w4`).** Each act is one press of one button: **Send** (`answer`, on a run question),
 **Resume** (`clear`, on a parked item) and **Approve merge** (`ack`). A press makes exactly two calls, in order:
@@ -253,8 +284,8 @@ still fresh, one-use and bound to this device and this act (the `client-api-auth
 confirm panel is gone (G1). **No `confirmCode` is asked for, and no code is spent, except on the operator's
 press**: a reload, a reconnect, a frame or a timer never asks. `unreachable` on the ask offers Retry with a new
 `command_id`; `unreachable` on the spend offers Retry with the same code and the same `command_id`; a refusal
-shows its line and drops the code. The page offers Send, Resume and Approve merge, and no option answer: a
-chat question's option buttons stay in the chat. **Hold** (on a merge card) makes no call: it sets the card
+shows its line and drops the code. The page offers one button for each option of a decision block, Send,
+Resume and Approve merge; a chat question's option buttons stay in the chat. **Hold** (on a merge card) makes no call: it sets the card
 aside on this Mac, in memory only, and the request stays open on the server. A run that starts waiting or ends
 shows in the sidebar's Workflow runs group, which reads `runList` when it opens (known limit: there is no run
 frame).
@@ -319,6 +350,7 @@ stream with no event.
 ```json
 {"event":"frame","frame":{"type":"caught","session_id":"S-1","last_seq":6}}
 {"event":"request_frame","frame":{"type":"claim","claim":null}}
+{"event":"notice_frame","frame":{"type":"notice","notice":{"position":7,"event":"opened","request":"R-12","revision":1,"run":"s1-1","project":"P-1","unit":"u1","kind":"stop","cause":"stop_file","text":"Unit u1 stopped at stage implement and wrote a stop file.","created_at":"2026-11-21T10:00:00.000Z","sends":1}}}
 {"event":"reconnecting","after":6,"retry_in_ms":4000,"reason":"the server is stopping"}
 {"event":"closed","error":{"kind":"unauthorized","message":"this device was revoked; pair it again"}}
 ```
@@ -374,6 +406,53 @@ an error before any `closed` becomes `closed` `unreachable` ("the bridge closed 
 limit: each open `EventSource` holds one of the browser's six HTTP/1.1 connections to the bridge, so
 the UI follows one session per stream.
 
+## Notices and the notifier
+
+`r2.s11.w5`. The Mac app tells the operator when a request opens: it shows a macOS notification and then
+acknowledges the notice. The state is `apps/ui/src/state/notices.tsx`; the notifier is
+`apps/ui/src/notify/{notifier.ts,tauri-notifier.ts}`.
+
+- **The notifier** is one small interface beside the transport: `show({title, body, request})` resolves `shown`
+  or `blocked`, and `onOpen(listener)` reports a click with the request it names, or with none. It has two
+  implementations, chosen as the transport is (`main.tsx`). Inside Tauri it uses the notification plugin
+  (`@tauri-apps/plugin-notification`: `isPermissionGranted`, `requestPermission`, `sendNotification` and
+  `onAction`, whose action `tap` is a click). In a browser (the test bridge) it uses the page's own
+  `Notification`. A test passes its own. Before it shows, the notifier reads the permission and, when that is not
+  decided, asks once in a run of the app.
+- **One batch.** The stream gives no end mark for a reconnect's waiting notices, so the app gathers them. A
+  notice frame starts a batch, and the batch ends 300 ms after its last frame and at most 1,000 ms after its
+  first. The one timer starts only on a frame, fires once and stops itself.
+- **What a batch does,** in order: (1) it drops each frame at or below the highest position this app has
+  acknowledged on this server, and each `opened` notice it has already shown in this run of the app; (2) it
+  takes the `opened` notices that are left, without those whose request the batch closes or the requests state
+  holds as closed (only `opened` asks for an alert: `revised` and `closed` raise nothing); (3) with one such
+  notice it shows one notification, and with several it shows one that counts them; (4) it calls `noticeAck`
+  once, with the highest position of the batch and the outcome, `blocked` when the notifier said so, when the
+  permission is not granted or when the notification failed, and `shown` otherwise (also for a batch with no
+  `opened` notice); (5) a failed `noticeAck` is not tried again by the app: the server sends the notice again,
+  and the next batch acknowledges it with no second notification.
+- **Only a server that sent a notice frame is acknowledged.** The app never calls `noticeAck` before the first
+  notice frame of a connection.
+- **The texts.** One notice: the title is `<project> · <what happened>` (the project's name, else the run ID),
+  and the body is the notice's `text`, a space and the request ID. `<what happened>` follows the notice's
+  `kind`: `<unit> asks a question`, `<unit> found gaps`, `<unit>’s gate failed`, `<unit> is parked`, `<unit>
+  stalled`, `<unit> lost its seat`, `<unit>’s merge failed`, `<unit> is ready to merge`, and `a request opened`
+  for another kind. Several: the title is `Pulse Factory · <n> new requests` and the body is `Newest:
+  <project> · <the newest notice's text> <R-n>`. The `text` is the server's, already cut to the channel's word
+  cap: the app cuts nothing and adds no seat text. A notification holds the controller's notice text and IDs
+  only. Nothing of a notice goes to browser storage, the console or a URL.
+- **A click** opens the Needs you page and scrolls to the card of the request the notification names; the count
+  form names the newest.
+- **Blocked.** When the last `noticeAck` this app sent to a server carried `blocked`, the page and the dock say
+  so at the top: `macOS is blocking notifications from Pulse Factory, so new requests only show here. <server>
+  lists this Mac as showing none.` on the page, and `macOS is blocking Pulse Factory’s notifications. New
+  requests only show here.` in the dock. The banner goes when a later acknowledgement carries `shown`. The
+  state lives in memory only. The buttons "Open System Settings" and "Settings" are `NotBuilt`: opening System
+  Settings needs one more plugin and permission.
+- **A known limit: the app reads no macOS setting of its own.** On a desktop the plugin answers "granted" for
+  the permission without asking macOS, so a Mac whose System Settings turn the app's notifications off still
+  acknowledges `shown`, and `blocked` comes only from a failed or refused plugin call.
+
 ## The Tauri commands
 
 `apps/desktop/src-tauri` registers sixteen commands. Each is one method of the interface, in snake case
@@ -411,14 +490,22 @@ never builds. `verb` calls `pf-client`'s `Transport::verb`, which checks the nam
 lock do not change. The `refusal` word of a rejection reaches `TransportError.refusal`.
 
 **A channel, not Tauri's event system.** Tauri's `listen` needs a capability that grants
-`core:event`, and the app declares no capability file (ADR-0013). A `Channel` is the IPC that Tauri
-provides for ordered streaming to one webview call, and it needs no capability. The webview still
+`core:event`, and the stream's `Channel` needs no capability. A `Channel` is the IPC that Tauri provides for
+ordered streaming to one webview call. The webview still
 opens no network connection, and `tauri.conf.json` (its content security policy) does not change.
 `open_stream` never rejects for a stream failure that happens after it returned an ID: such a failure is a
 `closed` event on the channel. A rejection of `open_stream` itself becomes one `closed` event in
 `tauri.ts`. **A reload:** the shell closes every open stream when a page starts loading
 (`on_page_load`, `Streams::close_all`), so a reloaded webview leaves no stream open behind a channel that
 nobody reads.
+
+**The plugin and the capability file (`r2.s11.w5`).** `main.rs` registers `tauri_plugin_notification::init()`,
+and `apps/desktop/src-tauri/capabilities/default.json` is the app's first capability file. Its `windows` is
+`["main"]` (the label `tauri.conf.json` gives the one window) and its permissions are the four `notification:`
+entries that the notifier's calls need: `allow-is-permission-granted`, `allow-request-permission`,
+`allow-notify` and `allow-register-listener`. It grants no `notification:default`, no `core:` entry and no other
+plugin. `notice_ack` goes through the one `verb` command and adds no command. `tauri-commands.test.ts` reads the
+file.
 
 A command returns the wire type itself, with no `{"ok": …}` envelope. A command that fails rejects
 with `{"kind": "<TransportErrorKind>", "message": "<text>"}`, the shape of the `error` member of a
@@ -519,6 +606,21 @@ Tauri's IPC only, so the webview opens no network connection.
   `POST /bridge/verbs/<verb>` and `GET /bridge/stream` from fixed test data (`apps/ui/e2e/screens/
   fixtures.ts`, which re-exports one module for each area under `fixtures/`). The server is test data for a rendering check, not the bridge: d12, d19 and d23 keep the
   real controller, API and bridge. A route or verb with no fixture answers `bad_request` and fails the run.
+  After `r2.s11.w5` it holds 20 screens: `3f-needs-you` and `dock-needs-you` are renewed with decision blocks, and
+  `12b-question-states`, `12c-other-cards`, `12e-working`, `12e-refused` and `12f-blocked` are new. Its fixture
+  server can hold a verb (a press in flight), answer a refusal and send notices on the stream.
+- `apps/ui/src/test/{needs-you-decision,needs-you-option-acts,notices,notifier}.test.ts*` (Vitest, the fake
+  transport, `r2.s11.w5`): the cards of a request with a decision block and the answered rows read from the stored
+  answer; one press makes two calls, an option press sends the option and no text, and a note rides as a typed
+  answer; the notice batch, its one timer, the outcome of `noticeAck` and the blocked banner; the two notifiers.
+  `transport-contract.test.ts`, `tauri-transport.test.ts` and `tauri-commands.test.ts` gain `noticeAck`, the
+  `notice_frame` event and the capability file. `no-polling.test.tsx` still passes: no notice frame, no call.
+- `crates/pf-client/tests/bridge_stream.rs` (`r2.s11.w5`): the bridge sends a notice frame as one `notice_frame`
+  event between other events, in order, and `POST /bridge/verbs/notice_ack` reaches the server with its arguments.
+- `scripts/demo/ui-needs-you-options.sh` (d33, `r2.s11.w5`): the options of every decision taken from the app in
+  headless Chromium through `pf-client-bridge`, against the real controller on `paper-options`. Its journey is
+  `apps/ui/e2e/needs-you-options.spec.ts`; it replaces the page's `Notification` with a recorder and reads the
+  ledgers after.
 
 ## The chat's Send and an open question (`r1.s6.w2`)
 
@@ -567,5 +669,5 @@ on `pf_api::ALLOWLIST`, so the one `verb` command carries them and no Tauri comm
   and their marks, the pick and the name, the `git init` tip and `git_init`, the success view, the retry
   with the same command ID, the refusal text, `NotBuilt` for the later-release choices, Escape, Cancel and
   focus. `projects.test.tsx`: the header button, no form, and the remove confirm in its three states.
-- `apps/ui/e2e/screens.spec.ts` (d25, fourteen screens): `2c-projects`, `11e-remove-confirm` and
+- `apps/ui/e2e/screens.spec.ts` (d25, 20 screens in all): `2c-projects`, `11e-remove-confirm` and
   `11f-add-project`. `scripts/demo/ui-pair.sh` (d12): add a folder with `git init`, remove it, add it again.

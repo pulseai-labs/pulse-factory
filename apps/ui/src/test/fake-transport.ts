@@ -13,6 +13,7 @@ import type {
   ClaimRecord,
   ConfirmCodeArgs,
   ConfirmIssued,
+  Decision,
   DeviceAckArgs,
   DeviceAnswerArgs,
   DeviceArmArgs,
@@ -21,6 +22,9 @@ import type {
   FolderEntry,
   FolderList,
   FolderListArgs,
+  NoticeAckArgs,
+  NoticeAcked,
+  NoticeRecord,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -92,6 +96,7 @@ export type Method =
   | "settingsUnset"
   | "runList"
   | "arm"
+  | "noticeAck"
   | "openStream";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
@@ -257,6 +262,25 @@ export function item(sessionId: string, seq: number, body: ChatItemBody, patch: 
 
 export const SERVER = { id: "0".repeat(64), name: "fake-server" };
 
+/** One notice as a device reads it: an `opened` one of R-12, run R-1, project P-1, unit u1. */
+export function noticeRecord(position: number, patch: Partial<NoticeRecord> = {}): NoticeRecord {
+  return {
+    position,
+    event: "opened",
+    request: "R-12",
+    revision: 1,
+    run: "R-1",
+    project: "P-1",
+    unit: "u1",
+    kind: "stop",
+    cause: "stop_file",
+    text: "Unit u1 stopped at stage implement and wrote a stop file.",
+    created_at: "2026-11-10T10:00:00.000Z",
+    sends: 1,
+    ...patch,
+  };
+}
+
 // ---- requests, the claim, runs and settings (r1.s4.w3) ----------------------------------------------
 
 /** A request as `requests` and the stream show it. A stop request takes `answer` and `clear`. */
@@ -389,6 +413,10 @@ export class FakeTransport implements Transport {
   requestRows: RequestSummary[] = [];
   /** The body each request's `show` answers. A request with none has an empty body. */
   bodies: Record<string, unknown> = {};
+  /** The decision block each request's `show` answers. A request with none answers no `decision`, as an old request does. */
+  decisions: Record<string, Decision> = {};
+  /** The stored answer each request's `show` answers (`requests.md`, "The request record"). */
+  answers: Record<string, unknown> = {};
   /** The head branch a `merge_ack`'s confirm code shows. */
   headBranch = "spine/s1";
   claim: ClaimRecord | null = null;
@@ -413,6 +441,8 @@ export class FakeTransport implements Transport {
   readonly interruptArgs: SessionInterruptArgs[] = [];
   readonly endArgs: SessionEndArgs[] = [];
   readonly armArgs: DeviceArmArgs[] = [];
+  /** The arguments of every `noticeAck`, in order. */
+  readonly noticeAckArgs: NoticeAckArgs[] = [];
   readonly streams: OpenStream[] = [];
   server: PairedServer | null;
   projects: ProjectRecord[];
@@ -652,7 +682,15 @@ export class FakeTransport implements Transport {
     this.enter("show");
     const row = this.requestRows.find((r) => r.id === args.id);
     if (!row) throw new TransportError("refused", `request ${args.id} is unknown`);
-    return { schema_version: 1, ...row, body: this.bodies[args.id] ?? {}, answer: null, answer_generation: null };
+    const decision = this.decisions[args.id];
+    return {
+      schema_version: 1,
+      ...row,
+      body: this.bodies[args.id] ?? {},
+      answer: this.answers[args.id] ?? null,
+      answer_generation: null,
+      ...(decision ? { decision } : {}),
+    };
   }
 
   /** The code the next arm `confirmCode` issues (a replay of a command ID answers `null`, as the server does). */
@@ -880,6 +918,23 @@ export class FakeTransport implements Transport {
       run_id: "run-1",
       project_id: "P-1",
     };
+  }
+
+  async noticeAck(args: NoticeAckArgs): Promise<NoticeAcked> {
+    this.noticeAckArgs.push(args);
+    this.enter("noticeAck");
+    return {
+      schema_version: 1,
+      device: this.server?.device.id ?? "D-1",
+      position: args.position,
+      outcome: args.outcome,
+      admitted: true,
+    };
+  }
+
+  /** Deliver a notice frame to every open stream, as the stream sends it (`api.md`, the stream). */
+  noticeFrame(notice: NoticeRecord): void {
+    this.emit({ event: "notice_frame", frame: { type: "notice", notice } });
   }
 
   async openStream(options: StreamOptions, onEvent: (event: StreamEvent) => void): Promise<StreamHandle> {

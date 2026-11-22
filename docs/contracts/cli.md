@@ -809,8 +809,8 @@ settings" in the common rules).
   run's project, or the server scope when the run has none. The two orchestrator keys also resolve at
   the agent. `on` and `max_words` are read when a notice is written, and `resend_seconds` at each
   re-send. A chat or a seat cannot set them. For a `notify.*` key, `applies` reads `next_turn`, and it
-  means the next notice: a third value of `applies` comes with the Settings page's text
-  (`r2.s11.w5`). Each `notify.*` key has the resume flag `current`.
+  means the next notice. The Settings page words these keys itself, as "Applies to the next notice"
+  (`r2.s11.w5`); the wire value stays `next_turn`. Each `notify.*` key has the resume flag `current`.
 
   The four `session.*` keys set how a session host serves a seat (`r2.s2.w3`, ADR-0016's amendment
   of 2026-11-16). `session.replay_bytes` is the size of the host's output buffer: the host keeps that

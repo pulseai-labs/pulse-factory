@@ -295,6 +295,23 @@ const CASES: Array<{
     run: (t) => t.settingsUnset({ key: "chat.self_turn_cap", project_id: "P-1", command_id: "c-12" }),
     result: { schema_version: 1, replayed: false, key: "chat.self_turn_cap" },
   },
+  // r2.s11.w5: the notice acknowledgement goes through the one `verb` command, with no new Tauri command.
+  {
+    method: "noticeAck",
+    verb: "notice_ack",
+    viaVerb: true,
+    args: { position: 4, outcome: "shown" },
+    run: (t) => t.noticeAck({ position: 4, outcome: "shown" }),
+    result: { schema_version: 1, device: "D-1", position: 4, outcome: "shown", admitted: true },
+  },
+  {
+    method: "noticeAck (blocked)",
+    verb: "notice_ack",
+    viaVerb: true,
+    args: { position: 9, outcome: "blocked" },
+    run: (t) => t.noticeAck({ position: 9, outcome: "blocked" }),
+    result: { schema_version: 1, device: "D-1", position: 9, outcome: "blocked", admitted: true },
+  },
   {
     method: "runList",
     verb: "run_list",
@@ -321,17 +338,18 @@ const CASES: Array<{
   },
 ];
 
-/** The scripted native events: one of each of the four shapes (the chat frame twice). */
+/** The scripted native events: one of each of the five shapes (the chat frame twice). */
 const NATIVE: unknown[] = [
   { event: "frame", frame: { type: "caught", session_id: "S-1", last_seq: 6 } },
   { event: "frame", frame: { type: "delta", session_id: "S-1", text: "hi" } },
   { event: "request_frame", frame: { type: "requests", requests: [], claim: null } },
+  { event: "notice_frame", frame: { type: "notice", notice: { position: 3, event: "opened", request: "R-12", revision: 1, run: "R-1", kind: "stop", text: "Unit u1 stopped.", created_at: "2026-11-22T10:00:00Z", sends: 1 } } },
   { event: "reconnecting", after: 6, retry_in_ms: 4000, reason: "the server is stopping" },
   { event: "closed", error: { kind: "unauthorized", message: "this device was revoked; pair it again" } },
 ];
 /** Every event before the last one: `closed` ends a stream. */
-const BEFORE_CLOSED = NATIVE.slice(0, 4);
-const CLOSED = NATIVE[4];
+const BEFORE_CLOSED = NATIVE.slice(0, -1);
+const CLOSED = NATIVE[NATIVE.length - 1];
 
 beforeEach(() => {
   FakeEventSource.all = [];
@@ -404,7 +422,7 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
       if (rig.name === "bridge") expect(FakeEventSource.all.at(-1)?.closed).toBe(true);
     });
 
-    it("drops a value that is not one of the four event shapes", async () => {
+    it("drops a value that is not one of the five event shapes", async () => {
       const rig = makeRig();
       const { seen } = await open(rig);
       const odd: unknown[] = [
@@ -421,6 +439,11 @@ describe.each(RIGS)("the %s transport", (_name, makeRig) => {
         { event: "request_frame", frame: { type: "requests", requests: 3, claim: null } },
         { event: "request_frame", frame: { type: "claim", claim: "bad" } },
         { event: "request_frame", frame: { type: "claim" } },
+        // A notice frame of another shape is dropped, never a closed stream.
+        { event: "notice_frame" },
+        { event: "notice_frame", frame: { type: "requests", requests: [], claim: null } },
+        { event: "notice_frame", frame: { type: "notice", notice: { position: "3", event: "opened", request: "R-1" } } },
+        { event: "notice_frame", frame: { type: "notice", notice: { position: 3, event: "opened" } } },
         42,
         null,
         "text",

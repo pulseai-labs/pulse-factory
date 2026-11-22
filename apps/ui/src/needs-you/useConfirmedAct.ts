@@ -1,6 +1,8 @@
-// The one-press act (r1.s5.w4, Approach 1; ruling G1). One hook for Approve merge, Send and Resume. A press
-// runs two calls in order: `confirmCode` with a fresh command ID and the act's subject, then the act (`ack`,
-// `answer` or `clear`) with that code and a second fresh command ID. The confirm panel is gone, so the
+// The one-press act (r1.s5.w4, Approach 1; ruling G1; r2.s11.w5, Approach 6). One hook for Approve merge, Send,
+// Resume and one button for each option. A press runs two calls in order: `confirmCode` with a fresh command ID
+// and the act's subject, then the act (`ack`, `answer` or `clear`) with that code and a second fresh command ID.
+// An option press binds the option's ID and sends the option and nothing of its own (an empty `text`, no `to`); a
+// note rides a `resume` option as one typed `answer` that binds the note's SHA-256 and the option's stage. The confirm panel is gone, so the
 // `client-api-auth` control (a fresh, one-use confirm code bound to this device and this act) stays as a
 // step the app takes behind the press.
 //
@@ -10,7 +12,9 @@
 //   - `unreachable` on the ask shows the line and Retry, which asks again with a new command ID;
 //   - `unreachable` on the spend shows the line and Retry, which spends the same code with the same ID;
 //   - a refusal shows `refusalLine(err)` on the card and drops the code; `subject_moved` reads `requests`
-//     once; a replay reads `requests` once and claims no outcome; a down kind leaves the line to the 3c banner;
+//     once and drops the press (an option of an older revision is never sent again); any other refusal keeps the
+//     press for Try again, which asks a new code; a replay reads `requests` once and claims no outcome; a down
+//     kind leaves the line to the 3c banner;
 //   - while a press is in flight a second press starts nothing.
 // The hook lives in the page, keyed by request ID: a request frame that closes the request while its spend
 // is in flight does not drop the spend's answer, and an answer that arrives after the page closed still
@@ -18,7 +22,7 @@
 //
 // This is a freshness and binding check, not a check that a person is present (Q2, C1): a script that holds
 // the device's bridge can make both calls. The page adds no user-presence check.
-import type { ConfirmCodeArgs, RequestActed, RequestSummary } from "@pulse-factory/api-client";
+import type { ConfirmCodeArgs, DecisionOption, RequestActed, RequestSummary } from "@pulse-factory/api-client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { newCommandId } from "../components/command-id";
 import { refusalLine } from "../components/ConfirmDialog";
@@ -29,10 +33,66 @@ import { shortSha } from "./format";
 
 export type ActKind = "answer" | "ack" | "clear";
 
+/**
+ * One press. The first three are today's acts (a card with no decision block). The others come from a block
+ * card: `send` a typed answer to a seat, `option` one button of the block, `note` a `resume` option with a note
+ * (one typed `answer`), `resume` a plain `clear` of a stop that takes no text, and `approve` the merge.
+ * `unit` is the words of the answered row.
+ */
+export type Act =
+  | { kind: "answer"; text: string }
+  | { kind: "clear" }
+  | { kind: "ack" }
+  | { kind: "send"; text: string; unit: string }
+  | { kind: "option"; option: DecisionOption; unit: string }
+  | { kind: "note"; option: DecisionOption; text: string; unit: string }
+  | { kind: "resume"; unit: string }
+  | { kind: "approve"; option?: string };
+
+/** The verb an act calls. */
+export function verbOf(act: Act): ActKind {
+  switch (act.kind) {
+    case "answer":
+    case "send":
+    case "note":
+      return "answer";
+    case "clear":
+    case "resume":
+      return "clear";
+    case "ack":
+    case "approve":
+      return "ack";
+    case "option":
+      return act.option.effect.verb === "resume" ? "clear" : act.option.effect.verb;
+  }
+}
+
+/** The control a press came from: an option's ID, `send`, `resume` or `approve`. The card shows it working. */
+export function controlOf(act: Act): string {
+  switch (act.kind) {
+    case "option":
+    case "note":
+      return act.option.id;
+    case "answer":
+    case "send":
+      return "send";
+    case "clear":
+    case "resume":
+      return "resume";
+    case "ack":
+    case "approve":
+      return "approve";
+  }
+}
+
 /** What a card shows of its press: the line and, after `unreachable`, a Retry. */
 export interface ActLine {
   phase: "asking" | "ask_unreachable" | "spending" | "spend_unreachable" | "ended";
   message: string | null;
+  /** The control that was pressed (`controlOf`). */
+  control: string;
+  /** A refusal that leaves the press to try again: the same act, a new code. */
+  again: boolean;
 }
 
 /** What a landed act did, for the card's mint row and the Answered today row. */
@@ -46,9 +106,8 @@ export interface Done {
 }
 
 interface Pending {
-  kind: ActKind;
+  act: Act;
   request: RequestSummary;
-  text: string;
   /** In memory only. `null` until the ask answers. */
   code: string | null;
   /** The command ID of the spend: kept for a retry after `unreachable`, and only then. */
@@ -63,16 +122,50 @@ export interface ConfirmedActs {
   /** A request that a replay found closed: "Done before: <status> at <time>". */
   notices: Record<string, string>;
   /** Press: ask a code, then spend it at once. A press while another is in flight for this request does nothing. */
-  press(request: RequestSummary, kind: ActKind, text?: string): void;
-  /** Retry after `unreachable`: the ask again (new command ID), or the spend again (same code, same ID). */
+  press(request: RequestSummary, act: Act): void;
+  /** Retry after `unreachable`: the ask again (new command ID), or the spend again (same code, same ID). Try again after a refusal: the ask again. */
   retry(id: string): void;
   /** A press is in flight for this request: the card's buttons are disabled. */
   inFlight(id: string): boolean;
 }
 
+/** What a landed act did, in the words of the mint row and of the answered row (Approach 7). */
+function wordsOf(p: Pending, acted: RequestActed, who: string): Done {
+  const { act, request } = p;
+  if (act.kind === "ack" || act.kind === "approve") {
+    return acted.merged === true
+      ? { what: "Merge approved", detail: `Merged at ${shortSha(acted.head_sha ?? request.head_sha ?? "")}`, device: who }
+      : { what: `Not merged: ${acted.outcome ?? "the merge did not land"}`, detail: null, device: who };
+  }
+  const stage = (to: string | undefined) => acted.to_stage ?? to ?? request.stage;
+  switch (act.kind) {
+    case "clear":
+      return { what: `Resumed at ${stage(undefined)}`, detail: null, device: who };
+    case "answer":
+      return { what: act.text, detail: null, device: who };
+    case "send":
+      return { what: `Typed ${act.text}`, detail: null, device: who };
+    case "resume":
+      return { what: `Resumed ${act.unit} at ${stage(undefined)}`, detail: null, device: who };
+    case "note": {
+      const to = act.option.effect.verb === "resume" ? act.option.effect.to : undefined;
+      return { what: `Resumed ${act.unit} at ${stage(to)} \u00b7 note: ${act.text}`, detail: null, device: who };
+    }
+    case "option": {
+      const effect = act.option.effect;
+      if (effect.verb === "answer") return { what: `Pressed ${act.option.label}`, detail: null, device: who };
+      return {
+        what: `Resumed ${act.unit} at ${stage(effect.verb === "resume" ? effect.to : undefined)}`,
+        detail: null,
+        device: who,
+      };
+    }
+  }
+}
+
 export function useConfirmedAct(): ConfirmedActs {
   const { call, server } = useConnection();
-  const { apply } = useRequests();
+  const { apply, state } = useRequests();
   const [lines, setLines] = useState<Record<string, ActLine>>({});
   const [done, setDone] = useState<Record<string, Done>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
@@ -81,6 +174,9 @@ export function useConfirmedAct(): ConfirmedActs {
   const live = useRef(true);
   const deviceName = server.device.name;
   const deviceId = server.device.id;
+  // The requests as the state holds them now, for the check that a retry never sends an older revision.
+  const held = useRef(state.byId);
+  held.current = state.byId;
 
   useEffect(() => {
     live.current = true;
@@ -118,17 +214,7 @@ export function useConfirmedAct(): ConfirmedActs {
     (p: Pending, acted: RequestActed) => {
       apply({ type: "acted", acted });
       const who = acted.device === deviceId ? deviceName : acted.device;
-      let outcome: Done;
-      if (p.kind === "ack") {
-        outcome =
-          acted.merged === true
-            ? { what: "Merge approved", detail: `Merged at ${shortSha(acted.head_sha ?? p.request.head_sha ?? "")}`, device: who }
-            : { what: `Not merged: ${acted.outcome ?? "the merge did not land"}`, detail: null, device: who };
-      } else if (p.kind === "clear") {
-        outcome = { what: `Resumed at ${acted.to_stage ?? p.request.stage}`, detail: null, device: who };
-      } else {
-        outcome = { what: p.text, detail: null, device: who };
-      }
+      const outcome = wordsOf(p, acted, who);
       if (live.current) setDone((d) => ({ ...d, [p.request.id]: outcome }));
     },
     [apply, deviceId, deviceName],
@@ -151,18 +237,38 @@ export function useConfirmedAct(): ConfirmedActs {
       const p = pending.current.get(id);
       if (p === undefined || p.code === null) return;
       const code = p.code;
+      const control = controlOf(p.act);
       busy.current.add(id);
-      setLine(id, { phase: "spending", message: null });
+      setLine(id, { phase: "spending", message: null, control, again: false });
       const commandId = (p.spendId ??= newCommandId());
-      const { request } = p;
+      const { request, act } = p;
+      const base = { request: request.id, rev: request.revision, code, command_id: commandId };
       try {
-        const acted = await call((t) =>
-          p.kind === "ack"
-            ? t.ack({ request: request.id, rev: request.revision, code, command_id: commandId })
-            : p.kind === "clear"
-              ? t.clear({ request: request.id, rev: request.revision, code, command_id: commandId })
-              : t.answer({ request: request.id, rev: request.revision, text: p.text, code, command_id: commandId }),
-        );
+        const acted = await call((t) => {
+          switch (act.kind) {
+            case "ack":
+              return t.ack(base);
+            case "approve":
+              return t.ack(act.option === undefined ? base : { ...base, option: act.option });
+            case "clear":
+            case "resume":
+              return t.clear(base);
+            case "answer":
+            case "send":
+              return t.answer({ ...base, text: act.text });
+            case "note": {
+              const to = act.option.effect.verb === "resume" ? act.option.effect.to : undefined;
+              return t.answer(to === undefined ? { ...base, text: act.text } : { ...base, text: act.text, to });
+            }
+            case "option":
+              // An option press carries the option and nothing of its own: an empty text, no stage.
+              return act.option.effect.verb === "answer"
+                ? t.answer({ ...base, text: "", option: act.option.id })
+                : act.option.effect.verb === "resume"
+                  ? t.clear({ ...base, option: act.option.id })
+                  : t.ack({ ...base, option: act.option.id });
+          }
+        });
         // The act landed: its answer applies even if the card or the page is gone meanwhile.
         pending.current.delete(id);
         busy.current.delete(id);
@@ -173,16 +279,23 @@ export function useConfirmedAct(): ConfirmedActs {
         busy.current.delete(id);
         const err = asTransportError(e);
         if (err.kind === "unreachable") {
-          setLine(id, { phase: "spend_unreachable", message: err.message });
+          setLine(id, { phase: "spend_unreachable", message: err.message, control, again: false });
           return;
         }
-        pending.current.delete(id);
+        // The code is spent or refused: drop it. The press stays for Try again unless the request moved.
+        p.code = null;
+        p.spendId = null;
         if (isDownKind(err.kind)) {
+          pending.current.delete(id);
           setLine(id, null);
           return;
         }
-        if (err.refusal === "subject_moved") void readRequests();
-        setLine(id, { phase: "ended", message: refusalLine(err) });
+        const moved = err.refusal === "subject_moved";
+        if (moved) {
+          pending.current.delete(id);
+          void readRequests();
+        }
+        setLine(id, { phase: "ended", message: refusalLine(err), control, again: !moved });
       }
     },
     [call, landed, replayed, readRequests, setLine],
@@ -192,25 +305,41 @@ export function useConfirmedAct(): ConfirmedActs {
     async (id: string) => {
       const p = pending.current.get(id);
       if (p === undefined) return;
+      const control = controlOf(p.act);
       busy.current.add(id);
       p.code = null;
       p.spendId = null;
-      setLine(id, { phase: "asking", message: null });
+      setLine(id, { phase: "asking", message: null, control, again: false });
       try {
-        const { request } = p;
-        const args: ConfirmCodeArgs = {
-          subject:
-            p.kind === "answer"
-              ? { kind: "request", request: request.id, revision: request.revision, verb: "answer", text_sha256: await sha256Hex(p.text) }
-              : { kind: "request", request: request.id, revision: request.revision, verb: p.kind },
-          // A fresh command ID for each ask, so a lost answer is never replayed (a replay answers `code: null`).
-          command_id: newCommandId(),
-        };
+        const { request, act } = p;
+        const at = { request: request.id, revision: request.revision };
+        let subject: ConfirmCodeArgs["subject"];
+        switch (act.kind) {
+          case "answer":
+          case "send":
+            subject = { kind: "request", ...at, verb: "answer", text_sha256: await sha256Hex(act.text) };
+            break;
+          case "note": {
+            const to = act.option.effect.verb === "resume" ? act.option.effect.to : undefined;
+            const text_sha256 = await sha256Hex(act.text);
+            subject = to === undefined ? { kind: "request", ...at, verb: "answer", text_sha256 } : { kind: "request", ...at, verb: "answer", text_sha256, to };
+            break;
+          }
+          case "option":
+            subject = { kind: "request", ...at, verb: verbOf(act), option: act.option.id };
+            break;
+          case "approve":
+            subject = act.option === undefined ? { kind: "request", ...at, verb: "ack" } : { kind: "request", ...at, verb: "ack", option: act.option };
+            break;
+          default:
+            subject = { kind: "request", ...at, verb: verbOf(act) };
+        }
+        // A fresh command ID for each ask, so a lost answer is never replayed (a replay answers `code: null`).
+        const args: ConfirmCodeArgs = { subject, command_id: newCommandId() };
         const issued = await call((t) => t.confirmCode(args));
         if (issued.code === null) {
           busy.current.delete(id);
-          pending.current.delete(id);
-          setLine(id, { phase: "ended", message: "The server gave no confirm code. Confirm again." });
+          setLine(id, { phase: "ended", message: "The server gave no confirm code. Confirm again.", control, again: true });
           return;
         }
         p.code = issued.code;
@@ -219,14 +348,13 @@ export function useConfirmedAct(): ConfirmedActs {
         busy.current.delete(id);
         const err = asTransportError(e);
         if (err.kind === "unreachable") {
-          setLine(id, { phase: "ask_unreachable", message: err.message });
+          setLine(id, { phase: "ask_unreachable", message: err.message, control, again: false });
         } else if (isDownKind(err.kind)) {
           // The 3c banner shows it; there is nothing to spend.
           pending.current.delete(id);
           setLine(id, null);
         } else {
-          pending.current.delete(id);
-          setLine(id, { phase: "ended", message: err.message });
+          setLine(id, { phase: "ended", message: err.message, control, again: true });
         }
       }
     },
@@ -234,9 +362,9 @@ export function useConfirmedAct(): ConfirmedActs {
   );
 
   const press = useCallback(
-    (request: RequestSummary, kind: ActKind, text = "") => {
+    (request: RequestSummary, act: Act) => {
       if (busy.current.has(request.id)) return;
-      pending.current.set(request.id, { kind, request, text, code: null, spendId: null });
+      pending.current.set(request.id, { act, request, code: null, spendId: null });
       void ask(request.id);
     },
     [ask],
@@ -247,10 +375,17 @@ export function useConfirmedAct(): ConfirmedActs {
       if (busy.current.has(id)) return;
       const p = pending.current.get(id);
       if (p === undefined) return;
+      // An option of an older revision is never sent again (G8): a request that moved drops the press.
+      const now = held.current[id];
+      if (now !== undefined && now.revision !== p.request.revision) {
+        pending.current.delete(id);
+        setLine(id, null);
+        return;
+      }
       if (p.code !== null) void spend(id);
       else void ask(id);
     },
-    [ask, spend],
+    [ask, spend, setLine],
   );
 
   const inFlight = useCallback(

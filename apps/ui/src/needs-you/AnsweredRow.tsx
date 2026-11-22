@@ -1,10 +1,14 @@
-// One row of "Answered today" (11d, r1.s5.w4): "<spine> · <run>" with "asked hh:mm", the question, the answer,
-// and who answered with the time. The claim line of the old page is gone (G1): the claim shows here only, as
-// the holder of the generation that answered.
-import type { ClaimRecord, RequestDetail, RequestSummary } from "@pulse-factory/api-client";
+// One row of "Answered today" (11d, r1.s5.w4; 12c, r2.s11.w5). A row with no decision block reads as it did:
+// "<spine> · <run>" with "asked hh:mm", the question, the answer, and who answered with the time. A row with a
+// block leads with the kind label and names what was done: "Pressed <label>", "Typed <text>", "Resumed <unit>
+// at <stage>", "Resumed <unit> at <stage> · note: <text>" (Approach 7). The claim line of the old page is gone
+// (G1): the claim shows here only, as the holder of the generation that answered.
+import type { ClaimRecord, ProjectRecord, RequestDetail, RequestSummary } from "@pulse-factory/api-client";
 import { clock } from "../components/format";
 import { parseTime } from "../components/chat-format";
 import { Icon } from "../ui";
+import { KindTag } from "./cards";
+import { shownStopText, storedAnswerWords } from "./decision";
 import type { Done } from "./useConfirmedAct";
 import { firstLine, fieldOf, questionOf, shortSha } from "./format";
 
@@ -21,6 +25,11 @@ export function answerWords(request: RequestSummary, detail: RequestDetail | und
   if (request.kind === "merge_ack") {
     const sha = fieldOf("head_sha", request, detail);
     return { what: "Merge approved", detail: sha === null ? null : `Merged at ${shortSha(sha)}` };
+  }
+  // A request with a decision block: what the stored answer did, from the block (the option's label, who asked).
+  if (detail?.decision !== undefined) {
+    const words = storedAnswerWords(request, detail, detail.decision);
+    if (words !== null) return { what: words, detail: null };
   }
   const answer = detail?.answer;
   if (typeof answer === "object" && answer !== null) {
@@ -51,13 +60,16 @@ export function whoWords(
 /** The question of an answered request, from any body held for it. */
 export function questionText(request: RequestSummary, body: RequestDetail | undefined): string {
   const { stop, gaps } = questionOf(body?.body);
-  if (stop !== null) return stop;
+  const decision = body?.decision;
+  if (stop !== null) return decision === undefined ? stop : shownStopText(stop, decision);
   if (gaps.length > 0) return gaps.map((g) => `${g.section} ${g.question}`.trim()).join(" · ");
   if (request.kind === "merge_ack") {
     const branch = fieldOf("head_branch", request, body);
     const base = fieldOf("base", request, body);
     if (branch !== null && base !== null) return `Merge ${branch} into ${base}?`;
   }
+  // Every other block card: the controller's summary.
+  if (decision !== undefined) return decision.summary;
   return firstLine(request.reason);
 }
 
@@ -72,29 +84,43 @@ export function AnsweredRow(props: {
   spine: string | null;
   claim: ClaimRecord | null;
   device: DeviceName;
+  projects?: ProjectRecord[] | null;
 }) {
-  const { request, body, detail, done, notice, spine, claim, device } = props;
+  const { request, body, detail, done, notice, spine, claim, device, projects } = props;
+  const decision = detail?.decision ?? body?.decision;
   const asked = parseTime(request.opened_at);
   const answeredAt = parseTime(request.answered_at);
   const answer = answerWords(request, detail, done);
   const who = whoWords(detail, done, claim, device);
   const time = answeredAt === null ? null : clock(answeredAt);
   const tail = [who, time].filter((s): s is string => s !== null && s !== "").join(" · ");
+  const resumed = answer?.what.startsWith("Resumed ") === true;
+  const projectId = decision?.refs.project;
+  const project = projectId === undefined ? null : (projects?.find((p) => p.id === projectId)?.name ?? projectId);
   return (
     <li className="ny-ans" aria-label={`Answered ${request.id}`}>
-      <div className="ny-head">
-        <span className="ny-icon ny-icon-run">
-          <Icon name={request.kind === "merge_ack" ? "git-branch" : "activity"} size={12} />
-        </span>
-        <span className="ny-name">{spine ?? request.run}</span>
-        {spine !== null ? <span className="ny-where">{`· ${request.run}`}</span> : null}
-        <span className="ny-spacer" />
-        <span className="ny-age">{asked === null ? "" : `asked ${clock(asked)}`}</span>
-      </div>
+      {decision !== undefined ? (
+        <div className="ny-head ny-head-block">
+          <KindTag kind={request.kind} />
+          <span className="ny-where ny-where-plain">{[spine ?? request.run, project ?? (spine !== null ? request.run : null)].filter((v): v is string => v !== null).join(" \u00b7 ")}</span>
+          <span className="ny-spacer" />
+          <span className="ny-id">{request.id}</span>
+        </div>
+      ) : (
+        <div className="ny-head">
+          <span className="ny-icon ny-icon-run">
+            <Icon name={request.kind === "merge_ack" ? "git-branch" : "activity"} size={12} />
+          </span>
+          <span className="ny-name">{spine ?? request.run}</span>
+          {spine !== null ? <span className="ny-where">{`· ${request.run}`}</span> : null}
+          <span className="ny-spacer" />
+          <span className="ny-age">{asked === null ? "" : `asked ${clock(asked)}`}</span>
+        </div>
+      )}
       <p className="ny-ans-question">{questionText(request, body ?? detail)}</p>
       <div className="ny-ans-line">
         <span className="ny-ans-icon">
-          <Icon name="check" size={13} />
+          <Icon name={resumed && decision !== undefined ? "play" : "check"} size={13} />
         </span>
         {answer !== null ? <span className="ny-ans-what">{answer.what}</span> : <span className="ny-ans-what">{notice ?? "Answered"}</span>}
         {answer?.detail ? <span className="ny-ans-detail">{answer.detail}</span> : null}

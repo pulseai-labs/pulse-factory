@@ -18,11 +18,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clock } from "../components/format";
 import { AnsweredRow } from "../needs-you/AnsweredRow";
+import { BlockedBanner } from "../needs-you/BlockedBanner";
 import { OpenList, chatQuestions } from "../needs-you/OpenList";
 import { useNeedsYou } from "../needs-you/useNeedsYou";
 import { useChat } from "../state/chat";
 import { asTransportError, isDownKind, useConnection } from "../state/connection";
 import { useRequests } from "../state/requests";
+import { useTold } from "../state/notices";
 import { Column } from "../shell/Column";
 import { Button } from "../ui";
 import "../styles/needs-you.css";
@@ -40,6 +42,7 @@ export function NeedsYou() {
   const { apply } = useRequests();
   const chat = useChat();
   const ny = useNeedsYou();
+  const told = useTold();
   const { retry } = ny.bodies;
   const [read, setRead] = useState<ReadState>(NEVER);
   const live = useRef(true);
@@ -99,6 +102,19 @@ export function NeedsYou() {
     void readRuns();
   }, [retry, readRequests, readRuns]);
 
+  // A click on a notification names a request: scroll to its card once it is on the page, then forget it.
+  const { scrollTo, clearScroll } = told;
+  useEffect(() => {
+    if (scrollTo === null) return;
+    const card = [...document.querySelectorAll("[data-request]")].find((el) => el.getAttribute("data-request") === scrollTo);
+    if (card !== undefined) {
+      card.scrollIntoView?.({ block: "start" });
+      clearScroll();
+    } else if (ny.state.loaded) {
+      clearScroll();
+    }
+  }, [scrollTo, clearScroll, ny.open, ny.state.loaded]);
+
   const chats = useMemo(() => chatQuestions(chat.live), [chat.live]);
   const empty = ny.open.length === 0 && chats.length === 0;
 
@@ -111,8 +127,9 @@ export function NeedsYou() {
               Needs you
             </h2>
             <p className="ny-subtitle">
-              Every open question across your projects. Answer here, in the session, on your phone or from the CLI.
+              Every open request across your projects. Merge approvals first, then the rest, oldest first.
             </p>
+            <BlockedBanner where="page" />
           </div>
         </div>
 
@@ -163,6 +180,7 @@ export function NeedsYou() {
                   spine={ny.spineOf(r.run)}
                   claim={ny.state.claim}
                   device={server.device}
+                  projects={projects}
                 />
               ))}
             </ul>
@@ -176,6 +194,10 @@ export function NeedsYou() {
 /** The open cards in the dock's 328 px width: the same hooks and Hold, no reads of its own. */
 export function NeedsYouDock(props: { active: boolean }) {
   const ny = useNeedsYou({ active: props.active });
-  if (ny.open.length === 0) return <p className="dock-empty">Nothing needs you.</p>;
-  return <OpenList ny={ny} compact />;
+  return (
+    <>
+      <BlockedBanner where="dock" />
+      {ny.open.length === 0 ? <p className="dock-empty">Nothing needs you.</p> : <OpenList ny={ny} compact />}
+    </>
+  );
 }
