@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "The main window may use the notification plugin's four calls that the app makes: read the permission, ask for it, show a notification and listen for a click. It grants no other plugin and no core permission. The stream and the app's own commands need none.",
+  "windows": ["main"],
+  "permissions": [
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify",
+    "notification:allow-register-listener"
+  ]
+}

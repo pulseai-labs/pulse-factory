@@ -56,6 +56,15 @@ const APPLIES: Record<SettingRecord["applies"], string> = {
   next_launch: "Applies at the next launch",
 };
 
+/**
+ * When a change applies, in words. A `notify.*` key reads `next_turn` on the wire, which `docs/contracts/cli.md` and
+ * ADR-0016 define as the next notice for these keys, so the page words them itself (r2.s11.w5, Approach 12). Every
+ * other record reads as it did.
+ */
+export function appliesLine(record: Pick<SettingRecord, "key" | "applies">): string {
+  return record.key.startsWith("notify.") ? "Applies to the next notice" : APPLIES[record.applies];
+}
+
 /** What a lost answer leaves to retry: the same call, with the command ID it already has. */
 type Retry = { op: "set"; value: SettingValue } | { op: "unset" };
 
@@ -129,7 +138,7 @@ function ChainRow(props: { record: SettingRecord; links: Link[]; scopeLabel: str
         ) : null}
       </div>
       <p className="st-note">{note}</p>
-      <p className="st-applies">{APPLIES[record.applies]}</p>
+      <p className="st-applies">{appliesLine(record)}</p>
     </>
   );
 }

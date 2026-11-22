@@ -11,11 +11,11 @@
 //
 // The fixture server stands in for the bridge's answers (`e2e/screens/server.ts`, test data for a
 // rendering check). The journey lines d12, d19 and d23 keep the real controller, API and bridge.
-import type { RequestList, RunList, SessionList } from "@pulse-factory/api-client";
+import type { RunList, SessionList } from "@pulse-factory/api-client";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { CONTRACT, openUnderContract, settle, type Recorder } from "./screens/contract";
-import { PARKED } from "./screens/fixtures/needs-you";
-import { clearOverlay, overlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
+import { NOTICE, SCREENS, listOf, pick } from "./screens/fixtures";
+import { Refused, clearOverlay, overlay, startFixtureServer, type FixtureServer, type Mode } from "./screens/server";
 
 test.use({
   viewport: CONTRACT.viewport,
@@ -42,6 +42,7 @@ test.afterAll(async () => {
 
 test.beforeEach(() => {
   server.setMode("paired");
+  server.setNotices([]);
   server.unexpected.length = 0;
 });
 
@@ -174,37 +175,117 @@ test.describe("chat", () => {
 });
 
 test.describe("needs-you", () => {
-  test("3f-needs-you: Needs you", async ({ page }) => {
-    // The parked item is this test's alone: one more open request would change the rail's count on every other
-    // screen. It comes through the overlay (its `show` answer is in `fixtures/needs-you.ts`).
-    overlay({
-      requests: (base: unknown) => {
-        const list = base as RequestList;
-        return { ...list, open: list.open + 1, requests: [...list.requests, PARKED] };
-      },
-    });
-    // The page is a column of five cards and the answered rows: a taller window shows all of them in one
-    // screenshot. Only the height changes; the width and the pixel ratio stay as the contract fixes them.
-    await page.setViewportSize({ width: CONTRACT.viewport.width, height: 1720 });
-    await open(page);
+  /**
+   * The requests this test's page shows: the cases it names, with the base's two open requests (a seat's question
+   * and the merge approval) or without them. The base's answered rows stay. The state is the test's alone: one
+   * more open request would change the rail's count on every other screen. The stream's request frame follows it.
+   */
+  function showRequests(ids: readonly string[], options: { base?: boolean } = {}): void {
+    overlay({ requests: () => listOf(pick(...ids), options.base ?? false) });
+  }
+
+  /** Opens Needs you on a window of `height`: only the height changes, the width and the pixel ratio stay as the contract fixes them. */
+  async function openPage(page: Page, height: number, options: { dock?: boolean } = {}): Promise<Locator> {
+    await page.setViewportSize({ width: CONTRACT.viewport.width, height });
+    await open(page, "paired", options);
     await rail(page, "Needs you").click();
     await expect(page.getByRole("heading", { name: "Needs you", level: 2 })).toBeVisible();
-    const main = page.getByRole("main");
-    // The merge card, the run question, the parked item and the chat question, then the answered rows.
-    await expect(main.getByTestId("merge-sha")).toBeVisible();
-    await expect(main.getByTestId("stop-text")).toBeVisible();
-    await expect(main.getByRole("button", { name: "Resume w3" })).toBeVisible();
+    return page.getByRole("main");
+  }
+
+  test("3f-needs-you: Needs you", async ({ page }) => {
+    // 12a: a merge approval, a seat's question with its recommendation, a stall, an outcome cap, a red gate, a
+    // gaps request, the chat question and the answered rows.
+    showRequests(SCREENS.page, { base: true });
+    const main = await openPage(page, 3400);
+    await expect(main.getByTestId("kind-label").first()).toBeVisible();
+    await expect(main.getByRole("button", { name: "Approve merge" })).toBeVisible();
     await expect(main.getByRole("button", { name: "Open session" })).toBeVisible();
     await expect(main.getByRole("list", { name: "Answered today" }).getByText("CLI · claim session C-2").first()).toBeVisible();
     await compare(page, "3f-needs-you.png", main.getByRole("button", { name: "Approve merge" }));
   });
 
   test("dock-needs-you: the dock, open on Projects", async ({ page }) => {
+    // 12d: the dock's cards at 328 px, with every act. A taller window shows the whole column.
+    await page.setViewportSize({ width: CONTRACT.viewport.width, height: 2000 });
     await open(page, "paired", { dock: true });
     const dock = page.getByRole("complementary", { name: "Needs you" });
-    await expect(dock.getByRole("button", { name: "Open" }).first()).toBeVisible();
-    await expect(dock.getByTestId("merge-sha")).toBeVisible();
+    await expect(dock.getByRole("button", { name: "Approve merge" })).toBeVisible();
+    await expect(dock.getByTestId("kind-label").first()).toBeVisible();
     await compare(page, "dock-needs-you.png", dock.getByText("all projects"), dock);
+  });
+
+  test("12b-question-states: a run question with no option, two, four long ones, options that could not be read, and no block", async ({ page }) => {
+    showRequests(SCREENS.questionStates);
+    const main = await openPage(page, 3300);
+    // The fifth request has no block: it keeps today's card, so it has no kind label.
+    await expect(main.locator('[data-request="R-35"]')).toBeVisible();
+    await expect(main.getByText(/The seat wrote options that couldn.t be read/)).toBeVisible();
+    await compare(page, "12b-question-states.png", main.locator('[data-request="R-35"]'));
+  });
+
+  test("12c-other-cards: a park file with declared options and with none, no done signal, merge failed, an outcome cap and a stop that take no text", async ({ page }) => {
+    showRequests(SCREENS.otherCards);
+    const main = await openPage(page, 3300);
+    await expect(main.locator('[data-request="R-27"]')).toBeVisible();
+    await compare(page, "12c-other-cards.png", main.locator('[data-request="R-22"]'));
+  });
+
+  test("12e-working: a press in flight, held by the server", async ({ page }) => {
+    // The server reads the act and never answers it: the pressed control shows its working text and the others wait.
+    showRequests(["R-21"]);
+    const main = await openPage(page, 1100);
+    server.hold("clear");
+    const card = main.locator('[data-request="R-21"]');
+    await card.locator('[data-option="resume"]').click();
+    await expect(card.getByText("Sending to draco-desk…")).toBeVisible();
+    await compare(page, "12e-working.png", card.getByText("Sending to draco-desk…"));
+  });
+
+  test("12e-refused: a refused press, with Try again", async ({ page }) => {
+    showRequests(["R-21"]);
+    overlay({ clear: () => new Refused("refused", "the request moved on since the code was issued") });
+    const main = await openPage(page, 1100);
+    const card = main.locator('[data-request="R-21"]');
+    await card.locator('[data-option="resume"]').click();
+    await expect(card.getByRole("button", { name: "Try again" })).toBeVisible();
+    await compare(page, "12e-refused.png", card.getByRole("button", { name: "Try again" }));
+  });
+
+  test("12f-blocked: the blocked banner on the page and in the open dock", async ({ page }) => {
+    // The page's `Notification` answers `denied`, so the batch of the one opened notice shows nothing and
+    // acknowledges `blocked`. The clock is paused, so the batch's timer is run by hand. The Needs you page has no
+    // dock, so the two states are two shots of one session, set side by side in one screenshot.
+    await page.addInitScript(() => {
+      class Denied {
+        static permission = "denied";
+        static requestPermission = () => Promise.resolve("denied");
+      }
+      Object.defineProperty(window, "Notification", { value: Denied, configurable: true });
+    });
+    showRequests([], { base: true });
+    server.setNotices([NOTICE]);
+    const main = await openPage(page, 560, { dock: true });
+    await page.clock.runFor(1500);
+    await expect(main.getByText(/macOS is blocking notifications from Pulse Factory/)).toBeVisible();
+    await settle(page);
+    const pageShot = await page.screenshot();
+    await page.getByRole("banner").getByRole("button", { name: "Projects" }).click();
+    const dock = page.getByRole("complementary", { name: "Needs you" });
+    await expect(dock.getByText(/macOS is blocking Pulse Factory.s notifications/)).toBeVisible();
+    await settle(page);
+    const dockShot = await dock.screenshot();
+    const view = await page.context().newPage();
+    try {
+      // The height of a PNG is the big-endian word at byte 20 of its header.
+      await view.setViewportSize({ width: CONTRACT.viewport.width, height: pageShot.readUInt32BE(20) + dockShot.readUInt32BE(20) });
+      const img = (shot: Buffer) => `<img style="display:block" src="data:image/png;base64,${shot.toString("base64")}">`;
+      await view.setContent(`<body style="margin:0;background:#000">${img(pageShot)}${img(dockShot)}</body>`);
+      await view.waitForFunction(() => [...document.images].every((i) => i.complete));
+      await expect(view).toHaveScreenshot("12f-blocked.png", { ...CONTRACT.tolerance, animations: "disabled" });
+    } finally {
+      await view.close();
+    }
   });
 });
 

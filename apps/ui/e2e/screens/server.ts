@@ -10,6 +10,7 @@ import fs from "node:fs";
 import http from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
+import type { NoticeRecord } from "@pulse-factory/api-client";
 import {
   PAIRED,
   STATUS,
@@ -36,6 +37,13 @@ export interface FixtureServer {
   setMode(mode: Mode): void;
   /** Every route or verb the page asked for that has no fixture, as `METHOD path`. */
   unexpected: string[];
+  /**
+   * The verb is held: its answer never comes until the mode is set again (12e, a press in flight). The
+   * request is read and recorded, and the connection stays open.
+   */
+  hold(verb: string): void;
+  /** The notices the stream sends after its request frame, as `notice_frame` events (12f). They hold the notice text and IDs only. */
+  setNotices(notices: NoticeRecord[]): void;
   close(): Promise<void>;
 }
 
@@ -90,6 +98,14 @@ const VERBS: Verbs = mergeVerbs([
  * round-3 item changes another module's value only through this, inside its own `describe` block.
  */
 export type Overlay = Record<string, unknown>;
+
+/** An overlay answer that is a refusal of the server, not a result (12e): `kind` is the wire's error kind. */
+export class Refused {
+  constructor(
+    readonly kind: string,
+    readonly message: string,
+  ) {}
+}
 
 let overlays: Overlay = {};
 
@@ -154,6 +170,8 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
   };
   resetFirstStatus();
   const unexpected: string[] = [];
+  const held = new Set<string>();
+  let notices: NoticeRecord[] = [];
   const sockets = new Set<Socket>();
 
   const json = (res: http.ServerResponse, body: unknown) => {
@@ -172,7 +190,18 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
     } else {
       const session = url.searchParams.get("session");
       const after = Number(url.searchParams.get("after") ?? "0");
-      for (const event of streamEvents(session, Number.isFinite(after) ? after : 0)) send(event);
+      for (const event of streamEvents(session, Number.isFinite(after) ? after : 0)) {
+        send(event);
+        // The request frame is the `requests` answer of this test, so a test that replaces the list sees it
+        // on the stream too (the page applies a snapshot from either).
+        if (event.event === "request_frame" && Object.hasOwn(overlays, "requests")) {
+          const list = answerOf("requests", {}).value as { requests: unknown[]; claim: unknown };
+          send({ event: "request_frame", frame: { type: "requests", requests: list.requests, claim: list.claim } });
+        }
+        if (event.event === "request_frame") {
+          for (const notice of notices) send({ event: "notice_frame", frame: { type: "notice", notice } });
+        }
+      }
     }
     // The stream stays open until the page closes it.
     req.on("close", () => res.end());
@@ -197,12 +226,15 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
     if (method === "POST" && verb !== undefined) {
       const args = await readBody(req);
       if (mode === "unreachable") return unreachable(res);
+      // A held verb is read, then never answered: the sockets are destroyed when the server closes.
+      if (held.has(verb)) return;
       try {
         const answer = answerOf(verb, args);
         if (!answer.found) {
           unexpected.push(`${route}`);
           return fail(res, "bad_request", `d25 has no fixture for the verb ${verb}`);
         }
+        if (answer.value instanceof Refused) return fail(res, answer.value.kind, answer.value.message);
         return ok(res, answer.value);
       } catch (e) {
         unexpected.push(`${route} (${e instanceof Error ? e.message : String(e)})`);
@@ -257,8 +289,15 @@ export async function startFixtureServer(uiDir: string): Promise<FixtureServer> 
 
   return {
     origin: `http://127.0.0.1:${address.port}`,
+    hold: (verb) => {
+      held.add(verb);
+    },
+    setNotices: (next) => {
+      notices = next;
+    },
     setMode: (next) => {
       mode = next;
+      held.clear();
       resetFirstStatus();
     },
     unexpected,

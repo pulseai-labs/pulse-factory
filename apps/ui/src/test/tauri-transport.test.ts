@@ -95,6 +95,9 @@ describe("the Tauri transport invokes the command of each method's name", () => 
       name: "settings_set",
       args: { key: "chat.self_turn_cap", value: 5, command_id: "c-2" },
     });
+    // r2.s11.w5: the notice acknowledgement is one more verb, with no new command.
+    await t.noticeAck({ position: 4, outcome: "shown" });
+    expect(invoke).toHaveBeenLastCalledWith("verb", { name: "notice_ack", args: { position: 4, outcome: "shown" } });
     // No new command of its own for any of them: the names are in the `verb` payload only.
     const commands = invoke.mock.calls.map(([c]) => c as string);
     expect(new Set(commands)).toEqual(new Set(["verb"]));

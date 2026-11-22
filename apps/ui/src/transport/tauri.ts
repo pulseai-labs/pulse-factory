@@ -2,7 +2,8 @@
 // of the shell's Rust side, with the names of the interface in snake case. The Rust side holds the
 // device token in the Keychain and makes the pinned TLS call. This file sees no token and opens no
 // connection: its channels are `invoke` and a `Channel` for the chat stream. It uses no Tauri event
-// (`listen` needs a capability, and the app declares no capability file).
+// (`listen` needs a capability, and the one capability file grants the notification plugin's four calls and no
+// `core:event`).
 import type {
   ApiStatus,
   ArmActed,
@@ -14,6 +15,8 @@ import type {
   DeviceClearArgs,
   FolderList,
   FolderListArgs,
+  NoticeAckArgs,
+  NoticeAcked,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -177,6 +180,7 @@ export function createTauriTransport(invokeImpl?: InvokeLike, channelFactory?: C
     folderList: (args?: FolderListArgs) => verb<FolderList>("folder_list", args ?? {}),
     projectRemove: (args: ProjectRemoveArgs) => verb<ProjectChanged>("project_remove", args),
     arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
+    noticeAck: (args: NoticeAckArgs) => verb<NoticeAcked>("notice_ack", args),
     openStream,
     forget: async () => {
       await command<null>("forget", undefined);

@@ -17,6 +17,8 @@ import { Banner } from "../components/Banner";
 import { useChat, useNotConnected } from "../state/chat";
 import { Dock, readDock, writeDock } from "../shell/Dock";
 import { back, canBack, canForward, closeTab, currentPage, forward, initialHistory, push, type Page } from "../shell/history";
+import type { Notifier } from "../notify/notifier";
+import { NoticesProvider } from "../state/notices";
 import { Navigation, type NavigationApi } from "../shell/navigation";
 import { Rail } from "../shell/Rail";
 import { SidePanel } from "../shell/SidePanel";
@@ -38,7 +40,7 @@ function readSidebar(): boolean {
   }
 }
 
-export function Shell() {
+export function Shell(props: { notifier: Notifier }) {
   const chat = useChat();
   const notConnected = useNotConnected();
   const { follow } = chat;
@@ -125,6 +127,7 @@ export function Shell() {
 
   return (
     <Navigation.Provider value={navigation}>
+      <NoticesProvider notifier={props.notifier}>
       <div className={`app${notConnected ? " app-down" : ""}`}>
         <TitleBar
           page={page}
@@ -172,6 +175,7 @@ export function Shell() {
           )}
         </div>
       </div>
+      </NoticesProvider>
     </Navigation.Provider>
   );
 }
