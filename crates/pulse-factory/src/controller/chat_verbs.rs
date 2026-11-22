@@ -367,9 +367,20 @@ impl Controller {
                 // The operator's message resets the count of self-started turns (ADR-0016).
                 inner.self_turns = 0;
             }
+            // The notices that wait for the Orchestrator ride this send as a marked block before
+            // the typed text. The stored item holds the typed text alone (`r2.s11.w3`).
+            let carry = self.notice_carry(live);
+            let wire_text = match &carry {
+                Some(c) => format!("{}\n\n{text}", c.block),
+                None => text.to_string(),
+            };
             live.port
-                .send(&live.chat, InputKind::Operator, text)
-                .map_err(|e| e.to_string())
+                .send(&live.chat, InputKind::Operator, &wire_text)
+                .map_err(|e| e.to_string())?;
+            if let Some(carry) = carry {
+                self.notices_carried(live, carry);
+            }
+            Ok(())
         });
         match sent {
             Err(failure) => Response::err(self.open_failed(session_id, failure)),

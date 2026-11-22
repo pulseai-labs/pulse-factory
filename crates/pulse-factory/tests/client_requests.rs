@@ -31,6 +31,15 @@ struct Client {
     _dir: tempfile::TempDir,
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 fn client(api: &rig::Api) -> Client {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -78,7 +87,9 @@ impl Client {
                 let left = end.saturating_duration_since(tokio::time::Instant::now());
                 match tokio::time::timeout(left, stream.next()).await {
                     Ok(Some(StreamEvent::RequestFrame { frame })) => frames.push(frame),
-                    Ok(Some(StreamEvent::Frame { .. })) => {}
+                    // A notice frame follows each new request (`r2.s11.w3`): this test is about the
+                    // request frames.
+                    Ok(Some(StreamEvent::Frame { .. } | StreamEvent::NoticeFrame { .. })) => {}
                     Ok(other) => panic!("{other:?} while waiting for {what}"),
                     Err(_) => panic!("timed out waiting for {what}"),
                 }
@@ -118,6 +129,7 @@ fn answer_subject(id: &str, text: &str) -> ConfirmCodeArgs {
             verb: ConfirmVerb::Answer,
             text_sha256: Some(sha256_hex(text.as_bytes())),
             to: None,
+            option: None,
         },
         command_id: "issue-answer".to_string(),
     }
@@ -131,6 +143,7 @@ fn ack_subject(id: &str) -> ConfirmCodeArgs {
             verb: ConfirmVerb::Ack,
             text_sha256: None,
             to: None,
+            option: None,
         },
         command_id: "issue-ack".to_string(),
     }
@@ -178,7 +191,7 @@ fn expect_empty_snapshot(api: &rig::Api, c: &Client, stream: &mut ChatStream) {
 
 #[test]
 fn a_client_answers_a_stop_request_and_a_second_spend_of_the_code_is_refused() {
-    let api = rig::api();
+    let api = rig::api_with(noted());
     let c = client(&api);
     let t = &c.transport;
     let token = c.token();
@@ -226,6 +239,8 @@ fn a_client_answers_a_stop_request_and_a_second_spend_of_the_code_is_refused() {
         request: stop.clone(),
         rev: 1,
         text: text.to_string(),
+        to: None,
+        option: None,
         code: code.clone(),
         command_id: "answer-1".to_string(),
     };
@@ -289,6 +304,7 @@ fn a_client_merges_the_spine_pr_and_reads_the_run_and_the_settings() {
     let ack = DeviceAckArgs {
         request: ack_id.clone(),
         rev: 1,
+        option: None,
         code: ack_code.clone(),
         command_id: "ack-1".to_string(),
     };
@@ -367,6 +383,7 @@ fn a_client_merges_the_spine_pr_and_reads_the_run_and_the_settings() {
         c.rt.block_on(t.ack(DeviceAckArgs {
             request: ack_id.clone(),
             rev: 1,
+            option: None,
             code: ack_code.clone(),
             command_id: "ack-2".to_string(),
         }))

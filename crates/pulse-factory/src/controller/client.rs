@@ -117,6 +117,26 @@ pub fn status_text(v: &Value) -> String {
         ));
     }
     line(format!("total cost: {}", s(&v["total"]["cost"])));
+    // The notices that wait, and the devices that cannot show one (`r2.s11.w3`).
+    for n in v["notices"]["waiting"].as_array().into_iter().flatten() {
+        line(format!(
+            "notice {}: {} of request {} (revision {}) waits for {} on the {} channel, sent {} times, waiting {} s",
+            n["position"],
+            s(&n["event"]),
+            s(&n["request"]),
+            n["revision"],
+            s(&n["target"]),
+            s(&n["channel"]),
+            n["sends"],
+            n["waiting_seconds"],
+        ));
+    }
+    for d in v["notices"]["blocked"].as_array().into_iter().flatten() {
+        line(format!(
+            "device {}: shows no notifications until its next shown notice",
+            s(d)
+        ));
+    }
     t
 }
 
@@ -320,6 +340,24 @@ pub fn show_text(v: &Value) -> String {
             v["answer_generation"],
             s(&v["answered_at"])
         ));
+        // An answer that took an option names it, who wrote it and whether it was the one the
+        // block recommended. The lines come after every line `show` prints for a typed answer.
+        let option = &v["answer"]["option"];
+        if option.is_object() {
+            line(format!(
+                "option: {} by {}",
+                tame(&s(&option["id"])),
+                tame(&s(&option["by"]))
+            ));
+            line(format!(
+                "recommended: {}",
+                if option["recommended"].as_bool() == Some(true) {
+                    "yes"
+                } else {
+                    "no"
+                }
+            ));
+        }
     }
     let verbs: Vec<String> = v["verbs"]
         .as_array()
@@ -349,7 +387,91 @@ pub fn show_text(v: &Value) -> String {
             ));
         }
     }
+    // The decision block, after every line that `show` printed before it existed. A request with
+    // no block prints none of these lines. A seat's text, an option's label among it, is tamed.
+    if v["decision"].is_object() {
+        decision_lines(&v["decision"], &mut |x: String| {
+            t.push_str(&x);
+            t.push('\n');
+        });
+    }
     t
+}
+
+/// The lines of a request's decision block (`docs/contracts/cli.md`, `show`): the cause, the
+/// summary, who asked, the attempt, whether a text answer reaches a seat, the seat the halt is
+/// about, why a stop's options could not be read, and one line for each option. An option line
+/// names who wrote the option, and for an answer the text and the stage it sends the unit to.
+fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
+    let s = |p: &Value| tame(p.as_str().unwrap_or(""));
+    line(format!("cause: {}", s(&d["cause"])));
+    line(format!("summary: {}", s(&d["summary"])));
+    let asked = &d["asked_by"];
+    line(match asked["kind"].as_str() {
+        Some("seat") => format!(
+            "asked by: seat {} (unit {})",
+            s(&asked["role"]),
+            s(&asked["unit"])
+        ),
+        _ => "asked by: controller".to_string(),
+    });
+    line(format!("attempt: {}", d["attempt"]));
+    line(format!(
+        "takes text: {}",
+        if d["takes_text"].as_bool() == Some(true) {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    if d["about"].is_object() {
+        line(format!(
+            "about: seat {} (unit {})",
+            s(&d["about"]["role"]),
+            s(&d["about"]["unit"])
+        ));
+    }
+    if let Some(why) = d["options_error"].as_str() {
+        line(format!("options error: {}", tame(why)));
+    }
+    for option in d["options"].as_array().into_iter().flatten() {
+        let id = s(&option["id"]);
+        // Who wrote the option. A block stored before `by` existed reads `seat` for a stop file and
+        // `controller` for every other cause.
+        let by = match option["by"].as_str() {
+            Some(by) => tame(by),
+            None if d["cause"].as_str() == Some("stop_file") => "seat".to_string(),
+            None => "controller".to_string(),
+        };
+        let does = match option["effect"]["verb"].as_str() {
+            Some("answer") => {
+                let text = format!("answers with the text {:?}", s(&option["effect"]["text"]));
+                match option["effect"]["to"].as_str() {
+                    Some(to) => format!("{text}, then resumes the unit at stage {}", tame(to)),
+                    None => text,
+                }
+            }
+            Some("resume") => match option["effect"]["to"].as_str() {
+                Some(to) => format!("resumes the unit at stage {}", tame(to)),
+                None => "resumes the unit".to_string(),
+            },
+            Some("ack") => "acks the merge".to_string(),
+            _ => "does an act this client does not know".to_string(),
+        };
+        let recommended = if d["recommended"]["option"].as_str() == Some(id.as_str()) {
+            format!(
+                "; recommended by {}: {}",
+                s(&d["recommended"]["by"]),
+                s(&d["recommended"]["why"])
+            )
+        } else {
+            String::new()
+        };
+        line(format!(
+            "option {id}: {} (by {by}; {does}{recommended})",
+            s(&option["label"])
+        ));
+    }
 }
 
 /// A seat's text for the terminal: line breaks become ` / `, and any other control character
@@ -521,7 +643,17 @@ pub fn answer(a: &AnswerArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "request": a.id, "rev": a.rev, "text": a.text, "token": token });
+    // An option stands in place of the text and the stage: send only what the act names.
+    let mut args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    if let Some(text) = &a.text {
+        args["text"] = json!(text);
+    }
+    if let Some(to) = &a.to {
+        args["to"] = json!(to);
+    }
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
     match call("answer", args) {
         Ok(v) => {
             if a.json {
@@ -535,8 +667,12 @@ pub fn answer(a: &AnswerArgs) -> i32 {
                     (Some(u), None) => format!("; unit {u} resumes"),
                     (None, _) => String::new(),
                 };
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "answered {}@{} by claim {}{unit}",
+                    "answered {}@{} by claim {}{with}{unit}",
                     v["request"].as_str().unwrap_or(""),
                     v["revision"],
                     v["generation"]
@@ -562,14 +698,24 @@ pub fn clear(a: &ClearArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "run": a.run, "unit": a.item, "to": a.to, "token": token });
+    let mut args = json!({ "run": a.run, "unit": a.item, "to": a.to, "token": token });
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
+    if let Some(rev) = a.rev {
+        args["rev"] = json!(rev);
+    }
     match call("clear", args) {
         Ok(v) => {
             if a.json {
                 print_json(&v);
             } else {
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "cleared {} of run {} ({}@{} by claim {}); it resumes at stage {}",
+                    "cleared {} of run {} ({}@{} by claim {}{with}); it resumes at stage {}",
                     v["unit"].as_str().unwrap_or(""),
                     v["run"].as_str().unwrap_or(""),
                     v["request"].as_str().unwrap_or(""),
@@ -598,7 +744,10 @@ pub fn ack(a: &AckArgs) -> i32 {
             return 1;
         }
     };
-    let args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    let mut args = json!({ "request": a.id, "rev": a.rev, "token": token });
+    if let Some(option) = &a.option {
+        args["option"] = json!(option);
+    }
     match call("ack", args) {
         Ok(v) => {
             if a.json {
@@ -613,8 +762,12 @@ pub fn ack(a: &AckArgs) -> i32 {
                         s_of(&v["unit"])
                     )
                 };
+                let with = match v["option"].as_str() {
+                    Some(option) => format!(" with option {}", tame(option)),
+                    None => String::new(),
+                };
                 println!(
-                    "acked {}@{} by claim {}; {merged}",
+                    "acked {}@{} by claim {}{with}; {merged}",
                     s_of(&v["request"]),
                     v["revision"],
                     v["generation"]

@@ -117,7 +117,9 @@ already holds (default 0). With no `session` the stream carries the overview onl
 
 The same stream carries three more frames, the **request frames** (`RequestFrame`, a separate wire
 type; the chat frames above do not change). Each holds a `RequestSummary`, as `requests` rows do, and
-a `ClaimRecord`. A client that does not know a `type` skips it.
+a `ClaimRecord`. A client that does not know a `type` skips it. A `RequestSummary` in a request frame
+holds `cause` and `summary` for a request that has a decision block, and leaves them out for any other
+(a client that does not know them decodes the frame as before).
 
 ```json
 {"type":"requests","requests":[{"id":"R-4","revision":1,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR waits for the claim's ack","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"9f2c0d1e5b7a43c8d6e1f0a2b3c4d5e6f7a8b9c0"}],"claim":{"generation":2,"holder":"device D-1 (MacBook)","device":"D-1","revoked":false,"claimed_at":"2026-11-09T21:04:50.118Z"}}
@@ -135,6 +137,26 @@ a `ClaimRecord`. A client that does not know a `type` skips it.
   A change that lands between the snapshot and the live frames arrives twice, so a reader keys by
   `(id, revision, status)`. A request frame goes to every stream, whatever session it follows. A
   stream that lags closes with 4002, as for the chat frames.
+
+The stream carries one more wire type, the **notice frame** (`NoticeFrame`, `r2.s11.w3`; ADR-0012's
+amendment of 2026-11-21). It goes to one device, and a client that does not know the `type` skips it.
+A notice is sent again until the device acknowledges it with `notice_ack`, so a client keys it by
+`position`, and `sends` says which send it is.
+
+```json
+{"type":"notice","notice":{"position":7,"event":"opened","request":"R-4","revision":1,"run":"r1-s4","project":"P-1","unit":"u1","kind":"stop","cause":"stop_file","text":"Unit u1 stopped at stage implement and wrote a stop file.","created_at":"2026-11-21T10:02:11.402Z","sends":1}}
+```
+
+- `position` is the notice's place in the store's one sequence, from 1. `event` is `opened`,
+  `revised` or `closed`. **Only `opened` asks for an alert**: `revised` and `closed` do not. `project`,
+  `unit` and `cause` are left out when absent. `text` is the controller's own text, redacted and cut
+  to `notify.app.max_words` (`requests.md`, "Notices").
+- A new stream gets, after the `requests` frame, each notice that waits for its device, oldest first.
+  A device's first stream joins at the newest position and gets no old notice. A notice goes to every
+  connected device at the tick that writes it, and again after `notify.resend_seconds × 2^(sends − 1)`
+  seconds, at most 900, until the device acknowledges it or the request closes. A `closed` notice is
+  sent once.
+- A notice frame never moves the `seq` of a reconnect, and a revoked device gets none.
 
 - `hello` comes first. It names the server, holds every live session as a `ChatSessionRecord`
   (id, project, worktree, branch, state, process with its `qualified` flag and holders, model,
@@ -236,6 +258,7 @@ A device may call exactly these verbs through `POST /v1/verbs/<verb>`:
 | `settings_get` | `settings get` |
 | `settings_set` | `settings set` |
 | `settings_unset` | `settings unset` |
+| `notice_ack` | none (API only); the device says it dealt with a notice (`r2.s11.w3`) |
 | `run_list` | none (API only); on the host, `status` shows the same runs |
 | `folder_list` | none (API only); the CLI user has a shell (`r1.s5.w5`) |
 
@@ -270,20 +293,31 @@ returns the first record with `replayed` true and acts on nothing, with no secon
 second merge.
 
 - **`requests`**: `{"run"?: "<run>", "all"?: true}`. The answer is a `RequestList`: `schema_version`,
-  `open`, `requests` (each a `RequestSummary` with `verbs`, and `pr`, `base` and `head_sha` for a
-  `merge_ack`) and `claim` (the current claim, or null). It is the JSON of the CLI's `requests --json`.
-- **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer` and
-  `answer_generation`. It is the JSON of `show --json`.
+  `open`, `requests` (each a `RequestSummary` with `verbs`, `pr`, `base` and `head_sha` for a
+  `merge_ack`, and `cause` and `summary` for a request that holds a decision block) and `claim` (the
+  current claim, or null). It is the JSON of the CLI's `requests --json`.
+- **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer`,
+  `answer_generation` and `decision`. `decision` is the request's decision block (`requests.md`, "The
+  decision block") as a `Decision`, with `DecisionOption`, `OptionEffect`, `Recommended`,
+  `DecisionRefs`, `AskedBy` and `DecisionAbout`. It is left out when the request holds no block, and
+  when the block's `v` is above 1. It is the JSON of `show --json`.
 - **`confirm_code`**: `{"subject": {"kind":"request","request":"R-4","revision":1,"verb":"ack"},
   "command_id": "<id>"}`. The `verb` is `answer`, `clear` or `ack`, and it must be one that the
   request takes (`ack` for a `merge_ack`, `answer` or `clear` for the rest). An `answer` subject
   adds `"text_sha256": "<64 lower-case hex digits>"`, the SHA-256 of the answer text; the text never
-  reaches the controller at issue. A `clear` subject adds `"to": "<stage>"` or no `to`. The answer
+  reaches the controller at issue; it may add `"to": "<stage>"`, which the code binds. A `clear`
+  subject adds `"to": "<stage>"` or no `to`. **An option:** a request subject may add `"option":
+  "<id>"`, an option of the request's decision block (`requests.md`, "Acting on an option"). The code
+  then binds the option's ID in place of a `text_sha256`, a `to` and a head of its own: a subject with
+  an option and a `text_sha256` or a `to` is refused. The controller checks at issue that the option
+  exists at that revision and that its effect fits the verb (`answer` for an `answer` effect, `clear`
+  for `resume`, `ack` for `ack`). A code for a text, or for an option whose effect is `answer`, on a
+  request that takes no text is refused at issue (`requests.md`, "Resuming a unit"). The answer
   is a `ConfirmIssued`: `schema_version`, `replayed`, `code` (null on a replay), `expires_at`,
   `device`, `generation` (the claim generation the code binds, or null), `holder` (the claim at
   the issue, so a dialog can say whom the act takes the claim from) and `subject` (the request,
   revision, kind, run, unit, reason, and for a `merge_ack` the `pr`, `base`, `head_branch` and
-  `head_sha`). **Issuing a code moves no claim.** A replay of the command ID returns this first
+  `head_sha`; for an option also `option` and `option_label`). **Issuing a code moves no claim.** A replay of the command ID returns this first
   record with `replayed` true and `code` null, whatever moved since; after a restart, or 10 minutes
   past the code's expiry, the first record is gone and a replay carries the facts the store still
   has, with `expires_at` and `generation` null.
@@ -294,15 +328,35 @@ second merge.
   `spine` and `plan_sha256`, so a dialog can name what the code starts. A proposal that is unknown
   (a restart), withdrawn, failed, being armed, already armed or whose plan hash differs is refused
   `subject_moved`, and the refusal text names the cause.
-- **`answer`**: `{"request","rev","text","code","command_id"}`. The answer is a `RequestActed`:
-  `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record after the act),
-  and `resumed`, `hook` for an answer. Fields that do not belong to the verb, and every field on a
-  replay, are null.
-- **`clear`**: `{"request","rev","to"?,"code","command_id"}`. The request names the unit and must be
-  its open request. The answer is a `RequestActed` with `to_stage`.
-- **`ack`**: `{"request","rev","code","command_id"}`. The answer is a `RequestActed` with `merged`,
-  `head_sha`, `pr`, `base` and `outcome`. The ack merges the spine PR through the engine path of the
-  CLI's `ack`.
+- **`answer`**: `{"request","rev","text","to"?,"option"?,"code","command_id"}`. The answer is a
+  `RequestActed`: `schema_version`, `replayed`, `verb`, `device`, `generation`, `request` (the record
+  after the act), `option` (the option the act took, or null), and `resumed`, `hook` for an answer.
+  Fields that do not belong to the verb, and every field on a replay, are null. An act with an
+  `"option"` sends an empty `text` (an empty text is no text); a text, or a `to`, beside an option is
+  another subject than the code's (`code_subject`).
+- **`clear`**: `{"request","rev","to"?,"option"?,"code","command_id"}`. The request names the unit and
+  must be its open request. The answer is a `RequestActed` with `to_stage` and `option`.
+- **`ack`**: `{"request","rev","option"?,"code","command_id"}`. The answer is a `RequestActed` with
+  `merged`, `head_sha`, `pr`, `base`, `outcome` and `option`. The ack merges the spine PR through the
+  engine path of the CLI's `ack`. `"option": "approve"` is the `ack` verb under the same fresh code.
+
+At the spend, the call's option must be the code's (`code_subject` otherwise), and the controller reads
+the request again: a revision between the card's render and the press is `subject_moved`. The
+`controller.ledger` line of an act or an issue for an option adds ` option=<id>`. No token, code or
+answer text is in it. The new fields are optional on the wire: a client that does not know them still
+works.
+- **`notice_ack`** (`r2.s11.w3`): `{"position", "outcome"}` (`NoticeAckArgs`). The `outcome` is `shown` or
+  `blocked`. It carries no command ID: the controller makes the admission's ID,
+  `notice-ack:<device>:<position>`. The device deals with every notice at or below `position`, so the
+  re-send of each ends. The answer is a `NoticeAcked`: `schema_version`, `device`, `position`,
+  `outcome` and `admitted`. `admitted` is false, with nothing written, when the position is at or below
+  the one stored. A position above the newest notice is a 422. The controller reads the device again, so
+  a revoked device gets the refusal `device_revoked`. `blocked` raises the position as `shown` does, so
+  the re-send ends; the target's row keeps the outcome, and `status` lists the device as showing no
+  notifications until its next `shown`. The verb takes no confirm code: it changes no run state and
+  moves no claim. A client calls it only on a server that has sent it a notice frame. On the Unix socket
+  it is refused: `notice_ack is for paired devices`. The request ledger has one `api.ledger` line for
+  each call, with `verb=notice_ack`.
 - **`run_list`** (`r1.s4.w3`): `{}` (`RunListArgs`; unknown fields are ignored). The answer is a
   `RunList`: `schema_version` 1 and `runs`, oldest first, one `RunSummary` for every run the controller
   holds (an ended run too, while the controller holds it). A `RunSummary` has exactly nine fields: `id`,
@@ -364,7 +418,7 @@ second merge.
   answer is a `ProjectChanged` with `ended`, the sessions this call ended (an empty list when none was live;
   absent when the call had no `end_sessions`). On the socket, a `project_remove` with `end_sessions: true` is
   refused for a caller that is, or descends from, a seat or a live chat process, as `session_end` is
-  (ADR-0005, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
+  (ADR-0015, Q2 rule 2); without the field the verb is as before. **Known limit:** when one session cannot be ended, the remove
   is refused and the sessions before it stay ended. There is no archive.
 - **`arm`** (`r1.s4.w2`): a `DeviceArmArgs`, `{"proposal","plan_sha256","code","command_id"}`. The
   answer is an `ArmActed`: `schema_version`, `replayed`, `device`, `proposal`, `run_id` and
@@ -388,7 +442,7 @@ code is a 422 and no guard failure.
 ### Confirm codes
 
 A device must hold a one-use confirm code to act on a request, or to arm a run from a start card. The code binds one request, its
-revision, one verb with its parameters (`text_sha256` or `to`), the device, the claim generation
+revision, one verb with its parameters (`text_sha256` and `to`, or `to`, or an option's ID), the device, the claim generation
 current at issue and, for an ack, the PR's head SHA. It is `pfc1-` and 32 hex digits, it works once,
 and it expires 120 seconds after issue. At most 4 codes of a device are live. Codes live in memory,
 and a restart voids them. The full rules are in `requests.md`, "Confirm codes".

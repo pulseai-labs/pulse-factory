@@ -33,4 +33,8 @@ hook: string | null,
 /**
  * `clear`: the stage the unit resumes at.
  */
-to_stage: string | null, };
+to_stage: string | null, 
+/**
+ * The option the act took, when it took one.
+ */
+option?: string, };

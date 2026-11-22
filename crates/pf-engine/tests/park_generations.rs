@@ -6,6 +6,7 @@
 mod common;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::claim::sha256_hex;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::forge::{Checks, ForgeOutcome, PrRef};
@@ -59,7 +60,12 @@ fn a_unit_parks_is_cleared_runs_and_parks_again() {
         .unwrap();
     env.engine.start_stage("u1").unwrap();
     env.engine
-        .park_as("u1", RequestKind::Stall, "stalled: no output")
+        .park_as(
+            "u1",
+            RequestKind::Stall,
+            Cause::Stalled,
+            "stalled: no output",
+        )
         .unwrap();
     env.engine
         .end("u1/implement#1", EndStatus::Failed, "stalled: no output")
@@ -96,7 +102,7 @@ fn a_unit_parks_is_cleared_runs_and_parks_again() {
 
     // The unit parks again. The second park has its own ID and opens a second request.
     env.engine
-        .park_as("u1", RequestKind::Stop, "stop file")
+        .park_as("u1", RequestKind::Stop, Cause::StopFile, "stop file")
         .unwrap();
     assert!(admitted(&env, "park:u1:1"));
     let all = requests(&env);
@@ -121,7 +127,7 @@ fn a_replay_at_an_old_generation_returns_the_stored_receipt_and_changes_nothing(
         })
         .unwrap();
     env.engine.start_stage("u1").unwrap();
-    let first = env.engine.park("u1", "stalled").unwrap();
+    let first = env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     env.engine
         .end("u1/implement#1", EndStatus::Failed, "stalled")
         .unwrap();
@@ -139,6 +145,7 @@ fn a_replay_at_an_old_generation_returns_the_stored_receipt_and_changes_nothing(
                 unit_id: "u1".to_string(),
                 reason: "stalled".to_string(),
                 request_kind: RequestKind::Park,
+                cause: Some(Cause::Stalled),
                 detail: None,
             },
         })
@@ -343,7 +350,12 @@ fn clear_to_an_earlier_stage_runs_it_again_and_keeps_the_attempt_count() {
         .unwrap();
     env.engine.start_stage("u1").unwrap();
     env.engine
-        .park_as("u1", RequestKind::RedGate, "the gate is red")
+        .park_as(
+            "u1",
+            RequestKind::RedGate,
+            Cause::ParkFile,
+            "the gate is red",
+        )
         .unwrap();
     env.engine
         .end("u1/verify#1", EndStatus::Failed, "the gate is red")
@@ -371,7 +383,7 @@ fn clear_refuses_what_it_must_and_changes_nothing() {
         })
         .unwrap();
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     let rejected = |r: Result<pf_engine::Admission, EngineError>| match r {
         Err(EngineError::Rejected(why)) => why,
         other => panic!("expected a rejection, got {other:?}"),
@@ -420,7 +432,7 @@ fn a_halted_run_accepts_the_clear_and_resumes_nothing() {
         })
         .unwrap();
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     env.engine
         .end("u1/implement#1", EndStatus::Failed, "stalled")
         .unwrap();

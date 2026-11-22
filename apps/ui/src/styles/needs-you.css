@@ -105,3 +105,100 @@
 .ny-card-compact .ny-fromto { padding: var(--space-2-5); }
 .ny-card-compact .ny-line { left: 15px; top: 22px; }
 .ny-card-compact .ny-head { flex-wrap: wrap; }
+
+/* ---- r2.s11.w5: the block cards (12a to 12e). The kind label, the summary, the facts, the IDs, one button for
+   each option, the text field and the states of a press. ---- */
+
+/* The kind label: one for each request kind, in the colour of its tone. */
+.ny-tag { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px 0 6px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-inset); font-size: var(--text-tag); font-weight: var(--weight-semibold); line-height: 1; letter-spacing: var(--tracking-caps); text-transform: uppercase; white-space: nowrap; }
+.ny-tag-amber { color: var(--amber-300); }
+.ny-tag-blue { color: var(--blue-300); }
+.ny-tag-red { color: var(--red-300); }
+.ny-tag-violet { color: var(--violet-300); }
+.ny-tag-mint { color: var(--mint-300); }
+.ny-head-block { flex-wrap: wrap; }
+.ny-run { display: inline-flex; align-items: center; gap: var(--space-1-5); min-width: 0; }
+.ny-icon-bare { display: inline-flex; flex: none; color: var(--blue-400); }
+.ny-id { flex: none; color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-meta); font-weight: var(--weight-medium); line-height: 1; white-space: nowrap; }
+.ny-where-plain { color: var(--text-tertiary); }
+.ny-head-dock .ny-head-run { flex-basis: 100%; min-width: 0; }
+
+/* The summary is the controller's sentence, as stored. */
+.ny-summary { margin: 0; color: var(--text-secondary); font: var(--font-ui); overflow-wrap: anywhere; }
+.ny-asks { display: flex; flex-direction: column; gap: var(--space-1-5); }
+.ny-asks-eyebrow { color: var(--text-tertiary); font-size: var(--text-meta); font-weight: var(--weight-medium); line-height: 1; }
+.ny-gate { display: flex; flex-direction: column; gap: var(--space-1-5); padding: var(--space-2-5) var(--space-3); border-radius: var(--radius-md); background: var(--bg-inset); }
+.ny-gate-label { color: var(--text-tertiary); font-size: var(--text-meta); line-height: 1; }
+.ny-gate-reason { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-sm); line-height: var(--leading-snug); }
+.ny-gaps-numbered { list-style: decimal; padding-left: var(--space-5); }
+.ny-facts-line { margin: 0; color: var(--text-secondary); font: var(--font-ui); overflow-wrap: anywhere; }
+.ny-card .ny-facts { grid-template-columns: 84px minmax(0, 1fr); }
+
+/* The IDs. */
+.ny-chips { display: flex; flex-wrap: wrap; gap: var(--space-1-5); }
+.ny-idchip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); color: var(--text-secondary); font-family: var(--font-mono); font-size: var(--text-meta); line-height: 1; white-space: nowrap; }
+.ny-idchip-label { color: var(--text-tertiary); }
+
+/* The foot of a block card: the warnings, the options and the text field. */
+.ny-foot-block { gap: var(--space-2); padding: var(--space-3) var(--space-4) 14px; }
+.ny-options { display: flex; flex-direction: column; gap: var(--space-2); }
+.ny-opt { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1-5); width: 100%; box-sizing: border-box; padding: var(--space-2-5) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-elevated); color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.ny-opt:hover:not(:disabled) { border-color: var(--amber-400); }
+.ny-opt:focus-visible { border-color: var(--border-focus); outline: none; }
+.ny-opt:disabled { cursor: default; opacity: 0.45; }
+.ny-opt-rec { border-color: var(--accent); background: var(--mint-tint); }
+.ny-opt-working { border-color: var(--blue-400); background: var(--blue-tint); }
+.ny-opt-working:disabled { opacity: 1; }
+.ny-opt-recline { display: flex; align-items: flex-start; gap: var(--space-1-5); color: var(--mint-300); font-size: var(--text-meta); font-weight: var(--weight-medium); line-height: var(--leading-snug); }
+.ny-opt-recline > svg { flex: none; margin-top: 2px; }
+.ny-opt-why { color: var(--text-secondary); font-weight: var(--weight-regular); }
+.ny-opt-label { font-size: var(--text-base); font-weight: var(--weight-medium); line-height: var(--leading-snug); white-space: normal; overflow-wrap: anywhere; }
+.ny-opt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-2-5); color: var(--text-tertiary); font-size: var(--text-meta); line-height: var(--leading-snug); }
+.ny-opt-does { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.ny-opt-does > svg { flex: none; }
+.ny-opt-by { margin-left: auto; }
+.ny-opt-sending { color: var(--blue-300); gap: var(--space-1-5); }
+.ny-stage { display: inline-block; padding: 1px var(--space-1-5); margin: 0 2px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--bg-inset); color: var(--text-primary); font-family: var(--font-mono); font-size: var(--text-meta); font-weight: var(--weight-medium); }
+
+/* The ring of a press in flight turns; it stands still under reduced motion. */
+.ny-ring { flex: none; width: 10px; height: 10px; box-sizing: border-box; border: 2px solid var(--blue-300); border-right-color: transparent; border-radius: var(--radius-full); animation: ny-spin 0.9s linear infinite; }
+@keyframes ny-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ny-ring { animation: none; }
+}
+
+/* The text field: a typed answer (with Send) or a note (with none). */
+.ny-textbox { display: flex; flex-direction: column; gap: var(--space-1-5); }
+.ny-textbox-label { color: var(--text-secondary); font-size: var(--text-sm); font-weight: var(--weight-medium); line-height: 1; }
+.ny-textbox-row { display: flex; align-items: flex-end; gap: var(--space-2); }
+.ny-textbox-row .ny-field { flex: 1; min-width: 0; }
+
+/* A warning above the options, and the states of a press that did not land. */
+.ny-warn { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; padding: var(--space-2) var(--space-2-5); border: 1px solid var(--amber-border); border-radius: var(--radius-md); background: var(--amber-tint); color: var(--amber-300); font: var(--font-ui); }
+.ny-warn-icon { display: inline-flex; flex: none; margin-top: 1px; color: var(--amber-300); }
+.ny-state { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-2-5); border-radius: var(--radius-md); font: var(--font-ui); }
+.ny-state-text { flex: 1; min-width: 0; }
+.ny-state-icon { display: inline-flex; flex: none; margin-top: 2px; }
+.ny-state-refused { border: 1px solid var(--red-border); background: var(--red-tint); color: var(--red-300); }
+.ny-state-refused b { font-weight: var(--weight-semibold); }
+.ny-state-down { border: 1px solid var(--border-default); background: var(--bg-inset); color: var(--text-secondary); }
+
+/* The merge card: From and Into on the left, the approval on the right (12a); stacked in the dock. */
+.ny-merge-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.ny-merge-left { display: flex; flex-direction: column; gap: var(--space-2-5); }
+.ny-approve { display: flex; align-items: flex-start; gap: var(--space-3); padding-top: var(--space-1); }
+.ny-approve-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid var(--accent); border-radius: var(--radius-full); color: var(--accent); }
+.ny-approve-body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.ny-approve-title { font-size: var(--text-base); font-weight: var(--weight-semibold); line-height: var(--leading-snug); }
+.ny-approve-sub { color: var(--text-tertiary); font-size: var(--text-meta); line-height: var(--leading-snug); }
+.ny-approve-buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+.ny-card-compact .ny-merge-grid { grid-template-columns: minmax(0, 1fr); }
+.ny-card-compact .ny-foot-block { padding: var(--space-2-5) var(--space-3); }
+.ny-card-compact .ny-textbox-row { flex-direction: column; align-items: stretch; }
+
+/* The told signal (12f): the banner at the top of the page and of the dock when macOS blocks notifications. */
+.ny-blocked { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-2-5); border: 1px solid var(--amber-border); border-radius: var(--radius-md); background: var(--amber-tint); color: var(--amber-300); font: var(--font-ui); }
+.ny-blocked .ny-state-icon { color: var(--amber-300); }
+.ny-blocked .ny-state-text { flex: 1; min-width: 0; }
+.dock .ny-blocked { margin: var(--space-2) var(--space-3) 0; flex-wrap: wrap; }
+.dock .ny-blocked .ny-state-text { flex: 1 1 12rem; }

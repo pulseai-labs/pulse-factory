@@ -8,7 +8,7 @@ use crate::claim;
 use crate::launch;
 use crate::merge;
 use crate::port::store::{
-    AdmissionOutcome, Effect, NodeKind, NodeRow, RequestKind, RunRow, RunState,
+    AdmissionOutcome, Cause, Effect, NodeKind, NodeRow, RequestKind, RunRow, RunState,
 };
 use crate::status::{EndStatus, Status, check_reason};
 use crate::unit::{Signal, UnitDetail};
@@ -169,12 +169,14 @@ pub fn decide(
             unit_id,
             reason,
             request_kind,
+            cause,
             detail,
         } => park_unit(
             view,
             workflow,
             unit_id,
             *request_kind,
+            *cause,
             reason,
             detail.as_ref(),
             now,
@@ -241,7 +243,7 @@ pub fn decide(
             revision,
             body,
             reason,
-        } => claim::decide_revise(view, id, *revision, body, reason.as_deref()),
+        } => claim::decide_revise(view, workflow, id, *revision, body, reason.as_deref()),
         CommandBody::AnswerRequest {
             id,
             revision,
@@ -274,13 +276,19 @@ pub fn decide(
             to_stage,
             generation,
             request_id,
+            option,
+            revision,
         } => claim::decide_clear(
             view,
             workflow,
-            unit_id,
-            to_stage.as_deref(),
+            claim::ClearAct {
+                unit_id,
+                to_stage: to_stage.as_deref(),
+                request_id,
+                option: option.as_deref(),
+                revision: *revision,
+            },
             *generation,
-            request_id,
             now,
         ),
         CommandBody::OpenMergeAck {
@@ -293,7 +301,17 @@ pub fn decide(
             revision,
             generation,
             head_sha,
-        } => claim::decide_ack(view, workflow, id, *revision, *generation, head_sha, now),
+            option,
+        } => claim::decide_ack(
+            view,
+            workflow,
+            id,
+            *revision,
+            *generation,
+            head_sha,
+            option.as_deref(),
+            now,
+        ),
         CommandBody::AckRefused {
             id,
             revision,
@@ -469,8 +487,9 @@ fn signal_stage(
     let place = track
         .stage_index(stage)
         .unwrap_or(detail.stages_done as usize);
-    // Set when the entry is at its cap: the unit parks with this reason.
-    let mut cap_park: Option<String> = None;
+    // Set when the entry is at its cap: the unit parks with this reason, and the request's
+    // facts name the stage the entry sends the unit to and the cap's number.
+    let mut cap_park: Option<(String, serde_json::Value)> = None;
     let text;
     if !signal.is_success() {
         stage_end.status = Status::Failed;
@@ -505,7 +524,11 @@ fn signal_stage(
                 "stage {stage} done ({}); {reason}; unit parked",
                 signal.describe()
             );
-            cap_park = Some(reason);
+            let facts = serde_json::json!({
+                claim::KEY_CAP_TO: target.to,
+                claim::KEY_CAP_MAX: target.max,
+            });
+            cap_park = Some((reason, facts));
         } else {
             detail.visits.insert(key, visit);
             detail.stages_done = u32::try_from(to).unwrap_or(u32::MAX);
@@ -546,15 +569,16 @@ fn signal_stage(
     d.effects.push(Effect::PutNode(stage_end));
     match cap_park {
         // The stage is over, and the unit parks in the same commit with its request (ADR-0006).
-        Some(reason) => {
+        Some((reason, facts)) => {
             let reason = check_reason(&reason).map_err(|e| e.to_string())?;
             d.effects.extend(claim::park_effects(
                 view,
                 workflow,
                 &unit_next,
                 RequestKind::Park,
+                Some(Cause::OutcomeCap),
                 reason,
-                None,
+                Some(&facts),
                 now,
             )?);
         }
@@ -604,11 +628,13 @@ fn end_node(
 }
 
 /// Park a unit that is `running`. The same commit opens the unit's request (ADR-0006).
+#[allow(clippy::too_many_arguments)]
 fn park_unit(
     view: &RunView,
     workflow: &Workflow,
     unit_id: &str,
     kind: RequestKind,
+    cause: Option<Cause>,
     reason: &str,
     detail: Option<&serde_json::Value>,
     now: &str,
@@ -617,7 +643,7 @@ fn park_unit(
     let unit = running_unit(view, unit_id)?;
     let mut d = Decision::admitted();
     d.unit_id = Some(unit_id.to_string());
-    d.effects = claim::park_effects(view, workflow, unit, kind, reason, detail, now)?;
+    d.effects = claim::park_effects(view, workflow, unit, kind, cause, reason, detail, now)?;
     d.ledger = Some(format!("unit {unit_id} parked: {reason}"));
     Ok(d)
 }

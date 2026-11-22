@@ -5,6 +5,7 @@
 mod common;
 
 use common::{Env, FakeUnitSource, env, unit, workflow};
+use pf_engine::Cause;
 use pf_engine::Status;
 use pf_engine::admission::{CommandBody, EngineError, PushOutcome};
 use pf_engine::merge::{PushRecord, head_check};
@@ -284,7 +285,9 @@ fn after_halt_a_push_effect_is_still_recorded() {
 #[test]
 fn a_push_is_recorded_for_a_unit_that_is_no_longer_running() {
     let e = run();
-    e.engine.park("u1", "needs a person").unwrap();
+    e.engine
+        .park("u1", Cause::Stalled, "needs a person")
+        .unwrap();
     e.engine
         .record_push(
             "u1",
@@ -350,7 +353,9 @@ fn every_ledger_line_passes_redact_not_only_pushes() {
     let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
     let e = run();
     // A park reason is outside text, and it reaches the ledger.
-    e.engine.park("u1", &format!("seat said {token}")).unwrap();
+    e.engine
+        .park("u1", Cause::Stalled, &format!("seat said {token}"))
+        .unwrap();
     let ledger = e.ledger_text();
     assert!(!ledger.contains(token), "{ledger}");
     assert!(ledger.contains("unit u1 parked"), "{ledger}");
@@ -445,7 +450,9 @@ fn a_note_for_an_unknown_unit_is_refused_and_a_note_is_recorded_in_any_run_state
     assert!(note_lines(&e).is_empty());
 
     // A halted run and a parked unit still record the note: it is an audit line.
-    e.engine.park("u1", "needs a person").unwrap();
+    e.engine
+        .park("u1", Cause::Stalled, "needs a person")
+        .unwrap();
     e.engine.halt("operator stop").unwrap();
     e.engine.record_note("u1", "n-2", "after the halt").unwrap();
     assert_eq!(note_lines(&e).len(), 1);

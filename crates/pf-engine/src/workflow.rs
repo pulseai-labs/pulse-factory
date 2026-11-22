@@ -41,6 +41,9 @@ pub struct StageDef {
     /// The stage runs only when an outcome sends the unit to it. A unit that reaches it in order
     /// goes past it, and a track that merges counts it as done.
     pub entered_by_outcome: bool,
+    /// A text answer to a park of this stage reaches a seat: the stage declares a fallback answer
+    /// hook. The engine knows no hook: it reads this flag when it writes a request's decision block.
+    pub takes_text: bool,
 }
 
 impl StageDef {
@@ -54,6 +57,7 @@ impl StageDef {
             settings: BTreeMap::new(),
             outcomes: Vec::new(),
             entered_by_outcome: false,
+            takes_text: false,
         }
     }
 }

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::port::agent::Usage;
 use crate::port::forge::PrRef;
 use crate::port::store::{
-    AdmissionRow, ClaimRow, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus, RunRow,
-    SessionRow,
+    AdmissionRow, Cause, ClaimRow, NodeKind, NodeRow, RequestKind, RequestRow, RequestStatus,
+    RunRow, SessionRow,
 };
 use crate::port::unit_source::UnitRecord;
 use crate::status::{EndStatus, Status};
@@ -85,6 +85,11 @@ pub enum CommandBody {
         reason: String,
         #[serde(default)]
         request_kind: RequestKind,
+        /// Why the unit parks. The engine derives the request's decision block from it. A park
+        /// stored before the cause existed has none, and its request holds no block; a park with
+        /// none has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<Cause>,
         /// More facts for the request body, a JSON object: the gap list of a `gaps` park, or
         /// the text of a `stop` park. A park with none has no such field in its stored content.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,7 +156,9 @@ pub enum CommandBody {
         id: String,
         revision: u32,
         generation: u64,
-        /// `{"verb":"answer","text":…}`.
+        /// `{"verb":"answer","text":…}`, the same with `"to_stage":<stage>`, or
+        /// `{"verb":"answer","option":<id>}`: an option stands in place of the answer's own
+        /// parameters, and the engine reads what it does from the stored request.
         answer: serde_json::Value,
         /// Set when the workflow's answer hook failed. The request is answered, and the unit
         /// parks again with this cause and a new request, instead of resuming.
@@ -185,6 +192,13 @@ pub enum CommandBody {
         to_stage: Option<String>,
         generation: u64,
         request_id: String,
+        /// The option of the request's decision block that this clear takes. With it, `to_stage`
+        /// stays `None` and `revision` names the revision the option belongs to. A clear with no
+        /// option has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u32>,
     },
     /// Park a ready unit at its merge and open its `merge_ack` request, in one commit. The merge
     /// rule `claim_ack` sends this; a unit park cannot open this kind of request.
@@ -202,6 +216,10 @@ pub enum CommandBody {
         generation: u64,
         /// The head SHA the request names. The merge that follows pins it.
         head_sha: String,
+        /// The option of the request's decision block that this ack takes. An ack with no option
+        /// has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option: Option<String>,
     },
     /// An ack that was refused. It changes no state; it writes the ledger line. `attempt`
     /// counts the refusals of this request and revision.

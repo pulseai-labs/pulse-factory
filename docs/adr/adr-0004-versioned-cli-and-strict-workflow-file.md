@@ -89,3 +89,52 @@ ADR-0017.
 - **A workflow file can come from an installed plugin.** It is read as strictly as before, and a run
   pins the plugin's content-hash manifest with it (ADR-0007). The plugins the workflow file declares for
   its seats are harness plugins, as before; a Pulse Factory plugin does not install them.
+
+## Amendment, 2026-11-21 (Proposed): an act names an option, an answer names a stage, and a stage declares a fallback answer hook
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It takes effect when
+the code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted. It goes with
+ADR-0005's and ADR-0012's amendments of the same date and ADR-0006's amendment of 2026-11-21.
+
+- **`answer`, `clear` and `ack` take `--option <id>`.** The option is one of the request's stored decision
+  block. The act names it **in place of** its own parameters: an option beside a text or a stage is
+  refused. The engine reads what the option does from the stored request, never from the caller, so a
+  caller cannot make an option say what it does not.
+- **`answer` takes `--to <stage>`** beside `--text`, and `--text` takes a value that starts with `-`
+  (canonical #42 C4).
+- **`clear --option` needs `--rev`.** An option belongs to one revision of a request, and `clear` named
+  none until now. Each of the three forms keeps its flags, its refusals and its JSON for an act with no
+  option; the JSON gains an `option` key, null for a typed act.
+- **The workflow file gains one key.** A stage may declare `on_answer`, a fallback answer hook in the
+  answer scope. A text typed on a park of that stage that has no hook of its own reaches the next seat
+  through it. A new answer placeholder, `{answer.source}`, is `typed` or `option:<id>:<by>`. It is
+  controller-made, reaches the argv as one word and is allowed only in an answer hook. The strict reading
+  of ADR-0004 is unchanged: the key is refused at the track and at the top level, and an unknown key is
+  still an error.
+- **An answer whose text no hook would deliver is refused** and names `clear`. It used to be stored and
+  reach no seat. A run pinned before this amendment has no fallback, so its parks with no file hook refuse
+  a text.
+
+## Amendment, 2026-11-21 (Proposed): a park_on entry declares its options
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q2 to Q5 and Q7).** It takes effect
+when the code that builds it lands (`r2.s11.w4`), and that work's close marks it Accepted. It follows the
+amendment of the same date that lets an act name an option, and it goes with ADR-0005's amendment: a
+workflow's option holds no seat text.
+
+- **A `park_on` entry takes one new optional key, `options`.** It is a list of one to four options. Each
+  option has a `label`, an `answer` text, a `to` stage of the same track, and a `recommended` mark. An
+  option holds an `answer`, a `to`, or both. The strict reading of ADR-0004 is unchanged: any other field
+  of an option is an error, and `options` is still refused at the stage, at the track, at the top level
+  and on a `stop_file` mapping. A `gaps.json` entry takes none: a gaps request keeps its typed answer.
+- **The file names no verb and no reason.** An option can answer or resume. It cannot ack, so a workflow
+  cannot spend the claim holder's confirm. The recommendation has a fixed reason that the controller
+  writes, so the file holds no free text that would pass as the controller's own.
+- **The texts are literal.** `label` and `answer` take no placeholder, and a text that the redactor would
+  change is refused at load. A unit variable comes from a record that a seat wrote, so a placeholder
+  would let seat words ride under `by: "workflow"`. The stored option is the pinned file's text, byte
+  for byte.
+- **An `answer` option needs a hook that would deliver it.** The load refuses it when neither the entry
+  nor its stage declares `on_answer`. A `to`-only option needs none.
+- **The file version stays 1.** A file with no `options` loads and runs as before. A run armed before this
+  amendment keeps its pinned copy, so its parks gain no option.

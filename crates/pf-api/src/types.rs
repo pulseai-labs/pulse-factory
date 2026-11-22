@@ -894,10 +894,19 @@ pub struct RequestSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub head_sha: Option<String>,
+    /// Why the unit parked, from the closed list of causes (`docs/contracts/requests.md`). Left
+    /// out for a request with no decision block, and for a block this binary cannot read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cause: Option<String>,
+    /// The controller's one-sentence summary of the halt. It holds no seat's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
 }
 
-/// The answer of `show`: the summary, the request's body and answer, and the generation that
-/// answered it.
+/// The answer of `show`: the summary, the request's body and answer, the decision block, and the
+/// generation that answered it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RequestDetail {
     pub schema_version: u32,
@@ -910,6 +919,122 @@ pub struct RequestDetail {
     pub answer: serde_json::Value,
     #[ts(type = "number | null")]
     pub answer_generation: Option<u64>,
+    /// The decision block of the request's body. Left out when the body holds none, or holds a
+    /// block of a version this binary does not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub decision: Option<Decision>,
+}
+
+/// The decision block of a request (`docs/contracts/requests.md`, "The decision block"): why the
+/// work stopped, what each possible answer does, and what a fresh session needs to pick the request
+/// up. It is data for a reader. An act names one of its options (`--option`), and the engine reads
+/// what the option does from the stored block, never from the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Decision {
+    /// The version of the block's shape. A block of another version is not decoded.
+    pub v: u32,
+    pub cause: String,
+    /// One sentence the controller writes. It never holds a seat's words.
+    pub summary: String,
+    /// Zero to four options.
+    pub options: Vec<DecisionOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recommended: Option<Recommended>,
+    pub refs: DecisionRefs,
+    /// The number of stage nodes of the parked stage for the unit. 0 for a park at the merge.
+    #[ts(type = "number")]
+    pub attempt: u64,
+    pub asked_by: AskedBy,
+    /// The seat the halt concerns, when the controller asked and a stage node of the unit exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub about: Option<DecisionAbout>,
+    /// Why a stop file's options could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub options_error: Option<String>,
+    /// True when a text answer reaches a seat, because the request's own file declares an answer
+    /// hook, or because the stage declares a fallback hook.
+    pub takes_text: bool,
+}
+
+/// One option of a decision block.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionOption {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub effect: OptionEffect,
+    /// Who wrote the option: `controller`, `workflow` or `seat`. A block stored before the field
+    /// existed has none: a reader takes `seat` for a stop and `controller` for any other cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub by: Option<String>,
+}
+
+/// What an option does when it is taken: it says which verb carries the option out. The engine reads
+/// the effect from the stored request, never from the caller.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum OptionEffect {
+    /// Answer with this text, and resume the unit at the stage `to` when it is set.
+    Answer {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to: Option<String>,
+    },
+    /// Resume the unit, at the stage `to` when it is set.
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        to: Option<String>,
+    },
+    /// Ack the merge.
+    Ack,
+}
+
+/// The option that is recommended, and who recommends it: `controller`, `workflow` or `seat`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Recommended {
+    pub option: String,
+    pub by: String,
+    pub why: String,
+}
+
+/// The IDs a fresh session needs. A fact that does not exist is left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionRefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project: Option<String>,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pr: Option<String>,
+}
+
+/// Who asked: the seat, when its own file opened the request, and the controller otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AskedBy {
+    Seat { role: String, unit: String },
+    Controller,
+}
+
+/// The seat a halt concerns, when the controller is the one who asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DecisionAbout {
+    pub role: String,
+    pub unit: String,
 }
 
 /// The answer of `requests`: the requests (the open ones, or all with `all`), newest last, the count of
@@ -954,8 +1079,10 @@ pub enum ConfirmVerb {
 /// What a confirm code is for. The tag `kind` names the subject, so a later subject is a new tag and
 /// not a new field. A request subject binds the request, its revision, the verb and the verb's own
 /// parameters: for `answer` the SHA-256 of the answer text (64 lower-case hex digits: the text never
-/// reaches the controller's code table), for `clear` the target stage `to` or its absence, for `ack`
-/// nothing (the code binds the PR's head SHA the controller reads when it issues the code).
+/// reaches the controller's code table) and the stage `to` or its absence, for `clear` the target
+/// stage `to` or its absence, for `ack` nothing (the code binds the PR's head SHA the controller
+/// reads when it issues the code). A code for an option binds the option's ID instead of a text
+/// hash, a stage and a head of its own: the controller reads what the option does from the request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(tag = "kind", rename_all = "snake_case")]
@@ -970,6 +1097,10 @@ pub enum ConfirmSubjectArg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         to: Option<String>,
+        /// The option of the request's decision block the code is for.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        option: Option<String>,
     },
     /// A start card's proposal and the hash of its plan. An arm code takes no claim.
     Arm {
@@ -1007,6 +1138,13 @@ pub struct ConfirmSubjectShown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub head_sha: Option<String>,
+    /// A code for an option: the option's ID, and its label as the dialog shows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option_label: Option<String>,
 }
 
 /// The answer of `confirm_code`. Issuing a code changes no claim. `code` is shown once: it is `pfc1-` and
@@ -1168,7 +1306,18 @@ pub struct ArmActed {
 pub struct DeviceAnswerArgs {
     pub request: String,
     pub rev: u32,
+    /// The ruling. An act that takes an option sends it empty: an empty text is no text, and a
+    /// text beside an option is refused.
+    #[serde(default)]
     pub text: String,
+    /// Resume at this stage of the unit's track. The code binds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub to: Option<String>,
+    /// The option of the request's decision block this answer takes, in place of a text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1181,6 +1330,10 @@ pub struct DeviceClearArgs {
     #[serde(default)]
     #[ts(optional = nullable)]
     pub to: Option<String>,
+    /// The option of the request's decision block this clear takes, in place of a stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1190,6 +1343,10 @@ pub struct DeviceClearArgs {
 pub struct DeviceAckArgs {
     pub request: String,
     pub rev: u32,
+    /// The option of the request's decision block this ack takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
     pub code: String,
     pub command_id: String,
 }
@@ -1220,6 +1377,10 @@ pub struct RequestActed {
     pub hook: Option<String>,
     /// `clear`: the stage the unit resumes at.
     pub to_stage: Option<String>,
+    /// The option the act took, when it took one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub option: Option<String>,
 }
 
 /// One frame about requests on `GET /v1/stream`, beside the chat frames (`ChatFrame`). A reader keys
@@ -1241,6 +1402,81 @@ pub enum RequestFrame {
     Request { request: RequestSummary },
     /// The current claim changed.
     Claim { claim: Option<ClaimRecord> },
+}
+
+// ------------------------------------------------------------------ the notice frame (r2.s11.w3)
+
+/// One notice as a device reads it: the controller's record of one request event, with its own text
+/// and the IDs a reader needs. `project`, `unit` and `cause` are left out when absent. The text holds
+/// no seat's words (`docs/contracts/requests.md`, "Notices").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeRecord {
+    /// The notice's place in the store's one sequence, from 1. A device acknowledges a position.
+    #[ts(type = "number")]
+    pub position: u64,
+    /// `opened`, `revised` or `closed`. Only `opened` asks for an alert.
+    pub event: String,
+    pub request: String,
+    pub revision: u32,
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unit: Option<String>,
+    /// The kind of the request.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cause: Option<String>,
+    pub text: String,
+    pub created_at: String,
+    /// How often the controller sent this notice to this device, this send included.
+    #[ts(type = "number")]
+    pub sends: u64,
+}
+
+/// A frame about notices on `GET /v1/stream`, beside the chat frames (`ChatFrame`) and the request
+/// frames (`RequestFrame`). A client that does not know the `type` skips it. A notice can arrive more
+/// than once: a reader keys it by `position`, and `sends` says which send it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum NoticeFrame {
+    Notice { notice: NoticeRecord },
+}
+
+/// What a device did with a notice it was sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum NoticeOutcome {
+    /// The device showed the notice.
+    Shown,
+    /// The device could not show it (no permission to notify). The re-send ends all the same.
+    Blocked,
+}
+
+/// The arguments of `notice_ack`: the position the device has dealt with, and what it did. It
+/// acknowledges every notice at or below the position.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeAckArgs {
+    #[ts(type = "number")]
+    pub position: u64,
+    pub outcome: NoticeOutcome,
+}
+
+/// The answer of `notice_ack`. `admitted` is false when the position did not rise: nothing was
+/// written.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NoticeAcked {
+    pub schema_version: u32,
+    pub device: String,
+    #[ts(type = "number")]
+    pub position: u64,
+    pub outcome: NoticeOutcome,
+    pub admitted: bool,
 }
 
 // ------------------------------------------------------------------ the run list (r1.s4.w3)
@@ -1344,6 +1580,13 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ClaimRecord::export_all(cfg)?;
     RequestSummary::export_all(cfg)?;
     RequestDetail::export_all(cfg)?;
+    Decision::export_all(cfg)?;
+    DecisionOption::export_all(cfg)?;
+    OptionEffect::export_all(cfg)?;
+    Recommended::export_all(cfg)?;
+    DecisionRefs::export_all(cfg)?;
+    AskedBy::export_all(cfg)?;
+    DecisionAbout::export_all(cfg)?;
     RequestList::export_all(cfg)?;
     RequestsArgs::export_all(cfg)?;
     ShowArgs::export_all(cfg)?;
@@ -1370,6 +1613,11 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     DeviceAckArgs::export_all(cfg)?;
     RequestActed::export_all(cfg)?;
     RequestFrame::export_all(cfg)?;
+    NoticeRecord::export_all(cfg)?;
+    NoticeFrame::export_all(cfg)?;
+    NoticeOutcome::export_all(cfg)?;
+    NoticeAckArgs::export_all(cfg)?;
+    NoticeAcked::export_all(cfg)?;
     RunListArgs::export_all(cfg)?;
     RunSummary::export_all(cfg)?;
     RunList::export_all(cfg)?;

@@ -57,13 +57,16 @@ impl Controller {
                 send(RequestFrame::Claim { claim });
             }
         }
-        for r in all {
-            let now = state_of(&r);
+        for r in &all {
+            let now = state_of(r);
             if watch.seen.get(&r.id) != Some(&now) {
                 watch.seen.insert(r.id.clone(), now);
-                send(RequestFrame::Request { request: r });
+                send(RequestFrame::Request { request: r.clone() });
             }
         }
+        drop(watch);
+        // The notices follow the frames (`r2.s11.w3`): one for each request event that lacks one.
+        self.run_notices(&all);
     }
 
     /// The `requests` frame of a new stream: the open requests and the claim.

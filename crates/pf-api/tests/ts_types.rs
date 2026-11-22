@@ -192,6 +192,12 @@ fn the_wire_types_a_client_needs_are_rendered() {
         "RunListArgs.ts",
         "RunSummary.ts",
         "RunList.ts",
+        // r2.s11.w3: the notice frame, the record it carries and `notice_ack`.
+        "NoticeRecord.ts",
+        "NoticeFrame.ts",
+        "NoticeOutcome.ts",
+        "NoticeAckArgs.ts",
+        "NoticeAcked.ts",
     ] {
         assert!(now.contains_key(name), "{name} is not rendered");
     }

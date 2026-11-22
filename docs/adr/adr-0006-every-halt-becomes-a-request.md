@@ -89,3 +89,47 @@ close passed it.
 - **Every halt still becomes a request**, and every end status still carries its reason. A stage with
   no `no_signal` parks as before. The engine knows no nudge and no command: the controller's driver
   carries both out (ADR-0001), and the workflow file declares them (ADR-0004).
+
+## Amendment, 2026-11-21 (Proposed): a request carries a cause and a decision block
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17). It takes
+effect when the code that builds it lands, and that work's close marks it Accepted.
+
+- **Every park names a cause** from a closed list, set in code at the site that makes the halt. No code
+  reads the reason text to find it. A park stored before this amendment has no cause and reads as no
+  block.
+- **A request holds a decision block** in its body: the cause, a summary the controller writes, the
+  options, the recommendation with its source, the IDs of the project, run, unit, stage and PR, the
+  attempt, who asked, and whether a text would reach a seat. The block is data for readers. The engine
+  derives it when it decides the park command, so a replay of the command ID derives nothing.
+- **No verb changes with the block.** `answer`, `clear`, `ack` and the clear grant act as before. An
+  option names an act that an existing verb already does. Who may settle a request does not change.
+- **The line class of the 2026-11-16 amendment attaches to the cause.** A cause is `below` or `above`
+  the line; the four causes that carry a `controller` recommendation are the ones that amendment lists
+  as below the line. A recommendation never changes a class.
+- **Every halt still becomes a request**, and every end status still carries its reason. A seat's text
+  stays in the request's body as data (ADR-0005): the summary never holds it, and a seat's stop options
+  are redacted and bounded before they are stored.
+
+## Amendment, 2026-11-21 (Proposed): a notice is derived from a request, acknowledged per target and sent again
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+- **Every request event becomes a notice.** The controller derives one notice from each request that
+  opens, each revision that a tick sees while the request is open, and each close. A request that closed
+  before the controller saw it open gets none. The notice is data about the request: no verb changes with
+  it, and no notice answers, clears or acknowledges a request.
+- **A notice is delivered on two channels**, the paired devices and the project's Orchestrator chat. It
+  starts no turn, no run and no launch, so `halt` does not stop one. A controller whose commands are
+  stopped writes none, and `status` says so.
+- **A notice is acknowledged per target and sent again until then.** A target acknowledges a position,
+  and the position covers every notice of its channel at or below it. A notice that its target has not
+  acknowledged is sent again on each reconnect and on a timer that doubles up to 15 minutes, until the
+  target acknowledges it or the request closes. A closed request ends the re-send of its earlier notices.
+  A `closed` notice is sent once and owes no acknowledgement.
+- **The text is the block's summary**, redacted once and cut to the channel's word cap. It never holds a
+  seat's words (ADR-0005), the reason, the stop text or the gaps.
+- **No give-up while the request is open** is a known limit: a client that never acknowledges gets each
+  waiting notice again at most every 15 minutes.

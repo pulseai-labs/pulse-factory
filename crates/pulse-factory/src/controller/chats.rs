@@ -284,6 +284,10 @@ pub(super) struct LiveInner {
     /// Why the process was stopped at the self-started turn cap. A held process is `needs_you`
     /// until the operator's next message reopens the session.
     pub held: Option<String>,
+    /// The highest notice position the last operator message carried, until the turn result of
+    /// that message is stored (`r2.s11.w3`). In memory only: a restart in the turn leaves the
+    /// notices waiting for the next message.
+    pub carried: Option<u64>,
 }
 
 /// One live chat process.
@@ -393,6 +397,10 @@ pub(super) struct Chats {
     pub request_frames: broadcast::Sender<wire::RequestFrame>,
     /// What the controller last sent of the requests and the claim.
     pub request_watch: Mutex<super::request_frames::RequestWatch>,
+    /// The notice step: what the controller read of the notices, and its one lock (`r2.s11.w3`).
+    pub notices: Mutex<super::notices::NoticeWatch>,
+    /// The notice frames, each for one device: a third wire type on the same stream.
+    pub notice_frames: broadcast::Sender<(String, wire::NoticeFrame)>,
     /// Open streams: the device and the channel that ends the stream.
     pub streams: Mutex<Vec<(String, mpsc::UnboundedSender<StreamEnd>)>>,
     pub ledger: ChatLedger,
@@ -410,6 +418,8 @@ impl Chats {
             frames: broadcast::channel(FRAME_CAPACITY).0,
             request_frames: broadcast::channel(FRAME_CAPACITY).0,
             request_watch: Mutex::new(Default::default()),
+            notices: Mutex::new(Default::default()),
+            notice_frames: broadcast::channel(FRAME_CAPACITY).0,
             streams: Mutex::new(Vec::new()),
             ledger: ChatLedger::new(state_dir.join(CHAT_LEDGER_FILE)),
         }
@@ -424,7 +434,7 @@ pub(super) fn utc(t: SystemTime) -> String {
 
 /// The time of UTC text that [`utc`] or `now()` wrote, to the millisecond. `None` for any other
 /// text.
-fn time_of(text: &str) -> Option<SystemTime> {
+pub(super) fn time_of(text: &str) -> Option<SystemTime> {
     super::devices::parse_utc_millis(text).map(|ms| UNIX_EPOCH + Duration::from_millis(ms))
 }
 
@@ -977,6 +987,7 @@ impl Controller {
                 state,
                 self_turns: 0,
                 held: None,
+                carried: None,
             }),
         })
     }
@@ -1629,7 +1640,12 @@ impl Controller {
                 };
                 let mut item = new_item(session, &body);
                 item.usage = Some(usage);
-                let _ = self.put(ctx, item);
+                let stored = self.put(ctx, item).is_ok();
+                // The turn result of an operator message that carried notices is the proof that
+                // the input arrived: the agent acknowledges them now (`r2.s11.w3`).
+                if stored && matches!(cause, TurnCause::Operator) {
+                    self.ack_carried(live);
+                }
                 {
                     let mut inner = lock(&live.inner);
                     inner.turn_since = None;
@@ -2116,6 +2132,7 @@ impl Controller {
         let rx = self.chats.frames.subscribe();
         // Subscribed before `hello` is built, so a change that lands meanwhile is not lost.
         let rrx = self.chats.request_frames.subscribe();
+        let nrx = self.chats.notice_frames.subscribe();
         let (end_tx, end_rx) = mpsc::unbounded_channel();
         {
             let mut streams = lock(&self.chats.streams);
@@ -2135,14 +2152,18 @@ impl Controller {
             Ok(_) => return Err(StreamRefusal::NotAuthorized),
             Err(e) => return Err(StreamRefusal::BadRequest(e.to_string())),
         }
+        // A device's first stream joins the notices at the newest position (`r2.s11.w3`).
+        self.join_notices(&device.id);
         let (tx, feed) = mpsc::channel(256);
         let me = self.me.clone();
         handle.spawn(forward(
             me,
             session.map(str::to_string),
+            device.id.clone(),
             after,
             rx,
             rrx,
+            nrx,
             end_rx,
             tx,
         ));
@@ -2257,12 +2278,15 @@ fn frame_text(frame: &wire::ChatFrame) -> StreamEvent {
 }
 
 /// The task of one stream: the reconnect, then the live frames.
+#[allow(clippy::too_many_arguments)]
 async fn forward(
     me: std::sync::Weak<Controller>,
     session: Option<String>,
+    device: String,
     after: u64,
     mut rx: broadcast::Receiver<wire::ChatFrame>,
     mut rrx: broadcast::Receiver<wire::RequestFrame>,
+    mut nrx: broadcast::Receiver<(String, wire::NoticeFrame)>,
     mut end: mpsc::UnboundedReceiver<StreamEnd>,
     tx: mpsc::Sender<StreamEvent>,
 ) {
@@ -2303,6 +2327,27 @@ async fn forward(
         Ok(Err(why)) => {
             eprintln!("pulse-factory: the stream's requests frame cannot be built: {why}");
             return;
+        }
+        Err(_) => return,
+    }
+    // The device's waiting notices, oldest first, each one send (`r2.s11.w3`). A live frame that
+    // repeats a send already made here is dropped.
+    let mut sent: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+    let backlog = {
+        let c = controller.clone();
+        let d = device.clone();
+        tokio::task::spawn_blocking(move || c.notice_backlog(&d)).await
+    };
+    match backlog {
+        Ok(frames) => {
+            for frame in frames {
+                let wire::NoticeFrame::Notice { notice } = &frame;
+                sent.insert(notice.position, notice.sends);
+                let text = serde_json::to_string(&frame).unwrap_or_default();
+                if tx.send(StreamEvent::Frame(text)).await.is_err() {
+                    return;
+                }
+            }
         }
         Err(_) => return,
     }
@@ -2389,6 +2434,27 @@ async fn forward(
                     let text = serde_json::to_string(&frame).unwrap_or_default();
                     if tx.send(StreamEvent::Frame(text)).await.is_err() {
                         return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Lagged { after_seq: last })).await;
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    let _ = tx.send(StreamEvent::End(StreamEnd::Shutdown)).await;
+                    return;
+                }
+            },
+            received = nrx.recv() => match received {
+                Ok((to, frame)) => {
+                    let wire::NoticeFrame::Notice { notice } = &frame;
+                    let again = sent.get(&notice.position).is_some_and(|n| *n >= notice.sends);
+                    if to == device && !again {
+                        sent.insert(notice.position, notice.sends);
+                        let text = serde_json::to_string(&frame).unwrap_or_default();
+                        if tx.send(StreamEvent::Frame(text)).await.is_err() {
+                            return;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {

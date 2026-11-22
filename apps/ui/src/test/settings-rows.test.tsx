@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import type { SettingScope } from "@pulse-factory/api-client";
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { appliesLine } from "../screens/Settings";
 import { boot, type User } from "./chat-helpers";
 import { ADDRESS, FakeTransport, orchestrator, project } from "./fake-transport";
 
@@ -464,5 +465,14 @@ describe("the page names no key", () => {
   it("has no setting key in Settings.tsx", () => {
     const source = readFileSync(resolve(import.meta.dirname, "../screens/Settings.tsx"), "utf8");
     expect(source).not.toMatch(/self_turn_cap|deny_commands|propose_per_min|chat\.[a-z_]+/);
+  });
+});
+
+describe("when a change applies (r2.s11.w5, Approach 12)", () => {
+  it("words a notify.* key as the next notice, and every other key as it did", () => {
+    expect(appliesLine({ key: "notify.on", applies: "next_turn" })).toBe("Applies to the next notice");
+    expect(appliesLine({ key: "notify.resend_seconds", applies: "next_turn" })).toBe("Applies to the next notice");
+    expect(appliesLine({ key: "chat.self_turn_cap", applies: "next_turn" })).toBe("Applies at the next turn");
+    expect(appliesLine({ key: "chat.deny_commands", applies: "next_launch" })).toBe("Applies at the next launch");
   });
 });

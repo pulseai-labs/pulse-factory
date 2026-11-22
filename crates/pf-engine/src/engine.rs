@@ -22,7 +22,7 @@ use crate::merge::PushRecord;
 use crate::port::agent::{AgentPort, Usage};
 use crate::port::forge::{ForgePort, PrRef};
 use crate::port::store::{
-    Commit, Committed, LedgerEntry, LedgerLine, NewAdmission, RequestKind, Store, StoreError,
+    Cause, Commit, Committed, LedgerEntry, LedgerLine, NewAdmission, RequestKind, Store, StoreError,
 };
 use crate::port::unit_source::{UnitRecord, UnitSource};
 use crate::status::{EndStatus, one_line_reason, redact};
@@ -554,9 +554,14 @@ impl Engine {
     }
 
     /// Park a unit that is `running`, and open a generic `park` request for it. A halt whose
-    /// source has its own request kind uses [`Engine::park_as`].
-    pub fn park(&self, unit_id: &str, reason: &str) -> Result<Admission, EngineError> {
-        self.park_as(unit_id, RequestKind::Park, reason)
+    /// source has its own request kind uses [`Engine::park_as`]. The `cause` is why, in code.
+    pub fn park(
+        &self,
+        unit_id: &str,
+        cause: Cause,
+        reason: &str,
+    ) -> Result<Admission, EngineError> {
+        self.park_as(unit_id, RequestKind::Park, cause, reason)
     }
 
     /// End a node with `done`, `failed` or `stopped`.

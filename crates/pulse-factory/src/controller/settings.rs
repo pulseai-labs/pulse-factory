@@ -75,6 +75,32 @@ pub const SESSION_KEYS: [(&str, u64, u64, u64); 4] = [
     (SESSION_HOOK_WAIT_SECONDS, 1, 120, 15),
 ];
 
+/// The key that turns the app channel of the notices on (1) or off (0) (`r2.s11.w3`).
+pub const NOTIFY_APP_ON: &str = "notify.app.on";
+
+/// The key that turns the orchestrator channel of the notices on (1) or off (0).
+pub const NOTIFY_ORCHESTRATOR_ON: &str = "notify.orchestrator.on";
+
+/// The key of the most words in the text of a notice on the app channel.
+pub const NOTIFY_APP_MAX_WORDS: &str = "notify.app.max_words";
+
+/// The key of the most words in the text of a notice on the orchestrator channel.
+pub const NOTIFY_ORCHESTRATOR_MAX_WORDS: &str = "notify.orchestrator.max_words";
+
+/// The key of the wait before a notice is sent again, in seconds. It doubles with each send, up to
+/// 900 seconds.
+pub const NOTIFY_RESEND_SECONDS: &str = "notify.resend_seconds";
+
+/// The five `notify.*` keys, with their range and built-in value, in the order `settings get` lists
+/// them: (key, lowest, highest, built-in). The two `on` keys are 0 or 1.
+pub const NOTIFY_KEYS: [(&str, u64, u64, u64); 5] = [
+    (NOTIFY_APP_ON, 0, 1, 1),
+    (NOTIFY_ORCHESTRATOR_ON, 0, 1, 1),
+    (NOTIFY_APP_MAX_WORDS, 5, 200, 30),
+    (NOTIFY_ORCHESTRATOR_MAX_WORDS, 10, 500, 100),
+    (NOTIFY_RESEND_SECONDS, 10, 3600, 60),
+];
+
 /// What a resume does with a key's value (ADR-0016's amendment of 2026-11-16, which calls the flag
 /// `applies`; `SettingApplies` of `pf-api` already names when a change takes effect, so the code
 /// names this flag `at_resume` and leaves the wire type alone).
@@ -129,7 +155,7 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 12] = [
     DENY_COMMANDS,
     SELF_TURN_CAP,
     PROPOSE_PER_MIN,
@@ -137,12 +163,18 @@ const KEYS: [&str; 7] = [
     SESSION_EXIT_HOLD_MINUTES,
     SESSION_ATTACH_WAIT_MS,
     SESSION_HOOK_WAIT_SECONDS,
+    NOTIFY_APP_ON,
+    NOTIFY_ORCHESTRATOR_ON,
+    NOTIFY_APP_MAX_WORDS,
+    NOTIFY_ORCHESTRATOR_MAX_WORDS,
+    NOTIFY_RESEND_SECONDS,
 ];
 
-/// The range and the built-in value of a `session.*` key.
+/// The range and the built-in value of a `session.*` or a `notify.*` key: a whole number.
 fn session_key(key: &str) -> Option<(u64, u64, u64)> {
     SESSION_KEYS
         .iter()
+        .chain(NOTIFY_KEYS.iter())
         .find(|(k, ..)| *k == key)
         .map(|(_, lo, hi, d)| (*lo, *hi, *d))
 }
@@ -160,7 +192,9 @@ fn unknown_key(key: &str) -> String {
 /// When a change of `key` applies.
 fn applies_of(key: &str) -> SettingApplies {
     // A session key reaches a host when it starts, so a change applies at the next launch.
-    if key == SELF_TURN_CAP || key == PROPOSE_PER_MIN {
+    // A `notify.*` key reads `next_turn` too: a third wire value would break the UI's typecheck, and
+    // `docs/contracts/cli.md` says that for these keys it means the next notice (`r2.s11.w3`).
+    if key == SELF_TURN_CAP || key == PROPOSE_PER_MIN || key.starts_with("notify.") {
         SettingApplies::NextTurn
     } else {
         SettingApplies::NextLaunch
@@ -527,6 +561,31 @@ impl Controller {
             Err(why) => {
                 eprintln!("pulse-factory: {PROPOSE_PER_MIN} is not read: {why}");
                 (DEFAULT_PROPOSE_PER_MIN, "built_in".to_string())
+            }
+        }
+    }
+
+    /// The resolved value of a `notify.*` key for a context. A resolver failure is the built-in, with
+    /// one stderr line: a notice is never held back by a settings read that fails.
+    pub(super) fn notify_setting(
+        &self,
+        key: &str,
+        project: Option<&str>,
+        agent: Option<&str>,
+    ) -> u64 {
+        let default = NOTIFY_KEYS
+            .iter()
+            .find(|(k, ..)| *k == key)
+            .map_or(0, |(_, _, _, d)| *d);
+        match self.resolve_setting(key, project, agent) {
+            Ok(Resolved {
+                value: SettingValue::Number(n),
+                ..
+            }) => n,
+            Ok(_) => default,
+            Err(why) => {
+                eprintln!("pulse-factory: {key} is not read: {why}");
+                default
             }
         }
     }

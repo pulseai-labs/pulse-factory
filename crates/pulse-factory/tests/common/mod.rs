@@ -47,6 +47,9 @@ pub struct Options {
     /// package. The two scripts the stages call come from `scripts_from`; set it to
     /// `real_scripts_dir()`.
     pub review_loop: bool,
+    /// Extra keys of the stage `review`, indented by 8 spaces, each line with a final newline (for
+    /// example a stage-level `on_answer:`). Used only with `review_loop`.
+    pub review_extra: String,
     /// Add the spine-close pieces: the param `base_branch`, a `spine` seed that starts when the
     /// items are done and `rounds.done` exists, a `spine` track with the stage `spine_close` and a
     /// `claim_ack` merge, and an `end_when` that waits for `{run.dir}/closed.flag`.
@@ -75,6 +78,7 @@ impl Default for Options {
             item_vars: "[worktree_path, branch]".to_string(),
             scripts_from: None,
             review_loop: false,
+            review_extra: String::new(),
             spine_close: false,
             close_extra: String::new(),
             close_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
@@ -337,7 +341,16 @@ seeds:
         close_extra = o.close_extra,
         close_stop = o.close_stop,
         review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
-        review_stages = if o.review_loop { REVIEW_STAGES } else { "" },
+        review_stages = if o.review_loop {
+            // The first `stall_minutes` of the block is the stage `review`'s.
+            REVIEW_STAGES.replacen(
+                "        stall_minutes: 20\n",
+                &format!("{}        stall_minutes: 20\n", o.review_extra),
+                1,
+            )
+        } else {
+            String::new()
+        },
     )
 }
 

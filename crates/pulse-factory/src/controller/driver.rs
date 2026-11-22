@@ -13,14 +13,16 @@ use super::base_push;
 use pf_engine::Admission;
 use pf_engine::admission::{EngineError, PushOutcome, RunView};
 use pf_engine::capacity::Slot;
-use pf_engine::claim::{gaps_detail, stop_detail};
+use pf_engine::claim::{
+    AnswerAct, KEY_TAKES_TEXT, ParkOptionDecl, gaps_detail, park_options_detail, stop_detail,
+};
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::agent::{
     AgentPort, SessionEvent, SessionRef, SessionState as AdapterState, SessionStatus, Usage,
 };
 use pf_engine::port::store::{
-    NodeRow, RequestKind, RequestRow, RequestStatus, RunState, SessionRow,
+    Cause, NodeRow, RequestKind, RequestRow, RequestStatus, RunState, SessionRow,
 };
 use pf_engine::render::{RenderContext, UnitView, render};
 use pf_engine::status::Status;
@@ -31,7 +33,7 @@ use pf_workflow::commands::{
     AnswerOutcome, HookOutcome, answer_through_hook, exit0, run_after_merge, run_hook,
     run_unit_hook,
 };
-use pf_workflow::file::{DoneCond, EndWhen, SeedDef, StageSpec};
+use pf_workflow::file::{DoneCond, EndWhen, ParkOn, SeedDef, StageSpec};
 use pf_workflow::package::Package;
 use pf_workflow::pin::{self, Pin};
 use pf_workflow::queue::{QueuePoll, QueueSource, ingest_queue};
@@ -449,7 +451,7 @@ impl Driver {
                                 let reason = format!(
                                     "the default branch {remote}/{branch} moved from {before} to {after} during a push"
                                 );
-                                self.park(t, &session.unit_id, &reason);
+                                self.park(t, &session.unit_id, Cause::BaseMoved, &reason);
                             }
                         }
                     }
@@ -493,13 +495,21 @@ impl Driver {
         t.absorb("usage", res);
     }
 
-    fn park(&self, t: &mut Tick, unit_id: &str, reason: &str) -> bool {
-        self.park_kind(t, unit_id, RequestKind::Park, reason)
+    fn park(&self, t: &mut Tick, unit_id: &str, cause: Cause, reason: &str) -> bool {
+        self.park_kind(t, unit_id, RequestKind::Park, cause, reason)
     }
 
-    /// Park a unit and open the request of `kind` with it. The kind is the park's source.
-    fn park_kind(&self, t: &mut Tick, unit_id: &str, kind: RequestKind, reason: &str) -> bool {
-        match self.cfg.engine.park_as(unit_id, kind, reason) {
+    /// Park a unit and open the request of `kind` with it. The kind and the cause are the park's
+    /// source, named in code.
+    fn park_kind(
+        &self,
+        t: &mut Tick,
+        unit_id: &str,
+        kind: RequestKind,
+        cause: Cause,
+        reason: &str,
+    ) -> bool {
+        match self.cfg.engine.park_as(unit_id, kind, cause, reason) {
             Ok(_) => true,
             Err(e) => {
                 t.note(format!("park of {unit_id} not recorded: {e}"));
@@ -536,6 +546,7 @@ impl Driver {
         session: &SessionRow,
         r: &SessionRef,
         kind: RequestKind,
+        cause: Cause,
         reason: &str,
         facts: Option<&serde_json::Value>,
     ) {
@@ -555,7 +566,7 @@ impl Driver {
         match self
             .cfg
             .engine
-            .park_with(&session.unit_id, kind, reason, facts)
+            .park_with(&session.unit_id, kind, cause, reason, facts)
         {
             Ok(_) => {}
             Err(e) => t.note(format!("park of {} not recorded: {e}", session.unit_id)),
@@ -564,18 +575,23 @@ impl Driver {
     }
 
     /// The facts a seat's file adds to the request its park opens: the gap list of a `gaps.json`,
-    /// or the text of the stop file. The kind says which file parked the unit.
+    /// or the text of the stop file and its options. The kind says which file parked the unit.
+    /// A park the seat's own file caused (`stop_file`, `park_file`) also says whether a text
+    /// answer reaches a seat: `takes_text` is true when the stage declares an `on_answer` hook
+    /// for that file. A `park_file` request of a file that declares `options` also carries them, as
+    /// the fact `park_options`, from the one entry that opened the request.
     fn park_facts(
         &self,
         stage: &StageSpec,
         ctx: &RenderContext,
         kind: RequestKind,
+        cause: Cause,
+        reason: &str,
     ) -> Option<serde_json::Value> {
-        match kind {
-            RequestKind::Stop => {
-                let path = render(&stage.stop_file, ctx).ok()?;
-                stop_detail(Path::new(&path.text))
-            }
+        let file_facts = match kind {
+            RequestKind::Stop => render(&stage.stop_file, ctx)
+                .ok()
+                .and_then(|path| stop_detail(Path::new(&path.text))),
             RequestKind::Gaps => {
                 let paths: Vec<String> = stage
                     .park_on
@@ -585,14 +601,53 @@ impl Driver {
                     .filter(|p| park_on_kind(p) == RequestKind::Gaps)
                     .collect();
                 // The file that parked the unit exists. If it went away since, the facts say so.
-                let path = paths
+                paths
                     .iter()
                     .find(|p| Path::new(p).exists())
-                    .or_else(|| paths.first())?;
-                Some(gaps_detail(Path::new(path)))
+                    .or_else(|| paths.first())
+                    .map(|path| gaps_detail(Path::new(path)))
             }
             _ => None,
+        };
+        if !matches!(cause, Cause::StopFile | Cause::ParkFile) {
+            return file_facts;
         }
+        // The entry that opened a `park_file` request holds its hook and its options, so the two are of
+        // one entry. A `gaps` request takes a typed answer alone (Q3), whatever the file declares.
+        let entry = if kind == RequestKind::Stop {
+            None
+        } else {
+            park_on_entry(stage, ctx, kind, reason)
+        };
+        let takes_text = if kind == RequestKind::Stop {
+            !stage.stop_on_answer.is_empty()
+        } else {
+            entry.is_some_and(|entry| !entry.on_answer.is_empty())
+        };
+        let mut facts = match file_facts {
+            Some(serde_json::Value::Object(object)) => object,
+            _ => serde_json::Map::new(),
+        };
+        facts.insert(KEY_TAKES_TEXT.to_string(), serde_json::json!(takes_text));
+        if cause == Cause::ParkFile
+            && kind != RequestKind::Gaps
+            && let Some(entry) = entry.filter(|entry| !entry.options.is_empty())
+        {
+            let declared: Vec<ParkOptionDecl> = entry
+                .options
+                .iter()
+                .map(|o| ParkOptionDecl {
+                    label: o.label.clone(),
+                    answer: o.answer.clone(),
+                    to: o.to.clone(),
+                    recommended: o.recommended,
+                })
+                .collect();
+            if let serde_json::Value::Object(options) = park_options_detail(&declared) {
+                facts.extend(options);
+            }
+        }
+        Some(serde_json::Value::Object(facts))
     }
 
     // 4. `after_first_turn`, once for each session.
@@ -724,9 +779,16 @@ impl Driver {
             let r = SessionRef(process_ref.clone());
             match decision {
                 StallDecision::Relaunch => self.end_session(st, t, session, &r, &reason, true),
-                StallDecision::Park => {
-                    self.park_running(st, t, session, &r, RequestKind::Stall, &reason, None)
-                }
+                StallDecision::Park => self.park_running(
+                    st,
+                    t,
+                    session,
+                    &r,
+                    RequestKind::Stall,
+                    Cause::Stalled,
+                    &reason,
+                    None,
+                ),
                 StallDecision::Active => {}
             }
         }
@@ -824,12 +886,17 @@ impl Driver {
                     session,
                     &r,
                     RequestKind::Park,
+                    Cause::NoDoneSignal,
                     pf_workflow::signals::REASON_NO_DONE_SIGNAL,
                     None,
                 ),
-                StageVerdict::Park { reason, kind } => {
-                    let facts = self.park_facts(stage, &ctx, *kind);
-                    self.park_running(st, t, session, &r, *kind, reason, facts.as_ref())
+                StageVerdict::Park {
+                    reason,
+                    kind,
+                    cause,
+                } => {
+                    let facts = self.park_facts(stage, &ctx, *kind, *cause, reason);
+                    self.park_running(st, t, session, &r, *kind, *cause, reason, facts.as_ref())
                 }
                 StageVerdict::Done { .. } | StageVerdict::Outcome { .. } => {
                     // A done signal seen mid-turn can come before the push it belongs to.
@@ -954,7 +1021,7 @@ impl Driver {
         if meta.len() > DECISIONS_MAX_BYTES {
             let reason = format!("the decisions file {path} is over 1 MiB");
             if unit.status == Status::Running {
-                self.park(t, &unit.id, &reason);
+                self.park(t, &unit.id, Cause::DecisionsTooLarge, &reason);
             } else {
                 t.note(format!("unit {}: {reason}", unit.id));
             }
@@ -1070,7 +1137,7 @@ impl Driver {
             }
             // The run's copies must be as they were at arm.
             if let Some(mismatch) = self.cfg.pins.iter().find_map(|p| pin::check(p).err()) {
-                self.park(t, &unit.id, &mismatch.to_string());
+                self.park(t, &unit.id, Cause::PinsChanged, &mismatch.to_string());
                 continue;
             }
             let ctx = self.ctx(run_dir, Some((&unit.id, &detail.record.vars)));
@@ -1099,7 +1166,7 @@ impl Driver {
                         }
                     }
                     Err(reason) => {
-                        self.park(t, &unit.id, &reason);
+                        self.park(t, &unit.id, Cause::BasePushFailed, &reason);
                         continue;
                     }
                 }
@@ -1239,6 +1306,23 @@ impl Driver {
             .map_err(|e| e.to_string())
     }
 
+    /// [`Driver::clear_unit`] with an option of the request's decision block in place of a stage.
+    /// The option belongs to `revision`. The pins are checked first, as for a clear.
+    pub fn clear_option(
+        &self,
+        unit_id: &str,
+        option: &str,
+        revision: u32,
+        generation: u64,
+        request_id: &str,
+    ) -> Result<Admission, String> {
+        self.check_pins()?;
+        self.cfg
+            .engine
+            .clear_unit_option(unit_id, option, revision, generation, request_id)
+            .map_err(|e| e.to_string())
+    }
+
     /// Ack a `merge_ack` request in the name of the claim `generation` (ADR-0005). The engine checks
     /// the PR again, answers the request and merges with the acked SHA pinned. A merge that lands
     /// ends the unit `done`, and the track's `after_merge` commands run. The pins of the run's whole
@@ -1252,12 +1336,24 @@ impl Driver {
         revision: u32,
         generation: u64,
     ) -> Result<Acked, String> {
+        self.ack_option(request_id, revision, generation, None)
+    }
+
+    /// [`Driver::ack_request`] that takes an option of the request's decision block. The pins are
+    /// checked first, and the engine checks the option before it reads the PR.
+    pub fn ack_option(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        option: Option<&str>,
+    ) -> Result<Acked, String> {
         self.check_pins()?;
         let _held = locked(&self.state);
         let step = self
             .cfg
             .engine
-            .ack_merge(request_id, revision, generation)
+            .ack_merge_option(request_id, revision, generation, option)
             .map_err(|e| match e {
                 EngineError::Rejected(why) => why,
                 other => other.to_string(),
@@ -1312,6 +1408,31 @@ impl Driver {
         generation: u64,
         text: &str,
     ) -> Result<Answered, String> {
+        self.answer_act(
+            request_id,
+            revision,
+            generation,
+            &AnswerAct::Text {
+                text,
+                to_stage: None,
+            },
+        )
+    }
+
+    /// [`Driver::answer_request`] for an act: a text with an optional stage, or an option of the
+    /// request's decision block.
+    ///
+    /// The engine is asked first, so a stale revision, a fenced claim, a changed pin or an option
+    /// the request does not hold gives its own refusal. Then, for a request with a unit, an answer
+    /// that no hook would deliver is refused and nothing is recorded: the answer would be stored
+    /// and reach no seat. `clear` is the way on. A request with no unit keeps its plain answer.
+    pub fn answer_act(
+        &self,
+        request_id: &str,
+        revision: u32,
+        generation: u64,
+        act: &AnswerAct,
+    ) -> Result<Answered, String> {
         let engine = &self.cfg.engine;
         let request = engine
             .requests()
@@ -1325,14 +1446,41 @@ impl Driver {
         if let Some(request) = request.filter(|r| resumes && r.status == RequestStatus::Open) {
             // One tick at a time: the stage must not launch between the hook and the resume.
             let _held = locked(&self.state);
-            if let Some(answered) = self.answer_with_hook(&request, revision, generation, text)? {
-                return Ok(answered);
-            }
+            engine
+                .check_answer_act(request_id, revision, generation, act)
+                .map_err(|e| e.to_string())?;
+            return match self.answer_with_hook(&request, revision, generation, act)? {
+                Some(answered) => Ok(answered),
+                None => Err(takes_no_text(&request)),
+            };
         }
         engine
-            .answer_request(request_id, revision, generation, text)
+            .answer_act(request_id, revision, generation, act)
             .map_err(|e| e.to_string())?;
         Ok(Answered::default())
+    }
+
+    /// Would a text answer to this request reach a seat through a hook? A request with no unit
+    /// keeps its plain answer. The refusal is the one `answer` gives, so a device never spends a
+    /// confirm code on a text that no seat would read.
+    pub fn check_takes_text(&self, request: &RequestRow) -> Result<(), String> {
+        let Some(unit_id) = request.unit_id.as_deref() else {
+            return Ok(());
+        };
+        let view = self.cfg.engine.view().map_err(|e| e.to_string())?;
+        let Some(unit) = view.node(unit_id) else {
+            return Ok(());
+        };
+        let Ok(detail) = view.unit_detail(unit) else {
+            return Ok(());
+        };
+        let run_dir = self.run_dir_text();
+        let ctx = self.ctx(&run_dir, Some((&unit.id, &detail.record.vars)));
+        if self.answer_hook(&detail.track, request, &ctx).is_empty() {
+            Err(takes_no_text(request))
+        } else {
+            Ok(())
+        }
     }
 
     /// Answer a request through its hook. `None` when the workflow declares no hook for it.
@@ -1341,7 +1489,7 @@ impl Driver {
         request: &RequestRow,
         revision: u32,
         generation: u64,
-        text: &str,
+        act: &AnswerAct,
     ) -> Result<Option<Answered>, String> {
         let engine = &self.cfg.engine;
         let view = engine.view().map_err(|e| e.to_string())?;
@@ -1362,7 +1510,7 @@ impl Driver {
             request,
             revision,
             generation,
-            text,
+            act,
             &hook,
             &ctx,
             &self.cfg.run_dir.join("answers"),
@@ -1377,11 +1525,12 @@ impl Driver {
         }))
     }
 
-    /// The `on_answer` commands the workflow declares for a request, or none. The stop file's
-    /// hook goes with a `stop` request. A `park_on` entry's hook goes with the request its file
-    /// opens: the entry whose file name gives the request's kind (`park_on_kind`), and for the
-    /// generic `park` kind also the entry whose reason is the request's reason. The first such
-    /// entry wins.
+    /// The `on_answer` commands the workflow declares for a request, or none. The hook of the
+    /// request's own file comes first: the stop file's hook goes with a `stop` request, and a
+    /// `park_on` entry's hook goes with the request its file opens (the entry whose file name gives
+    /// the request's kind (`park_on_kind`), and for the generic `park` kind also the entry whose
+    /// reason is the request's reason; the first such entry wins). With none, the stage's
+    /// fallback hook goes: a park that no file opened (a stall, a cap, a failed launch) uses it.
     fn answer_hook(
         &self,
         track: &str,
@@ -1391,26 +1540,18 @@ impl Driver {
         let Some(stage) = self.stage_spec(track, &request.stage) else {
             return Vec::new();
         };
-        if request.kind == RequestKind::Stop {
-            return stage.stop_on_answer.clone();
+        let own = if request.kind == RequestKind::Stop {
+            stage.stop_on_answer.clone()
+        } else {
+            park_on_entry(stage, ctx, request.kind, &request.reason)
+                .map(|entry| entry.on_answer.clone())
+                .unwrap_or_default()
+        };
+        if own.is_empty() {
+            stage.on_answer.clone()
+        } else {
+            own
         }
-        stage
-            .park_on
-            .iter()
-            .find(|entry| {
-                let Ok(file) = render(&entry.file, ctx) else {
-                    return false;
-                };
-                if park_on_kind(&file.text) != request.kind {
-                    return false;
-                }
-                request.kind != RequestKind::Park
-                    || render(&entry.reason, ctx).is_ok_and(|reason| {
-                        pf_engine::status::one_line_reason(&reason.text) == request.reason
-                    })
-            })
-            .map(|entry| entry.on_answer.clone())
-            .unwrap_or_default()
     }
 
     /// End each session still open under a unit that is not running (start-up, and a replaced run).
@@ -1427,6 +1568,41 @@ impl Driver {
 }
 
 // ------------------------------------------------------------------ files
+
+/// The refusal of a text answer that no hook would deliver to a seat. The answer would be stored
+/// and reach nobody, so it is refused and nothing is recorded.
+fn takes_no_text(request: &RequestRow) -> String {
+    format!(
+        "request {} takes no text: no answer hook of stage {} would deliver it to a seat; resume the unit with pulse-factory clear {} {}",
+        request.id,
+        request.stage,
+        request.run_id,
+        request.unit_id.as_deref().unwrap_or_default()
+    )
+}
+
+/// The `park_on` entry that opened a request of `kind` with this `reason`: the entry whose file
+/// name gives the request's kind (`park_on_kind`), and for the generic `park` kind also the entry
+/// whose reason is the request's reason. The first such entry wins. `reason` is the one-line
+/// reason the request stores.
+fn park_on_entry<'a>(
+    stage: &'a StageSpec,
+    ctx: &RenderContext,
+    kind: RequestKind,
+    reason: &str,
+) -> Option<&'a ParkOn> {
+    stage.park_on.iter().find(|entry| {
+        let Ok(file) = render(&entry.file, ctx) else {
+            return false;
+        };
+        if park_on_kind(&file.text) != kind {
+            return false;
+        }
+        kind != RequestKind::Park
+            || render(&entry.reason, ctx)
+                .is_ok_and(|rendered| pf_engine::status::one_line_reason(&rendered.text) == reason)
+    })
+}
 
 fn mtime_secs(p: &Path) -> Option<u64> {
     std::fs::metadata(p)

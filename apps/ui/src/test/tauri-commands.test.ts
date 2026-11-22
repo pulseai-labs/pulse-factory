@@ -131,10 +131,28 @@ describe("the Tauri commands", () => {
     expect(MAIN_RS).toContain("close_all");
   });
 
-  it("add no capability file and no event listener", () => {
+  it("add no command and no event listener: the stream stays on the Channel, and notice_ack goes through `verb`", () => {
     // Tauri's `listen` needs a capability that grants core:event; a Channel needs none.
     const code = TAURI_TS.replace(/\/\/.*$/gm, "");
     expect(code).not.toMatch(/\blisten\b/);
     expect(code).toContain("Channel");
+    expect(code).toContain('verb<NoticeAcked>("notice_ack"');
+    expect(TAURI_COMMANDS).not.toContain("notice_ack");
+  });
+
+  it("have one capability file for the main window that grants the notification plugin's four calls and nothing else (r2.s11.w5)", () => {
+    const file = JSON.parse(read("../../../desktop/src-tauri/capabilities/default.json")) as { windows: string[]; permissions: unknown[] };
+    const conf = JSON.parse(read("../../../desktop/src-tauri/tauri.conf.json")) as { app: { windows: Array<{ label?: string }> } };
+    expect(file.windows).toEqual(["main"]);
+    expect(conf.app.windows[0]?.label).toBe("main");
+    expect([...file.permissions].sort()).toEqual([
+      "notification:allow-is-permission-granted",
+      "notification:allow-notify",
+      "notification:allow-register-listener",
+      "notification:allow-request-permission",
+    ]);
+    expect(file.permissions).not.toContain("notification:default");
+    expect(file.permissions.every((p) => typeof p === "string" && !p.startsWith("core:"))).toBe(true);
+    expect(MAIN_RS).toContain("tauri_plugin_notification::init()");
   });
 });

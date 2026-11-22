@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 
 use pf_adapter_fake::FakeAdapter;
+use pf_engine::Cause;
 use pf_engine::port::agent::*;
 use pulse_factory::arm::ArmPlan;
 use pulse_factory::controller::ports::{Ports, RunPorts, RunSpec};
@@ -335,7 +336,10 @@ impl Live {
     /// Park a running unit through the engine, then tick so the driver ends its stage node.
     /// The unit is then `parked` with an open request, and `answer` and `clear` can take it.
     pub fn park_unit(&self, unit: &str, reason: &str) {
-        self.handle().engine.park(unit, reason).unwrap();
+        self.handle()
+            .engine
+            .park(unit, Cause::Stalled, reason)
+            .unwrap();
         self.controller.tick_all();
     }
 

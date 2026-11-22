@@ -4,6 +4,7 @@
 mod common;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::ledger::{format_line, parse_seq};
 use pf_engine::port::forge::PrRef;
 use pf_engine::unit::Signal;
@@ -107,7 +108,7 @@ fn drive_more(env: &Env) {
         })
         .unwrap();
     env.engine.start_stage("u9").unwrap();
-    env.engine.park("u9", "stalled").unwrap();
+    env.engine.park("u9", Cause::Stalled, "stalled").unwrap();
 }
 
 #[test]
@@ -161,6 +162,7 @@ fn a_command_that_is_replayed_or_rejected_writes_no_line() {
             unit_id: "u1".to_string(),
             reason: "stalled".to_string(),
             request_kind: pf_engine::RequestKind::Park,
+            cause: None,
             detail: None,
         },
     };
@@ -176,6 +178,7 @@ fn a_command_that_is_replayed_or_rejected_writes_no_line() {
                     unit_id: "u1".to_string(),
                     reason: "again".to_string(),
                     request_kind: pf_engine::RequestKind::Park,
+                    cause: None,
                     detail: None,
                 },
             })

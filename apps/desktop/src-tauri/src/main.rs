@@ -13,7 +13,13 @@
 //! opens no network connection (its CSP allows the bundle's own assets and Tauri's IPC only).
 //!
 //! The stream's events go to the webview on a `tauri::ipc::Channel`, not on Tauri's event system:
-//! `listen` needs a capability that grants `core:event`, and the app declares no capability file.
+//! `listen` needs a capability that grants `core:event`, and the capability file grants none.
+//!
+//! The app shows a macOS notification when a request opens (`r2.s11.w5`, ADR-0013's amendment of
+//! 2026-11-22): the notification plugin is registered below, and `capabilities/default.json` is the app's
+//! one capability file. It names the `main` window and grants four `notification:allow-…` entries, the
+//! plugin's own commands that the UI's notifier calls (read the permission, ask for it, show, listen for a
+//! click). It grants no `notification:default`, no `core:` entry and no other plugin.
 
 use pf_api::types::{
     ApiStatus, ProjectAddArgs, ProjectChanged, ProjectList, SessionAnswerArgs, SessionChanged,
@@ -154,6 +160,7 @@ async fn forget(device: State<'_, Device>) -> Result<(), ClientError> {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // The address, the pin and the device record go in the app's data directory. They hold
             // no secret: the token is in the Keychain.

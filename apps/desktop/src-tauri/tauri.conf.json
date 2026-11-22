@@ -9,6 +9,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Pulse Factory",
         "width": 1440,
         "height": 860,

@@ -11,8 +11,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use pf_api::types::{ClaimRecord, RequestDetail, RequestList, RequestSummary};
-use pf_engine::claim::{check_claim_in, claim_of_hash, holder_device, sha256_hex};
+use pf_api::types::{ClaimRecord, Decision, RequestDetail, RequestList, RequestSummary};
+use pf_engine::claim::{AnswerAct, check_claim_in, claim_of_hash, holder_device, sha256_hex};
 use pf_engine::merge::blocked_by;
 use pf_engine::port::agent::SessionRef;
 use pf_engine::port::store::{ClaimRow, DeviceRow, RequestKind, RequestRow, RequestStatus, Store};
@@ -368,15 +368,30 @@ impl Controller {
         if let Err(why) = self.check_chat_caller("answer", peer) {
             return err(why);
         }
-        let (Some(id), Some(rev), Some(body)) = (
+        let (Some(id), Some(rev)) = (
             text(args, "request"),
             args.get("rev").and_then(Value::as_u64),
-            text(args, "text"),
         ) else {
-            return err("answer refused: it needs a request ID, --rev and --text");
+            return err("answer refused: it needs a request ID, --rev and --text or --option");
         };
         let Ok(rev) = u32::try_from(rev) else {
             return err("answer refused: --rev is too large");
+        };
+        // An option stands in place of the text and the stage: it carries no parameters of its own.
+        let option = text(args, "option");
+        let act = match (text(args, "text"), option) {
+            (Some(_), Some(_)) => return err(format!("answer refused: {OPTION_WITH_PARAMETERS}")),
+            (None, Some(_)) if text(args, "to").is_some() => {
+                return err(format!("answer refused: {OPTION_WITH_PARAMETERS}"));
+            }
+            (Some(body), None) => AnswerAct::Text {
+                text: body,
+                to_stage: text(args, "to"),
+            },
+            (None, Some(option)) => AnswerAct::Option(option),
+            (None, None) => {
+                return err("answer refused: it needs a request ID, --rev and --text or --option");
+            }
         };
         let request = match self.store.request(id) {
             Ok(Some(r)) => r,
@@ -392,7 +407,7 @@ impl Controller {
             Ok(g) => g,
             Err(why) => return err(format!("answer refused: {why}")),
         };
-        match handle.driver.answer_request(id, rev, generation, body) {
+        match handle.driver.answer_act(id, rev, generation, &act) {
             Ok(answered) => Response::ok(json!({
                 "schema_version": SCHEMA_VERSION,
                 "request": id,
@@ -400,6 +415,9 @@ impl Controller {
                 "run": request.run_id,
                 "unit": request.unit_id,
                 "generation": generation,
+                // The option the answer took, or null for a typed text.
+                "option": option,
+                "to_stage": self.stored_to_stage(id),
                 // A failed answer hook parks the unit again: the answer is recorded and the
                 // unit does not resume.
                 "resumed": request.unit_id.is_some() && answered.hook_failed.is_none(),
@@ -440,10 +458,30 @@ impl Controller {
             ));
         };
         let to_stage = text(args, "to");
-        match handle
-            .driver
-            .clear_unit(unit, to_stage, generation, &request.id)
-        {
+        let option = text(args, "option");
+        let cleared = match option {
+            Some(option) => {
+                if to_stage.is_some() {
+                    return err(format!("clear refused: {OPTION_WITH_PARAMETERS}"));
+                }
+                // An option belongs to one revision of the request: `clear` named none until now.
+                let Some(rev) = args.get("rev").and_then(Value::as_u64) else {
+                    return err(
+                        "clear refused: --option needs --rev, the revision you read with `show`",
+                    );
+                };
+                let Ok(rev) = u32::try_from(rev) else {
+                    return err("clear refused: --rev is too large");
+                };
+                handle
+                    .driver
+                    .clear_option(unit, option, rev, generation, &request.id)
+            }
+            None => handle
+                .driver
+                .clear_unit(unit, to_stage, generation, &request.id),
+        };
+        match cleared {
             Ok(_) => {
                 let resumed_at = self
                     .store
@@ -461,6 +499,7 @@ impl Controller {
                     "request": request.id,
                     "revision": request.revision,
                     "generation": generation,
+                    "option": option,
                     "to_stage": resumed_at,
                 }))
             }
@@ -498,7 +537,8 @@ impl Controller {
             Ok(g) => g,
             Err(why) => return err(format!("ack refused: {why}")),
         };
-        match handle.driver.ack_request(id, rev, generation) {
+        let option = text(args, "option");
+        match handle.driver.ack_option(id, rev, generation, option) {
             Ok(acked) => {
                 let (pr, base) = match self.store.request(id) {
                     Ok(Some(r)) => {
@@ -515,6 +555,7 @@ impl Controller {
                     "unit": acked.unit,
                     "generation": generation,
                     "verb": "ack",
+                    "option": option,
                     "pr": pr,
                     "base": base,
                     "head_sha": acked.head_sha,
@@ -525,6 +566,18 @@ impl Controller {
             }
             Err(why) => err(format!("ack refused: {why}")),
         }
+    }
+
+    /// The stage an answered request's stored answer names, or null.
+    fn stored_to_stage(&self, id: &str) -> Value {
+        self.store
+            .request(id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.answer)
+            .and_then(|a| serde_json::from_str::<Value>(&a).ok())
+            .and_then(|a| a.get("to_stage").cloned())
+            .unwrap_or(Value::Null)
     }
 
     // ------------------------------------------------------------------ requests and show
@@ -552,6 +605,7 @@ impl Controller {
                 .flatten()
                 .and_then(|b| b.get(key).and_then(Value::as_str).map(str::to_string))
         };
+        let decision = decision_of(&r.body);
         RequestSummary {
             id: r.id.clone(),
             revision: r.revision,
@@ -568,6 +622,8 @@ impl Controller {
             pr: body("pr"),
             base: body("base"),
             head_sha: body("head_sha"),
+            cause: decision.as_ref().map(|d| d.cause.clone()),
+            summary: decision.map(|d| d.summary),
         }
     }
 
@@ -664,9 +720,22 @@ impl Controller {
             body: parse(&request.body),
             answer: request.answer.as_deref().map_or(Value::Null, parse),
             answer_generation: request.answer_generation,
+            decision: decision_of(&request.body),
         };
         Response::ok(serde_json::to_value(detail).unwrap_or(Value::Null))
     }
+}
+
+/// The decision block of a request's body. `None` when the body holds none (a park stored before
+/// the cause existed), when the block is of a version this binary does not read, and when it does
+/// not decode: a reader then sees the request as it saw one with no block, and no error.
+pub(super) fn decision_of(body: &str) -> Option<Decision> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let block = value.get(pf_engine::claim::KEY_DECISION)?;
+    if block.get("v").and_then(Value::as_u64) != Some(pf_engine::claim::DECISION_VERSION) {
+        return None;
+    }
+    serde_json::from_value(block.clone()).ok()
 }
 
 /// The verbs that answer a request: a unit's request takes `answer` and `clear`; a `merge_ack`
@@ -679,6 +748,10 @@ pub(super) fn verbs_of(request: &RequestRow) -> Vec<&'static str> {
         _ => Vec::new(),
     }
 }
+
+/// The refusal of an act that names an option and carries parameters of its own. The engine's
+/// words, so the CLI, the socket and the engine say one thing.
+const OPTION_WITH_PARAMETERS: &str = "an act with an option carries no parameters of its own";
 
 /// The number in `R-<n>`, for sorting. An ID that does not read sorts first.
 fn request_number(id: &str) -> u64 {

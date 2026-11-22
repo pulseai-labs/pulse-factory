@@ -140,8 +140,17 @@ fn pair(live: &Live, bridge: &ApiBridge, name: &str) -> DeviceRecord {
         .device
 }
 
+/// A package whose stage `implement` takes a text answer on any park and delivers it to no script.
+/// A text answer to a unit's request needs a hook since `r2.s11.w2` (Q5).
+fn noted() -> Options {
+    Options {
+        implement_extra: "        on_answer:\n          - [\"true\"]\n".to_string(),
+        ..Options::default()
+    }
+}
+
 fn world() -> World {
-    let live = Live::start_config(BIN.into(), |cfg: &mut Config| {
+    let live = Live::start_package(BIN.into(), &noted(), |cfg: &mut Config| {
         cfg.api_listen = Some("127.0.0.1:0".to_string());
         cfg.confirm_ttl = TTL;
     });
@@ -188,17 +197,25 @@ impl World {
         self.live.controller.store().claims().unwrap()
     }
 
+    /// The admissions of the act under test. The notices that a request event brings
+    /// (`r2.s11.w3`: `notice`, `notice_send`, `notice_ack`, `notice_supersede`) are the
+    /// controller's own steps of the tick, with their own tests: they are not counted here.
     fn admissions(&self) -> usize {
         self.live
             .controller
             .store()
             .admissions(CONTROLLER_SCOPE)
             .unwrap()
-            .len()
+            .iter()
+            .filter(|a| !a.kind.starts_with("notice"))
+            .count()
     }
 
     fn ledger_lines(&self) -> usize {
-        controller_ledger(&self.live).len()
+        controller_ledger(&self.live)
+            .iter()
+            .filter(|l| !l.contains(" notice"))
+            .count()
     }
 
     fn request(&self, req: usize) -> pf_engine::port::store::RequestRow {

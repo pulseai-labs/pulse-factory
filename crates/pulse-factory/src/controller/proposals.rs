@@ -1127,6 +1127,8 @@ impl Controller {
                     base: None,
                     head_branch: None,
                     head_sha: None,
+                    option: None,
+                    option_label: None,
                 },
                 start: Some(StartShown {
                     proposal: proposal.to_string(),
@@ -1396,6 +1398,8 @@ fn arm_issued(
             base: None,
             head_branch: None,
             head_sha: None,
+            option: None,
+            option_label: None,
         },
         start: Some(StartShown {
             proposal: p.id.clone(),

@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use pf_engine::Engine;
 use pf_engine::admission::EngineError;
-use pf_engine::port::store::RequestRow;
+use pf_engine::claim::{AnswerAct, resolve_act};
+use pf_engine::port::store::{Cause, RequestRow};
 use pf_engine::render::{AnswerView, RenderContext, render, render_with};
 
 /// The timeout of a command that sets none.
@@ -382,7 +383,7 @@ pub fn run_unit_hook(
         Ok(_) => Ok(HookOutcome::Passed),
         Err(failure) => {
             let reason = failure.to_string();
-            engine.park(unit_id, &reason)?;
+            engine.park(unit_id, Cause::HookFailed, &reason)?;
             Ok(HookOutcome::Failed(reason))
         }
     }
@@ -547,12 +548,16 @@ pub enum AnswerOutcome {
 
 /// Answer a request of a parked unit through its `on_answer` hook, in this order:
 ///
-/// `revision` is the one the caller read: the answer binds to it, as every answer does.
+/// `revision` is the one the caller read: the answer binds to it, as every answer does. The act is
+/// a text with an optional stage, or an option of the request's decision block.
 ///
 /// 1. The engine is asked whether it would admit the answer. A refusal returns the engine's
-///    error and runs nothing, so a stale revision or a fenced claim never runs a hook.
+///    error and runs nothing, so a stale revision, a fenced claim or an option the request does
+///    not hold never runs a hook.
 /// 2. The controller writes two files in a fresh directory under `files_dir`, mode 0600 in a
-///    directory of mode 0700: the answer text, and the request body as JSON.
+///    directory of mode 0700: the answer text (for an option, the text the option stands for, read
+///    from the stored request), and the request body as JSON. `{answer.source}` says whether a
+///    person typed the answer or took an option.
 /// 3. The hook runs, before the unit can become `running`.
 /// 4. The run is a ledger line, `answer hook <R-n>: rc <n>`, whether it passed or failed.
 /// 5. The engine admits the answer. When the hook failed, the same commit leaves the request
@@ -565,21 +570,26 @@ pub fn answer_through_hook(
     request: &RequestRow,
     revision: u32,
     generation: u64,
-    text: &str,
+    act: &AnswerAct,
     hook: &[CommandSpec],
     ctx: &RenderContext,
     files_dir: &std::path::Path,
 ) -> Result<AnswerOutcome, EngineError> {
-    engine.check_answer(&request.id, revision, generation, text)?;
+    engine.check_answer_act(&request.id, revision, generation, act)?;
+    // The text and the source come from the stored request, as the engine's own decision reads
+    // them, so the hook's text and the admitted answer are one.
+    let resolved = resolve_act(request, act).map_err(EngineError::Rejected)?;
+    let source = resolved.source();
 
     let dir = files_dir.join(&request.id);
-    let files = AnswerFiles::write(&dir, text, &request.body)
+    let files = AnswerFiles::write(&dir, &resolved.text, &request.body)
         .map_err(|e| EngineError::Port(format!("cannot write the answer files: {e}")))?;
     let view = AnswerView {
         file: &files.answer,
         request: &request.id,
         revision,
         generation,
+        source: &source,
         body_file: &files.body,
     };
     let run = run_answer_hook(hook, ctx, &view);
@@ -587,7 +597,7 @@ pub fn answer_through_hook(
 
     engine.record_answer_hook(&request.id, revision, run.rc, &run.note())?;
     let cause = run.failure.as_ref().map(ToString::to_string);
-    engine.answer_request_after_hook(&request.id, revision, generation, text, cause.as_deref())?;
+    engine.answer_act_after_hook(&request.id, revision, generation, act, cause.as_deref())?;
     Ok(match cause {
         None => AnswerOutcome::Resumed,
         Some(cause) => AnswerOutcome::HookFailed(cause),

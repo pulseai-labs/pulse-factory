@@ -6,6 +6,7 @@ import { Shell } from "./screens/Shell";
 import { ChatProvider } from "./state/chat";
 import { ConnectionProvider } from "./state/connection";
 import { RequestsProvider } from "./state/requests";
+import { createBrowserNotifier, type Notifier } from "./notify/notifier";
 import type { PairedServer, Transport } from "./transport/types";
 import { Button, Icon } from "./ui";
 
@@ -15,8 +16,11 @@ type View =
   | { name: "pair"; notice?: Notice }
   | { name: "shell"; server: PairedServer };
 
-export function App(props: { transport: Transport }) {
-  const { transport } = props;
+/** The notifier of a page with no other: the page's own `Notification`. `main.tsx` passes the plugin's inside Tauri. */
+const BROWSER_NOTIFIER = createBrowserNotifier();
+
+export function App(props: { transport: Transport; notifier?: Notifier }) {
+  const { transport, notifier = BROWSER_NOTIFIER } = props;
   const [view, setView] = useState<View>({ name: "loading" });
   const [attempt, setAttempt] = useState(0);
 
@@ -92,7 +96,7 @@ export function App(props: { transport: Transport }) {
         >
           <ChatProvider transport={transport}>
             <RequestsProvider>
-              <Shell />
+              <Shell notifier={notifier} />
             </RequestsProvider>
           </ChatProvider>
         </ConnectionProvider>

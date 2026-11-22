@@ -12,9 +12,10 @@ publish = false
 [workspace]
 
 [build-dependencies]
-tauri-build = "=2.6.3"
+tauri-build = "=2.7.4"
 
 [dependencies]
-tauri = "=2.11.5"
+tauri = "=2.12.5"
+tauri-plugin-notification = "=2.8.0"
 pf-api = { path = "../../../crates/pf-api" }
 pf-client = { path = "../../../crates/pf-client" }

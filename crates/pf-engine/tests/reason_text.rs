@@ -5,6 +5,7 @@
 mod common;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::launch::LaunchStep;
 use pf_engine::merge::MergeStep;
 use pf_engine::port::forge::{ForgeOutcome, PrRef};
@@ -310,7 +311,7 @@ fn launched(e: &Env, unit: &str) -> String {
 fn park_accepts_a_multi_line_text_with_a_token() {
     let e = run();
     launched(&e, "u1");
-    e.engine.park("u1", &multi_line()).unwrap();
+    e.engine.park("u1", Cause::Stalled, &multi_line()).unwrap();
     let (status, reason) = e.status_of("u1");
     assert_eq!(status, Status::Parked);
     let reason = reason.unwrap();
@@ -363,7 +364,7 @@ fn halt_for_accepts_a_multi_line_text_with_a_token() {
 fn an_empty_reason_is_accepted_and_gets_the_fixed_text() {
     let e = run();
     launched(&e, "u1");
-    e.engine.park("u1", "  \n ").unwrap();
+    e.engine.park("u1", Cause::Stalled, "  \n ").unwrap();
     assert_eq!(e.status_of("u1").1.as_deref(), Some(REASON_NONE_GIVEN));
     e.engine.halt("").unwrap();
     assert!(e.ledger_text().contains(REASON_NONE_GIVEN));

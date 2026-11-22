@@ -12,6 +12,8 @@ import type {
   DeviceClearArgs,
   FolderList,
   FolderListArgs,
+  NoticeAckArgs,
+  NoticeAcked,
   ProjectAddArgs,
   ProjectChanged,
   ProjectList,
@@ -172,6 +174,7 @@ export function createBridgeTransport(fetchImpl?: FetchLike, eventSourceFactory?
     folderList: (args?: FolderListArgs) => verb<FolderList>("folder_list", args ?? {}),
     projectRemove: (args: ProjectRemoveArgs) => verb<ProjectChanged>("project_remove", args),
     arm: (args: DeviceArmArgs) => verb<ArmActed>("arm", args),
+    noticeAck: (args: NoticeAckArgs) => verb<NoticeAcked>("notice_ack", args),
     openStream,
     forget: async () => {
       await request<null>("POST", "/bridge/forget", {});

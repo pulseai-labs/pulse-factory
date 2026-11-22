@@ -7,10 +7,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pf_engine::MergeRule;
 use pf_engine::capacity::Settings;
+use pf_engine::claim::{
+    PARK_OPTION_ANSWER_MAX_CHARS, PARK_OPTION_LABEL_MAX_CHARS, PARK_OPTIONS_MAX,
+};
+use pf_engine::port::store::RequestKind;
 use pf_engine::render::{Placeholder, placeholder_names};
+use pf_engine::status::redact;
 
 use crate::commands::{CommandSpec, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS};
 use crate::marked::{self, Entry, Node, ParseError, Pos, Value};
+use crate::signals::park_on_kind;
 
 /// The only file version this parser reads.
 pub const SUPPORTED_VERSION: u32 = 1;
@@ -106,6 +112,23 @@ pub struct ParkOn {
     /// Commands that run when an answer resumes a unit parked by this file, before the unit
     /// becomes `running`. Empty declares no hook.
     pub on_answer: Vec<CommandSpec>,
+    /// The options the workflow names for a request this file opens. Empty declares none. The
+    /// request's decision block lists them, `by: "workflow"`.
+    pub options: Vec<ParkOption>,
+}
+
+/// One option of a `park_on` entry. It holds an answer text, a stage, or both, and the texts are
+/// literal: the file holds no placeholder in either. The file names no verb, so no option can ack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkOption {
+    /// The words of the button: one line, 1 to 80 characters.
+    pub label: String,
+    /// The text the option answers with: 1 to 2,000 characters.
+    pub answer: Option<String>,
+    /// A stage of the same track: the unit resumes there.
+    pub to: Option<String>,
+    /// The workflow recommends this option. At most one option of an entry is marked.
+    pub recommended: bool,
 }
 
 /// One stage of a track.
@@ -124,6 +147,10 @@ pub struct StageSpec {
     /// Commands that run when an answer resumes a unit parked by the stop file, before the unit
     /// becomes `running`. Empty declares no hook.
     pub stop_on_answer: Vec<CommandSpec>,
+    /// The stage's fallback answer hook: commands that run when an answer resumes a unit parked at
+    /// this stage by a request whose own file declares no hook (a stall, a cap, a failed launch).
+    /// A stage that declares one takes a text answer on every park. Empty declares none.
+    pub on_answer: Vec<CommandSpec>,
     pub stall_minutes: u32,
     pub first_turn_seconds: u32,
     pub skills: Vec<String>,
@@ -957,8 +984,9 @@ fn read_tracks(
         let scope = Scope::Unit(&e.key);
         let mut stages: Vec<StageSpec> = Vec::new();
         let mut targets: Vec<(String, String, Pos)> = Vec::new();
+        let mut option_targets: Vec<(String, String, Pos)> = Vec::new();
         for s in stage_nodes {
-            let (stage, to_refs) = read_stage(s, check, scope, roles)?;
+            let (stage, to_refs, option_refs) = read_stage(s, check, scope, roles)?;
             if stages.iter().any(|x| x.name == stage.name) {
                 return Err(ParseError::new(
                     s.pos,
@@ -967,6 +995,11 @@ fn read_tracks(
             }
             targets.extend(
                 to_refs
+                    .into_iter()
+                    .map(|(to, pos)| (stage.name.clone(), to, pos)),
+            );
+            option_targets.extend(
+                option_refs
                     .into_iter()
                     .map(|(to, pos)| (stage.name.clone(), to, pos)),
             );
@@ -979,6 +1012,17 @@ fn read_tracks(
                     pos,
                     format!(
                         "an outcome of stage `{from}` sends the unit to `{to}`, which {what} does not define"
+                    ),
+                ));
+            }
+        }
+        // An option of a `park_on` entry resumes the unit at a stage of its own track.
+        for (from, to, pos) in option_targets {
+            if !stages.iter().any(|x| x.name == to) {
+                return Err(ParseError::new(
+                    pos,
+                    format!(
+                        "an option of a `park_on` entry of stage `{from}` sends the unit to `{to}`, which {what} does not define"
                     ),
                 ));
             }
@@ -1006,6 +1050,7 @@ const STAGE_FIELDS: &[&str] = &[
     "before",
     "after_first_turn",
     "stop_file",
+    "on_answer",
     "stall_minutes",
     "first_turn_seconds",
     "skills",
@@ -1021,7 +1066,8 @@ const STAGE_FIELDS: &[&str] = &[
 /// A stage, and the `to` of each of its outcomes with the place it was written. The track checks
 /// the targets once it has read every stage.
 type OutcomeTargets = Vec<(String, Pos)>;
-type StageRead = (StageSpec, OutcomeTargets);
+/// A stage, the stages its outcomes send the unit to, and the stages its `park_on` options name.
+type StageRead = (StageSpec, OutcomeTargets, OutcomeTargets);
 
 fn read_stage(
     node: &Node,
@@ -1085,6 +1131,9 @@ fn read_stage(
             Vec::new(),
         ),
     };
+    // The stage's own fallback, in the answer scope.
+    let on_answer = read_on_answer(&f, check, scope)?;
+    let stage_on_answer = on_answer.clone();
     let stall_minutes = small_uint(f.req("stall_minutes")?, "`stall_minutes`", 1)?;
     let first_turn_seconds = small_uint(f.req("first_turn_seconds")?, "`first_turn_seconds`", 1)?;
     let skills = match f.get("skills") {
@@ -1107,16 +1156,32 @@ fn read_stage(
         .iter()
         .map(|d| read_done(d, check, scope))
         .collect::<Result<_, _>>()?;
+    let mut option_targets: OutcomeTargets = Vec::new();
     let park_on = match f.get("park_on") {
         None => Vec::new(),
         Some(n) => items(n, "`park_on`")?
             .iter()
             .map(|p| {
-                let pf = Fields::new(p, "a `park_on` entry", &["file", "reason", "on_answer"])?;
+                let pf = Fields::new(
+                    p,
+                    "a `park_on` entry",
+                    &["file", "reason", "on_answer", "options"],
+                )?;
+                let file = check.text_node(pf.req("file")?, "`file`", scope)?;
+                let reason = check.text_node(pf.req("reason")?, "`reason`", scope)?;
+                let on_answer = read_on_answer(&pf, check, scope)?;
+                let options = match pf.get("options") {
+                    None => Vec::new(),
+                    Some(o) => {
+                        let hook = !on_answer.is_empty() || !stage_on_answer.is_empty();
+                        read_park_options(o, &file, hook, &mut option_targets)?
+                    }
+                };
                 Ok(ParkOn {
-                    file: check.text_node(pf.req("file")?, "`file`", scope)?,
-                    reason: check.text_node(pf.req("reason")?, "`reason`", scope)?,
-                    on_answer: read_on_answer(&pf, check, scope)?,
+                    file,
+                    reason,
+                    on_answer,
+                    options,
                 })
             })
             .collect::<Result<_, ParseError>>()?,
@@ -1165,6 +1230,7 @@ fn read_stage(
         after_first_turn,
         stop_file,
         stop_on_answer,
+        on_answer,
         stall_minutes,
         first_turn_seconds,
         skills,
@@ -1176,7 +1242,157 @@ fn read_stage(
         base_push,
         no_signal,
     };
-    Ok((spec, targets))
+    Ok((spec, targets, option_targets))
+}
+
+/// The `options` list of a `park_on` entry: each is `{label, answer, to, recommended}`. `file` is
+/// the entry's file template, and `hook` says that the entry or its stage declares an answer hook.
+/// The texts are literal, so a placeholder is refused, and so is a text that the redactor would
+/// change: the file holds no secret, and the stored option is the file's text byte for byte. Each
+/// `to` goes to `targets`; the track checks it once it has read every stage.
+fn read_park_options(
+    node: &Node,
+    file: &str,
+    hook: bool,
+    targets: &mut OutcomeTargets,
+) -> Result<Vec<ParkOption>, ParseError> {
+    let list = items(node, "`options`")?;
+    if list.is_empty() {
+        return Err(ParseError::new(
+            node.pos,
+            "`options` of a `park_on` entry must hold at least one option",
+        ));
+    }
+    if park_on_kind(file) == RequestKind::Gaps {
+        return Err(ParseError::new(
+            node.pos,
+            "a `park_on` entry for a gaps file takes no `options`: a gaps request is answered with a typed text",
+        ));
+    }
+    if list.len() > PARK_OPTIONS_MAX {
+        return Err(ParseError::new(
+            list[PARK_OPTIONS_MAX].pos,
+            format!(
+                "`options` holds at most {PARK_OPTIONS_MAX} options, not {}",
+                list.len()
+            ),
+        ));
+    }
+    let mut options = Vec::new();
+    let mut marked = false;
+    for entry in list {
+        let f = Fields::new(
+            entry,
+            "an option",
+            &["label", "answer", "to", "recommended"],
+        )?;
+        let label_node = f.req("label")?;
+        let label = nonempty_text(label_node, "`label`")?;
+        let label_chars = label.chars().count();
+        if label_chars > PARK_OPTION_LABEL_MAX_CHARS {
+            return Err(ParseError::new(
+                label_node.pos,
+                format!(
+                    "`label` holds {label_chars} characters; the most is {PARK_OPTION_LABEL_MAX_CHARS}"
+                ),
+            ));
+        }
+        if label.chars().any(char::is_control) {
+            return Err(ParseError::new(
+                label_node.pos,
+                "`label` must be one line, with no line break or control character",
+            ));
+        }
+        literal_text(&label, label_node.pos, "`label`")?;
+        let answer = match f.get("answer") {
+            None => None,
+            Some(a) => {
+                let text = nonempty_text(a, "`answer`")?;
+                let chars = text.chars().count();
+                if chars > PARK_OPTION_ANSWER_MAX_CHARS {
+                    return Err(ParseError::new(
+                        a.pos,
+                        format!(
+                            "`answer` holds {chars} characters; the most is {PARK_OPTION_ANSWER_MAX_CHARS}"
+                        ),
+                    ));
+                }
+                if text
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\r'))
+                {
+                    return Err(ParseError::new(
+                        a.pos,
+                        "`answer` holds a control character other than a line break",
+                    ));
+                }
+                literal_text(&text, a.pos, "`answer`")?;
+                if !hook {
+                    return Err(ParseError::new(
+                        a.pos,
+                        "an option with an `answer` needs an `on_answer` hook on the entry or on its stage, or no answer reaches the seat",
+                    ));
+                }
+                Some(text)
+            }
+        };
+        let to = match f.get("to") {
+            None => None,
+            Some(t) => {
+                let name = name_of(t, "`to`")?;
+                targets.push((name.clone(), t.pos));
+                Some(name)
+            }
+        };
+        if answer.is_none() && to.is_none() {
+            return Err(ParseError::new(
+                entry.pos,
+                "an option must hold an `answer`, a `to`, or both",
+            ));
+        }
+        let recommended = match f.get("recommended") {
+            None => false,
+            Some(r) => {
+                let mark = flag_of(r, "`recommended`")?;
+                if mark && marked {
+                    return Err(ParseError::new(
+                        r.pos,
+                        "more than one option of the entry is `recommended: true`",
+                    ));
+                }
+                marked |= mark;
+                mark
+            }
+        };
+        options.push(ParkOption {
+            label,
+            answer,
+            to,
+            recommended,
+        });
+    }
+    Ok(options)
+}
+
+/// A text of an option: no placeholder, and nothing the redactor would change.
+fn literal_text(text: &str, pos: Pos, what: &str) -> Result<(), ParseError> {
+    if let Some(name) = placeholder_names(text).first() {
+        return Err(ParseError::new(
+            pos,
+            format!(
+                "{what} of an option is literal text: it may not hold the placeholder `{{{name}}}`"
+            ),
+        ));
+    }
+    if redact(text) != text {
+        return Err(ParseError::new(
+            pos,
+            format!(
+                "{what} of an option holds text that looks like a secret: a workflow file holds no secret"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The `no_signal` mapping of a stage: `{nudge, nudges, run}`. Each error names the stage and the
@@ -1284,7 +1500,7 @@ fn read_outcomes(
     Ok((outcomes, targets))
 }
 
-/// The optional `on_answer` list of a `park_on` entry or a `stop_file`. Its commands may use the
+/// The optional `on_answer` list of a stage, a `park_on` entry or a `stop_file`. Its commands may use the
 /// answer placeholders, so they are checked in the answer scope.
 fn read_on_answer(
     f: &Fields,

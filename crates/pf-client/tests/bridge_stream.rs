@@ -39,6 +39,8 @@ struct Fake {
     opens: Mutex<Vec<(Option<String>, u64)>>,
     feeds: Mutex<Vec<mpsc::Sender<Feed>>>,
     calls: Mutex<Vec<String>>,
+    /// The arguments each verb arrived with, in order (`r2.s11.w5`).
+    args: Mutex<Vec<(String, Value)>>,
 }
 
 impl ApiHost for Fake {
@@ -50,8 +52,21 @@ impl ApiHost for Fake {
         (Some(token_sha256_hex.to_string()) == token_sha256(TOKEN)).then(device)
     }
 
-    fn call(&self, _: &DeviceRecord, verb: &str, _args: Value) -> pf_ipc::Response {
+    fn call(&self, _: &DeviceRecord, verb: &str, args: Value) -> pf_ipc::Response {
         self.calls.lock().unwrap().push(verb.to_string());
+        self.args
+            .lock()
+            .unwrap()
+            .push((verb.to_string(), args.clone()));
+        if verb == "notice_ack" {
+            return pf_ipc::Response::ok(json!({
+                "schema_version": 1,
+                "device": "D-1",
+                "position": args["position"],
+                "outcome": args["outcome"],
+                "admitted": true
+            }));
+        }
         pf_ipc::Response::ok(json!({
             "replayed": false,
             "session": {"id": "S-1", "state": "idle"},
@@ -131,6 +146,7 @@ impl Rig {
             opens: Mutex::new(Vec::new()),
             feeds: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
+            args: Mutex::new(Vec::new()),
         });
         let app = router_with(fake.clone(), GuardConfig::default(), system_clock());
         let config = key.server_config().unwrap();
@@ -329,6 +345,19 @@ fn item(seq: u64) -> Feed {
             "session_id": "S-1", "seq": seq, "answers_seq": null,
             "created_at": "2026-11-09T10:00:00.000Z", "redacted_at": null,
             "body": {"kind": "assistant_text", "text": "hi"}
+        }})
+        .to_string(),
+    )
+}
+
+fn notice_frame(position: u64) -> Feed {
+    Feed::Frame(
+        json!({"type": "notice", "notice": {
+            "position": position, "event": "opened", "request": "R-1", "revision": 1,
+            "run": "s1-1", "project": "P-1", "unit": "u1", "kind": "stop",
+            "cause": "stop_file",
+            "text": "Unit u1 stopped at stage implement and wrote a stop file.",
+            "created_at": "2026-11-21T10:00:00.000Z", "sends": 1
         }})
         .to_string(),
     )
@@ -541,4 +570,57 @@ async fn no_answer_holds_the_token_and_the_csp_is_unchanged() {
     let device_file = std::fs::read_to_string(rig.state.path().join("device.json")).unwrap();
     assert!(device_file.contains(TOKEN));
     rig.stop().await;
+}
+
+/// AC-11 of `r2.s11.w5`: a notice frame of the server reaches the page as one `notice_frame` event,
+/// between the other events and in the order sent, and the page's `notice_ack` reaches the server
+/// with its arguments.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_notice_frame_reaches_the_page_as_one_event_in_order_and_notice_ack_reaches_the_server() {
+    let rig = Rig::start(true).await;
+    let mut reply = rig.get("/bridge/stream?session=S-1&after=0", "").await;
+    let tx = rig.fake.wait_feed(0).await;
+    tx.send(item(1)).await.unwrap();
+    tx.send(notice_frame(7)).await.unwrap();
+    tx.send(caught(1)).await.unwrap();
+    let first = reply.event(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        (first["event"].as_str(), first["frame"]["type"].as_str()),
+        (Some("frame"), Some("item"))
+    );
+    let second = reply.event(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(second["event"], "notice_frame", "{second}");
+    assert_eq!(second["frame"]["type"], "notice");
+    assert_eq!(second["frame"]["notice"]["position"], 7);
+    assert_eq!(second["frame"]["notice"]["request"], "R-1");
+    assert_eq!(second["frame"]["notice"]["event"], "opened");
+    let third = reply.event(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        third,
+        json!({"event": "frame", "frame": {"type": "caught", "session_id": "S-1", "last_seq": 1}})
+    );
+    // The page acknowledges through the bridge: the verb reaches the server with its arguments.
+    let acked = rig
+        .post(
+            "/bridge/verbs/notice_ack",
+            &rig.host,
+            "application/json",
+            r#"{"position":7,"outcome":"shown"}"#,
+        )
+        .await;
+    assert_eq!(acked.status, 200);
+    let (body, raw) = acked.body().await;
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["ok"], true, "{body}");
+    assert_eq!(answer["result"]["position"], 7);
+    assert_eq!(answer["result"]["outcome"], "shown");
+    assert_eq!(answer["result"]["admitted"], true);
+    assert!(!raw.contains(TOKEN), "the token is in the answer");
+    assert_eq!(
+        rig.fake.args.lock().unwrap().clone(),
+        vec![(
+            "notice_ack".to_string(),
+            json!({"position": 7, "outcome": "shown"})
+        )]
+    );
 }

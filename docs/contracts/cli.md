@@ -266,6 +266,16 @@ run, or null for a run that the CLI armed.
   `PF_HOST_LAUNCHER=systemd`. There is one more, `orphan sweep skipped: <why>`, when the sweep at the
   controller's start could not list the hosts (no user manager answered).
 
+`status --json` carries a third field from `r2.s11.w3`, `notices`: `{"waiting": [{"position", "request",
+"revision", "event", "target", "channel", "sends", "waiting_seconds"}], "blocked": ["<device>", …]}`
+(`requests.md`, "Notices"). `waiting` has one entry for each waiting delivery of the run's notices and
+each target of its channel whose position is below the notice: a paired device on the app channel (a
+revoked device is left out), the project's Orchestrator on the orchestrator channel. `waiting_seconds`
+is the age of the notice. `blocked` lists the live devices whose last `notice_ack` was `blocked`: they
+show no notifications until their next `shown`. The text output prints one line for each waiting
+notice and one for each blocked device, after the lines it printed before. With the controller's
+commands stopped, `warnings` holds a text that says no notice is written.
+
 A failed store read is an error, never an empty list. `status` reads the run, its nodes, sessions,
 admissions and requests, and when one read fails the controller answers `cannot read run <id> from the
 store: <cause>`, and the CLI exits 1 with that text and prints no unit list. A run whose units the
@@ -304,7 +314,7 @@ answered and withdrawn requests, each marked with its status. With nothing open 
 `no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
 `requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
 `opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
-`merge_ack`), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
+`merge_ack`, and `cause` and `summary` for a request that holds a decision block), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
 null), `revoked` and `claimed_at`; null when none). The new fields join the old ones: none is
 removed and `schema_version` stays 1. The API serves the same JSON (`api.md`). It needs no claim.
 
@@ -317,8 +327,39 @@ pulse-factory show <R-n> [--json]
 Prints every field of one request: the body, the answer if there is one, and the verbs that answer
 it (`answer`, and `clear` for a request that has a unit). It also prints the gaps a `gaps` request
 holds and the text of a `stop` request. The JSON adds `body`, `answer`,
-`answer_generation` to the fields of `requests` (`verbs` and a `merge_ack`'s `pr`, `base` and
-`head_sha` are in them already). An unknown ID exits 1 and names it. It needs no claim.
+`answer_generation` and `decision` to the fields of `requests` (`verbs`, `cause`, `summary` and a
+`merge_ack`'s `pr`, `base` and `head_sha` are in them already). An unknown ID exits 1 and names it. It
+needs no claim.
+
+A request that holds a decision block (`requests.md`, "The decision block") also prints these lines,
+after every line above, with every control character of a value replaced:
+
+```
+cause: <cause>
+summary: <one sentence>
+asked by: seat <role> (unit <unit>)      or      asked by: controller
+attempt: <n>
+takes text: yes|no
+about: seat <role> (unit <unit>)         only when the block has `about`
+options error: <cause>                   only when a stop's options could not be read
+option <id>: <label> (by <by>; <what it does>[; recommended by <by>: <why>])
+```
+
+`<by>` is who wrote the option: `controller`, `workflow` or `seat`. A block stored before options
+carried `by` reads `seat` for a `stop_file` request and `controller` for every other. `<what it does>` is
+`answers with the text "<text>"`, `answers with the text "<text>", then resumes the unit at stage
+<stage>`, `resumes the unit`, `resumes the unit at stage <stage>` or `acks the merge`. One `option` line
+prints for each option, in the block's order, so a reader sees every word an option sends and can tell a
+workflow's option from the controller's. A request with no block prints none of these lines. `show
+--json` does not change.
+
+An answered request whose answer took an option prints two more lines after the answer lines that it
+printed before (`requests.md`, "Acting on an option"):
+
+```
+option: <id> by <by>
+recommended: yes|no
+```
 
 ## `claim`
 
@@ -344,12 +385,24 @@ the latest that has not ended.
 ## `answer`
 
 ```
-pulse-factory answer <R-n> --rev <k> --text <ruling> [--claim-token-file <path>] [--json]
+pulse-factory answer <R-n> --rev <k> (--text <ruling> [--to <stage>] | --option <id>) [--claim-token-file <path>] [--json]
 ```
 
 Records the ruling in the request and writes the ledger line. A request that has a unit resumes the
-unit at the stage it parked in, as `clear` does. The text is untrusted data: it is stored and shown,
-never run. `--rev` must be the request's current revision.
+unit at the stage it parked in, as `clear` does, or at `--to`. The text is untrusted data: it is stored
+and shown, never run. `--text` takes a value that starts with `-`: it is the text, not a flag. `--rev`
+must be the request's current revision.
+
+`--option <id>` takes an option of the request's decision block (`show` prints them) in place of a text
+and a stage. The engine reads the option's text and stage from the stored request, so `--option` with
+`--text` or `--to` is refused, and so is an ID that is not 1 to 32 characters of `a-z`, `0-9`, `_` and
+`-`. The option's effect must be `answer`: another effect is refused and names the right verb
+(`requests.md`, "Acting on an option"). The text output names the option: `answered <R-n>@<rev> by claim
+<g> with option <id>; unit <unit> resumes`.
+
+A text that no hook would deliver to a seat is refused and nothing is recorded: the request's own file
+has no `on_answer` hook and the parked stage declares no fallback (`workflow-file.md`, "Answer hooks").
+The refusal names `clear`.
 
 - **Refusals** (exit 1, nothing recorded): the refusals of `claim`; a token file that is missing or
   empty (the message names the path); a token that matches no claim; a fenced token
@@ -362,12 +415,13 @@ never run. `--rev` must be the request's current revision.
   "Answer hooks"). A hook that fails does not refuse the answer: the request is answered, the unit
   parks again with a new request, and `resumed` is `false`.
 - The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `resumed`,
-  `hook` (`none`, `passed` or `failed`) and `hook_failure` (the cause, or null).
+  `hook` (`none`, `passed` or `failed`), `hook_failure` (the cause, or null), `option` (the ID, or
+  null) and `to_stage` (the stage the stored answer names, or null).
 
 ## `clear`
 
 ```
-pulse-factory clear <run> <item> [--to <stage>] [--claim-token-file <path>] [--json]
+pulse-factory clear <run> <item> [--to <stage> | --option <id> --rev <k>] [--claim-token-file <path>] [--json]
 ```
 
 Resumes a parked unit in the same run. It answers the unit's open request with
@@ -376,22 +430,30 @@ ledger line `answer <R-n>@<rev> by claim <generation>: clear <unit> --to <stage>
 is the one the unit parked in. The next tick launches it. A halted run accepts the clear and
 launches nothing.
 
+`--option <id>` takes an option of the unit's open request in place of a stage: its effect must be
+`resume`, and the stage is the effect's `to`. **`--option` needs `--rev`**: an option belongs to one
+revision of the request, and `clear` named none until now. The revision must be the current one (the
+refusal names it). `--option` with `--to` is refused. The text output adds ` with option <id>` after the
+claim generation.
+
 - **Refusals** (exit 1, nothing recorded): those of `answer`, the refusal that names `the claim
   moved to device D-n` included; a unit that is not parked or has no
   open request; a `--to` that is not a stage of the unit's track; a `merge_ack` request (the
   message names `ack`).
-- The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation` and
-  `to_stage`.
+- The JSON holds `schema_version`, `run`, `unit`, `request`, `revision`, `generation`, `to_stage`
+  and `option` (the ID, or null).
 
 ## `ack`
 
 ```
-pulse-factory ack <R-n> --rev <k> [--claim-token-file <path>] [--json]
+pulse-factory ack <R-n> --rev <k> [--option <id>] [--claim-token-file <path>] [--json]
 ```
 
 Merges the spine PR that an open `merge_ack` request names, with the head SHA of the request
 pinned. It takes the claim as `answer` does: the same token file, the same caller check and the same
-refusals. `--rev` must be the request's current revision. The controller, in order:
+refusals. `--rev` must be the request's current revision. `--option <id>` names the request's `ack`
+option (`approve`): its effect must be `ack`, it is checked before the PR is read, and everything else is
+today's ack. Another effect is refused and names the right verb. The controller, in order:
 
 1. refuses a halted or ended run, and names the state;
 2. reads the PR again. If its head SHA is not the request's `head_sha`, it revises the request (the
@@ -416,7 +478,7 @@ refusals. `--rev` must be the request's current revision. The controller, in ord
   (`merge of unit <unit>: repo=… branch=… sha=… outcome=landed`).
 - The JSON holds `schema_version`, `request`, `revision`, `run`, `unit`, `generation`, `verb`
   (`ack`), `pr`, `base`, `head_sha`, `merged` (true when the merge landed), `outcome` (`landed`, or
-  the cause of the park) and `after_merge_failure` (the cause, or null).
+  the cause of the park), `after_merge_failure` (the cause, or null) and `option` (the ID, or null).
 
 ## `project`
 
@@ -501,7 +563,8 @@ command ID and one line of the controller ledger (see Common rules).
   live worktree rows removed in the same command.
 - **`--end-sessions`** (`r1.s5.w5`) ends the project's live chat sessions first, in session order, each
   through the code of `session end` with the command ID `<command-id>:end:<S-n>`, then removes the
-  project. The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
+  project. `project remove --end-sessions` is refused for a caller that is, or descends from, a seat or
+  a live chat process (ADR-0015, Q2 rule 2). The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
   its derived IDs is refused before any end.
 - **The run refusal** (`r1.s5.w5`), for `remove` with or without `--end-sessions`: a project with an active
   run is not removed, and no session is ended (`project P-1 has an active run <run>; remove it after the
@@ -664,7 +727,7 @@ stream (`api.md`).
   closes each pending request as `lost` and adds a `host_lost` notice. A host that does not answer
   does the same with a `host_unreachable` notice and nothing starts; the next `send` stops it first.
   A session with no host row is set `idle` as before. Each outcome is one `chat rebind` line. The next
-  `send` of a lost session resumes it from the newest revision of its launch record: a `current` key
+  `send` of a lost session resumes it with the model, effort, permission mode and options of the session row (`session set` writes them): a `current` key
   (`chat.deny_commands`, `chat.self_turn_cap`, `chat.propose_per_min`) is read now, a `record` key
   (`session.*`) comes from the record, and the CLI copy the chat was launched with must still be in
   place with the same SHA-256, or the resume fails with `RuntimeNotReady` and starts nothing. A
@@ -714,9 +777,11 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly seven in this release. Any other key is refused: `unknown setting <key>; the
+- **The keys.** Exactly twelve in this release. Any other key is refused: `unknown setting <key>; the
   settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
-  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds`. The confirm code, the
+  session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds, notify.app.on,
+  notify.orchestrator.on, notify.app.max_words, notify.orchestrator.max_words,
+  notify.resend_seconds`. The confirm code, the
   caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
@@ -728,6 +793,24 @@ settings" in the common rules).
   | `session.exit_hold_minutes` | a JSON integer, 1 to 10080 | `1440` | `override` | at the next seat launch |
   | `session.attach_wait_ms` | a JSON integer, 100 to 30000 | `3000` | `override` | at the next seat launch |
   | `session.hook_wait_seconds` | a JSON integer, 1 to 120 | `15` | `override` | at the next seat launch |
+  | `notify.app.on` | a JSON integer, 0 or 1; `0` is off | `1` | `override` | at the next notice |
+  | `notify.orchestrator.on` | a JSON integer, 0 or 1; `0` is off | `1` | `override` | at the next notice |
+  | `notify.app.max_words` | a JSON integer, 5 to 200 | `30` | `override` | at the next notice |
+  | `notify.orchestrator.max_words` | a JSON integer, 10 to 500 | `100` | `override` | at the next notice |
+  | `notify.resend_seconds` | a JSON integer, 10 to 3600 | `60` | `override` | at the next re-send |
+
+  The five `notify.*` keys rule the channels of the request notices (`r2.s11.w3`, ADR-0016's amendment
+  of 2026-11-21; `requests.md`, "Notices"). `notify.app.on` and `notify.orchestrator.on` turn a
+  channel off: a notice that is written while its channel is off holds a delivery that is
+  `superseded` with the reason `channel_off`, and nothing is sent. `notify.app.max_words` and
+  `notify.orchestrator.max_words` cut the text of a notice to that many words, at white space.
+  `notify.resend_seconds` is the first wait before a notice that a device has not acknowledged is sent
+  again; the wait doubles with each send, and stops at 900 seconds. The context of a notice is its
+  run's project, or the server scope when the run has none. The two orchestrator keys also resolve at
+  the agent. `on` and `max_words` are read when a notice is written, and `resend_seconds` at each
+  re-send. A chat or a seat cannot set them. For a `notify.*` key, `applies` reads `next_turn`, and it
+  means the next notice. The Settings page words these keys itself, as "Applies to the next notice"
+  (`r2.s11.w5`); the wire value stays `next_turn`. Each `notify.*` key has the resume flag `current`.
 
   The four `session.*` keys set how a session host serves a seat (`r2.s2.w3`, ADR-0016's amendment
   of 2026-11-16). `session.replay_bytes` is the size of the host's output buffer: the host keeps that
@@ -812,7 +895,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (one of the seven keys, such as `chat.self_turn_cap`, or `other` for an unknown key
+  (one of the twelve keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -825,8 +908,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, sixteen
-  across the eight buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, twenty-six
+  across the thirteen buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where

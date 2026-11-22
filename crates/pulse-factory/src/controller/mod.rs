@@ -18,6 +18,7 @@ pub mod driver;
 pub mod files;
 pub mod folders;
 pub mod hosts;
+pub mod notices;
 pub mod ports;
 pub mod projects;
 pub mod proposals;
@@ -866,6 +867,8 @@ impl Handler for Controller {
             "api_status" => self.verb_api_status(),
             // A confirm code is for a paired device, on the API (`r1.s4.w1`).
             "confirm_code" => Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "confirm_code")),
+            // A notice is acknowledged by the device it was sent to (`r2.s11.w3`).
+            "notice_ack" => Controller::socket_notice_ack(),
             // These change who acts and what runs. They need to know who calls.
             "arm" | "propose" | "claim" | "answer" | "clear" | "ack" | "device_pair"
             | "device_revoke" | "settings_set" | "settings_unset" => Response::err(format!(
@@ -936,7 +939,7 @@ impl Controller {
                 },
                 Err(why) => Response::err(why),
             },
-            // A seat cannot drive a chat, and neither can a chat (ADR-0005, Q2 rule 2).
+            // A seat cannot drive a chat, and neither can a chat (ADR-0015, Q2 rule 2).
             verb @ ("session_start" | "session_send" | "session_answer" | "session_interrupt"
             | "session_set" | "session_end" | "session_redact") => {
                 match self.check_chat_caller(verb, peer) {
@@ -945,7 +948,7 @@ impl Controller {
                 }
             }
             // `project_remove` with `end_sessions` ends chat sessions, so a seat or a chat cannot
-            // call it that way (ADR-0005, Q2 rule 2). Without the field it ends nothing, and the
+            // call it that way (ADR-0015, Q2 rule 2). Without the field it ends nothing, and the
             // verb is as it was.
             "project_remove"
                 if request.args.get("end_sessions").and_then(Value::as_bool) == Some(true) =>

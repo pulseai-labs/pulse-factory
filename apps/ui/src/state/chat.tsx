@@ -9,7 +9,7 @@
 // The UI never polls and sets no timer here: `pf-client` reconnects, and the UI opens a new stream
 // only on an operator action, when the chat on screen changes, or when the link comes back
 // (`epoch`). See docs/contracts/ui-transport.md, "When the UI calls".
-import type { ChatFrame, ChatItemRecord, ChatSessionRecord, RequestFrame, SessionList } from "@pulse-factory/api-client";
+import type { ChatFrame, ChatItemRecord, ChatSessionRecord, NoticeFrame, RequestFrame, SessionList } from "@pulse-factory/api-client";
 import {
   createContext,
   useCallback,
@@ -163,6 +163,8 @@ export interface Chat {
    * listener; it opens no stream. Returns the function that stops the listening.
    */
   onRequestFrame(listener: (frame: RequestFrame) => void): () => void;
+  /** Listen for the notice frames of the one stream (r2.s11.w5). The notices state is the one listener. */
+  onNotice(listener: (frame: NoticeFrame) => void): () => void;
 }
 
 const Ctx = createContext<Chat | null>(null);
@@ -212,6 +214,7 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
   const maxSeq = useRef<Record<string, number>>({});
   const listLoaded = useRef(false);
   const requestListeners = useRef(new Set<(frame: RequestFrame) => void>());
+  const noticeListeners = useRef(new Set<(frame: NoticeFrame) => void>());
 
   const onEvent = useCallback(
     (event: StreamEvent) => {
@@ -230,6 +233,11 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
           // A request frame is a sign that the stream is open, as a chat frame is. It rides this one
           // stream, so Needs you opens none of its own.
           for (const listener of requestListeners.current) listener(event.frame);
+          setStatus((s) => (s.state === "open" ? s : { state: "open" }));
+          return;
+        case "notice_frame":
+          // A notice rides the same stream. It is a sign that the stream is open, as the other frames are.
+          for (const listener of noticeListeners.current) listener(event.frame);
           setStatus((s) => (s.state === "open" ? s : { state: "open" }));
           return;
         case "reconnecting":
@@ -338,6 +346,13 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
     };
   }, []);
 
+  const onNotice = useCallback((listener: (frame: NoticeFrame) => void) => {
+    noticeListeners.current.add(listener);
+    return () => {
+      noticeListeners.current.delete(listener);
+    };
+  }, []);
+
   const live = useMemo(
     () => Object.values(state.sessions).filter((s) => s.ended_at === null).sort(byCreation),
     [state.sessions],
@@ -359,8 +374,9 @@ export function ChatProvider(props: { transport: Transport; children: ReactNode 
       refreshList,
       ensureList,
       onRequestFrame,
+      onNotice,
     }),
-    [state, live, status, following, follow, reconnect, applyRecord, refreshList, ensureList, onRequestFrame],
+    [state, live, status, following, follow, reconnect, applyRecord, refreshList, ensureList, onRequestFrame, onNotice],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

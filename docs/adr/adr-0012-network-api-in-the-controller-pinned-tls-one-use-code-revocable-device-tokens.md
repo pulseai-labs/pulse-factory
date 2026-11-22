@@ -513,3 +513,45 @@ ADR-0017. Per the allowlist rule, this amendment records each verb it adds.
 - **The chat stream after a controller restart.** A chat whose session host survived keeps its process
   (ADR-0014, amended). A client that reconnects gets the same session, with the output the host kept
   since the controller's last acknowledged cursor, through the stream's existing reconnect.
+
+## Amendment, 2026-11-21 (Proposed): a device act names an option
+
+**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It takes effect when the
+code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted. It goes with ADR-0004's
+and ADR-0005's amendments of the same date. This amendment adds no verb to the allowlist.
+
+- **`confirm_code`, `answer`, `clear` and `ack` take an optional `option`.** `answer` also takes `to`. A
+  code for an option binds the option's ID (ADR-0005, amended). An option act sends an empty `text`: an
+  empty text is no text, and a text beside an option is another subject than the code's (`code_subject`).
+- **The wire types gain optional fields only.** `ConfirmSubjectArg::Request`, `DeviceAnswerArgs`,
+  `DeviceClearArgs` and `DeviceAckArgs` gain `option`; `DeviceAnswerArgs` gains `to`; `RequestActed` gains
+  `option`; `ConfirmSubjectShown` gains `option` and `option_label`; `DecisionOption` gains `by` and the
+  `answer` effect gains `to`. Each is left out of the JSON when absent. No existing field changes its type,
+  so the generated TypeScript of the earlier version still fits the app (ADR-0013).
+- **The admission's content** gains `option` only when one is set, so the content bytes of a typed act are
+  as before, and a replay of a typed act is unchanged.
+- **The `controller.ledger` line** of an issue or an act for an option adds ` option=<id>`. No token, code
+  or answer text is in it.
+
+## Amendment, 2026-11-21 (Proposed): the notice frame and notice_ack
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+Per the allowlist rule, this amendment records each verb it adds.
+
+- **A third wire enum, `NoticeFrame`, rides `GET /v1/stream`.** One variant, `notice`, goes to one
+  device. `ChatFrame` and `RequestFrame` do not change. A client that does not know the `type` skips
+  it, and `pf-client` carries it as its own event that never moves the `seq` of a reconnect.
+- **`notice_ack` joins the allowlist**, with `{position, outcome}`, the outcome being `shown` or
+  `blocked`. It takes no confirm code: it changes no run state and moves no claim. The controller reads
+  the device again, so a revoked device gets the refusal `device_revoked`. It is refused on the Unix
+  socket. It is admitted under `@controller` with a command ID that the controller makes. Each call is
+  one `api.ledger` line.
+- **Only the frame's `event` says whether to alert.** `opened` alerts. `revised` and `closed` do not.
+  The alert is the app's.
+- **A client calls `notice_ack` only on a server that has sent it a notice frame**, so a newer app on an
+  older server never calls an unknown verb.
+- **The generated types** `NoticeRecord`, `NoticeFrame`, `NoticeOutcome`, `NoticeAckArgs` and
+  `NoticeAcked` join `apps/api-client/src/gen/` (ADR-0013).

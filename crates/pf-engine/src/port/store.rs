@@ -223,6 +223,117 @@ impl RequestKind {
     }
 }
 
+/// Why a unit parked: the closed list of the causes of a park (`docs/contracts/requests.md`, "The
+/// decision block"). Every park site names one in code. Nothing reads the reason text to find it.
+/// The cause is the key of a request's options and of its recommendation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    /// The seat wrote its stop file.
+    StopFile,
+    /// The seat wrote a file the stage lists under `park_on`.
+    ParkFile,
+    /// The seat's turn ended and no done signal holds.
+    NoDoneSignal,
+    /// The seat stalled after its one relaunch.
+    Stalled,
+    /// The agent port refused the launch.
+    LaunchRefused,
+    /// The agent port failed the launch.
+    LaunchFailed,
+    /// A stage outcome reached its cap.
+    OutcomeCap,
+    /// A command hook of a stage failed.
+    HookFailed,
+    /// The answer hook of a request failed.
+    AnswerHookFailed,
+    /// A pinned copy of the run changed after arm.
+    PinsChanged,
+    /// The push of a stage's base branch failed.
+    BasePushFailed,
+    /// The default branch moved during a push.
+    BaseMoved,
+    /// A path or a condition of a stage cannot render.
+    RenderFailed,
+    /// The decisions file is over its bound.
+    DecisionsTooLarge,
+    /// The unit is ready to merge and no PR is recorded for it.
+    NoPr,
+    /// The forge reports a merge conflict.
+    MergeConflict,
+    /// The checks of the PR are red.
+    MergeChecksRed,
+    /// The forge refused the merge.
+    MergeRefused,
+    /// A forge error, or an outcome no other cause fits.
+    MergeError,
+    /// The seat's process is gone.
+    SeatLost,
+    /// The seat's host did not answer.
+    HostUnreachable,
+    /// A merge waits on the claim's ack.
+    MergeWaitsAck,
+}
+
+impl Cause {
+    /// Every cause, in the order the contract lists them.
+    pub const ALL: [Cause; 22] = [
+        Cause::StopFile,
+        Cause::ParkFile,
+        Cause::NoDoneSignal,
+        Cause::Stalled,
+        Cause::LaunchRefused,
+        Cause::LaunchFailed,
+        Cause::OutcomeCap,
+        Cause::HookFailed,
+        Cause::AnswerHookFailed,
+        Cause::PinsChanged,
+        Cause::BasePushFailed,
+        Cause::BaseMoved,
+        Cause::RenderFailed,
+        Cause::DecisionsTooLarge,
+        Cause::NoPr,
+        Cause::MergeConflict,
+        Cause::MergeChecksRed,
+        Cause::MergeRefused,
+        Cause::MergeError,
+        Cause::SeatLost,
+        Cause::HostUnreachable,
+        Cause::MergeWaitsAck,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cause::StopFile => "stop_file",
+            Cause::ParkFile => "park_file",
+            Cause::NoDoneSignal => "no_done_signal",
+            Cause::Stalled => "stalled",
+            Cause::LaunchRefused => "launch_refused",
+            Cause::LaunchFailed => "launch_failed",
+            Cause::OutcomeCap => "outcome_cap",
+            Cause::HookFailed => "hook_failed",
+            Cause::AnswerHookFailed => "answer_hook_failed",
+            Cause::PinsChanged => "pins_changed",
+            Cause::BasePushFailed => "base_push_failed",
+            Cause::BaseMoved => "base_moved",
+            Cause::RenderFailed => "render_failed",
+            Cause::DecisionsTooLarge => "decisions_too_large",
+            Cause::NoPr => "no_pr",
+            Cause::MergeConflict => "merge_conflict",
+            Cause::MergeChecksRed => "merge_checks_red",
+            Cause::MergeRefused => "merge_refused",
+            Cause::MergeError => "merge_error",
+            Cause::SeatLost => "seat_lost",
+            Cause::HostUnreachable => "host_unreachable",
+            Cause::MergeWaitsAck => "merge_waits_ack",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Cause> {
+        Cause::ALL.into_iter().find(|c| c.as_str() == text)
+    }
+}
+
 /// Where a request stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -986,6 +1097,103 @@ pub struct HostPositionRow {
     pub updated_at: String,
 }
 
+// ------------------------------------------------------------------ notices (ADR-0003's amendment of 2026-11-21)
+
+/// The events of a notice: a request opened, was revised, or closed (answered or withdrawn).
+pub const NOTICE_EVENTS: [&str; 3] = ["opened", "revised", "closed"];
+
+/// A notice: one record of one request event, in one sequence for the store. The store keeps a
+/// channel and a target as opaque text. A row never changes and is never deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeRow {
+    /// The store's sequence, from 1.
+    pub position: u64,
+    pub request_id: String,
+    pub revision: u32,
+    /// One of [`NOTICE_EVENTS`].
+    pub event: String,
+    pub run_id: String,
+    /// `None` for a run with no project.
+    pub project_id: Option<String>,
+    pub created_at: String,
+    /// The command that added the notice.
+    pub command_id: String,
+}
+
+/// One delivery of a new notice, for one channel. `why` is `None` for a delivery that waits, and
+/// the reason for a delivery that is superseded at birth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewDelivery {
+    pub channel: String,
+    /// The controller's own text, redacted and cut before it comes here.
+    pub text: String,
+    pub why: Option<String>,
+}
+
+/// A notice to add. The store gives it the next position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewNotice {
+    pub request_id: String,
+    pub revision: u32,
+    /// One of [`NOTICE_EVENTS`].
+    pub event: String,
+    pub run_id: String,
+    pub project_id: Option<String>,
+    pub created_at: String,
+    /// One delivery for each channel, at least one.
+    pub deliveries: Vec<NewDelivery>,
+}
+
+/// Whether a delivery still waits for its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryState {
+    Waiting,
+    Superseded,
+}
+
+impl DeliveryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeliveryState::Waiting => "waiting",
+            DeliveryState::Superseded => "superseded",
+        }
+    }
+}
+
+/// One delivery of a notice, for one channel. The one change a row allows is `Waiting` to
+/// `Superseded`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeliveryRow {
+    pub position: u64,
+    pub channel: String,
+    pub text: String,
+    pub state: DeliveryState,
+    /// `None` while the delivery waits.
+    pub why: Option<String>,
+    pub updated_at: String,
+}
+
+/// What one target has acknowledged: every notice of its channel at or below `acked`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeTargetRow {
+    pub target: String,
+    pub channel: String,
+    /// A position. It only rises.
+    pub acked: u64,
+    /// The outcome of the last acknowledgement.
+    pub outcome: String,
+    pub updated_at: String,
+}
+
+/// How often one notice was sent to one target, and when last.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NoticeSendRow {
+    pub position: u64,
+    pub target: String,
+    pub sends: u64,
+    pub last_sent_at: String,
+}
+
 /// The canonical form of a JSON value: no white space and every object's keys in order, so the
 /// same value always gives the same bytes.
 pub fn canonical_json(value: &serde_json::Value) -> String {
@@ -1274,6 +1482,41 @@ pub enum Effect {
         position: String,
         updated_at: String,
     },
+    /// Add a notice with its deliveries (ADR-0003's amendment of 2026-11-21). The store gives it the
+    /// next position (as [`NEW_ID`]). Allowed only in an admission under [`CONTROLLER_SCOPE`]. A
+    /// second notice of one `(request, revision, event)`, an event that is not one of
+    /// [`NOTICE_EVENTS`], a revision of 0, no delivery, a channel twice or an empty channel, or a
+    /// scope other than the controller's makes the commit [`Committed::Rejected`].
+    NoticeAdd(NewNotice),
+    /// Supersede the delivery of `position` on `channel`, with a reason. A delivery that is not
+    /// there, one that is superseded already, an empty reason, or a scope other than the
+    /// controller's makes the commit [`Committed::Rejected`].
+    NoticeSupersede {
+        position: u64,
+        channel: String,
+        why: String,
+        updated_at: String,
+    },
+    /// Record one send of a notice to a target. `sends` must be the stored count plus 1 (1 when
+    /// there is none). A notice that is not there, a `sends` that is not the next one, or a scope
+    /// other than the controller's makes the commit [`Committed::Rejected`].
+    NoticeSend {
+        position: u64,
+        target: String,
+        sends: u64,
+        sent_at: String,
+    },
+    /// Make a target's row, or raise its `acked`. A position above the newest notice, a position at
+    /// or below the stored one, a channel that is not the row's, an empty target or channel, or a
+    /// scope other than the controller's makes the commit [`Committed::Rejected`]. A new row may
+    /// take any position from 0 to the newest notice.
+    NoticeAck {
+        target: String,
+        channel: String,
+        position: u64,
+        outcome: String,
+        updated_at: String,
+    },
 }
 
 /// What the engine wants on the ledger. The store assigns the sequence number.
@@ -1471,4 +1714,19 @@ pub trait Store: Send + Sync {
     fn host(&self, unit: &str) -> Result<Option<HostRow>, StoreError>;
     /// Read the last position saved for the host of `unit`, or `None` when none was saved.
     fn host_position(&self, unit: &str) -> Result<Option<HostPositionRow>, StoreError>;
+
+    /// Read one notice by position.
+    fn notice(&self, position: u64) -> Result<Option<NoticeRow>, StoreError>;
+    /// Read up to `limit` notices above `position`, in ascending position.
+    fn notices_after(&self, position: u64, limit: u32) -> Result<Vec<NoticeRow>, StoreError>;
+    /// The position of the newest notice, or 0 when the store holds none.
+    fn newest_notice(&self) -> Result<u64, StoreError>;
+    /// Read the deliveries of one notice, by channel.
+    fn notice_deliveries(&self, position: u64) -> Result<Vec<DeliveryRow>, StoreError>;
+    /// Read the deliveries of one channel that wait, in ascending position.
+    fn waiting_deliveries(&self, channel: &str) -> Result<Vec<DeliveryRow>, StoreError>;
+    /// Read every target, by target.
+    fn notice_targets(&self) -> Result<Vec<NoticeTargetRow>, StoreError>;
+    /// Read the sends of one notice, by target.
+    fn notice_sends(&self, position: u64) -> Result<Vec<NoticeSendRow>, StoreError>;
 }

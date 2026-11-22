@@ -9,7 +9,7 @@
 // that another screen shows is changed only with that screen's screenshot, in the same PR.
 export { AGENT, RUNTIME, verbs as agentsVerbs } from "./fixtures/agents";
 export { S1, S2, S2_ITEMS, streamEvents, verbs as chatVerbs } from "./fixtures/chat";
-export { DETAILS, REQUESTS, REQUESTS_FRAME, REQUEST_LIST, verbs as needsYouVerbs } from "./fixtures/needs-you";
+export { CASES, DETAILS, NOTICE, REQUESTS, REQUESTS_FRAME, REQUEST_LIST, SCREENS, listOf, pick, verbs as needsYouVerbs } from "./fixtures/needs-you";
 export { PROJECTS, verbs as projectsVerbs } from "./fixtures/projects";
 export { SETTINGS, verbs as settingsVerbs } from "./fixtures/settings";
 export { PAIRED, RUNS, SERVER_NAME, SESSION_LIST, STATUS, THIS_DEVICE, UNREACHABLE_MESSAGE, verbs as shellVerbs } from "./fixtures/shell";

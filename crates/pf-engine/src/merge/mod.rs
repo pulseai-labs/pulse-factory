@@ -17,7 +17,7 @@ use crate::claim::{VERB_ACK, check_claim};
 use crate::engine::Engine;
 use crate::port::forge::{Checks, ForgeEffect, ForgeOutcome, Mergeable, PrRef};
 use crate::port::store::{
-    AdmissionOutcome, Effect, NodeKind, NodeRow, RequestKind, RequestStatus, RunState,
+    AdmissionOutcome, Cause, Effect, NodeKind, NodeRow, RequestKind, RequestStatus, RunState,
 };
 use crate::render::{RenderContext, UnitView, render};
 use crate::status::{REASON_RUN_HALTED, Status, check_reason, one_line_reason};
@@ -25,6 +25,13 @@ use crate::unit::UnitDetail;
 use crate::workflow::{MergeDef, MergeRule, Workflow};
 
 type Rejected = String;
+
+/// How a merge ended: the PR landed, or the unit parks with this cause.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    Landed,
+    Parked(Cause),
+}
 
 /// The last push of a unit that succeeded: where it went, and the SHA.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,7 +334,7 @@ impl Engine {
         let detail = view.unit_detail(node).map_err(EngineError::Rejected)?;
         let Some(pr) = detail.pr.clone() else {
             let reason = "no PR is recorded for the unit".to_string();
-            self.park(unit_id, &reason)?;
+            self.park(unit_id, Cause::NoPr, &reason)?;
             return Ok(MergeStep::Parked {
                 unit: unit_id.to_string(),
                 reason,
@@ -346,42 +353,67 @@ impl Engine {
             })?;
         let declared = match self.declared(unit_id, &detail, def) {
             Ok(d) => d,
-            Err(why) => return self.finish_merge(unit_id, &pr.repo, "", "", &why, false),
+            Err(why) => {
+                return self.finish_merge(
+                    unit_id,
+                    &pr.repo,
+                    "",
+                    "",
+                    &why,
+                    Ended::Parked(Cause::MergeError),
+                );
+            }
         };
         // The repo comes from the seat's PR reference. Nothing reads or merges a PR elsewhere.
         if let Err(why) = declared.check_repo(&pr.repo) {
-            return self.finish_merge(unit_id, &pr.repo, "", "", &why, false);
+            return self.finish_merge(
+                unit_id,
+                &pr.repo,
+                "",
+                "",
+                &why,
+                Ended::Parked(Cause::MergeError),
+            );
         }
 
         let status = match self.forge.pr_status(&pr) {
             Ok(s) => s,
-            Err(e) => return self.finish_merge(unit_id, &pr.repo, "", "", &forge_error(e), false),
+            Err(e) => {
+                return self.finish_merge(
+                    unit_id,
+                    &pr.repo,
+                    "",
+                    "",
+                    &forge_error(e),
+                    Ended::Parked(Cause::MergeError),
+                );
+            }
         };
-        let done = |outcome: &str| {
+        let done = |outcome: &str, cause: Cause| {
             self.finish_merge(
                 unit_id,
                 &status.repo,
                 &status.branch,
                 &status.sha,
                 outcome,
-                false,
+                Ended::Parked(cause),
             )
         };
         if let Err(why) = declared
             .check_repo(&status.repo)
             .and_then(|()| declared.check_base(&status.base))
         {
-            return done(&why);
+            return done(&why, Cause::MergeError);
         }
         if def.rule == MergeRule::ClaimAck
             && let Err(why) = declared.check_head_branch(&status.branch)
         {
-            return done(&why);
+            return done(&why, Cause::MergeError);
         }
         if def.head_check {
             let last_push = self.last_successful_push(unit_id)?;
             if let Err(why) = head_check(&status.sha, last_push.as_ref()) {
-                return done(&why);
+                return done(&why, Cause::MergeError);
             }
         }
         match (status.checks, status.mergeable) {
@@ -391,8 +423,8 @@ impl Engine {
                     why: "checks are pending".to_string(),
                 });
             }
-            (Checks::Red, _) => return done("checks red"),
-            (_, Mergeable::Conflict) => return done("merge conflict"),
+            (Checks::Red, _) => return done("checks red", Cause::MergeChecksRed),
+            (_, Mergeable::Conflict) => return done("merge conflict", Cause::MergeConflict),
             (Checks::Green, Mergeable::Clean) => {}
         }
 
@@ -467,6 +499,19 @@ impl Engine {
         revision: u32,
         generation: u64,
     ) -> Result<MergeStep, EngineError> {
+        self.ack_merge_option(id, revision, generation, None)
+    }
+
+    /// [`Engine::ack_merge`] that takes an option of the request's decision block. The option is
+    /// checked before the PR is read: it must be the request's, and its effect must be `ack`. A
+    /// refusal after the request is known writes the `ack … refused` line, as every refusal does.
+    pub fn ack_merge_option(
+        &self,
+        id: &str,
+        revision: u32,
+        generation: u64,
+        option: Option<&str>,
+    ) -> Result<MergeStep, EngineError> {
         let rejected = |why: String| EngineError::Rejected(why);
         let view = self.view()?;
         let run_id = &self.cfg.run_id;
@@ -511,6 +556,11 @@ impl Engine {
             )));
         }
         check_claim(&view, generation).map_err(&refuse)?;
+        if let Some(option_id) = option {
+            crate::claim::stored_option(request, option_id)
+                .and_then(|o| o.check_verb(id, VERB_ACK))
+                .map_err(&refuse)?;
+        }
 
         let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
         let unit_id = request
@@ -584,6 +634,7 @@ impl Engine {
                 revision,
                 generation,
                 head_sha: acked.clone(),
+                option: option.map(str::to_string),
             },
         })?;
         self.merge_pinned(&unit_id, &pr, &status.repo, &status.branch, &acked)
@@ -624,7 +675,14 @@ impl Engine {
         let merged = match self.forge.merge(pr, sha) {
             Ok(e) => e,
             Err(e) => {
-                return self.finish_merge(unit_id, repo, branch, sha, &forge_error(e), false);
+                return self.finish_merge(
+                    unit_id,
+                    repo,
+                    branch,
+                    sha,
+                    &forge_error(e),
+                    Ended::Parked(Cause::MergeError),
+                );
             }
         };
         // A forge may leave the branch of a merge effect empty. The ledger line still names the
@@ -634,26 +692,29 @@ impl Engine {
         } else {
             &merged.branch
         };
-        let fail = |outcome: &str| {
+        let fail = |outcome: &str, cause: Cause| {
             self.finish_merge(
                 unit_id,
                 &merged.repo,
                 merged_branch,
                 &merged.sha,
                 outcome,
-                false,
+                Ended::Parked(cause),
             )
         };
+        // The cause comes from the variant of the merge outcome.
         match &merged.outcome {
             ForgeOutcome::Merged => {}
-            ForgeOutcome::Conflict => return fail("merge conflict"),
-            ForgeOutcome::Refused(why) => return fail(&format!("merge refused: {why}")),
-            other => return fail(&format!("merge returned {other}")),
+            ForgeOutcome::Conflict => return fail("merge conflict", Cause::MergeConflict),
+            ForgeOutcome::Refused(why) => {
+                return fail(&format!("merge refused: {why}"), Cause::MergeRefused);
+            }
+            other => return fail(&format!("merge returned {other}"), Cause::MergeError),
         }
 
         match self.forge.merge_landed(pr) {
             Ok(e) if e.outcome == ForgeOutcome::Landed => {
-                self.finish_merge(unit_id, &e.repo, &e.branch, &e.sha, "landed", true)
+                self.finish_merge(unit_id, &e.repo, &e.branch, &e.sha, "landed", Ended::Landed)
             }
             Ok(e) => self.finish_merge(
                 unit_id,
@@ -661,7 +722,7 @@ impl Engine {
                 &e.branch,
                 &e.sha,
                 "merge did not land",
-                false,
+                Ended::Parked(Cause::MergeError),
             ),
             Err(e) => self.finish_merge(
                 unit_id,
@@ -669,7 +730,7 @@ impl Engine {
                 &merged.branch,
                 &merged.sha,
                 &forge_error(e),
-                false,
+                Ended::Parked(Cause::MergeError),
             ),
         }
     }
@@ -703,7 +764,8 @@ impl Engine {
         })
     }
 
-    /// Record the merge result. It writes the ledger line and ends or parks the unit.
+    /// Record the merge result. It writes the ledger line and ends or parks the unit; a park
+    /// names its cause.
     fn finish_merge(
         &self,
         unit_id: &str,
@@ -711,8 +773,9 @@ impl Engine {
         branch: &str,
         sha: &str,
         outcome: &str,
-        landed: bool,
+        ended: Ended,
     ) -> Result<MergeStep, EngineError> {
+        let landed = ended == Ended::Landed;
         // The outcome can hold text from the forge. It is one clean line before it is recorded.
         let outcome = one_line_reason(outcome);
         let view = self.view()?;
@@ -752,7 +815,11 @@ impl Engine {
                 },
             })
         } else {
-            self.park_as(unit_id, RequestKind::MergeFailed, &outcome)?;
+            let cause = match ended {
+                Ended::Parked(cause) => cause,
+                Ended::Landed => Cause::MergeError,
+            };
+            self.park_as(unit_id, RequestKind::MergeFailed, cause, &outcome)?;
             Ok(MergeStep::Parked {
                 unit: unit_id.to_string(),
                 reason: outcome,

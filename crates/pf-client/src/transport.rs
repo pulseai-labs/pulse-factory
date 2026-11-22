@@ -12,11 +12,12 @@ use std::time::Duration;
 use pf_api::code::PairingCode;
 use pf_api::types::{
     ApiStatus, ConfirmCodeArgs, ConfirmIssued, DeviceAckArgs, DeviceAnswerArgs, DeviceClearArgs,
-    DeviceRecord, PairRequest, PairResult, ProjectAddArgs, ProjectChanged, ProjectList,
-    RequestActed, RequestDetail, RequestList, RequestsArgs, RunList, RunListArgs, ServerRef,
-    SessionAnswerArgs, SessionChanged, SessionEndArgs, SessionInterruptArgs, SessionList,
-    SessionListArgs, SessionSendArgs, SessionSetArgs, SessionStartArgs, SettingChanged,
-    SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, SettingsView, ShowArgs,
+    DeviceRecord, NoticeAckArgs, NoticeAcked, PairRequest, PairResult, ProjectAddArgs,
+    ProjectChanged, ProjectList, RequestActed, RequestDetail, RequestList, RequestsArgs, RunList,
+    RunListArgs, ServerRef, SessionAnswerArgs, SessionChanged, SessionEndArgs,
+    SessionInterruptArgs, SessionList, SessionListArgs, SessionSendArgs, SessionSetArgs,
+    SessionStartArgs, SettingChanged, SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs,
+    SettingsView, ShowArgs,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -518,6 +519,12 @@ impl<S: DeviceStore> Transport<S> {
     /// to the long timeout.
     pub async fn ack(&self, args: DeviceAckArgs) -> Result<RequestActed, ClientError> {
         self.typed_verb("ack", &args).await
+    }
+
+    /// `notice_ack`: the device has dealt with every notice at or below `position`. Call it only on
+    /// a server that sent a notice frame.
+    pub async fn notice_ack(&self, args: NoticeAckArgs) -> Result<NoticeAcked, ClientError> {
+        self.typed_verb("notice_ack", &args).await
     }
 
     pub async fn settings_get(&self, args: SettingsGetArgs) -> Result<SettingsView, ClientError> {

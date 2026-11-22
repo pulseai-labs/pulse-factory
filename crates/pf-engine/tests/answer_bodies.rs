@@ -7,6 +7,7 @@ mod common;
 use std::path::Path;
 
 use common::*;
+use pf_engine::Cause;
 use pf_engine::claim::{
     GAP_TEXT_MAX_CHARS, GAPS_FILE_MAX_BYTES, STOP_TEXT_MAX_BYTES, gaps_detail, sha256_hex,
     stop_detail,
@@ -29,8 +30,12 @@ fn requests(env: &Env) -> Vec<RequestRow> {
     env.engine.requests().unwrap()
 }
 
+/// The facts of the request's body, without the decision block. The block has its own tests
+/// (`request_decision.rs`); these tests are about the facts a seat's file adds.
 fn body(r: &RequestRow) -> Value {
-    serde_json::from_str(&r.body).unwrap()
+    let mut body: Value = serde_json::from_str(&r.body).unwrap();
+    body.as_object_mut().unwrap().remove("decision");
+    body
 }
 
 fn write(dir: &Path, name: &str, text: impl AsRef<[u8]>) -> std::path::PathBuf {
@@ -41,9 +46,13 @@ fn write(dir: &Path, name: &str, text: impl AsRef<[u8]>) -> std::path::PathBuf {
 
 /// Park `u1` the way the driver does for a seat's file: with the facts the file holds.
 fn park_with(env: &Env, kind: RequestKind, reason: &str, detail: &Value) {
+    let cause = match kind {
+        RequestKind::Stop => Cause::StopFile,
+        _ => Cause::ParkFile,
+    };
     env.engine.start_stage("u1").unwrap();
     env.engine
-        .park_with("u1", kind, reason, Some(detail))
+        .park_with("u1", kind, cause, reason, Some(detail))
         .unwrap();
 }
 
@@ -348,10 +357,11 @@ fn text_with_placeholders_and_command_substitution_is_stored_literally() {
 fn a_park_s_facts_cannot_set_the_keys_the_engine_owns() {
     let env = item_env();
     env.engine.start_stage("u1").unwrap();
-    for key in ["reason", "stage", "park_generation"] {
+    for key in ["reason", "stage", "park_generation", "decision"] {
         let why = match env.engine.park_with(
             "u1",
             RequestKind::Gaps,
+            Cause::ParkFile,
             "gaps",
             Some(&json!({ key: "forged" })),
         ) {
@@ -363,6 +373,7 @@ fn a_park_s_facts_cannot_set_the_keys_the_engine_owns() {
     let why = match env.engine.park_with(
         "u1",
         RequestKind::Gaps,
+        Cause::ParkFile,
         "gaps",
         Some(&json!(["not", "an", "object"])),
     ) {
@@ -380,7 +391,7 @@ fn a_park_without_facts_keeps_its_stored_content() {
     // the same bytes, so its replay is a replay and not a conflict.
     let env = item_env();
     env.engine.start_stage("u1").unwrap();
-    env.engine.park("u1", "stalled").unwrap();
+    env.engine.park("u1", Cause::Stalled, "stalled").unwrap();
     let row = env.store.admission("run-1", "park:u1:0").unwrap().unwrap();
     assert!(!row.content.contains("detail"), "{}", row.content);
     let replay = env
@@ -391,6 +402,7 @@ fn a_park_without_facts_keeps_its_stored_content() {
                 unit_id: "u1".to_string(),
                 reason: "stalled".to_string(),
                 request_kind: RequestKind::Park,
+                cause: Some(Cause::Stalled),
                 detail: None,
             },
         })

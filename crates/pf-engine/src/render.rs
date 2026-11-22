@@ -4,7 +4,7 @@
 //! such as a JSON object or a `jq` program, is literal. The names are a closed set:
 //! `unit.id`, `unit.vars.<k>`, `run.id`, `run.dir`, `run.package` and `param.<k>`, and, in an
 //! `on_answer` command only, `answer.file`, `answer.request`, `answer.revision`,
-//! `answer.generation` and `request.body_file`.
+//! `answer.generation`, `answer.source` and `request.body_file`.
 //!
 //! A value goes into the text once. Nothing re-reads a rendered value for placeholders, so a value
 //! that holds `{param.repo}` stays that literal text.
@@ -41,6 +41,9 @@ pub enum AnswerField {
     Revision,
     /// `{answer.generation}`: the claim generation that answered.
     Generation,
+    /// `{answer.source}`: `typed`, or `option:<id>:<by>` for an option of the request's decision
+    /// block. The controller makes it, and it reaches the argv as one word.
+    Source,
     /// `{request.body_file}`: a file that holds the request body as JSON.
     BodyFile,
 }
@@ -53,6 +56,7 @@ impl AnswerField {
             AnswerField::Request => "answer.request",
             AnswerField::Revision => "answer.revision",
             AnswerField::Generation => "answer.generation",
+            AnswerField::Source => "answer.source",
             AnswerField::BodyFile => "request.body_file",
         }
     }
@@ -77,6 +81,7 @@ impl Placeholder {
             "answer.request" => Ok(Placeholder::Answer(AnswerField::Request)),
             "answer.revision" => Ok(Placeholder::Answer(AnswerField::Revision)),
             "answer.generation" => Ok(Placeholder::Answer(AnswerField::Generation)),
+            "answer.source" => Ok(Placeholder::Answer(AnswerField::Source)),
             "request.body_file" => Ok(Placeholder::Answer(AnswerField::BodyFile)),
             _ => {
                 if let Some(rest) = name.strip_prefix("unit.vars.") {
@@ -85,7 +90,7 @@ impl Placeholder {
                     key(rest).map(Placeholder::Param)
                 } else {
                     Err(format!(
-                        "unknown placeholder `{{{name}}}`; use unit.id, unit.vars.<k>, run.id, run.dir, run.package or param.<k> (an on_answer command also has answer.file, answer.request, answer.revision, answer.generation and request.body_file)"
+                        "unknown placeholder `{{{name}}}`; use unit.id, unit.vars.<k>, run.id, run.dir, run.package or param.<k> (an on_answer command also has answer.file, answer.request, answer.revision, answer.generation, answer.source and request.body_file)"
                     ))
                 }
             }
@@ -189,6 +194,8 @@ pub struct AnswerView<'a> {
     pub request: &'a str,
     pub revision: u32,
     pub generation: u64,
+    /// `typed`, or `option:<id>:<by>`.
+    pub source: &'a str,
     pub body_file: &'a str,
 }
 
@@ -273,6 +280,7 @@ pub fn render_with(
                             AnswerField::Request => text.push_str(a.request),
                             AnswerField::Revision => text.push_str(&a.revision.to_string()),
                             AnswerField::Generation => text.push_str(&a.generation.to_string()),
+                            AnswerField::Source => text.push_str(a.source),
                             AnswerField::BodyFile => text.push_str(a.body_file),
                         },
                         None => return Err(RenderError::NeedsAnswer(name)),

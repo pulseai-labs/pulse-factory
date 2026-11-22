@@ -5,6 +5,7 @@
 // (`useRequestBodies`, which also asks again, on opening, for a body whose `show` failed on a down link).
 import type { RequestDetail, RequestSummary } from "@pulse-factory/api-client";
 import { useCallback, useMemo } from "react";
+import { useConnection, useServerName } from "../state/connection";
 import { answeredRecently, useRequests, type RequestsState } from "../state/requests";
 import type { CardEnv } from "./cards";
 import { useHeld } from "./held";
@@ -29,6 +30,8 @@ export interface NeedsYou {
 export function useNeedsYou(options: { active?: boolean } = {}): NeedsYou {
   const active = options.active ?? true;
   const { state, open } = useRequests();
+  const { projects } = useConnection();
+  const serverName = useServerName();
   const acts = useConfirmedAct();
   const held = useHeld();
   const answered = useMemo(() => answeredRecently(state, Date.now()), [state]);
@@ -64,11 +67,13 @@ export function useNeedsYou(options: { active?: boolean } = {}): NeedsYou {
       notice: acts.notices[request.id],
       inFlight: acts.inFlight(request.id),
       compact,
-      onPress: (kind, text) => acts.press(request, kind, text),
+      projects,
+      serverName,
+      onAct: (act) => acts.press(request, act),
       onRetry: () => acts.retry(request.id),
       onRefresh: retry,
     }),
-    [detailOf, errors, spineOf, acts, retry],
+    [detailOf, errors, spineOf, acts, retry, projects, serverName],
   );
 
   return { state, open, answered, held, acts, bodies, spineOf, bodyFor, envOf };

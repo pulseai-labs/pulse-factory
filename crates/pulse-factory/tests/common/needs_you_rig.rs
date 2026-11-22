@@ -37,7 +37,12 @@ impl Drop for Api {
 }
 
 pub fn api() -> Api {
-    let s = Spine::start_with(|cfg| cfg.api_listen = Some("127.0.0.1:0".to_string()));
+    api_with(crate::common::Options::default())
+}
+
+/// The same rig on the fixture package of `o`.
+pub fn api_with(o: crate::common::Options) -> Api {
+    let s = Spine::start_options(o, |cfg| cfg.api_listen = Some("127.0.0.1:0".to_string()));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let controller = s.live.controller.clone();
     let thread = std::thread::spawn(move || {

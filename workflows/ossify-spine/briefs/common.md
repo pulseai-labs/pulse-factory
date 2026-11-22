@@ -5,6 +5,15 @@ You are one stage of an unattended run. Your message gives the paths. `$SPINE_ST
 Everything you write is data to the controller. It parses your files in strict formats and never runs their text.
 
 - **Stop rule.** A question whose answer adds, changes or contradicts an ADR, or touches a bone or the skeleton, is a stop. Classify it against the spine plan's bone list and the ADR index. When in doubt, it is a stop. On a stop, write the paragraph to `$SPINE_STOP_FILE` and end the turn. The first line of the file is one line that says what clears the stop. The rest holds the question, why it is a stop, and what you would need.
+- **Options.** When you can name two or more answers to your stop, end the stop file with an options block, with nothing but blank lines after it. The operator's one press sends one line back to you as the ruling, so each line is the whole answer and must stand alone:
+
+  ```text
+  Options:
+  - <one answer, on one line>
+  - [recommended] <the answer you recommend, on one line>
+  ```
+
+  Two to four lines. Each starts with `- ` and holds at most 200 characters. At most one starts with `[recommended] `. A stop with no block is still a stop, and the first line of the file still says what clears it.
 - **Any other question:** decide it yourself. Then append one line to `$SPINE_DECISIONS` with the shell's `>>` operator. That file is yours alone. Never write to the run's ledger: the controller appends your lines to it. The line starts with `- `:
   `- <UTC time> <work item or stage> | Q: … | A: … | why: … | rejected: …`
 - **Rulings.** If `<your OUT>/rulings.md` exists, read it first. Its last entry answers your last stop; earlier entries still bind. Never edit it.

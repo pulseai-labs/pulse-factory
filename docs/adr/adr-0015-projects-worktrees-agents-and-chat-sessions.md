@@ -64,7 +64,7 @@
   `runtime_session_ref`. Nothing copies the old one.
 
 **"Live" does not depend on a process (Q2 rule 4, C3).**
-- A controller restart ends every chat process (ADR-0007: no restart survival).
+- A controller restart ends every chat process (ADR-0007: no restart survival) (superseded by the amendment of 2026-11-16).
 - At controller start, each live chat session goes to `idle` with no process. Its `ended_at`,
   `runtime_session_ref`, model, effort and permission mode stay.
 - Each pending request of such a session gets an answer item with the outcome `lost`. The process
@@ -336,3 +336,29 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0001's and A
   `halt`, which still stops every live chat process, now through its host.
 - **The cap on live chat processes and the 30-minute idle release are unchanged.** They now count hosts
   that survived a restart too.
+
+## Amendment, 2026-11-21 (Proposed): request notices in the Orchestrator's chat
+
+**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
+Accepted.
+
+- **A notice is written once into the project's newest Orchestrator session** that has not ended, as a
+  `notice` item (`request_opened`, `request_revised` or `request_closed`). With no such session it
+  waits, and it is written into the session that next carries it.
+- **The operator's next message carries the waiting notices.** When no turn is open, the controller
+  puts a marked block before the typed text, in one `Operator` send: one line for each open request,
+  newest first, at most ten, then a count. **"none is sent today" stays true** of the port's `Notice`
+  input: a request notice rides an `Operator` send, because no adapter can frame a second part of a
+  message, and a new part would change the Claude Code adapter's input shape, which no probe has
+  qualified. The stored `OperatorMessage` holds the typed text alone.
+- **The acknowledgement is the stored turn result.** The live chat remembers the highest position that
+  the send carried. When the next `turn_result` with the cause `operator` is stored, the agent
+  acknowledges that position. A failed send, an ended session and a controller restart in the turn
+  leave the notices waiting for the next message. No notice starts a turn, and the channel has no timer.
+- **The persona gains one paragraph:** a block that starts with the mark is the controller's, it lists
+  requests that wait in Needs you, and the Orchestrator can answer none of them (ADR-0005).
+- **Debt, from the amendments of 2026-11-16 and 2026-11-13.** The sentence "A controller restart ends
+  every chat process" in "'Live' does not depend on a process" no longer holds: the amendment of
+  2026-11-16 supersedes it. And `project remove --end-sessions` is refused for a caller that is, or
+  descends from, a seat or a live chat process, as `cli.md` says (Q2 rule 2).

@@ -934,3 +934,91 @@ Checked on draco-desk on 2026-11-15, on the branch cut from `origin/main` at `78
 ### Unverified claims (`fix/ui-canvas-motion`)
 - The Mac app's WebKit runs the transitions and `inert` as Chromium does. No demo line runs `e2e/motion.spec.ts`,
   and d25 holds Chromium only.
+
+## Amendment, 2026-11-22 (Proposed): the Needs you cards read the decision block, and the app shows a notification
+
+`r2.s11.w5`, the last item of the spine `r2.s11`. Status: Proposed, until the operator accepts it. It follows
+the approved frames 12a to 12f of the canvas at version `1795287632-34c6`. The text above this amendment does not
+change. Where the text above says that the app declares no capability file, this amendment replaces that rule.
+
+- **The cards read the decision block.** A request whose `show` answers a `decision` is drawn from it alone: the
+  kind label, the controller's summary as stored, who asked (`asked_by`, or `about` for a controller's park), the
+  attempt, the IDs, and one button for each option the server would take. Nothing is derived from the reason text,
+  and the app builds or rewrites no summary. A request with no block keeps today's card. The card offers only an
+  act the server would take: an `answer` option only when the block's `takes_text` is true, a `resume` option
+  while the request lists `clear`. A recommendation shows with its source and reason, and never on a merge
+  approval.
+- **The text field has two forms, by who asked.** On a request a seat asked (`stop_file`, `park_file`) it is a typed
+  answer to the seat's file ("Another answer", or "Your answer" on a gaps request), with Send. On a request the
+  controller asked it is a note for the next seat, with no Send: the note rides on the pressed `resume` option as
+  one typed `answer` whose `to` is the option's stage. With an empty note the press is the option's own act.
+- **The acts.** A press still makes exactly two calls, `confirmCode` then the act, each with a fresh `command_id`. An
+  option press sends the option and no text of its own, under a code that binds the option. The press states are
+  working, done, refused (with Try again) and not connected (with Retry now). After `subject_moved` the card reads
+  the new revision, and an option of an older revision is never sent again. The answered row names what was done,
+  read from the stored answer.
+- **The notifier and the batch rule.** The transport gains `noticeAck` and a `notice_frame` event. One small
+  interface, the notifier, shows a notification and reports a click. It has two implementations, chosen as the
+  transport is: the notification plugin inside Tauri, and the page's `Notification` in a browser. A notice frame
+  starts a batch that ends 300 ms after its last frame and at most 1,000 ms after its first. The batch shows at most
+  one notification, and calls `noticeAck` once, with the highest position and the outcome `shown` or `blocked`. The
+  app calls `noticeAck` only on a server that sent a notice frame. The batch timer is the one new timer: the page
+  keeps "no polling" (C15). `docs/contracts/ui-transport.md`, "Notices and the notifier", has the rules.
+- **The plugin and the capability file.** `tauri-plugin-notification` (crate) and `@tauri-apps/plugin-notification`
+  (npm) are pinned exactly, both at **2.8.0**. The plugin reports a desktop click to `onAction`, which it does
+  from 2.6.0, and every such release asks for `tauri ^2.12`. The plugin is registered in `main.rs`, and the app's
+  first capability file, `apps/desktop/src-tauri/capabilities/default.json`, grants the main window four
+  permissions: `notification:allow-is-permission-granted`, `notification:allow-request-permission`,
+  `notification:allow-notify` and `notification:allow-register-listener`. It grants no `notification:default`, no
+  `core:` entry and no other plugin. `tauri.conf.json` names the window's `label` `main`. The stream stays on the
+  `Channel`, which needs no capability. The webview still opens no network connection, and the content security
+  policy does not change.
+- **The versions, and the operator's waiver.** The four Tauri pins moved together to the 2.12 line, in
+  `apps/desktop/src-tauri/Cargo.toml` and `apps/ui/package.json`. Registries read on 2026-11-22: `tauri` 2.12.5
+  (crates.io, 2026-10-21); `tauri-build` 2.7.4 (crates.io, 2026-10-21); `@tauri-apps/api` 2.12.4 (npm,
+  2026-10-14); `@tauri-apps/cli` 2.12.4 (npm, 2026-10-21); the plugin 2.8.0 (crates.io 2026-10-28, npm
+  2026-10-28). `@tauri-apps/api` 2.12.5 and `@tauri-apps/cli` 2.12.5 are dated 2026-11-16, which is under two
+  weeks, so the newest release of the line that passes the bar is 2.12.4 for each. The plugin's other releases
+  were 2.6.0 (2026-10-10), 2.7.0 (2026-10-14) and 2.8.1 (2026-11-10, under two weeks). None of these is yanked or
+  deprecated. The operator waived the four-month bar for the four Tauri pins once, on 2026-11-22, for the 2.12
+  line, so the notification plugin that reports a desktop click (≥ 2.6.0, which needs `tauri ^2.12`) can ship. The
+  pins moved to `tauri` 2.12.5 (2026-10-21), `tauri-build` 2.7.4 (2026-10-21), `@tauri-apps/api` 2.12.4
+  (2026-10-14) and `@tauri-apps/cli` 2.12.4 (2026-10-21). Later moves return to the four-month bar. Only `cargo
+  update` resolved `Cargo.lock`, and npm wrote `apps/package-lock.json`: no build on draco-desk compiles Tauri.
+- **The frames' pin and what this item rules.** The frames are at canvas version `1795287632-34c6`. This item rules
+  these differences, and the walk counts none of them as a gap. (Approach 5) A seat's park file whose options send
+  answers shows the typed answer ("Another answer" with Send), not the frame's note field: an act with an option
+  carries no text of its own, so a note could not go with an answer option. (Approach 6) An option press makes the
+  option's own act, a note rides as a typed answer, and `unreachable` on the spend offers Retry now with the same
+  code and the same `command_id`. (Approach 8) "Review the PR" and "Open on GitHub" show as `NotBuilt`; the "waits
+  for the demo walk" state is not built, because no workflow sets it and no field of the request carries it; a
+  block card in the dock has no Open button and no quiet reason line; a stored attempt of 0 (a park at the merge)
+  shows no Attempt row. (Approach 9) The real summary sentences, roles, stages and notification titles replace the
+  frames' examples; the buttons "Open System Settings" and "Settings" are `NotBuilt`.
+- **The suite at this item's head.** The whole UI suite passes: 38 files, 1080 tests, and `tsc` is clean (measured
+  with `npm --prefix apps run test --workspace ui`). The earlier text's "24 files, 636 tests" (`r1.s5.w2`) was one
+  short of the suite it measured.
+
+### Verified claims (`r2.s11.w5`)
+Checked on draco-desk on 2026-11-22, with the item's verification commands:
+- The UI suite and `tsc` pass as the line above counts them. The notice batch, its one timer, the outcome and the
+  blocked banner, the two notifiers (the plugin through an injected module) and the capability file are tested.
+- `scripts/demo/ui-screens.sh` (d25) passes with 20 screens, and only the seven baselines of this item changed.
+- `scripts/demo/ui-needs-you-options.sh` (d33) passes: the options of a stop, a park with a note, a red gate and a
+  merge approval are taken from the app on the paper package, one recorded notification comes for each request
+  that opened, and the ledgers hold each option act and a `notice_ack` of the device for each notice.
+- `cargo test -p pf-client --test bridge_stream`: the bridge sends a notice frame as one `notice_frame` event, in
+  order, and `notice_ack` reaches the server with its arguments.
+
+### Unverified claims (`r2.s11.w5`)
+Each waits for the `macos-app` CI job of the item's PR or for d34's walk on the MacBook.
+- The notification plugin 2.8.0 builds with `tauri` 2.12.5 and registers in the Mac app, and the app's first
+  capability file is read as written (the four `notification:allow-` entries are enough for the four calls).
+- The plugin's JavaScript calls (`isPermissionGranted`, `requestPermission`, `sendNotification`) use the plugin's
+  injected `window.Notification`, and `onAction` reports a click as the action `tap` with the notification's `extra`.
+- On a desktop the plugin answers "granted" for the permission without asking macOS. So a Mac whose System Settings
+  turn the app's notifications off still acknowledges `shown`, and `blocked` comes only from a failed or refused
+  plugin call. The app reads no macOS setting of its own. d34's walk records what macOS does at the first
+  notification.
+- A click on a notification opens Needs you at the request that it names.
+- The capability file works beside the app's own commands and the stream's `Channel`, which need no capability.
