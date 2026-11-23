@@ -129,7 +129,7 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   // 3. Type the answer, press Send: one press, no dialog. It made exactly one `confirm_code` and one `answer`
   //    call; the card leaves Open requests and shows in Answered today with the answer and this device's name.
   //    A second use of the same code is refused as `code_used`.
-  await stopCard.getByLabel("Your answer").fill(answer);
+  await stopCard.getByLabel("Another answer").fill(answer);
   expect(acts, "no call before the press").toEqual([]);
   await stopCard.getByRole("button", { name: "Send", exact: true }).click();
   await expect(openList.getByRole("article", { name: `Request ${stopId}` })).toHaveCount(0);
@@ -170,8 +170,7 @@ test("answer the stop question, merge the spine PR, watch the run, set a chat po
   const mergeBase = fieldOf(mergeId, "base");
   const headSha = fieldOf(mergeId, "head_sha");
   const headBranch = fieldOf(mergeId, "head_branch");
-  const prNumber = /\/pull\/(\d+)$/.exec(pr)?.[1];
-  await expect(merge.getByTestId("merge-pr")).toContainText(prNumber ?? pr);
+  await expect(merge.getByLabel("IDs").getByTitle(pr, { exact: true })).toBeVisible();
   await expect(merge.getByTestId("merge-into")).toHaveText(mergeBase);
   await expect(merge.getByTestId("merge-from")).toHaveText(headBranch);
   await expect(merge.getByTestId("merge-sha")).toHaveText(headSha.slice(0, 7));
