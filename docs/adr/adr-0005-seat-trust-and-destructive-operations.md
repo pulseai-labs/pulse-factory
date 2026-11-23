@@ -363,10 +363,9 @@ the seat denials and the merge rule do not change.
 **Consequences.** A mechanical halt no longer waits for the operator once the grant is given. Every
 act of the grant is in the ledger and visible to the operator.
 
-## Amendment, 2026-11-21 (Proposed): a confirm code binds an option, and a seat's options are data
+## Amendment, 2026-11-21 (Accepted): a confirm code binds an option, and a seat's options are data
 
-**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17, with Q16's audit).** It
-takes effect when the code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted.
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17, with Q16's audit).**
 It goes with ADR-0004's and ADR-0012's amendments of the same date.
 
 - **A confirm code binds an option.** A code for an option binds the request, its revision, the verb and

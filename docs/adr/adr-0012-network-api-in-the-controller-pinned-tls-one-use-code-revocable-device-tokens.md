@@ -514,10 +514,9 @@ ADR-0017. Per the allowlist rule, this amendment records each verb it adds.
   (ADR-0014, amended). A client that reconnects gets the same session, with the output the host kept
   since the controller's last acknowledged cursor, through the stream's existing reconnect.
 
-## Amendment, 2026-11-21 (Proposed): a device act names an option
+## Amendment, 2026-11-21 (Accepted): a device act names an option
 
-**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It takes effect when the
-code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted. It goes with ADR-0004's
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It goes with ADR-0004's
 and ADR-0005's amendments of the same date. This amendment adds no verb to the allowlist.
 
 - **`confirm_code`, `answer`, `clear` and `ack` take an optional `option`.** `answer` also takes `to`. A
@@ -533,11 +532,10 @@ and ADR-0005's amendments of the same date. This amendment adds no verb to the a
 - **The `controller.ledger` line** of an issue or an act for an option adds ` option=<id>`. No token, code
   or answer text is in it.
 
-## Amendment, 2026-11-21 (Proposed): the notice frame and notice_ack
+## Amendment, 2026-11-21 (Accepted): the notice frame and notice_ack
 
-**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
-`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
-Accepted.
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`).
 
 Per the allowlist rule, this amendment records each verb it adds.
 

@@ -164,11 +164,10 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
   from a closed set (ADR-0017). Their defaults resolve at a scope just above the built-in. The
   controller and the engine never read them for their own decisions. A plugin never sets a core key.
 
-## Amendment, 2026-11-21 (Proposed): the notify keys
+## Amendment, 2026-11-21 (Accepted): the notify keys
 
-**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
-`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
-Accepted.
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`).
 
 - **Five keys join the registry**, each a whole number, merge mode `override`, resume flag `current`:
   `notify.app.on` and `notify.orchestrator.on` (0 or 1; built-in 1), `notify.app.max_words` (5 to 200;
@@ -181,4 +180,4 @@ Accepted.
   each key and `other`: thirteen.
 - **`applies` reads `next_turn` for these keys.** A third wire value of `SettingApplies` would break the
   UI's typecheck, which this work does not own. For a `notify.*` key `next_turn` means the next notice.
-  `r2.s11.w5` adds the value with its Settings text.
+  `r2.s11.w5` decided not to add a third value, so these keys keep `next_turn`.
