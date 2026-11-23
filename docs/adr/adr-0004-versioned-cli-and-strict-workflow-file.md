@@ -90,10 +90,9 @@ ADR-0017.
   pins the plugin's content-hash manifest with it (ADR-0007). The plugins the workflow file declares for
   its seats are harness plugins, as before; a Pulse Factory plugin does not install them.
 
-## Amendment, 2026-11-21 (Proposed): an act names an option, an answer names a stage, and a stage declares a fallback answer hook
+## Amendment, 2026-11-21 (Accepted): an act names an option, an answer names a stage, and a stage declares a fallback answer hook
 
-**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It takes effect when
-the code that builds it lands (`r2.s11.w2`), and that work's close marks it Accepted. It goes with
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21 (`r2.s11`, Q1 to Q17).** It goes with
 ADR-0005's and ADR-0012's amendments of the same date and ADR-0006's amendment of 2026-11-21.
 
 - **`answer`, `clear` and `ack` take `--option <id>`.** The option is one of the request's stored decision
@@ -115,10 +114,9 @@ ADR-0005's and ADR-0012's amendments of the same date and ADR-0006's amendment o
   reach no seat. A run pinned before this amendment has no fallback, so its parks with no file hook refuse
   a text.
 
-## Amendment, 2026-11-21 (Proposed): a park_on entry declares its options
+## Amendment, 2026-11-21 (Accepted): a park_on entry declares its options
 
-**Status: Proposed; ruled by the operator on 2026-11-21 (`r2.s11`, Q2 to Q5 and Q7).** It takes effect
-when the code that builds it lands (`r2.s11.w4`), and that work's close marks it Accepted. It follows the
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21 (`r2.s11`, Q2 to Q5 and Q7).** It follows the
 amendment of the same date that lets an act name an option, and it goes with ADR-0005's amendment: a
 workflow's option holds no seat text.
 

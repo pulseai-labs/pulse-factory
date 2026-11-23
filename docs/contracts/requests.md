@@ -141,7 +141,9 @@ text. `show` prints a label with every control character replaced.
 ### The causes
 
 The cause, the kind of the request it opens, the options and the recommendation. A recommendation is
-`controller` only for the four causes that ADR-0006's amendment of 2026-11-16 lists as below the line.
+`controller` only for four of the five reasons that ADR-0006's amendment of 2026-11-16 lists as below the
+line: `stalled`, `seat_lost`, `host_unreachable` and `merge_checks_red`. A failed launch with a transient
+cause is below the line and carries no recommendation.
 
 | Cause | Kind | Options | Recommendation |
 |---|---|---|---|

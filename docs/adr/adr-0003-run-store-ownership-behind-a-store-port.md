@@ -251,11 +251,10 @@ it lands, and that work's close marks it Accepted. It needs the session hosts of
 **Consequences.** A full restart has what it needs to resume each session as it was. No secret value
 enters the store.
 
-## Amendment, 2026-11-21 (Proposed): the notices tables, admitted writes
+## Amendment, 2026-11-21 (Accepted): the notices tables, admitted writes
 
-**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
-`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
-Accepted.
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`).
 
 - **Migration 0012 adds four tables**, forward-only (ADR-0007): `notices` (one row for each request
   event, in one sequence for the store from 1), `notice_deliveries` (one row for each notice and

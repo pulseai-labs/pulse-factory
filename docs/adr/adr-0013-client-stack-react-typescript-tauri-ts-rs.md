@@ -935,9 +935,9 @@ Checked on draco-desk on 2026-11-15, on the branch cut from `origin/main` at `78
 - The Mac app's WebKit runs the transitions and `inert` as Chromium does. No demo line runs `e2e/motion.spec.ts`,
   and d25 holds Chromium only.
 
-## Amendment, 2026-11-22 (Proposed): the Needs you cards read the decision block, and the app shows a notification
+## Amendment, 2026-11-22 (Accepted): the Needs you cards read the decision block, and the app shows a notification
 
-`r2.s11.w5`, the last item of the spine `r2.s11`. Status: Proposed, until the operator accepts it. It follows
+`r2.s11.w5`, the last item of the spine `r2.s11`. Status: Accepted, 2026-11-23, at the close of spine `r2.s11`. It follows
 the approved frames 12a to 12f of the canvas at version `1795287632-34c6`. The text above this amendment does not
 change. Where the text above says that the app declares no capability file, this amendment replaces that rule.
 

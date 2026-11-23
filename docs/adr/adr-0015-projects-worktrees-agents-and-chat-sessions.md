@@ -337,11 +337,10 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0001's and A
 - **The cap on live chat processes and the 30-minute idle release are unchanged.** They now count hosts
   that survived a restart too.
 
-## Amendment, 2026-11-21 (Proposed): request notices in the Orchestrator's chat
+## Amendment, 2026-11-21 (Accepted): request notices in the Orchestrator's chat
 
-**Status: Proposed; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
-`r2.s11.w3`). It takes effect when the code that builds it lands, and that work's close marks it
-Accepted.
+**Status: Accepted, 2026-11-23, at the close of spine `r2.s11`; ruled by the operator on 2026-11-21** (spine r2.s11, calls Q1 to Q17, work item
+`r2.s11.w3`).
 
 - **A notice is written once into the project's newest Orchestrator session** that has not ended, as a
   `notice` item (`request_opened`, `request_revised` or `request_closed`). With no such session it
