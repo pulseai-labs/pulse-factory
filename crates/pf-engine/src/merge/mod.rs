@@ -56,10 +56,10 @@ pub fn head_check(pr_sha: &str, last_push: Option<&PushRecord>) -> Result<(), St
 
 /// The repo, the base branch and the head branch that the track's merge definition declares,
 /// rendered for one unit. An empty text declares nothing, and nothing is checked against it.
-struct Declared {
-    repo: String,
-    base: String,
-    head_branch: String,
+pub(crate) struct Declared {
+    pub(crate) repo: String,
+    pub(crate) base: String,
+    pub(crate) head_branch: String,
 }
 
 /// The reason a PR value differs from the declared one. It names both.
@@ -736,7 +736,7 @@ impl Engine {
     }
 
     /// Render the repo and the base of the track's merge definition for one unit.
-    fn declared(
+    pub(crate) fn declared(
         &self,
         unit_id: &str,
         detail: &UnitDetail,

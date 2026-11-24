@@ -89,6 +89,8 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's amend
   intended fence: below-the-line work moves to the clear grant, so no session needs to hold the claim
   for routine halts.
 - **The clear grant is one per project per server**, held by that project's Orchestrator agent
-  (ADR-0005, amended). It has its own generation and is fenced on its own.
+  (ADR-0005, amended).
+  At most one grant of a project is live. A revoke ends its generation, and the next grant takes the
+  next one. A removed project's grant is not live.
 - Revisit the claim's scope when a server has a second operator, or when a project's claim must go to
   a session outside Pulse Factory.

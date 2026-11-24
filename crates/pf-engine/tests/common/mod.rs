@@ -26,6 +26,9 @@ struct StoreState {
     outbox: Vec<LedgerLine>,
     requests: Vec<RequestRow>,
     claims: Vec<ClaimRow>,
+    /// The projects a test added with [`FakeStore::add_project`]: the ID, and whether it is removed.
+    projects: BTreeMap<String, bool>,
+    clear_grants: Vec<ClearGrantRow>,
 }
 
 /// An in-memory store that keeps the port's promises: one unique command ID per run, content
@@ -63,6 +66,25 @@ impl FakeStore {
 
     pub fn all_claims(&self) -> Vec<ClaimRow> {
         self.state.lock().unwrap().claims.clone()
+    }
+
+    /// Make a live project known to the fake, as the real store knows one. The engine tests carry no
+    /// other controller entity, but the clear grant's rules read the project.
+    pub fn add_project(&self, id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .projects
+            .insert(id.to_string(), false);
+    }
+
+    /// Mark a project the fake knows as removed.
+    pub fn remove_project(&self, id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .projects
+            .insert(id.to_string(), true);
     }
 
     pub fn node(&self, run: &str, id: &str) -> Option<NodeRow> {
@@ -202,6 +224,111 @@ impl Store for FakeStore {
                 | Effect::NoticeSupersede { .. }
                 | Effect::NoticeSend { .. }
                 | Effect::NoticeAck { .. } => {}
+                Effect::GrantClear(_) | Effect::RevokeClearGrant { .. }
+                    if commit.run_id != CONTROLLER_SCOPE =>
+                {
+                    *s = snapshot;
+                    return Ok(Committed::Rejected(
+                        "a clear grant and its revoke are written only in an admission under @controller"
+                            .to_string(),
+                    ));
+                }
+                // The same rules as the real store: one live row of a project, generations 1 to n,
+                // a revoke set once, and a precondition that writes nothing.
+                Effect::GrantClear(n) => {
+                    let why = match s.projects.get(&n.project_id) {
+                        None => Some(format!("no project {}", n.project_id)),
+                        Some(true) => Some(format!("project {} is removed", n.project_id)),
+                        Some(false) => {
+                            let mine: Vec<&ClearGrantRow> = s
+                                .clear_grants
+                                .iter()
+                                .filter(|g| g.project_id == n.project_id)
+                                .collect();
+                            let next = mine.iter().map(|g| g.generation).max().unwrap_or(0) + 1;
+                            match mine.iter().find(|g| g.revoked_at.is_none()) {
+                                Some(open) => Some(format!(
+                                    "project {} already holds the clear grant (generation {})",
+                                    n.project_id, open.generation
+                                )),
+                                None if n.generation != next => Some(format!(
+                                    "generation {} of project {} is wrong: {next} is next",
+                                    n.generation, n.project_id
+                                )),
+                                None => None,
+                            }
+                        }
+                    };
+                    if let Some(why) = why {
+                        *s = snapshot;
+                        return Ok(Committed::Rejected(why));
+                    }
+                    s.clear_grants.push(ClearGrantRow {
+                        project_id: n.project_id,
+                        generation: n.generation,
+                        agent_id: n.agent_id,
+                        granted_by: n.granted_by,
+                        granted_at: n.granted_at,
+                        revoked_by: None,
+                        revoked_at: None,
+                        command_id: commit.command_id.clone(),
+                    });
+                }
+                Effect::RevokeClearGrant {
+                    project_id,
+                    generation,
+                    revoked_by,
+                    revoked_at,
+                } => {
+                    let found = s
+                        .clear_grants
+                        .iter_mut()
+                        .find(|g| g.project_id == project_id && g.generation == generation);
+                    match found {
+                        Some(g) if g.revoked_at.is_none() => {
+                            g.revoked_by = Some(revoked_by);
+                            g.revoked_at = Some(revoked_at);
+                        }
+                        other => {
+                            let why = if other.is_some() {
+                                format!(
+                                    "generation {generation} of project {project_id} is revoked already"
+                                )
+                            } else {
+                                format!(
+                                    "project {project_id} holds no clear grant of generation {generation}"
+                                )
+                            };
+                            *s = snapshot;
+                            return Ok(Committed::Rejected(why));
+                        }
+                    }
+                }
+                Effect::RequireLiveGrant {
+                    project_id,
+                    generation,
+                } => {
+                    let live = s
+                        .clear_grants
+                        .iter()
+                        .find(|g| g.project_id == project_id && g.revoked_at.is_none())
+                        .map(|g| g.generation);
+                    let why = match (s.projects.get(&project_id), live) {
+                        (None, _) => Some(format!("no project {project_id}")),
+                        (Some(true), _) => Some(format!("project {project_id} is removed")),
+                        (Some(false), None) => {
+                            Some(format!("project {project_id} holds no live clear grant"))
+                        }
+                        (Some(false), Some(g)) if g != generation => Some(format!(
+                            "the clear grant of project {project_id} is live at generation {g}, not {generation}"
+                        )),
+                        (Some(false), Some(_)) => None,
+                    };
+                    if let Some(why) = why {
+                        *s = snapshot;
+                        return Ok(Committed::Rejected(why));
+                    }
+                }
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
@@ -519,6 +646,10 @@ impl Store for FakeStore {
 
     fn notice_sends(&self, _position: u64) -> Result<Vec<NoticeSendRow>, StoreError> {
         Ok(Vec::new())
+    }
+
+    fn clear_grants(&self) -> Result<Vec<ClearGrantRow>, StoreError> {
+        Ok(self.state.lock().unwrap().clear_grants.clone())
     }
 }
 

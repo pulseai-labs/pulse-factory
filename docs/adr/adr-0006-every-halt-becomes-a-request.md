@@ -53,12 +53,16 @@ Rejected alternatives:
 **Status: Proposed; ruled by the operator on 2026-11-16.** It takes effect when the code that builds
 it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16.
 
-- **Each park reason carries a class**, `below` or `above`, set in code. `below`: a stall, a failed
-  launch with a transient cause, a seat lost across a restart, a host that does not answer, a red
-  check that a re-run may fix. Every other reason is `above`.
-- **Each request kind carries a class.** A core kind is `below` only when every answer it allows is an
-  act of the clear grant's closed list (ADR-0005, amended). Every request kind a plugin adds is
-  `above` (ADR-0017).
+- **The class is a function of the cause and of the track's merge.** A request is `below` or `above`,
+  and the engine computes the class when a reader asks. No request stores it. The merge is the
+  track's rule and its base, read from the run's pinned copy of the workflow, never from the package
+  on disk. `below`: a stall, a seat lost across a restart, a host that does not answer, and a red
+  check or a merge conflict on a track that needs no ack and does not merge into the default branch
+  of the forge. A failed launch is below the line only once an adapter marks its cause as
+  transient, and none does today. Every other cause is `above`, and so is a request whose class
+  cannot be computed: the class fails closed.
+- **No request kind carries a class.** The class is per request, from its cause. Every request kind
+  a plugin adds is `above` (ADR-0017).
 - **A `below` request may be settled by the clear grant** or by the claim. An `above` request is
   settled by the claim only.
 - **Every halt still becomes a request**, and every end status still carries its reason. A settled

@@ -82,7 +82,9 @@ ADR-0017.
 
 - **`settle`**: the clear grant's one verb. It names a request or a unit, one act of the grant's closed
   list and a reason (ADR-0005, amended). Only the grant's holder may call it.
-- **`grant clear` and `grant revoke`**: claim acts that give or end a project's clear grant.
+- **`grant clear`, `grant revoke` and `grant list`**: give, end and read a project's clear grant. The
+  first two are operator acts on the `arm` pattern: each passes the caller check and they
+  take no claim. A seat or a chat cannot call them.
 - **`plugin add`, `plugin list` and `plugin remove`** (ADR-0017). `plugin add` and `plugin remove` are
   claim acts. A seat or a chat cannot call them.
 - Each new verb takes `--json`, and its JSON carries a `schema_version`, as every verb does.

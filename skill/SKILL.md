@@ -13,8 +13,8 @@ only on your ack. The CLI contract is `docs/contracts/cli.md`. This skill covers
 `controller`, the verbs of requests and the claim: `requests`, `show`, `claim`, `answer`, `clear`
 and `ack`, `project`, which lists the operator's projects, `session`, which chats with a project's
 Orchestrator, `settings`, which reads and sets the chat policies, `chat-runtime`, which installs the
-runtime that chat needs, `device` and `api`, which pair and revoke the devices that reach the
-controller over the network, and `store`, which lists and restores the store's backups and checks an
+runtime that chat needs, `grant`, which gives, ends and reads a project's clear grant, `device` and
+`api`, which pair and revoke the devices that reach the controller over the network, and `store`, which lists and restores the store's backups and checks an
 upgrade (CLI only: a seat's call is refused).
 
 ## Arm a run
@@ -296,6 +296,30 @@ Each `device pair` redeem and each `device revoke` is one line of `<state dir>/c
 The line names the device and never the code or the token. A seat cannot run `device pair` or
 `device revoke`; `device list` and `api status` are reads.
 
+## Give or end a clear grant
+
+A project's **clear grant** lets its Orchestrator settle the requests that are below the line. Each
+request says which side it is on: `pulse-factory requests` and `pulse-factory show` print `line:
+below` or `line: above`. The grant is off until you give it. Nothing acts under it yet, so a grant
+changes no verb today.
+
+```
+pulse-factory grant clear --project P-1    # clear grant given: P-1 orchestrator generation 1
+pulse-factory grant revoke --project P-1   # clear grant ended: P-1 generation 1
+pulse-factory grant list                   # P-1  generation 1  granted by cli at …  live
+```
+
+1. `grant clear` gives the project's next generation. It is refused when the project is unknown or
+   removed, and when its grant is already live.
+2. `grant revoke` ends the open grant at once. It commits even when the controller's commands are
+   stopped, and its ledger line follows at the next start. A new grant takes the next generation.
+3. `grant list` shows every row and which one is live. A removed project's grant is never live.
+   `requests --json` holds a `grants` key with the live ones.
+
+Only the operator gives or ends a grant: a chat or a seat that calls `grant clear` or `grant revoke` is refused.
+Neither verb takes a claim. `halt` does not end a grant, and no grant verb is on the device allowlist.
+Each grant and each revoke is one line of `<state dir>/controller.ledger`.
+
 ## Halt a run
 
 `pulse-factory halt [<run>] --reason "<why>"` stops new launches and new merges. Seats that run
@@ -310,5 +334,6 @@ process and answers with the sessions it stopped (see "Chat with a project's Orc
   it yourself.
 
 A seat cannot arm or halt a run, it cannot add or remove a project, it cannot start or drive a chat,
-and it cannot pair or revoke a device: those verbs refuse when `PF_SEAT_TOKEN` is set. A chat cannot
-arm a run or change a setting: it proposes the start and the operator confirms it.
+it cannot pair or revoke a device, and it cannot give or end a clear grant: those verbs refuse when
+`PF_SEAT_TOKEN` is set. A chat cannot arm a run, change a setting or give or end a clear grant: it
+proposes the start and the operator confirms it.

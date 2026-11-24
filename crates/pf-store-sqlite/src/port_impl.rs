@@ -7,14 +7,14 @@ use std::collections::BTreeMap;
 
 use pf_engine::port::store::{
     ANSWER_OUTCOMES, AdmissionOutcome, AdmissionRow, AgentRow, CONTROLLER_SCOPE, ChatHostCursor,
-    ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow, Commit,
-    Committed, DeliveryRow, DeliveryState, DeviceRow, Effect, HostPositionRow, HostRow,
-    LaunchRecordRow, LedgerLine, NEW_ID, NOTICE_EVENTS, NewChatItem, NewChatSession, NewDevice,
-    NewHost, NewLaunchRecord, NewNotice, NewProject, NewRequest, NodeKind, NodeRow, NoticeRow,
-    NoticeSendRow, NoticeTargetRow, ORCHESTRATOR_AGENT, ProjectKind, ProjectRow, REDACTED_PAYLOAD,
-    REDACTED_TEXT, RequestKind, RequestRow, RequestStatus, RunRow, RunState, SessionRow,
-    SessionWorktree, SettingRow, SettingScope, Store, StoreError, TOOL_TEXT_MAX_BYTES, ToolText,
-    WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
+    ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState, ClaimRow,
+    ClearGrantRow, Commit, Committed, DeliveryRow, DeliveryState, DeviceRow, Effect,
+    HostPositionRow, HostRow, LaunchRecordRow, LedgerLine, NEW_ID, NOTICE_EVENTS, NewChatItem,
+    NewChatSession, NewClearGrant, NewDevice, NewHost, NewLaunchRecord, NewNotice, NewProject,
+    NewRequest, NodeKind, NodeRow, NoticeRow, NoticeSendRow, NoticeTargetRow, ORCHESTRATOR_AGENT,
+    ProjectKind, ProjectRow, REDACTED_PAYLOAD, REDACTED_TEXT, RequestKind, RequestRow,
+    RequestStatus, RunRow, RunState, SessionRow, SessionWorktree, SettingRow, SettingScope, Store,
+    StoreError, TOOL_TEXT_MAX_BYTES, ToolText, WORKTREE_ID, WorktreeCreatedBy, WorktreeRow,
 };
 use pf_engine::status::Status;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -1484,6 +1484,137 @@ fn notice_ack(
     Ok(())
 }
 
+/// The columns of a clear-grant row, in the order [`clear_grant_from`] reads them.
+const CLEAR_GRANT_COLUMNS: &str =
+    "project_id, generation, agent_id, granted_by, granted_at, revoked_by, revoked_at, command_id";
+
+fn clear_grant_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClearGrantRow> {
+    Ok(ClearGrantRow {
+        project_id: r.get(0)?,
+        generation: to_u64(r.get(1)?),
+        agent_id: r.get(2)?,
+        granted_by: r.get(3)?,
+        granted_at: r.get(4)?,
+        revoked_by: r.get(5)?,
+        revoked_at: r.get(6)?,
+        command_id: r.get(7)?,
+    })
+}
+
+/// The row of a project with no revoke, if it has one.
+fn open_clear_grant(
+    tx: &Transaction<'_>,
+    project_id: &str,
+) -> rusqlite::Result<Option<ClearGrantRow>> {
+    tx.query_row(
+        &format!(
+            "SELECT {CLEAR_GRANT_COLUMNS} FROM clear_grants \
+             WHERE project_id = ?1 AND revoked_at IS NULL"
+        ),
+        [project_id],
+        clear_grant_from,
+    )
+    .optional()
+}
+
+/// Give a live project its clear grant at the next generation.
+fn grant_clear(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    n: &NewClearGrant,
+) -> Result<(), EffectError> {
+    live_project(tx, &n.project_id)?;
+    if let Some(open) = open_clear_grant(tx, &n.project_id)? {
+        return Err(EffectError::Rejected(format!(
+            "project {} already holds the clear grant (generation {})",
+            n.project_id, open.generation
+        )));
+    }
+    let highest: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(generation), 0) FROM clear_grants WHERE project_id = ?1",
+        [&n.project_id],
+        |r| r.get(0),
+    )?;
+    let next = to_u64(highest) + 1;
+    if n.generation != next {
+        return Err(EffectError::Rejected(format!(
+            "generation {} of project {} is wrong: {next} is next",
+            n.generation, n.project_id
+        )));
+    }
+    tx.execute(
+        "INSERT INTO clear_grants (project_id, generation, agent_id, granted_by, granted_at, command_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            n.project_id,
+            to_i64(n.generation),
+            n.agent_id,
+            n.granted_by,
+            n.granted_at,
+            command_id
+        ],
+    )
+    .map_err(backstop)?;
+    Ok(())
+}
+
+/// End one generation of a project's grant. A removed project's row can be ended.
+fn revoke_clear_grant(
+    tx: &Transaction<'_>,
+    project_id: &str,
+    generation: u64,
+    revoked_by: &str,
+    revoked_at: &str,
+) -> Result<(), EffectError> {
+    let row = tx
+        .query_row(
+            &format!(
+                "SELECT {CLEAR_GRANT_COLUMNS} FROM clear_grants \
+                 WHERE project_id = ?1 AND generation = ?2"
+            ),
+            params![project_id, to_i64(generation)],
+            clear_grant_from,
+        )
+        .optional()?;
+    match row {
+        None => Err(EffectError::Rejected(format!(
+            "project {project_id} holds no clear grant of generation {generation}"
+        ))),
+        Some(g) if g.revoked_at.is_some() => Err(EffectError::Rejected(format!(
+            "generation {generation} of the clear grant of project {project_id} is revoked already"
+        ))),
+        Some(_) => {
+            tx.execute(
+                "UPDATE clear_grants SET revoked_by = ?3, revoked_at = ?4 \
+                 WHERE project_id = ?1 AND generation = ?2 AND revoked_at IS NULL",
+                params![project_id, to_i64(generation), revoked_by, revoked_at],
+            )
+            .map_err(backstop)?;
+            Ok(())
+        }
+    }
+}
+
+/// The precondition of a commit: the project is live and its grant is live at `generation`. It
+/// writes nothing.
+fn require_live_grant(
+    tx: &Transaction<'_>,
+    project_id: &str,
+    generation: u64,
+) -> Result<(), EffectError> {
+    live_project(tx, project_id)?;
+    match open_clear_grant(tx, project_id)? {
+        None => Err(EffectError::Rejected(format!(
+            "project {project_id} holds no live clear grant"
+        ))),
+        Some(g) if g.generation != generation => Err(EffectError::Rejected(format!(
+            "the clear grant of project {project_id} is live at generation {}, not {generation}",
+            g.generation
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Apply one effect. It returns the IDs the effect assigned.
 fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assigned, EffectError> {
     match effect {
@@ -1585,6 +1716,17 @@ fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assi
             outcome,
             updated_at,
         } => notice_ack(tx, target, channel, *position, outcome, updated_at)?,
+        Effect::GrantClear(n) => grant_clear(tx, command_id, n)?,
+        Effect::RevokeClearGrant {
+            project_id,
+            generation,
+            revoked_by,
+            revoked_at,
+        } => revoke_clear_grant(tx, project_id, *generation, revoked_by, revoked_at)?,
+        Effect::RequireLiveGrant {
+            project_id,
+            generation,
+        } => require_live_grant(tx, project_id, *generation)?,
     }
     Ok(Assigned::default())
 }
@@ -1653,6 +1795,19 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
     {
         return Ok(Committed::Rejected(
             "a notice, a send or an acknowledgement is written only in an admission under @controller"
+                .to_string(),
+        ));
+    }
+    // A clear grant and its revoke are the controller's to write: the effects are refused in any
+    // other scope, and the admission rolls back with them. The precondition `RequireLiveGrant` is
+    // admitted in every scope.
+    if c.run_id != CONTROLLER_SCOPE
+        && c.effects
+            .iter()
+            .any(|e| matches!(e, Effect::GrantClear(_) | Effect::RevokeClearGrant { .. }))
+    {
+        return Ok(Committed::Rejected(
+            "a clear grant and its revoke are written only in an admission under @controller"
                 .to_string(),
         ));
     }
@@ -2819,6 +2974,21 @@ impl Store for SqliteStore {
                         last_sent_at: r.get(3)?,
                     })
                 },
+            )
+            .map_err(sql_error)
+        })?
+    }
+
+    fn clear_grants(&self) -> Result<Vec<ClearGrantRow>, StoreError> {
+        self.call(move |conn| {
+            collect(
+                conn,
+                &format!(
+                    "SELECT {CLEAR_GRANT_COLUMNS} FROM clear_grants \
+                     ORDER BY CAST(substr(project_id, 3) AS INTEGER), project_id, generation"
+                ),
+                [],
+                clear_grant_from,
             )
             .map_err(sql_error)
         })?

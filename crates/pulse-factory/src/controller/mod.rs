@@ -17,6 +17,7 @@ pub mod devices;
 pub mod driver;
 pub mod files;
 pub mod folders;
+pub mod grants;
 pub mod hosts;
 pub mod notices;
 pub mod ports;
@@ -864,6 +865,8 @@ impl Handler for Controller {
             "session_items" => self.verb_session_items(&request.args),
             "settings_get" => self.verb_settings_get(&request.args),
             "device_list" => self.verb_device_list(),
+            // A read, open to every caller as `requests` is (`r2.s3.w1`).
+            "grant_list" => self.verb_grant_list(&request.args),
             "api_status" => self.verb_api_status(),
             // A confirm code is for a paired device, on the API (`r1.s4.w1`).
             "confirm_code" => Response::err(SOCKET_CODE_REFUSAL.replace("{verb}", "confirm_code")),
@@ -871,7 +874,8 @@ impl Handler for Controller {
             "notice_ack" => Controller::socket_notice_ack(),
             // These change who acts and what runs. They need to know who calls.
             "arm" | "propose" | "claim" | "answer" | "clear" | "ack" | "device_pair"
-            | "device_revoke" | "settings_set" | "settings_unset" => Response::err(format!(
+            | "device_revoke" | "grant_clear" | "grant_revoke" | "settings_set"
+            | "settings_unset" => Response::err(format!(
                 "{} refused: the controller cannot tell which process called",
                 request.verb
             )),
@@ -911,6 +915,16 @@ impl Controller {
             },
             "device_revoke" => match self.check_chat_caller("device_revoke", peer) {
                 Ok(()) => self.verb_device_revoke(&request.args),
+                Err(why) => Response::err(why),
+            },
+            // Only the operator gives or ends the clear grant: a seat cannot, and neither can a chat.
+            // The check is the one `arm` passes. The verbs take no claim (`r2.s3.w1`).
+            "grant_clear" => match self.check_chat_caller("grant_clear", peer) {
+                Ok(()) => self.verb_grant_clear(&request.args),
+                Err(why) => Response::err(why),
+            },
+            "grant_revoke" => match self.check_chat_caller("grant_revoke", peer) {
+                Ok(()) => self.verb_grant_revoke(&request.args),
                 Err(why) => Response::err(why),
             },
             // A seat cannot change a setting, and neither can a chat. The refusal is audited, with a

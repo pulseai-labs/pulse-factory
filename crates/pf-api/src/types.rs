@@ -219,6 +219,45 @@ pub struct DevicePairing {
     pub expires_at: String,
 }
 
+// ------------------------------------------------------------------ the clear grant
+
+/// One row of a project's clear grant, as `grant list` shows it (ADR-0005, amended). A revoke ends a
+/// generation, and the next grant takes the next one. `live` is true for the one row of a live
+/// project that has no revoke: a removed project's row is never live.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ClearGrant {
+    pub project_id: String,
+    pub agent_id: String,
+    #[ts(type = "number")]
+    pub generation: u64,
+    pub granted_by: String,
+    pub granted_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revoked_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revoked_at: Option<String>,
+    pub live: bool,
+}
+
+/// The answer of `grant_list`: every row asked for, by project, and in a project newest generation
+/// first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GrantList {
+    pub schema_version: u32,
+    pub grants: Vec<ClearGrant>,
+}
+
+/// The answer of `grant_clear` and `grant_revoke`: the row the command wrote. `replayed` is true when
+/// the command ID was admitted before with the same content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct GrantChanged {
+    pub schema_version: u32,
+    pub replayed: bool,
+    pub grant: ClearGrant,
+}
+
 // ------------------------------------------------------------------ the listener's state
 
 /// Where the listener stands.
@@ -903,6 +942,13 @@ pub struct RequestSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub summary: Option<String>,
+    /// Which side of the line the request is on: `below` (the project's clear grant may settle it,
+    /// or the claim) or `above` (the claim alone). The engine computes it at each read from the
+    /// request's cause and its track's merge, and never stores it. A request whose class cannot be
+    /// computed reads `above`. Left out by a controller that has no line class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub line: Option<String>,
 }
 
 /// The answer of `show`: the summary, the request's body and answer, the decision block, and the
@@ -1046,6 +1092,11 @@ pub struct RequestList {
     pub open: u64,
     pub requests: Vec<RequestSummary>,
     pub claim: Option<ClaimRecord>,
+    /// The live clear grants: one for each project whose Orchestrator may settle what is below the
+    /// line. A removed project's grant is never here. Left out when no grant is live.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<ClearGrant>>", optional)]
+    pub grants: Vec<ClearGrant>,
 }
 
 /// The arguments of `requests`.
@@ -1529,6 +1580,9 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     FolderEntry::export_all(cfg)?;
     FolderList::export_all(cfg)?;
     DeviceRecord::export_all(cfg)?;
+    ClearGrant::export_all(cfg)?;
+    GrantList::export_all(cfg)?;
+    GrantChanged::export_all(cfg)?;
     PairRequest::export_all(cfg)?;
     PairResult::export_all(cfg)?;
     ServerRef::export_all(cfg)?;
