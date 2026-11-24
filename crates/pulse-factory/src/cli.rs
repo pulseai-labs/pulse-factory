@@ -1,6 +1,6 @@
 //! The command line (ADR-0004): `arm`, `status`, `halt`, `requests`, `show`, `claim`, `answer`,
-//! `clear`, `ack`, `project`, `session`, `settings`, `chat-runtime`, `device`, `api`, `store`, `hook`
-//! and `controller`.
+//! `clear`, `ack`, `project`, `session`, `settings`, `chat-runtime`, `grant`, `device`, `api`, `store`,
+//! `hook` and `controller`.
 //!
 //! No verb waits or watches. Exit codes: 0 ok, 1 a refusal or an error, 2 `arm` with neither
 //! `--dry-run` nor `--yes` (or a command line that clap refuses).
@@ -52,6 +52,8 @@ pub enum Verb {
     Settings(SettingsArgs),
     /// Install the managed Claude Code copy that the chat runs.
     ChatRuntime(ChatRuntimeArgs),
+    /// Give, end and read a project's clear grant. Only you give or end it.
+    Grant(GrantArgs),
     /// Pair, list and revoke the devices that call the network API. A device acts as you.
     Device(DeviceArgs),
     /// Show whether the network API is off, waiting for its address or listening.
@@ -581,6 +583,60 @@ pub struct ChatRuntimeInstallArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct GrantArgs {
+    #[command(subcommand)]
+    pub verb: GrantVerb,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GrantVerb {
+    /// Give a project's Orchestrator the clear grant. It acts on nothing that is above the line.
+    Clear(GrantClearArgs),
+    /// End a project's clear grant. A new grant takes the next generation.
+    Revoke(GrantRevokeArgs),
+    /// List the grants: every row, by project, and which one is live.
+    List(GrantListArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GrantClearArgs {
+    /// The project, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GrantRevokeArgs {
+    /// The project, such as `P-1`.
+    #[arg(long, value_name = "P-n")]
+    pub project: String,
+    /// The command ID. A retry sends the same one, and the command is admitted once. The default
+    /// is a random one for each call.
+    #[arg(long, value_name = "ID")]
+    pub command_id: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct GrantListArgs {
+    /// Only this project's rows.
+    #[arg(long, value_name = "P-n")]
+    pub project: Option<String>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct DeviceArgs {
     #[command(subcommand)]
     pub verb: DeviceVerb,
@@ -733,6 +789,11 @@ pub fn run(args: Vec<OsString>) -> i32 {
         },
         Verb::ChatRuntime(a) => match a.verb {
             ChatRuntimeVerb::Install(a) => crate::controller::client::chat_runtime_install(&a),
+        },
+        Verb::Grant(a) => match a.verb {
+            GrantVerb::Clear(a) => crate::controller::client::grant_clear(&a),
+            GrantVerb::Revoke(a) => crate::controller::client::grant_revoke(&a),
+            GrantVerb::List(a) => crate::controller::client::grant_list(&a),
         },
         Verb::Device(a) => match a.verb {
             DeviceVerb::Pair(a) => crate::controller::client::device_pair(&a),

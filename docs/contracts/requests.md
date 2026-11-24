@@ -143,7 +143,9 @@ text. `show` prints a label with every control character replaced.
 The cause, the kind of the request it opens, the options and the recommendation. A recommendation is
 `controller` only for four of the five reasons that ADR-0006's amendment of 2026-11-16 lists as below the
 line: `stalled`, `seat_lost`, `host_unreachable` and `merge_checks_red`. A failed launch with a transient
-cause is below the line and carries no recommendation.
+cause is below the line and carries no recommendation. Which side of the line a cause is on is in
+"The line": the class is a function of the cause and of the track's merge, and this table does not
+repeat it.
 
 | Cause | Kind | Options | Recommendation |
 |---|---|---|---|
@@ -269,6 +271,101 @@ the act does. The caller never says what an option means. An option ID is 1 to 3
 - A halted run admits an option act as it admits the typed one: the unit is left with the reason `run
   halted`, and nothing launches. An ack on a halted run is refused as today.
 
+## The line
+
+Every request has a **line class**, `below` or `above` (ADR-0006, amended). `below` means that the
+operator's clear grant may settle the request (see "The clear grant"), and `above` means that the
+claim alone may. Nothing acts under the grant yet, so the class changes no verb: who may `answer`,
+`clear` and `ack` a request is as before, for both classes.
+
+The engine computes the class from the request's cause and from its track's merge, with one
+function, `line_of(cause, free_merge)`. One exhaustive `match` over the causes gives each cause a
+row, so a new cause does not compile until it has one:
+
+| Cause | Class |
+|---|---|
+| `stalled`, `seat_lost`, `host_unreachable` | `below` |
+| `merge_checks_red`, `merge_conflict` | `below` when the track's merge is free (below), else `above` |
+| every other cause, `launch_failed` included | `above` |
+| no cause (a park stored before the cause existed, a request with no block) | `above` |
+
+A failed launch is below the line only once an adapter marks its cause as transient. No adapter
+does today, so `launch_failed` is `above`.
+
+**A track's merge is free** only when all of these hold: the unit's track has a merge; its rule is
+not `claim_ack`; the caller gave a forge repo and its default branch; the track's `repo`, rendered
+for the unit, is that repo; and the track's `base`, rendered for the unit, is another branch than
+the default branch. Anything else makes it not free: a `repo` or a `base` that does not render, an
+empty `repo` or `base` (it "declares nothing"), a unit whose merge renders another repo, and a
+default branch that is not given. A unit whose merge renders another repo than the run's forge repo
+has no known default branch, so its merge causes are `above`.
+
+- **One renderer.** The class renders `repo` and `base` with the merge step's own function, so the
+  class and the merge cannot name different branches. A track whose `head_branch` does not render
+  makes that function fail, and a failed render gives `above`.
+- **Branch names are normalized before the compare.** One leading `refs/heads/` is cut from each
+  name, so `refs/heads/main` equals `main`. Nothing else is folded: the compare is exact and
+  case-sensitive.
+- **The workflow is the run's own.** The class reads the track's merge
+  from the run's pinned copy of the workflow (`<run dir>/package`, which `arm` made), never from
+  the package on disk. A change to the source package after `arm` changes the class of no request
+  of that run, also after a controller restart.
+- **The class fails closed.** Every read that fails gives `above`: a body that is not JSON, a block
+  of another version, a unit the run does not hold, a unit detail that does not read, and a run
+  whose view cannot be read. A request with no unit is `above`. The engine names no repo and no
+  branch of its own: the controller passes the run's forge repo and its default branch on every
+  call.
+- **The class is computed and never stored.** No request body, command or block holds a class key.
+  An open request and a closed one read the class at the read, from the cause in the stored block.
+
+`show`, `requests` and the `request` and `requests` frames carry it as `line` (`cli.md`, `api.md`).
+
+## The clear grant
+
+A project's **clear grant** is a stored row that says the Orchestrator may settle the project's
+requests that are below the line. The grant is off until the operator gives it, and the operator
+can end it at any time. Nothing acts under the grant yet: this section is the record and the rules
+that a later verb reads.
+
+- **The row.** One row for each project and generation, in the table `clear_grants`: the project's
+  ID, the generation (an integer from 1), the agent that holds the grant (`orchestrator`), who
+  gave it and when, and, once the operator ends it, who ended it and when. Each change is an
+  admitted command under `@controller` with the caller's command ID.
+- **The generation rule.** A new row's generation is the project's highest generation plus 1. A
+  revoke ends its generation, and the next grant takes the next one, so an act under an old
+  generation is refused. At most one row of a project has no revoke, so at most one grant of a
+  project is live. A revoke is set once, on its row, and a row is never deleted. The database
+  holds these rules as guards, so no caller can break one.
+- **Who gives and ends it.** Only the operator: `grant clear` gives the grant, `grant revoke` ends
+  it, and `grant list` reads it (`cli.md`, `grant`). The two that change it pass the caller check
+  of "The caller check" and take no claim: a chat or a seat that calls one is refused, and neither
+  reads a claim token. No grant verb is on the device allowlist.
+- **A revoke commits when the controller's commands are stopped.** The controller refuses every
+  command when its ledger cannot be appended to, except a device revoke and a grant revoke. Those
+  commit to the store at once, and the ledger line waits in the outbox for the next start. A new
+  grant is refused there like every other command.
+- **The ledger lines**, in `controller.ledger`, one for each admitted command:
+  `grant_clear <P-n> agent=orchestrator generation=<g> by=cli command=<id>` and
+  `grant_revoke <P-n> generation=<g> by=cli command=<id>`. A replay of a command ID returns the
+  first record and writes no line.
+- **Refusals.** `grant clear` is refused for a project the store does not hold, for a removed
+  project, and for a project whose grant is live (`project <P-n> already holds the clear grant
+  (generation <g>)`). `grant revoke` is refused for a project the store does not hold and for a
+  project with no open row (`project <P-n> holds no clear grant`). `halt` revokes nothing.
+- **A removed project's grant is not live.** `project remove` writes no revoke. Every reader of
+  "is the grant live" skips a removed project: `grant list` marks none of its rows live, and
+  `requests` holds none of its grants. No code makes a removed project live again, so its grant
+  cannot come back. `grant revoke` still ends the open row of a removed project, so the operator
+  can always end what the store still holds.
+- **The precondition.** A store commit can require that a project holds a live grant at one
+  generation (`Effect::RequireLiveGrant`). The effect writes nothing. The store checks it inside
+  the commit's transaction and rejects the commit, with one line and nothing written (no
+  admission, no outbox line and no other effect of the commit), when the project has no open
+  row, when the open row is of another generation, and when the project is removed or unknown. It
+  is admitted in every scope, a run's included. Commits are serial, so a revoke is either before a
+  commit that carries the precondition, which is then rejected, or after it. A revoke through the
+  stopped-ledger path counts: it commits to the store at once.
+
 ## Command IDs
 
 Every change is an admitted command. Its ID is in the admissions table, and a replay with the same
@@ -286,6 +383,7 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Claim | `claim:<generation>` |
 | Issue a confirm code, or act with one from a device | the device's own `command_id` |
 | Clear a unit | `clear:<unit>:<park generation>` |
+| Give or end a clear grant (`@controller`) | the caller's `--command-id`, random by default; the admission's unit is `<P-n>:<generation>` |
 | Park a unit | `park:<unit>:<park generation>` |
 | Merge a unit | `merge:<unit>:<park generation>` |
 | Record a merge result | `merge-result:<unit>:<park generation>` |
@@ -354,8 +452,8 @@ The token reaches no log, ledger line, `status`, request body, `requests`, `show
 
 ### The caller check
 
-On every `claim`, `answer`, `clear`, `ack`, `arm`, `device pair` and `device revoke`, and on the
-session verbs, the controller:
+On every `claim`, `answer`, `clear`, `ack`, `arm`, `device pair`, `device revoke`, `grant clear` and
+`grant revoke`, and on the session verbs, the controller:
 
 1. reads the peer's PID from the socket (`SO_PEERCRED`);
 2. refuses a peer whose `/proc/<pid>/environ` holds `PF_SEAT_TOKEN`;
@@ -366,8 +464,9 @@ session verbs, the controller:
    is, or descends from, chat process <pid>`.
 
 Any read that fails refuses, and so does a chain that does not end. The client refuses too when
-`PF_SEAT_TOKEN` is set. A refusal records nothing. `arm` runs only through the peer-aware path: with
-no peer it is refused (`arm refused: the controller cannot tell which process called`). `halt` and
+`PF_SEAT_TOKEN` is set. A refusal records nothing. `arm`, `grant clear` and `grant revoke` run only
+through the peer-aware path: with no peer each is refused (`arm refused: the controller cannot tell
+which process called`). `halt` and
 the reads stay open to every caller, because the kill switch must work from anywhere.
 
 **The chat marker.** The ancestry walk stops at the first parent with a PID of 1 or less. A child

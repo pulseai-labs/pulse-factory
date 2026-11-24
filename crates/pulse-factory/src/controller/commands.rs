@@ -25,8 +25,16 @@ use super::{Controller, lock};
 /// The controller ledger's file name in the state directory.
 pub const LEDGER_FILE: &str = "controller.ledger";
 
-/// The one command kind that still commits while the ledger is stopped.
+/// A command kind that still commits while the ledger is stopped: a device revoke cuts a device off.
 pub const DEVICE_REVOKE: &str = "device_revoke";
+
+/// The kind of `grant clear`: it gives a project its clear grant.
+pub const GRANT_CLEAR: &str = "grant_clear";
+
+/// The other command kind that still commits while the ledger is stopped: a grant revoke ends the
+/// clear grant, and the operator must be able to end it in the state where nothing else can be
+/// recorded.
+pub const GRANT_REVOKE: &str = "grant_revoke";
 
 /// A command ID is 1 to 128 characters.
 pub const COMMAND_ID_MAX_CHARS: usize = 128;
@@ -142,12 +150,14 @@ impl Controller {
         plan: Plan,
     ) -> Result<(AdmissionRow, bool), String> {
         let mut ledger = lock(&self.controller_ledger);
-        // A stopped ledger refuses every command but a revoke. A revoke cuts a device off, and the
-        // API reads the store on each call, so the operator must still be able to make one. It
-        // commits to the store and its line waits in the outbox for the next start to append.
+        // A stopped ledger refuses every command but a revoke. A device revoke cuts a device off, and
+        // the API reads the store on each call. A grant revoke ends the clear grant. The operator
+        // must still be able to make either one. It commits to the store and its line waits in the
+        // outbox for the next start to append.
         let stopped = ledger.stopped.clone();
         if let Some(why) = &stopped
             && kind != DEVICE_REVOKE
+            && kind != GRANT_REVOKE
         {
             return Err(format!("controller commands are stopped: {why}"));
         }

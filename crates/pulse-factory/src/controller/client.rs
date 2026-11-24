@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 
 use crate::cli::{
     AckArgs, AnswerArgs, ApiStatusArgs, ChatRuntimeInstallArgs, ClaimArgs, ClearArgs,
-    DeviceListArgs, DevicePairArgs, DeviceRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs,
-    ProjectRemoveArgs, ProposeArgs, RequestsArgs, SessionAnswerArgs, SessionEndArgs,
-    SessionInterruptArgs, SessionItemsArgs, SessionListArgs, SessionRedactArgs, SessionSendArgs,
-    SessionSetArgs, SessionStartArgs, SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs,
-    ShowArgs, StatusArgs,
+    DeviceListArgs, DevicePairArgs, DeviceRevokeArgs, GrantClearArgs, GrantListArgs,
+    GrantRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs, ProjectRemoveArgs, ProposeArgs,
+    RequestsArgs, SessionAnswerArgs, SessionEndArgs, SessionInterruptArgs, SessionItemsArgs,
+    SessionListArgs, SessionRedactArgs, SessionSendArgs, SessionSetArgs, SessionStartArgs,
+    SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -390,10 +390,13 @@ pub fn show_text(v: &Value) -> String {
     // The decision block, after every line that `show` printed before it existed. A request with
     // no block prints none of these lines. A seat's text, an option's label among it, is tamed.
     if v["decision"].is_object() {
-        decision_lines(&v["decision"], &mut |x: String| {
+        decision_lines(&v["decision"], v["line"].as_str(), &mut |x: String| {
             t.push_str(&x);
             t.push('\n');
         });
+    } else if let Some(class) = v["line"].as_str() {
+        // A request with no block has no summary: its class is the last line.
+        t.push_str(&format!("line: {}\n", tame(class)));
     }
     t
 }
@@ -402,10 +405,14 @@ pub fn show_text(v: &Value) -> String {
 /// summary, who asked, the attempt, whether a text answer reaches a seat, the seat the halt is
 /// about, why a stop's options could not be read, and one line for each option. An option line
 /// names who wrote the option, and for an answer the text and the stage it sends the unit to.
-fn decision_lines(d: &Value, line: &mut dyn FnMut(String)) {
+fn decision_lines(d: &Value, class: Option<&str>, line: &mut dyn FnMut(String)) {
     let s = |p: &Value| tame(p.as_str().unwrap_or(""));
     line(format!("cause: {}", s(&d["cause"])));
     line(format!("summary: {}", s(&d["summary"])));
+    // The request's line class, directly after the summary. `show` of an older controller has none.
+    if let Some(class) = class {
+        line(format!("line: {}", tame(class)));
+    }
     let asked = &d["asked_by"];
     line(match asked["kind"].as_str() {
         Some("seat") => format!(
@@ -1052,6 +1059,121 @@ pub fn settings_unset(a: &SettingsUnsetArgs) -> i32 {
 
 /// Print a refusal or an error of a device verb and give the exit code 1. The text is tamed: a
 /// device chose its own name.
+fn grant_failed(verb: &str, why: &str) -> i32 {
+    eprintln!("pulse-factory: grant {verb}: {}", tame(why));
+    1
+}
+
+/// `grant clear`: give a project's Orchestrator the clear grant. A seat does not call it.
+pub fn grant_clear(a: &GrantClearArgs) -> i32 {
+    if let Some(code) = refuse_seat("grant clear") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return grant_failed("clear", &why),
+    };
+    match call(
+        "grant_clear",
+        json!({ "project_id": a.project, "command_id": command_id }),
+    ) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!(
+                    "clear grant given: {} {} generation {}",
+                    tame(&s_of(&v["grant"]["project_id"])),
+                    tame(&s_of(&v["grant"]["agent_id"])),
+                    v["grant"]["generation"]
+                );
+            }
+            0
+        }
+        Err(why) => grant_failed("clear", &why),
+    }
+}
+
+/// `grant revoke`: end a project's clear grant. A seat does not call it.
+pub fn grant_revoke(a: &GrantRevokeArgs) -> i32 {
+    if let Some(code) = refuse_seat("grant revoke") {
+        return code;
+    }
+    let command_id = match command_id_of(&a.command_id) {
+        Ok(id) => id,
+        Err(why) => return grant_failed("revoke", &why),
+    };
+    match call(
+        "grant_revoke",
+        json!({ "project_id": a.project, "command_id": command_id }),
+    ) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                println!(
+                    "clear grant ended: {} generation {}",
+                    tame(&s_of(&v["grant"]["project_id"])),
+                    v["grant"]["generation"]
+                );
+            }
+            0
+        }
+        Err(why) => grant_failed("revoke", &why),
+    }
+}
+
+/// `grant list`: one line for each row.
+pub fn grant_list(a: &GrantListArgs) -> i32 {
+    let args = match &a.project {
+        Some(p) => json!({ "project_id": p }),
+        None => json!({}),
+    };
+    match call("grant_list", args) {
+        Ok(v) => {
+            if a.json {
+                print_json(&v);
+            } else {
+                print!("{}", grant_list_text(&v));
+            }
+            0
+        }
+        Err(why) => grant_failed("list", &why),
+    }
+}
+
+/// The text form of `grant list`: `<P-n>  generation <g>  granted by <who> at <t>  live`, or
+/// `  revoked by <who> at <t>` for an ended row. Every part is tamed.
+pub fn grant_list_text(v: &Value) -> String {
+    let rows = v["grants"].as_array().cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return "no clear grants\n".to_string();
+    }
+    let mut t = String::new();
+    for g in &rows {
+        let state = if g["live"].as_bool() == Some(true) {
+            "live".to_string()
+        } else if g["revoked_at"].is_string() {
+            format!(
+                "revoked by {} at {}",
+                tame(&s_of(&g["revoked_by"])),
+                tame(&s_of(&g["revoked_at"]))
+            )
+        } else {
+            // An open row of a removed project: it is not live, and a revoke still ends it.
+            "not live (project removed)".to_string()
+        };
+        t.push_str(&format!(
+            "{}  generation {}  granted by {} at {}  {state}\n",
+            tame(&s_of(&g["project_id"])),
+            g["generation"],
+            tame(&s_of(&g["granted_by"])),
+            tame(&s_of(&g["granted_at"])),
+        ));
+    }
+    t
+}
+
 fn device_failed(verb: &str, why: &str) -> i32 {
     eprintln!("pulse-factory: device {verb}: {}", tame(why));
     1

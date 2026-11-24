@@ -177,16 +177,16 @@ fn a_version_six_file_migrates_to_seven_with_every_row_unchanged() {
     };
     {
         let store = SqliteStore::open(&path).unwrap();
-        // 0008 to 0012 follow 0007, and the plain open applies all of them.
-        assert_eq!(store.schema_version().unwrap(), 12);
+        // 0008 to 0013 follow 0007, and the plain open applies all of them.
+        assert_eq!(store.schema_version().unwrap(), 13);
     }
     let conn = Connection::open(&path).unwrap();
     for (table, was) in &before {
         let now = rows(&conn, table);
         if table == "schema_version" {
-            // The old rows stay, and one row each for 0007 to 0012 follows.
+            // The old rows stay, and one row each for 0007 to 0013 follows.
             assert_eq!(&now[..was.len()], &was[..], "{table}");
-            assert_eq!(now.len(), was.len() + 6);
+            assert_eq!(now.len(), was.len() + 7);
         } else if table == "chat_sessions" {
             // 0011 adds `host_cursor` last, NULL on every old row.
             let trimmed: Vec<String> = now
@@ -219,7 +219,7 @@ fn a_fresh_file_opens_at_seven_with_an_empty_settings_table() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "settings"), 0);
@@ -235,7 +235,7 @@ fn a_version_six_file_with_an_active_run_refuses_and_stays_at_six() {
         err,
         OpenError::RunActive {
             current: 6,
-            pending: 12
+            pending: 13
         }
     );
     let conn = Connection::open(&path).unwrap();

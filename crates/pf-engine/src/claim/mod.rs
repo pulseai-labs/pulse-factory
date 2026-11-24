@@ -19,6 +19,8 @@
 
 mod decision;
 mod detail;
+mod grant;
+mod line;
 mod sha256;
 
 pub use decision::{
@@ -32,6 +34,8 @@ pub use detail::{
     STOP_OPTION_MAX_CHARS, STOP_OPTIONS_MAX, STOP_OPTIONS_MIN, STOP_TEXT_MAX_BYTES, gaps_detail,
     gaps_of, park_options_detail, stop_detail,
 };
+pub use grant::{live_grant, open_grant};
+pub use line::{Line, line_of};
 pub use sha256::sha256_hex;
 
 use serde_json::{Value, json};

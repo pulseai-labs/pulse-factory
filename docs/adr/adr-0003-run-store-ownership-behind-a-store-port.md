@@ -244,8 +244,10 @@ it lands, and that work's close marks it Accepted. It needs the session hosts of
   mode) writes a new revision. The newest revision wins. Old revisions stay.
 - **The host registry** records each host's job name, socket, incarnation, start time and end. The
   reconciliation of ADR-0007 (amendment of 2026-11-16) reads it.
-- **The clear grant** is a row per project: the agent that holds it, the generation, who granted it,
-  when, and when it was revoked (ADR-0005, amendment of 2026-11-16).
+- **The clear grant** is one row for each project and generation: the agent that holds it, who
+  granted it, when, and when it was revoked. A revoke is set once, on its row, and the next grant
+  takes the next generation. A commit can require that a project holds a live grant at one generation,
+  and the store rejects the commit when it does not (ADR-0005, amendment of 2026-11-16).
 - Each write passes admission with a command ID, as every state change does.
 
 **Consequences.** A full restart has what it needs to resume each session as it was. No secret value

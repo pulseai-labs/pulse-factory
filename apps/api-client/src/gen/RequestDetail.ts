@@ -19,4 +19,11 @@ cause?: string,
 /**
  * The controller's one-sentence summary of the halt. It holds no seat's words.
  */
-summary?: string, };
+summary?: string, 
+/**
+ * Which side of the line the request is on: `below` (the project's clear grant may settle it,
+ * or the claim) or `above` (the claim alone). The engine computes it at each read from the
+ * request's cause and its track's merge, and never stores it. A request whose class cannot be
+ * computed reads `above`. Left out by a controller that has no line class.
+ */
+line?: string, };

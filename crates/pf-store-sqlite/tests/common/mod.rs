@@ -4,9 +4,9 @@
 
 use pf_engine::port::store::{
     AdmissionOutcome, AdmissionRow, CONTROLLER_SCOPE, ChatItemKind, Commit, Committed, Effect,
-    LedgerEntry, LedgerLine, NEW_ID, NewAdmission, NewChatItem, NewChatSession, NewDelivery,
-    NewHost, NewLaunchRecord, NewNotice, NewProject, ORCHESTRATOR_AGENT, ProjectKind,
-    SessionWorktree, Store, WORKTREE_ID, WorktreeCreatedBy,
+    LedgerEntry, LedgerLine, NEW_ID, NewAdmission, NewChatItem, NewChatSession, NewClearGrant,
+    NewDelivery, NewHost, NewLaunchRecord, NewNotice, NewProject, ORCHESTRATOR_AGENT, ProjectKind,
+    RunRow, RunState, SessionWorktree, Store, WORKTREE_ID, WorktreeCreatedBy,
 };
 use pf_store_sqlite::SqliteStore;
 
@@ -623,4 +623,81 @@ pub fn version_eight_store(path: &std::path::Path) {
              VALUES ('@controller', 'c1', 'project_add', '{}', 'admitted', 't1');",
     )
     .unwrap();
+}
+
+// ------------------------------------------------------------------ the clear grant
+
+/// The commit of `grant clear`, as the controller builds it: the next generation for `project_id`.
+pub fn grant_commit(command_id: &str, project_id: &str, generation: u64) -> Commit {
+    commit(
+        "grant_clear",
+        command_id,
+        &format!("{{\"project_id\":\"{project_id}\"}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(&format!("{project_id}:{generation}")),
+        vec![Effect::GrantClear(NewClearGrant {
+            project_id: project_id.to_string(),
+            generation,
+            agent_id: ORCHESTRATOR_AGENT.to_string(),
+            granted_by: "cli".to_string(),
+            granted_at: "t5".to_string(),
+        })],
+        Some(format!(
+            "grant_clear {project_id} agent=orchestrator generation={generation} by=cli command={command_id}"
+        )),
+    )
+}
+
+/// The commit of `grant revoke` of one generation.
+pub fn revoke_commit(command_id: &str, project_id: &str, generation: u64) -> Commit {
+    commit(
+        "grant_revoke",
+        command_id,
+        &format!("{{\"project_id\":\"{project_id}\"}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        Some(&format!("{project_id}:{generation}")),
+        vec![Effect::RevokeClearGrant {
+            project_id: project_id.to_string(),
+            generation,
+            revoked_by: "cli".to_string(),
+            revoked_at: "t6".to_string(),
+        }],
+        Some(format!(
+            "grant_revoke {project_id} generation={generation} by=cli command={command_id}"
+        )),
+    )
+}
+
+/// A commit in the scope of run `run-1` that writes the run row and carries the precondition
+/// `RequireLiveGrant` for `project_id` at `generation`. It is what a settle will commit.
+pub fn guarded_commit(command_id: &str, project_id: &str, generation: u64) -> Commit {
+    let mut c = commit(
+        "settle_probe",
+        command_id,
+        &format!("{{\"project_id\":\"{project_id}\",\"generation\":{generation}}}"),
+        AdmissionOutcome::Admitted,
+        None,
+        None,
+        vec![
+            Effect::PutRun(RunRow {
+                id: "run-1".to_string(),
+                workflow: "wf".to_string(),
+                ledger_file: LEDGER.to_string(),
+                state: RunState::Active,
+                halted_reason: None,
+                project_id: None,
+                created_at: "t7".to_string(),
+                updated_at: "t7".to_string(),
+            }),
+            Effect::RequireLiveGrant {
+                project_id: project_id.to_string(),
+                generation,
+            },
+        ],
+        Some(format!("settle_probe {project_id} command={command_id}")),
+    );
+    c.run_id = "run-1".to_string();
+    c
 }

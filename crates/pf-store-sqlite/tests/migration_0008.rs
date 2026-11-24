@@ -209,15 +209,15 @@ fn a_version_seven_file_migrates_to_eight_with_every_row_unchanged_and_no_run_in
     };
     {
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
     }
     let conn = Connection::open(&path).unwrap();
     for (table, was) in &before {
         let now = rows(&conn, table);
         if table == "schema_version" {
-            // The old rows stay, and one row each for 0008 to 0012 follows.
+            // The old rows stay, and one row each for 0008 to 0013 follows.
             assert_eq!(&now[..was.len()], &was[..], "{table}");
-            assert_eq!(now.len(), was.len() + 5);
+            assert_eq!(now.len(), was.len() + 6);
         } else if table == "chat_sessions" {
             // 0011 adds `host_cursor` last, NULL on every old row.
             let trimmed: Vec<String> = now
@@ -252,7 +252,7 @@ fn a_version_seven_file_migrates_to_eight_with_every_row_unchanged_and_no_run_in
         .unwrap();
     assert_eq!(name, "run_project");
     assert_eq!(MIGRATIONS[7].name, "run_project");
-    assert_eq!(MIGRATIONS.len(), 12);
+    assert_eq!(MIGRATIONS.len(), 13);
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn a_fresh_file_opens_at_eight() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     let has: i64 = conn
@@ -283,7 +283,7 @@ fn a_version_seven_file_with_an_active_run_refuses_and_stays_at_seven() {
         err,
         OpenError::RunActive {
             current: 7,
-            pending: 12
+            pending: 13
         }
     );
     let conn = Connection::open(&path).unwrap();

@@ -119,7 +119,10 @@ The same stream carries three more frames, the **request frames** (`RequestFrame
 type; the chat frames above do not change). Each holds a `RequestSummary`, as `requests` rows do, and
 a `ClaimRecord`. A client that does not know a `type` skips it. A `RequestSummary` in a request frame
 holds `cause` and `summary` for a request that has a decision block, and leaves them out for any other
-(a client that does not know them decodes the frame as before).
+(a client that does not know them decodes the frame as before). It also holds `line`, `below` or
+`above`: the side of the line the request is on (`requests.md`, "The line"). The controller computes
+it at each read, for an open request and for a closed one. A client that does not know `line`
+decodes the frame as before.
 
 ```json
 {"type":"requests","requests":[{"id":"R-4","revision":1,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR waits for the claim's ack","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"9f2c0d1e5b7a43c8d6e1f0a2b3c4d5e6f7a8b9c0"}],"claim":{"generation":2,"holder":"device D-1 (MacBook)","device":"D-1","revoked":false,"claimed_at":"2026-11-09T21:04:50.118Z"}}
@@ -292,10 +295,17 @@ Each takes a JSON body. A state-changing verb takes a `command_id`: the same ID 
 returns the first record with `replayed` true and acts on nothing, with no second engine call and no
 second merge.
 
+No grant verb is on the allowlist yet. `grant_clear`, `grant_revoke` and `grant_list` (the CLI's
+`grant`) run on the host over the socket only, and a device that calls one gets a 403. A device
+reads the live grants in the `grants` field of `requests`.
+
 - **`requests`**: `{"run"?: "<run>", "all"?: true}`. The answer is a `RequestList`: `schema_version`,
   `open`, `requests` (each a `RequestSummary` with `verbs`, `pr`, `base` and `head_sha` for a
-  `merge_ack`, and `cause` and `summary` for a request that holds a decision block) and `claim` (the
-  current claim, or null). It is the JSON of the CLI's `requests --json`.
+  `merge_ack`, `cause` and `summary` for a request that holds a decision block, and `line` for every
+  request), `claim` (the current claim, or null) and `grants` (the live clear grants, each a
+  `ClearGrant`: `project_id`, `agent_id`, `generation`, `granted_by`, `granted_at` and `live`; the
+  key is left out when no grant is live, and a removed project's grant is never in it). It is the
+  JSON of the CLI's `requests --json`.
 - **`show`**: `{"id": "R-4"}`. The answer is a `RequestDetail`: the summary and `body`, `answer`,
   `answer_generation` and `decision`. `decision` is the request's decision block (`requests.md`, "The
   decision block") as a `Decision`, with `DecisionOption`, `OptionEffect`, `Recommended`,

@@ -79,14 +79,14 @@ fn a_version_one_store_migrates_to_the_latest_and_keeps_every_row() {
     {
         // Migrations 0003 to 0007 follow 0002 in the same open: the file ends at version 7.
         let store = SqliteStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
     }
     let conn = Connection::open(&path).unwrap();
     assert_eq!(count(&conn, "runs"), 1);
     assert_eq!(count(&conn, "nodes"), 3);
     assert_eq!(count(&conn, "admissions"), 1);
     assert_eq!(count(&conn, "ledger_outbox"), 1);
-    assert_eq!(count(&conn, "schema_version"), 12);
+    assert_eq!(count(&conn, "schema_version"), 13);
     let name: String = conn
         .query_row(
             "SELECT name FROM schema_version WHERE version = 2",
@@ -105,7 +105,7 @@ fn a_version_one_store_migrates_to_the_latest_and_keeps_every_row() {
 #[test]
 fn the_migration_list_holds_version_two_after_version_one() {
     let versions: Vec<u32> = MIGRATIONS.iter().map(|m| m.version).collect();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     assert_eq!(MIGRATIONS[1].name, "requests");
 }
 
@@ -119,7 +119,7 @@ fn a_store_never_migrates_under_an_active_run() {
         err,
         OpenError::RunActive {
             current: 1,
-            pending: 12
+            pending: 13
         }
     );
     // The refusal changed nothing.
@@ -258,7 +258,7 @@ fn a_store_at_version_six_refuses_to_open_and_names_both_versions() {
     {
         let conn = Connection::open(&path).unwrap();
         conn.execute(
-            "INSERT INTO schema_version (version, name, applied_at) VALUES (13, 'future', 't')",
+            "INSERT INTO schema_version (version, name, applied_at) VALUES (14, 'future', 't')",
             [],
         )
         .unwrap();
@@ -267,13 +267,13 @@ fn a_store_at_version_six_refuses_to_open_and_names_both_versions() {
     assert_eq!(
         err,
         OpenError::SchemaNewer {
-            database: 13,
-            supported: 12
+            database: 14,
+            supported: 13
         }
     );
     let text = err.to_string();
     assert!(
-        text.contains("version 13") && text.contains("version 12"),
+        text.contains("version 14") && text.contains("version 13"),
         "{text}"
     );
 }
@@ -296,7 +296,7 @@ fn migrating_twice_is_a_no_op() {
         (count(&conn, "schema_version"), applied)
     };
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 12);
+    assert_eq!(store.schema_version().unwrap(), 13);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     let applied: String = conn

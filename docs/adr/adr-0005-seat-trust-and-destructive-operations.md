@@ -307,18 +307,23 @@ generation, the acting session, the request or unit, and the reason.
 **The verb.** The grant acts through one verb of its own, `settle`, which names the request or unit,
 the act and a reason. It is not a claim verb: `answer`, `clear`, `ack`, `arm` and the rest still refuse
 every chat and seat. `settle` refuses every caller except a session that the controller identifies,
-from its host, as the grant's holder for the project of the request or unit. Granting and revoking are
-claim acts: `grant clear` and `grant revoke`, on the CLI and, with a confirm code, on a device
-(ADR-0012, amendment of 2026-11-16).
+from its host, as the grant's holder for the project of the request or unit. Giving and ending the
+grant, `grant clear` and `grant revoke`, pass the caller check that `arm` passes and take no claim.
+They run on the CLI and, with a confirm code, on a device (ADR-0012, amendment of 2026-11-16).
 
 **Above the line, for the claim only:** the merge ack into a default branch; an answer that changes a
 spec, an ADR, a rule set or a permission, including an implementer's clarification; a raise of a cap
-or a launch budget; `arm`; granting or revoking the clear grant; installing or removing a plugin; every
-settings write; a demo verdict; every request kind a plugin adds.
+or a launch budget; installing or removing a plugin; every settings write; a demo verdict; every
+request kind a plugin adds.
+
+**Above the line, for the operator, with no claim:** `arm`, and giving or ending the clear grant. Each
+passes the caller check that refuses a seat and a chat, and on a device each needs a confirm code.
 
 **Granting.** The grant is off until the operator grants it for a project, on the CLI or with a device
-confirm code. The operator revokes it at any time. A revoke bumps the grant's generation, and an act
-under an old generation is refused. `halt` does not revoke it, but `halt` stops every launch, so acts
+confirm code. The operator revokes it at any time. A revoke ends its generation, and the next grant takes
+the next one, so an act under an old generation is refused. A revoke commits even when the
+controller's commands are stopped, and its ledger line follows at the next start. A removed project's
+grant is not live. A device's confirm code comes with the device verbs. `halt` does not revoke it, but `halt` stops every launch, so acts
 2, 4 and 5 cannot run. The setting `authority.clear_acts` (ADR-0016, amended) can narrow the list for a
 project or an agent. It can never widen it.
 

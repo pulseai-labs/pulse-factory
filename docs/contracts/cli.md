@@ -2,13 +2,14 @@
 
 `pulse-factory` is one binary (ADR-0001, ADR-0004). The CLI verbs talk to the controller over one
 Unix socket. No verb waits or watches: a verb sends one request, prints one answer and exits. A run
-has nineteen verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
+has twenty verbs: `arm`, `status`, `halt`, `hook` and `controller` (`r0.s1`), `requests`, `show`,
 `claim`, `answer`, `clear` and `ack` (`r0.s2`), `project` (`r1.s2`), which has the three forms
 `add`, `list` and `remove`, `device` and `api` (`r1.s2`), which manage the network API, and
 `session` and `chat-runtime` (`r1.s3`), which chat with a project's Orchestrator and install the
 runtime it needs, `settings` (`r1.s4`), which reads and sets how a chat behaves, per server,
-project or agent, `propose` (`r1.s4`), which posts a start card into the calling chat, and `store`
-(`r2.s2`), which lists the store's backups, restores one and checks an upgrade, with no controller.
+project or agent, `propose` (`r1.s4`), which posts a start card into the calling chat, `grant` (`r2.s3`), which gives,
+ends and reads a project's clear grant, and `store` (`r2.s2`), which lists the store's backups,
+restores one and checks an upgrade, with no controller.
 `api.md` is the API's own contract. `requests.md` holds the records and the rules.
 
 ## Common rules
@@ -18,7 +19,7 @@ project or agent, `propose` (`r1.s4`), which posts a start card into the calling
   ledgers (ADR-0003). A client never writes there.
 - **The controller ledger and the `@controller` scope.** `<state dir>/controller.ledger` is the
   ledger of the controller's own commands (`project`, the device commands, which are the redeem of a
-  pairing code and `device revoke`, and the chat commands `chat_session_start`, `chat_session_end`,
+  pairing code and `device revoke`, the grant commands `grant_clear` and `grant_revoke`, and the chat commands `chat_session_start`, `chat_session_end`,
   `chat_item_redact`, `chat_send`, `chat_answer`, `chat_interrupt` and `chat_session_set`, the settings
   commands `setting_set` and `setting_unset` (`r1.s4`), with the kind
   backfill `project_kind` that runs at controller start). A `chat_send` line holds the byte count of
@@ -33,11 +34,12 @@ project or agent, `propose` (`r1.s4`), which posts a start card into the calling
   When the file cannot be recovered at start or a line cannot be appended, the controller's
   commands stop until it restarts with a good file: a `project` command, and the redeem of a
   pairing code, are refused with the reason (the redeem leaves the live code unused). `device
-  revoke` is the one exception: it still commits to the store, so the device is refused at once,
-  and its line waits in the outbox for the next start to append. The reads still work.
+  revoke` and `grant revoke` are the two exceptions: each still commits to the store, so the device
+  is refused at once and the grant ends at once, and its line waits in the outbox for the next
+  start to append. `grant clear` is refused there like every other command. The reads still work.
 - **`halt` and the projects.** `halt` applies to runs and to live chat processes. A `project` command
   launches nothing and changes no run, so a halt neither stops it nor needs it. The same holds for
-  `device` commands and for the commands `project_kind`, `chat_session_start`, `chat_session_end`
+  `device` commands, the `grant` commands and the commands `project_kind`, `chat_session_start`, `chat_session_end`
   and `chat_item_redact`. The commands `setting_set` and `setting_unset` launch nothing and change
   no run either, so `halt` neither stops them nor needs them, and they still commit after a halt.
   `halt` stops every live chat process (see `halt` and `session`). `halt` is
@@ -91,15 +93,16 @@ project or agent, `propose` (`r1.s4`), which posts a start card into the calling
   `--yes`, and a command line that clap refuses. 3 is `store check-upgrade` when the upgrade must not
   start.
 - **A seat cannot spend.** `arm`, `propose`, `halt`, `claim`, `answer`, `clear`, `ack`, `project add`,
-  `project remove`, `device pair`, `device revoke`, every `store` verb and the state-changing `session` verbs (`start`,
+  `project remove`, `device pair`, `device revoke`, `grant clear`, `grant revoke`, every `store` verb and the state-changing `session` verbs (`start`,
   `send`, `answer`, `interrupt`, `set`, `end` and `redact`) refuse when `PF_SEAT_TOKEN` is in the
   environment (a seat launch is an irreversible spend, ADR-0005, and a seat has no need to change
   the list of projects, to let a device in or to start a chat).
-  `project list`, `device list`, `api status`, `session list`, `session items` and `settings get` are
+  `project list`, `device list`, `grant list`, `api status`, `session list`, `session items` and `settings get` are
   reads and stay open. `settings set` and `settings unset` are the named exception: the CLI does not
   refuse them under `PF_SEAT_TOKEN`. They always reach the controller, whose caller check refuses the
   seat and audits the refusal (see `settings`). The controller checks the caller of `arm`, `propose`, `claim`,
-  `answer`, `clear`, `ack`, `device pair`, `device revoke`, the state-changing `session` verbs and
+  `answer`, `clear`, `ack`, `device pair`, `device revoke`, `grant clear`, `grant revoke`, the
+  state-changing `session` verbs and
   `settings set` and `settings unset` again: a caller that is, or descends from, a seat or a chat
   process, or that holds `PULSE_FACTORY_CHAT` in its environment, is refused (see `claim`, `session`
   and `settings`).
@@ -314,8 +317,13 @@ answered and withdrawn requests, each marked with its status. With nothing open 
 `no open requests`. The JSON holds `schema_version`, `open` (the count of open requests) and
 `requests` (the objects, with `id`, `revision`, `kind`, `status`, `run`, `unit`, `stage`, `blocks`,
 `opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
-`merge_ack`, and `cause` and `summary` for a request that holds a decision block), and `claim` (the current claim as `generation`, `holder`, `device` (the device ID, or
-null), `revoked` and `claimed_at`; null when none). The new fields join the old ones: none is
+`merge_ack`, `cause` and `summary` for a request that holds a decision block, and `line` for every
+request: `below` or `above`, the side of the line it is on (`requests.md`, "The line"), computed at
+the read for an open request and for a closed one), `claim` (the current claim as `generation`,
+`holder`, `device` (the device ID, or null), `revoked` and `claimed_at`; null when none) and
+`grants` (the live clear grants, as `grant list` shows a row, so a reader knows which projects the
+Orchestrator may settle for; the key is absent when no grant is live, and a removed project's grant
+is never in it). The new fields join the old ones: none is
 removed and `schema_version` stays 1. The API serves the same JSON (`api.md`). It needs no claim.
 
 ## `show`
@@ -351,7 +359,17 @@ carried `by` reads `seat` for a `stop_file` request and `controller` for every o
 <stage>`, `resumes the unit`, `resumes the unit at stage <stage>` or `acks the merge`. One `option` line
 prints for each option, in the block's order, so a reader sees every word an option sends and can tell a
 workflow's option from the controller's. A request with no block prints none of these lines. `show
---json` does not change.
+--json` does not change, except that it holds `line` (see below).
+
+Every request prints one more line, the class of its cause (`requests.md`, "The line"):
+
+```
+line: below|above
+```
+
+A request with a block prints it directly after the `summary:` line. A request with no block prints
+it after the last line it printed before. No other line of `show` changes, and `show --json` holds
+`line` beside `cause` and `summary`.
 
 An answered request whose answer took an option prints two more lines after the answer lines that it
 printed before (`requests.md`, "Acting on an option"):
@@ -938,6 +956,51 @@ Success prints `the chat runtime Claude Code <version> is installed at <path>`. 
 `{"schema_version": 1, "installed": false, "error": "<cause and URL>"}` on stdout. A controller with a registry set checks the copy at its start on a background thread
 and runs the same fetch when it is missing or altered; until a good copy is in place, a chat open is
 refused with the adapter's text, which names this verb.
+
+## `grant`
+
+```
+pulse-factory grant clear --project <P-n> [--command-id <id>] [--json]
+pulse-factory grant revoke --project <P-n> [--command-id <id>] [--json]
+pulse-factory grant list [--project <P-n>] [--json]
+```
+
+A project's **clear grant** says the project's Orchestrator may settle the requests that are below
+the line (`requests.md`, "The line" and "The clear grant"). Only the operator gives or ends it. The
+verbs run on the host over the socket. They launch nothing and change no run, so `halt` does not
+apply to them, and `halt` revokes no grant. Nothing acts under a grant yet.
+
+- **`clear`** gives the grant. It writes the project's next generation (from 1) for the agent
+  `orchestrator`, given by `cli`. The text form is one line: `clear grant given: <P-n> orchestrator
+  generation <g>`. The JSON is `{"schema_version": 1, "replayed": <bool>, "grant": {...}}`.
+- **`revoke`** ends the project's open grant. The text form is one line: `clear grant ended: <P-n>
+  generation <g>`. The JSON is the same shape as `clear`'s. The open row of a removed project can be
+  ended too, so the operator can always end what the store holds. A revoke commits when the
+  controller's commands are stopped: its line waits in the outbox for the next start.
+- **`list`** shows every row, by project and then newest generation first, and marks the live one.
+  `--project` narrows to one project, and an unknown project gives an empty list. A line is `<P-n>
+  generation <g>  granted by <who> at <time>  live`, or `revoked by <who> at <time>` in place of
+  `live` for an ended row, or `not live (project removed)` for an open row of a removed project.
+  With none it prints `no clear grants`. It needs no claim and is open to every caller, a chat and
+  a seat included. The JSON is `{"schema_version": 1, "grants": [{"project_id", "agent_id",
+  "generation", "granted_by", "granted_at", "revoked_by", "revoked_at", "live"}]}`, where the two
+  revoke fields are absent for an open row. A removed project's row is never `live`.
+- **`--command-id`** follows the rules of `project`: the default is random, a retry sends the same
+  ID, and the same ID with the same arguments returns the first record with `replayed` true and
+  writes no line. The same ID with other arguments exits 1. The admission's unit is
+  `<P-n>:<generation>`, so a replay names the same row.
+- **Refusals** (exit 1, nothing on stdout, the reason on stderr): `clear` for a project the store
+  does not hold, for a removed project, and for a project whose grant is live (`project <P-n>
+  already holds the clear grant (generation <g>)`); `revoke` for a project the store does not hold
+  and for a project with no open row (`project <P-n> holds no clear grant`). `clear` and `revoke`
+  with `PF_SEAT_TOKEN` set, and a caller that the controller finds to be, or to descend from, a
+  seat or a chat process, or to hold `PULSE_FACTORY_CHAT`. With no peer to check, both are refused
+  (`grant_clear refused: the controller cannot tell which process called`). Neither reads a claim
+  token or moves a claim. A new grant is refused while the controller's commands are stopped.
+- **Ledger lines**, in `controller.ledger`: `grant_clear <P-n> agent=orchestrator generation=<g>
+  by=cli command=<id>` and `grant_revoke <P-n> generation=<g> by=cli command=<id>`. A refused
+  command writes its refusal line as the other controller commands do. No line holds a token.
+- **No grant verb is on the device allowlist** (`api.md`, "The allowlist").
 
 ## `device`
 

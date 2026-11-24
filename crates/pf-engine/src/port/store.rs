@@ -1362,6 +1362,38 @@ impl NewHost {
     }
 }
 
+/// One row of the clear grant (ADR-0005 and ADR-0009, amended): the grant of one project at one
+/// generation. A project has at most one row with no revoke, and its generations run 1 to n with no
+/// gap. A revoke is set once on its row, and a row is never deleted. A controller entity: the
+/// engine core never writes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClearGrantRow {
+    /// A project's ID, `P-<n>`.
+    pub project_id: String,
+    /// From 1. The project's highest generation plus 1 for a new row.
+    pub generation: u64,
+    /// The agent that holds the grant. The store keeps it as opaque text.
+    pub agent_id: String,
+    pub granted_by: String,
+    pub granted_at: String,
+    /// Set together with `revoked_at`, once.
+    pub revoked_by: Option<String>,
+    pub revoked_at: Option<String>,
+    /// The command that gave the grant. It is unique.
+    pub command_id: String,
+}
+
+/// A clear grant before the store writes it. The command ID is the commit's own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewClearGrant {
+    pub project_id: String,
+    /// The project's highest generation plus 1, or 1 when it has none.
+    pub generation: u64,
+    pub agent_id: String,
+    pub granted_by: String,
+    pub granted_at: String,
+}
+
 /// A state write inside one commit. A row replaces the row with the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -1516,6 +1548,30 @@ pub enum Effect {
         position: u64,
         outcome: String,
         updated_at: String,
+    },
+    /// Give a live project its clear grant at the next generation (ADR-0005, amended). Allowed only
+    /// in an admission under [`CONTROLLER_SCOPE`]. An unknown or removed project, a project whose
+    /// grant is live, a generation that is not the project's highest plus 1, or a scope other than
+    /// the controller's makes the commit [`Committed::Rejected`].
+    GrantClear(NewClearGrant),
+    /// End a project's grant: set the revoke on the row of `generation`, once. Allowed only in an
+    /// admission under [`CONTROLLER_SCOPE`]. A row that is not there, a row that is revoked already,
+    /// or a scope other than the controller's makes the commit [`Committed::Rejected`]. A removed
+    /// project's row can be revoked: the operator can always end what the store still holds.
+    RevokeClearGrant {
+        project_id: String,
+        generation: u64,
+        revoked_by: String,
+        revoked_at: String,
+    },
+    /// The precondition "this project's grant is live at this generation". It writes nothing. The
+    /// store checks it inside the commit's transaction, and rejects the commit, with nothing written
+    /// (no admission, no outbox line and no other effect of the commit), when the project has no row
+    /// with no revoke, when that row has another generation, or when the project is removed or is not
+    /// in the store. It is admitted in every scope, a run's included.
+    RequireLiveGrant {
+        project_id: String,
+        generation: u64,
     },
 }
 
@@ -1729,4 +1785,6 @@ pub trait Store: Send + Sync {
     fn notice_targets(&self) -> Result<Vec<NoticeTargetRow>, StoreError>;
     /// Read the sends of one notice, by target.
     fn notice_sends(&self, position: u64) -> Result<Vec<NoticeSendRow>, StoreError>;
+    /// Every clear-grant row, by project (in the order of the project numbers) and generation.
+    fn clear_grants(&self) -> Result<Vec<ClearGrantRow>, StoreError>;
 }

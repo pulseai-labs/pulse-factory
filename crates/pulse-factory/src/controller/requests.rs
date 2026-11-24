@@ -12,7 +12,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pf_api::types::{ClaimRecord, Decision, RequestDetail, RequestList, RequestSummary};
-use pf_engine::claim::{AnswerAct, check_claim_in, claim_of_hash, holder_device, sha256_hex};
+use pf_engine::admission::RunView;
+use pf_engine::claim::{AnswerAct, Line, check_claim_in, claim_of_hash, holder_device, sha256_hex};
 use pf_engine::merge::blocked_by;
 use pf_engine::port::agent::SessionRef;
 use pf_engine::port::store::{ClaimRow, DeviceRow, RequestKind, RequestRow, RequestStatus, Store};
@@ -582,23 +583,60 @@ impl Controller {
 
     // ------------------------------------------------------------------ requests and show
 
-    /// What a request holds back: the unit, and each later unit the merge order holds back.
-    fn blocks(&self, handle: &RunHandle, request: &RequestRow) -> Vec<String> {
+    /// What a request holds back: the unit, and each later unit the merge order holds back. `view`
+    /// is the run's view, or `None` when it could not be read.
+    fn blocks(
+        &self,
+        handle: &RunHandle,
+        view: Option<&RunView>,
+        request: &RequestRow,
+    ) -> Vec<String> {
         let Some(unit) = &request.unit_id else {
             return Vec::new();
         };
         if request.status != RequestStatus::Open {
             return Vec::new();
         }
-        match handle.engine.view() {
-            Ok(view) => blocked_by(&view, handle.engine.workflow(), unit),
-            Err(_) => vec![unit.clone()],
+        match view {
+            Some(view) => blocked_by(view, handle.engine.workflow(), unit),
+            None => vec![unit.clone()],
         }
+    }
+
+    /// The request's line class, `below` or `above`, as the run's engine computes it now (ADR-0006,
+    /// amended). The engine reads the track's merge from the run's own pinned copy of the workflow,
+    /// and the controller gives it the run's forge repo and default branch. A run whose view could
+    /// not be read gives `above`: the class fails closed.
+    fn line_of_request(
+        &self,
+        handle: &RunHandle,
+        view: Option<&RunView>,
+        request: &RequestRow,
+    ) -> &'static str {
+        let Some(view) = view else {
+            return Line::Above.as_str();
+        };
+        let forge = (&handle.info.forge_repo[..], &handle.info.default_branch[..]);
+        handle
+            .engine
+            .request_line(view, request, Some(forge))
+            .as_str()
     }
 
     /// The row of `requests` and of the stream: the fields of the CLI's JSON, the verbs that answer the
     /// request, and for a `merge_ack` its PR, base and head SHA.
     pub(super) fn request_summary_of(&self, handle: &RunHandle, r: &RequestRow) -> RequestSummary {
+        let view = handle.engine.view().ok();
+        self.summary_in(handle, view.as_ref(), r)
+    }
+
+    /// [`Controller::request_summary_of`] over a view that the caller already read.
+    fn summary_in(
+        &self,
+        handle: &RunHandle,
+        view: Option<&RunView>,
+        r: &RequestRow,
+    ) -> RequestSummary {
         let body = |key: &str| -> Option<String> {
             (r.kind == RequestKind::MergeAck)
                 .then(|| serde_json::from_str::<Value>(&r.body).ok())
@@ -614,7 +652,7 @@ impl Controller {
             run: r.run_id.clone(),
             unit: r.unit_id.clone(),
             stage: r.stage.clone(),
-            blocks: self.blocks(handle, r),
+            blocks: self.blocks(handle, view, r),
             opened_at: r.opened_at.clone(),
             answered_at: r.answered_at.clone(),
             reason: r.reason.clone(),
@@ -624,6 +662,7 @@ impl Controller {
             head_sha: body("head_sha"),
             cause: decision.as_ref().map(|d| d.cause.clone()),
             summary: decision.map(|d| d.summary),
+            line: Some(self.line_of_request(handle, view, r).to_string()),
         }
     }
 
@@ -669,11 +708,16 @@ impl Controller {
                 .store
                 .requests(&handle.info.run_id)
                 .map_err(|e| e.to_string())?;
+            // One read of the run's view serves every request of the run.
+            let view = handle.engine.view().ok();
             for r in rows
                 .iter()
                 .filter(|r| all || r.status == RequestStatus::Open)
             {
-                found.push((request_number(&r.id), self.request_summary_of(handle, r)));
+                found.push((
+                    request_number(&r.id),
+                    self.summary_in(handle, view.as_ref(), r),
+                ));
             }
         }
         // Newest last.
@@ -691,11 +735,17 @@ impl Controller {
             Ok(c) => c,
             Err(why) => return err(why),
         };
+        // The live clear grants, so a reader knows which projects the Orchestrator may settle for.
+        let grants = match self.live_grant_records() {
+            Ok(g) => g,
+            Err(why) => return err(why),
+        };
         let list = RequestList {
             schema_version: SCHEMA_VERSION,
             open: requests.iter().filter(|r| r.status == "open").count() as u64,
             requests,
             claim,
+            grants,
         };
         Response::ok(serde_json::to_value(list).unwrap_or(Value::Null))
     }
