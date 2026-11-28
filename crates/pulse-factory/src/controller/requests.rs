@@ -657,7 +657,7 @@ impl Controller {
         // The time the Orchestrator's woken turn ended for this request (`r2.s3.w4`): one point
         // lookup, and only for an open request below the line. A failed read leaves it out.
         let woken_at = (r.status == RequestStatus::Open && line == "below")
-            .then(|| self.woken_at(&r.id))
+            .then(|| self.woken_at(&r.id).ok().flatten())
             .flatten();
         RequestSummary {
             id: r.id.clone(),

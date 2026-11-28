@@ -1288,15 +1288,16 @@ impl Controller {
     }
 
     /// The time of a request's `woken:<R-n>` record: the time that its woken turn's result was
-    /// stored. `None` when the request was not woken, and for a read that fails.
-    pub(super) fn woken_at(&self, request: &str) -> Option<String> {
+    /// stored. `Ok(None)` when the request was not woken. A read that fails is an error: the wake
+    /// path gives no wake at that check, and never counts the request as not woken.
+    pub(super) fn woken_at(&self, request: &str) -> Result<Option<String>, String> {
         let row = self
             .store
             .admission(CONTROLLER_SCOPE, &format!("woken:{request}"))
-            .ok()
-            .flatten()?;
-        (row.outcome == pf_engine::port::store::AdmissionOutcome::Admitted)
-            .then_some(row.admitted_at)
+            .map_err(|e| format!("cannot read the woken record of {request}: {e}"))?;
+        Ok(row
+            .filter(|r| r.outcome == pf_engine::port::store::AdmissionOutcome::Admitted)
+            .map(|r| r.admitted_at))
     }
 
     /// Is the project's clear grant live?
@@ -1323,12 +1324,16 @@ impl Controller {
         let mode =
             self.resolve_setting_strict(AUTOPILOT_WAKE, Some(project), Some(ORCHESTRATOR_AGENT))?;
         let below = matches!(&mode.value, SettingValue::List(list) if list.len() == 1 && list[0] == WAKE_BELOW);
-        if !below
-            || self.notify_setting(
-                NOTIFY_ORCHESTRATOR_ON,
-                Some(project),
-                Some(ORCHESTRATOR_AGENT),
-            ) == 0
+        if !below {
+            return Ok(None);
+        }
+        // The channel's switch reads strictly too: a row that cannot be read gives no wake, and
+        // never the built-in (on).
+        if self.notify_setting_strict(
+            NOTIFY_ORCHESTRATOR_ON,
+            Some(project),
+            Some(ORCHESTRATOR_AGENT),
+        )? == 0
         {
             return Ok(None);
         }
@@ -1352,19 +1357,32 @@ impl Controller {
                 .map_err(|e| format!("cannot read the items of chat session {session}: {e}"))?;
             let n = rows.len();
             for row in rows {
-                count.read_to = row.seq;
                 match row.kind.as_str() {
                     "operator_message" => count.last_operator = row.seq,
                     "notice" => {
-                        let is_wake = serde_json::from_str::<Value>(&row.payload)
-                            .ok()
-                            .is_some_and(|v| v["code"].as_str() == Some(WAKE_CODE));
-                        if is_wake && let Some(at) = time_of(&row.created_at) {
+                        // An item that cannot be read is no item that does not count: the check
+                        // gives no wake, and never loosens the bounds.
+                        let payload = serde_json::from_str::<Value>(&row.payload).map_err(|e| {
+                            format!(
+                                "cannot read the payload of item {} of chat session {session}: {e}",
+                                row.seq
+                            )
+                        })?;
+                        if payload["code"].as_str() == Some(WAKE_CODE) {
+                            let at = time_of(&row.created_at).ok_or_else(|| {
+                                format!(
+                                    "cannot read the time of wake item {} of chat session {session}",
+                                    row.seq
+                                )
+                            })?;
                             count.wakes.push((row.seq, at));
                         }
                     }
                     _ => {}
                 }
+                // The cursor moves past an item only once the item is read: an item that cannot
+                // be read stops every check until it can, and is never skipped.
+                count.read_to = row.seq;
             }
             if n < PAGE as usize {
                 break;
@@ -1437,7 +1455,7 @@ impl Controller {
         let Some(acked) = targets.iter().find(|t| t.target == target).map(|t| t.acked) else {
             return Ok(Vec::new());
         };
-        let (allowed, _) = self.resolved_clear_acts(project, ORCHESTRATOR_AGENT)?;
+        let (allowed, _) = self.resolved_clear_acts_strict(project, ORCHESTRATOR_AGENT)?;
         // The newest waiting notice of each request of the project.
         let mut newest: BTreeMap<String, (NoticeRow, String)> = BTreeMap::new();
         for d in self
@@ -1470,7 +1488,7 @@ impl Controller {
                 continue;
             }
             // A request is woken at most once, at any revision.
-            if self.woken_at(&id).is_some() {
+            if self.woken_at(&id)?.is_some() {
                 continue;
             }
             let run = self.store.run(&row.run_id).map_err(|e| e.to_string())?;
@@ -1673,8 +1691,11 @@ impl Controller {
         };
         let opened_failed = |reason: &str| {
             let mut watch = lock(&self.chats.notices);
-            let set = self.wake_set(project).unwrap_or_default();
-            self.write_held(&mut watch, project, session, reason, &set, None);
+            match self.wake_set(project) {
+                Ok(set) => self.write_held(&mut watch, project, session, reason, &set, None),
+                // A read that fails gives no line: a line with no requests says nothing true.
+                Err(why) => self.note_failure(&mut watch, &format!("wake set {project}"), &why),
+            }
         };
         if self.live_chat(session).is_none()
             && let Err(why) = self.ready_to_open(&row)
@@ -1742,15 +1763,25 @@ impl Controller {
         let target = agent_target(project);
         // A notice that is no item yet is written into this session first, as the carry does, so
         // that a send row always means a stored item.
+        // The send rows are read before anything is written: a read that fails gives no wake, and
+        // never a notice that is written again.
+        let mut unsent = Vec::new();
         for l in listed {
-            let sent = self
-                .store
-                .notice_sends(l.notice.position)
-                .ok()
-                .is_some_and(|rows| rows.iter().any(|s| s.target == target));
-            if !sent {
-                self.deliver_item_to(&mut watch, &l.notice, &target, &l.text, session);
+            match self.store.notice_sends(l.notice.position) {
+                Ok(rows) => {
+                    if !rows.iter().any(|s| s.target == target) {
+                        unsent.push(l);
+                    }
+                }
+                Err(e) => {
+                    let why = format!("cannot read the sends of notice {}: {e}", l.notice.position);
+                    self.note_failure(&mut watch, &format!("wake sends {session}"), &why);
+                    return false;
+                }
             }
+        }
+        for l in unsent {
+            self.deliver_item_to(&mut watch, &l.notice, &target, &l.text, session);
         }
         let block = self.wake_block(project, listed, more);
         // The item first, so it reaches the stream and the display log as one notice item and a
@@ -1809,13 +1840,21 @@ impl Controller {
             return false;
         }
         for l in listed {
-            let sends = self
-                .store
-                .notice_sends(l.notice.position)
-                .ok()
-                .and_then(|rows| rows.into_iter().find(|s| s.target == target))
-                .map_or(0, |s| s.sends)
-                + 1;
+            // The wake is counted by now, so a read that fails skips this one send row; it never
+            // counts from 1 again.
+            let sends = match self.store.notice_sends(l.notice.position) {
+                Ok(rows) => {
+                    rows.into_iter()
+                        .find(|s| s.target == target)
+                        .map_or(0, |s| s.sends)
+                        + 1
+                }
+                Err(e) => {
+                    let why = format!("cannot read the sends of notice {}: {e}", l.notice.position);
+                    self.note_failure(&mut watch, &format!("wake sends {session}"), &why);
+                    continue;
+                }
+            };
             let key = format!("notice-send:{}:{target}:{sends}", l.notice.position);
             match self.commit_send(&watch, l.notice.position, &target, sends) {
                 Ok(()) => Self::note_success(&mut watch, &key),

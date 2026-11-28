@@ -186,6 +186,30 @@ fn a_woken_request_is_not_listed_again_and_a_halted_turn_leaves_its_requests_unm
     assert_eq!(w.wake_items().len(), 1);
 }
 
+/// A woken turn whose stored result is an error is no proof that the block arrived: it marks no
+/// request woken, and the end of that turn's check wakes them again. The control: a result that is
+/// no error marks them.
+#[test]
+fn a_woken_turn_that_ends_in_an_error_marks_nothing_and_the_request_is_woken_again() {
+    let w = world(&["u1"], Start::Running);
+    w.port.swallow_wakes();
+    w.grant();
+    w.stall("u1");
+    let (id, _) = w.request("u1");
+    w.wait("the wake's send", || w.port.wake_sends().len() == 1);
+    w.begin(TurnCause::Notice);
+    w.end_with(TurnCause::Notice, true);
+    assert!(!w.is_woken(&id), "an error result marked the request woken");
+    // The turn's end runs the check: the request is in a second wake.
+    w.wait("the second wake's send", || w.port.wake_sends().len() == 2);
+    assert_eq!(listed(&w.port.wake_sends()[1]), vec![id.clone()]);
+    assert_eq!(w.wake_items().len(), 2, "each wake item counts");
+    // The control: a result that is no error marks the request.
+    w.begin(TurnCause::Notice);
+    w.end(TurnCause::Notice);
+    assert!(w.is_woken(&id));
+}
+
 #[test]
 fn a_session_held_at_the_cap_gets_no_wake_at_any_of_the_three_points() {
     let w = world(&["u1", "u2", "u3", "u4"], Start::Running);

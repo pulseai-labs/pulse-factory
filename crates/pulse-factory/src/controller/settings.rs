@@ -682,7 +682,30 @@ impl Controller {
         project: &str,
         agent: &str,
     ) -> Result<(Vec<String>, String), String> {
-        match self.resolve_setting(AUTHORITY_CLEAR_ACTS, Some(project), Some(agent))? {
+        Self::clear_acts_of(self.resolve_setting(
+            AUTHORITY_CLEAR_ACTS,
+            Some(project),
+            Some(agent),
+        )?)
+    }
+
+    /// [`Controller::resolved_clear_acts`] for the wake (`r2.s3.w4`): a stored row that cannot be
+    /// read is an error, where the plain read skips it and lets a wider scope decide. A wake that
+    /// names acts the narrowing row may have cut gives no wake instead.
+    pub(super) fn resolved_clear_acts_strict(
+        &self,
+        project: &str,
+        agent: &str,
+    ) -> Result<(Vec<String>, String), String> {
+        Self::clear_acts_of(self.resolve_setting_strict(
+            AUTHORITY_CLEAR_ACTS,
+            Some(project),
+            Some(agent),
+        )?)
+    }
+
+    fn clear_acts_of(resolved: Resolved) -> Result<(Vec<String>, String), String> {
+        match resolved {
             Resolved {
                 value: SettingValue::List(list),
                 from_text,
@@ -767,6 +790,20 @@ impl Controller {
                 eprintln!("pulse-factory: {key} is not read: {why}");
                 default
             }
+        }
+    }
+
+    /// [`Controller::notify_setting`] for the wake (`r2.s3.w4`): a stored row that cannot be read
+    /// is an error, and never the built-in.
+    pub(super) fn notify_setting_strict(
+        &self,
+        key: &str,
+        project: Option<&str>,
+        agent: Option<&str>,
+    ) -> Result<u64, String> {
+        match self.resolve_setting_strict(key, project, agent)?.value {
+            SettingValue::Number(n) => Ok(n),
+            SettingValue::List(_) => Err(format!("{key} resolved to a list, not a number")),
         }
     }
 

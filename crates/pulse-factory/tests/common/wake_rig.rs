@@ -409,6 +409,11 @@ impl W {
     }
 
     pub fn end(&self, cause: TurnCause) {
+        self.end_with(cause, false);
+    }
+
+    /// The end of a turn whose result is an error (`is_error`) or is not.
+    pub fn end_with(&self, cause: TurnCause, is_error: bool) {
         self.live
             .controller
             .apply_chat_event(
@@ -416,7 +421,7 @@ impl W {
                 ChatEvent::TurnResult {
                     cause,
                     usage: Usage::default(),
-                    is_error: false,
+                    is_error,
                     stop: "end_turn".into(),
                     duration_ms: 1,
                     cache_ttl_seconds: None,

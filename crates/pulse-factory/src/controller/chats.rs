@@ -1673,8 +1673,15 @@ impl Controller {
                 }
                 // The turn result of a wake is the proof that the wake's block arrived: each request
                 // it listed is marked woken now, before the turn's end runs the check (`r2.s3.w4`).
-                if stored && matches!(cause, TurnCause::Notice) {
-                    self.mark_woken(live);
+                // A result that is an error is no proof: it marks nothing, the wake is no longer
+                // pending, and the next check can list the requests again. The wake item stays and
+                // counts, so the cap and the hour still bound the spend.
+                if matches!(cause, TurnCause::Notice) {
+                    if stored && !is_error {
+                        self.mark_woken(live);
+                    } else {
+                        lock(&live.inner).woken = None;
+                    }
                 }
                 {
                     let mut inner = lock(&live.inner);

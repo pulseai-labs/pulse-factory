@@ -787,7 +787,7 @@ stream (`api.md`).
 - **The lifetime.** One live process for each chat. A process is *not idle* while a turn runs, a
   background task runs or a request is pending. A process that is none of these for 30 minutes is
   released: it is stopped, a `notice` item says so, and `chat stop reason=idle` is written. Nothing
-  reopens a released process except the operator's next `send`: no timer, tick or notice does. The
+  reopens a released process except the operator's next `send` and, in a project's Orchestrator chat, a wake (`docs/contracts/requests.md`, "The wake"): no timer or tick does. The
   cap is `PF_CHAT_MAX_LIVE` (default 4). An open that would pass it is refused, no process is
   released early to make room, and the refusal names every live chat and why it holds its process:
   `the chat process cap (4) is reached: S-3 waits for an answer since <t>; S-5 holds background task

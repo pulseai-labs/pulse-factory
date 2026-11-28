@@ -356,6 +356,15 @@ fn with_the_cap_at_zero_wakes_run_up_to_the_hour_and_with_the_hour_at_zero_none_
 /// A stored value that the binary cannot read gives no wake at all, and never the built-in. When
 /// the value is written again, the waiting request is woken.
 fn unreadable_gives_no_wake(key: &str) {
+    let good = if key == "autopilot.wake" {
+        "[\"below\"]"
+    } else {
+        "3"
+    };
+    unreadable_gives_no_wake_then(key, good);
+}
+
+fn unreadable_gives_no_wake_then(key: &str, good: &str) {
     let w = world(&["u1"], Start::Running);
     w.grant();
     store_unreadable(&w, key, &format!("setting-unreadable-{key}"));
@@ -374,11 +383,6 @@ fn unreadable_gives_no_wake(key: &str) {
     assert!(!w.is_woken(&id));
 
     // The value is written again, and the next tick wakes the request.
-    let good = if key == "autopilot.wake" {
-        "[\"below\"]"
-    } else {
-        "3"
-    };
     w.set(key, good);
     w.tick(1);
     w.wait_woken(&id);
@@ -398,4 +402,53 @@ fn a_failed_read_of_autopilot_wakes_per_hour_gives_no_wake() {
 #[test]
 fn a_failed_read_of_the_cap_gives_no_wake_where_a_chats_own_cap_keeps_its_built_in() {
     unreadable_gives_no_wake("chat.self_turn_cap");
+}
+
+/// The channel's own switch is part of the wake (`notify.orchestrator.on`): a row that cannot be
+/// read gives no wake, where the notice's own read falls to the built-in (on).
+#[test]
+fn a_failed_read_of_the_orchestrator_channel_switch_gives_no_wake() {
+    unreadable_gives_no_wake_then("notify.orchestrator.on", "1");
+}
+
+/// The acts a wake names come from `authority.clear_acts`: a narrowing row that cannot be read must
+/// not widen them to the built-in.
+#[test]
+fn a_failed_read_of_clear_acts_gives_no_wake_and_never_the_built_in_acts() {
+    unreadable_gives_no_wake_then("authority.clear_acts", r#"["redispatch","resume"]"#);
+}
+
+/// A wake item that cannot be read must not loosen the bounds: the check that meets it gives no wake.
+/// A `wake` item whose time is no time is such an item (the store holds no payload that is no JSON).
+#[test]
+fn an_item_of_the_session_that_cannot_be_read_gives_no_wake() {
+    use pf_engine::port::store::{ChatItemKind, NewChatItem};
+    let w = world(&["u1"], Start::Running);
+    w.grant();
+    w.live
+        .controller
+        .store()
+        .append_chat_item(NewChatItem {
+            session_id: w.session.clone(),
+            kind: ChatItemKind::Notice,
+            payload: r#"{"code":"wake","text":"a wake that was written by hand"}"#.to_string(),
+            tool_input: None,
+            tool_output: None,
+            answers_seq: None,
+            usage: None,
+            host: None,
+            created_at: "not a time".to_string(),
+        })
+        .unwrap();
+    w.stall("u1");
+    let (id, _) = w.request("u1");
+    w.tick(8);
+    // The one wake item is the one that the test wrote.
+    assert_eq!(w.wake_items().len(), 1, "a wake ran on a failed read");
+    assert!(w.port.wake_sends().is_empty());
+    assert!(
+        w.ledger("wake_held").is_empty(),
+        "a failed read is not a held wake"
+    );
+    assert!(!w.is_woken(&id));
 }

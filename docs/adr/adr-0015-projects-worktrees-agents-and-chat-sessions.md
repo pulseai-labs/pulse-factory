@@ -348,13 +348,13 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0001's and A
 - **The operator's next message carries the waiting notices.** When no turn is open, the controller
   puts a marked block before the typed text, in one `Operator` send: one line for each open request,
   newest first, at most ten, then a count. **"none is sent today" stays true** of the port's `Notice`
-  input: a request notice rides an `Operator` send, because no adapter can frame a second part of a
+  input of the carry (Since the amendment of 2026-11-24 a wake sends one.): a request notice rides an `Operator` send, because no adapter can frame a second part of a
   message, and a new part would change the Claude Code adapter's input shape, which no probe has
   qualified. The stored `OperatorMessage` holds the typed text alone.
 - **The acknowledgement is the stored turn result.** The live chat remembers the highest position that
   the send carried. When the next `turn_result` with the cause `operator` is stored, the agent
   acknowledges that position. A failed send, an ended session and a controller restart in the turn
-  leave the notices waiting for the next message. No notice starts a turn, and the channel has no timer.
+  leave the notices waiting for the next message. No notice starts a turn, and the channel has no timer. (Since the amendment of 2026-11-24 a wake notice starts one turn of the Orchestrator; the channel still has no timer.)
 - **The persona gains one paragraph:** a block that starts with the mark is the controller's, it lists
   requests that wait in Needs you, and the Orchestrator can answer none of them (ADR-0005).
 - **Debt, from the amendments of 2026-11-16 and 2026-11-13.** The sentence "A controller restart ends
