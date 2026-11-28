@@ -17,6 +17,14 @@ use pf_engine::port::store::{CONTROLLER_SCOPE, Store};
 use serde_json::{Value, json};
 use settle_rig::*;
 
+/// The command kinds that the controller writes on its own, apart from any call: a notice's
+/// records, and (`r2.s3.w4`, step 13) a wake's. The rig's grant wakes the rig's Orchestrator chat,
+/// and its turn's `woken` records land at a time of the chat's, so a count of what a refused call
+/// left leaves these kinds out.
+fn own_kind(kind: &str) -> bool {
+    kind.starts_with("notice") || ["wake", "woken", "wake_held"].contains(&kind)
+}
+
 /// What a refused call must leave as it was: the projects, the controller's admissions and the
 /// controller's ledger.
 fn state_of(rig: &SRig) -> (Vec<String>, usize, usize) {
@@ -28,8 +36,19 @@ fn state_of(rig: &SRig) -> (Vec<String>, usize, usize) {
             .iter()
             .map(|p| format!("{p:?}"))
             .collect(),
-        store.admissions(CONTROLLER_SCOPE).unwrap().len(),
-        controller_ledger(&rig.live).len(),
+        store
+            .admissions(CONTROLLER_SCOPE)
+            .unwrap()
+            .iter()
+            .filter(|a| !own_kind(&a.kind))
+            .count(),
+        controller_ledger(&rig.live)
+            .iter()
+            .filter(|l| {
+                // A line is `- #<n> <kind> <rest>`.
+                !l.split_whitespace().nth(2).is_some_and(own_kind)
+            })
+            .count(),
     )
 }
 

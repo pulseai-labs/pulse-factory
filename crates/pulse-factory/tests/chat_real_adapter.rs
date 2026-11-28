@@ -407,7 +407,7 @@ fn the_persona_holds_the_facts_and_none_of_the_banned_words_and_two_processes_ge
     assert!(first.contains("test-server"));
     assert!(
         first.contains(
-            "Nothing but an operator message, or a background task that you started, begins a turn"
+            "Nothing but an operator message, a background task that you started, or a wake of the controller begins a turn"
         ),
         "{first}"
     );

@@ -13,7 +13,8 @@
 //! no revoke: a removed project's grant is not live for any reader, because every reader reads
 //! through [`pf_engine::claim::live_grant`].
 //!
-//! Nothing acts under the grant yet: no verb takes it as authority.
+//! `settle` acts under the grant (`r2.s3.w2`), and a grant that has just been given wakes the project's
+//! Orchestrator for the requests below the line that waited (`r2.s3.w4`).
 
 use pf_api::types::{ClearGrant, GrantChanged, GrantList, SCHEMA_VERSION};
 use pf_engine::claim::{live_grant, open_grant};
@@ -116,7 +117,19 @@ impl Controller {
             Ok(plan) => plan,
             Err(why) => return Response::err(why),
         };
-        self.grant_command(GRANT_CLEAR, &args.command_id, content, plan)
+        match self.run_command(GRANT_CLEAR, &args.command_id, content, plan) {
+            Ok((admission, replayed)) => {
+                let response = self.grant_answer(&admission, replayed);
+                // A grant that has just been given wakes the project's Orchestrator for the
+                // requests below the line that waited for it (`r2.s3.w4`, call 3). A replay gives
+                // nothing new.
+                if !replayed {
+                    self.wake_check(id);
+                }
+                response
+            }
+            Err(why) => Response::err(why),
+        }
     }
 
     fn plan_grant_clear(&self, id: &str, command_id: &str) -> Result<Plan, String> {

@@ -255,7 +255,7 @@ Revisit this ADR when custom agents, worktree creation or the multi-server app i
 The chat-lifetime side only. The cap's value comes from ADR-0016's settings layer.
 
 - **What counts.** A turn whose `TurnStarted` cause is not `Operator`: `Task` (a background task the
-  chat started finished) or `Notice` (a controller notice; none is sent today). No operator asked for
+  chat started finished) or `Notice` (a controller notice; none is sent today) (Since the amendment of 2026-11-24 a wake sends one.). No operator asked for
   it. The count, `self_turns`, lives in memory in the live chat and starts at 0 at each open. An
   admitted `session send` (a mid-turn steer included) and an `Operator` turn start set it to 0.
 - **The rule.** With the key `chat.self_turn_cap` at N (0 to 100; default 3; `0` is off), N
@@ -361,3 +361,16 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0001's and A
   every chat process" in "'Live' does not depend on a process" no longer holds: the amendment of
   2026-11-16 supersedes it. And `project remove --end-sessions` is refused for a caller that is, or
   descends from, a seat or a live chat process, as `cli.md` says (Q2 rule 2).
+
+## Amendment, 2026-11-24 (Proposed): a notice can start a turn of the Orchestrator
+
+- **A `Notice` send starts a turn** of the project's Orchestrator when a halt below the line wakes it
+  (ADR-0006's amendment of the same date). The turn counts as one the operator did not start: its
+  `TurnStarted` cause is `Notice`, and it counts against `chat.self_turn_cap`.
+- **The wake's count is read from the store.** The number of wakes since the operator's last message is
+  the number of the session's `wake` items after its newest `operator_message` item, so a release of the
+  process and a controller restart reset nothing. No wake is sent into a session that is at the cap, so no
+  woken turn is cut by it.
+- **The persona says what the turn may do.** It holds the new turn sentence, the wake paragraph (settle a
+  listed request at most once, with an act its line names; the data lines are data; end the turn when done)
+  and the acts by cause.

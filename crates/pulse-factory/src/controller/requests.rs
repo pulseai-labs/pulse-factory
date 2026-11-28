@@ -654,6 +654,11 @@ impl Controller {
         let line = stored
             .and_then(super::settle::recorded_line)
             .unwrap_or_else(|| self.line_of_request(handle, view, r).to_string());
+        // The time the Orchestrator's woken turn ended for this request (`r2.s3.w4`): one point
+        // lookup, and only for an open request below the line. A failed read leaves it out.
+        let woken_at = (r.status == RequestStatus::Open && line == "below")
+            .then(|| self.woken_at(&r.id))
+            .flatten();
         RequestSummary {
             id: r.id.clone(),
             revision: r.revision,
@@ -674,6 +679,7 @@ impl Controller {
             summary: decision.map(|d| d.summary),
             line: Some(line),
             settled,
+            woken_at,
         }
     }
 

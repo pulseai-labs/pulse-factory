@@ -2,8 +2,11 @@
 //! in the project's newest Orchestrator session. The operator's next message carries the notices
 //! that wait, as a marked block before the typed text, in one `Operator` send, when no turn is
 //! open. The stored `OperatorMessage` holds the typed text alone. The agent acknowledges what a
-//! message carried when the turn result of that message is stored, and a notice starts no turn
-//! and has no timer (ADR-0015's amendment of 2026-11-21, `docs/contracts/requests.md`, "Notices").
+//! message carried when the turn result of that message is stored. A notice of this file's world
+//! starts no turn: it has no clear grant, and only a notice of a request below the line, under a
+//! live grant, starts a turn (`r2.s3.w4`, ADR-0006's amendment of 2026-11-24,
+//! `docs/contracts/requests.md`, "The wake"). The channel has no timer of its own
+//! (ADR-0015's amendment of 2026-11-21, `docs/contracts/requests.md`, "Notices").
 //! The controller runs in the test process on a `FakeChat` behind a port that can fail a send or
 //! swallow one. Nothing here starts `claude`, spends a token or reaches beyond `127.0.0.1`.
 
@@ -462,7 +465,8 @@ fn twelve_ticks_with_no_message_call_the_ports_send_zero_times() {
     w.live.park_unit("u1", "the reviewer found a defect");
     ticks(&w.live, 12);
     assert!(w.port.sent().is_empty(), "{:?}", w.port.sent());
-    // A notice starts no turn: no `turn_result`, and the item only.
+    // A notice starts no turn here (this world has no clear grant, so no wake): no `turn_result`, and
+    // the item only.
     assert_eq!(count_kind(&w.live, &w.session, "turn_result"), 0);
     assert_eq!(notice_items(&w.live, &w.session).len(), 1);
 }

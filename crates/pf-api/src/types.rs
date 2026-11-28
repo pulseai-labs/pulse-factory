@@ -958,6 +958,13 @@ pub struct RequestSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub settled: Option<RequestSettled>,
+    /// When the Orchestrator was woken for the request: the time the woken turn's result was
+    /// stored (`docs/contracts/requests.md`, "The wake"). Present for an open request below the
+    /// line that a wake listed and whose turn ended, and for no other. A client that does not know
+    /// the field decodes the frame as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub woken_at: Option<String>,
 }
 
 /// What a settle recorded on its request (`docs/contracts/requests.md`, "Settle"): the act, the

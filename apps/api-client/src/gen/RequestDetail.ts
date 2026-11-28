@@ -33,4 +33,11 @@ line?: string,
  * that the Orchestrator settled with `settle`, and for no other. For such a request `line` is
  * the class that the settle recorded, not a computed one.
  */
-settled?: RequestSettled, };
+settled?: RequestSettled, 
+/**
+ * When the Orchestrator was woken for the request: the time the woken turn's result was
+ * stored (`docs/contracts/requests.md`, "The wake"). Present for an open request below the
+ * line that a wake listed and whose turn ended, and for no other. A client that does not know
+ * the field decodes the frame as before.
+ */
+woken_at?: string, };

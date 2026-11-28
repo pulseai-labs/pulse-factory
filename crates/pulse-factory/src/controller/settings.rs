@@ -112,6 +112,26 @@ pub const AUTHORITY_CLEAR_ACTS: &str = "authority.clear_acts";
 const CLEAR_ACTS_SCOPE: &str =
     "authority.clear_acts is set at a project, an agent, or a project and agent";
 
+/// The key that turns the wake of a project's Orchestrator off or on (`r2.s3.w4`, ADR-0016's
+/// amendment of 2026-11-24): a list of exactly one word, `["off"]` or `["below"]`. There is no `all`:
+/// the relay is deferred.
+pub const AUTOPILOT_WAKE: &str = "autopilot.wake";
+
+/// The key that bounds the wakes of a project in an hour: a whole number, 0 to 60. `0` is off.
+pub const AUTOPILOT_WAKES_PER_HOUR: &str = "autopilot.wakes_per_hour";
+
+/// The built-in of [`AUTOPILOT_WAKES_PER_HOUR`].
+pub const DEFAULT_WAKES_PER_HOUR: u64 = 6;
+
+/// The top of the range of [`AUTOPILOT_WAKES_PER_HOUR`].
+pub const WAKES_PER_HOUR_MAX: u64 = 60;
+
+/// The one word of [`AUTOPILOT_WAKE`] that lets a halt below the line wake the Orchestrator.
+pub const WAKE_BELOW: &str = "below";
+
+/// The word of [`AUTOPILOT_WAKE`] that turns the wake off.
+pub const WAKE_OFF: &str = "off";
+
 /// What a resume does with a key's value (ADR-0016's amendment of 2026-11-16, which calls the flag
 /// `applies`; `SettingApplies` of `pf-api` already names when a change takes effect, so the code
 /// names this flag `at_resume` and leaves the wire type alone).
@@ -166,7 +186,7 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 13] = [
+const KEYS: [&str; 15] = [
     DENY_COMMANDS,
     SELF_TURN_CAP,
     PROPOSE_PER_MIN,
@@ -180,6 +200,10 @@ const KEYS: [&str; 13] = [
     NOTIFY_ORCHESTRATOR_MAX_WORDS,
     NOTIFY_RESEND_SECONDS,
     AUTHORITY_CLEAR_ACTS,
+    // `r2.s3.w3`'s `authority.rerun_checks_per_head` goes right after `authority.clear_acts` when
+    // that item is on the base, and these two stay last in either merge order.
+    AUTOPILOT_WAKE,
+    AUTOPILOT_WAKES_PER_HOUR,
 ];
 
 /// The range and the built-in value of a `session.*` or a `notify.*` key: a whole number.
@@ -207,11 +231,13 @@ fn applies_of(key: &str) -> SettingApplies {
     // A `notify.*` key reads `next_turn` too: a third wire value would break the UI's typecheck, and
     // `docs/contracts/cli.md` says that for these keys it means the next notice (`r2.s11.w3`).
     // `authority.clear_acts` reads `next_turn` too, and `docs/contracts/cli.md` says that for this key it
-    // means the next `settle` (`r2.s3.w2`).
+    // means the next `settle` (`r2.s3.w2`). The two `autopilot.*` keys read `next_turn` too, and for
+    // them it means the next wake (`r2.s3.w4`).
     if key == SELF_TURN_CAP
         || key == PROPOSE_PER_MIN
         || key == AUTHORITY_CLEAR_ACTS
         || key.starts_with("notify.")
+        || key.starts_with("autopilot.")
     {
         SettingApplies::NextTurn
     } else {
@@ -244,6 +270,10 @@ fn built_in(key: &str) -> SettingValue {
         SettingValue::Number(DEFAULT_PROPOSE_PER_MIN)
     } else if key == AUTHORITY_CLEAR_ACTS {
         SettingValue::List(all_act_names())
+    } else if key == AUTOPILOT_WAKE {
+        SettingValue::List(vec![WAKE_BELOW.to_string()])
+    } else if key == AUTOPILOT_WAKES_PER_HOUR {
+        SettingValue::Number(DEFAULT_WAKES_PER_HOUR)
     } else {
         SettingValue::List(BUILT_IN_DENY.iter().map(ToString::to_string).collect())
     }
@@ -271,6 +301,22 @@ fn check_value(key: &str, value: &Value) -> Result<SettingValue, String> {
             Some(n) if n <= PROPOSE_PER_MIN_MAX => Ok(SettingValue::Number(n)),
             _ => Err(format!(
                 "{PROPOSE_PER_MIN} is a whole number from 0 to {PROPOSE_PER_MIN_MAX} (0 is off), not {value}"
+            )),
+        },
+        AUTOPILOT_WAKE => match value.as_array().map(Vec::as_slice) {
+            Some([word]) if matches!(word.as_str(), Some(WAKE_OFF | WAKE_BELOW)) => {
+                Ok(SettingValue::List(vec![
+                    word.as_str().unwrap_or(WAKE_BELOW).to_string(),
+                ]))
+            }
+            _ => Err(format!(
+                "{AUTOPILOT_WAKE} is a list of one word, [\"{WAKE_OFF}\"] or [\"{WAKE_BELOW}\"], not {value}"
+            )),
+        },
+        AUTOPILOT_WAKES_PER_HOUR => match value.as_u64() {
+            Some(n) if n <= WAKES_PER_HOUR_MAX => Ok(SettingValue::Number(n)),
+            _ => Err(format!(
+                "{AUTOPILOT_WAKES_PER_HOUR} is a whole number from 0 to {WAKES_PER_HOUR_MAX} (0 is off), not {value}"
             )),
         },
         AUTHORITY_CLEAR_ACTS => {
@@ -538,6 +584,29 @@ impl Controller {
         project: Option<&str>,
         agent: Option<&str>,
     ) -> Result<Resolved, String> {
+        self.resolve_inner(key, project, agent, false)
+    }
+
+    /// [`Controller::resolve_setting`] for a read that must fail closed (the wake, `r2.s3.w4`): a
+    /// stored row that this binary cannot read is an error, where the plain read skips it and lets
+    /// the next scope or the built-in decide. A wake is spend, so a value it cannot read gives no
+    /// wake and never the built-in.
+    pub(super) fn resolve_setting_strict(
+        &self,
+        key: &str,
+        project: Option<&str>,
+        agent: Option<&str>,
+    ) -> Result<Resolved, String> {
+        self.resolve_inner(key, project, agent, true)
+    }
+
+    fn resolve_inner(
+        &self,
+        key: &str,
+        project: Option<&str>,
+        agent: Option<&str>,
+        strict: bool,
+    ) -> Result<Resolved, String> {
         if !KEYS.contains(&key) {
             return Err(unknown_key(key));
         }
@@ -557,6 +626,12 @@ impl Controller {
                     set_by: row.set_by,
                     set_at: row.set_at,
                 }),
+                Err(why) if strict => {
+                    return Err(format!(
+                        "the stored value of {key} at {} cannot be read: {why}",
+                        row.scope.text()
+                    ));
+                }
                 Err(why) => eprintln!(
                     "pulse-factory: the stored value of {key} at {} is skipped: {why}",
                     row.scope.text()
