@@ -435,6 +435,60 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// Call `verb` from a helper that is a child of the live chat's process, after that process
+    /// exited: the helper has an empty environment (no marker, no seat token) and no chat on its
+    /// chain any more. The shell is registered as the chat's process and ends at once.
+    fn call_as_orphan_of_chat(&self, verb: &str, args: &Value) -> Value {
+        let n = RUNS.fetch_add(1, Ordering::SeqCst);
+        let root = self.live.sb.root.path();
+        let (go, out) = (root.join(format!("go-{n}")), root.join(format!("out-{n}")));
+        let exe = std::env::current_exe().unwrap();
+        let mut shell = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "( while [ ! -e \"$GO\" ]; do sleep 0.02; done; \
+                   \"$EXE\" --exact helper_calls_the_controller --nocapture --test-threads=1 \
+                   > \"$OUT\" 2>&1 ) > /dev/null 2>&1 &",
+            )
+            .env_clear()
+            .env("PATH", self.live.sb.path_env())
+            .env("GO", &go)
+            .env("OUT", &out)
+            .env("EXE", &exe)
+            .env("PF_TEST_HELPER_STATE", &self.live.sb.state)
+            .env("PF_TEST_HELPER_VERB", verb)
+            .env("PF_TEST_HELPER_ARGS", args.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        self.rec
+            .pids
+            .lock()
+            .unwrap()
+            .insert(self.chat.clone(), shell.id());
+        // The shell puts the helper in the background and exits: its child lives on without it.
+        assert!(shell.wait().unwrap().success());
+        std::fs::write(&go, "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let line = loop {
+            let text = std::fs::read_to_string(&out).unwrap_or_default();
+            if let Some((_, r)) = text.split_once("HELPER_RESPONSE:") {
+                break r.lines().next().unwrap().to_string();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no response from the helper: {text}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        self.rec.pids.lock().unwrap().clear();
+        serde_json::from_str(&line).unwrap()
+    }
+}
+
 fn refused_with(resp: &Value, verb: &str, because: &str) {
     assert_eq!(resp["ok"], false, "{verb}: {resp}");
     let why = resp["error"].as_str().unwrap_or_default();
@@ -493,6 +547,34 @@ fn a_chat_a_marker_and_a_seat_are_refused_on_both_verbs_and_write_nothing() {
     assert_eq!(resp["ok"], true, "{resp}");
     assert_eq!(rig.rows(), rows);
     assert!(!rig.list().grants[0].live);
+}
+
+/// The stated residue of the fake `host-launcher-detached` (audit C13; ADR-0005, amended). Under
+/// `detached` the caller check reads ancestry and environment only. A child of a chat whose parent
+/// exited has neither a chat ancestor nor a marker, so `grant clear` admits it. Under `systemd` the
+/// grant verbs refuse the same caller by its cgroup, and `systemd_live_hosts.rs` tests that.
+#[test]
+fn under_detached_a_child_of_a_chat_whose_parent_exited_is_admitted_on_grant_clear_the_residue() {
+    let rig = rig();
+    let resp = rig.call_as_orphan_of_chat(
+        "grant_clear",
+        &json!({ "project_id": "P-2", "command_id": "orphan-1" }),
+    );
+    assert_eq!(resp["ok"], true, "the residue: {resp}");
+    assert_eq!(rig.rows(), 1, "the grant was given");
+    assert!(rig.list().grants[0].live);
+    // The control: a child that still has the chat on its chain is refused, as before.
+    let resp = rig.call_as(
+        true,
+        &[],
+        "grant_revoke",
+        &json!({ "project_id": "P-2", "command_id": "orphan-2" }),
+    );
+    refused_with(&resp, "grant_revoke", "descends from, chat process");
+    assert!(
+        rig.list().grants[0].live,
+        "the refused revoke changed nothing"
+    );
 }
 
 #[test]

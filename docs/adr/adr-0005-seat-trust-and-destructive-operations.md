@@ -299,15 +299,18 @@ them, so each one waits for the operator. A launched session must still never an
 5. Send a seat to resolve a merge conflict on an item branch or a spine branch, never on a default
    branch. If the resolution changes a test or a spec file, the seat's done record says so, and the
    controller parks the unit with an `above` reason.
-6. Close a request that a newer revision of the same request replaced.
+6. Close a request that a newer revision of the same request replaced. `close_stale` has no object,
+   because a revision replaces its request in the same row, so no stale request exists.
 
 Each act is an admitted command with a command ID and one ledger line that names the grant, its
 generation, the acting session, the request or unit, and the reason.
 
-**The verb.** The grant acts through one verb of its own, `settle`, which names the request or unit,
-the act and a reason. It is not a claim verb: `answer`, `clear`, `ack`, `arm` and the rest still refuse
-every chat and seat. `settle` refuses every caller except a session that the controller identifies,
-from its host, as the grant's holder for the project of the request or unit. Giving and ending the
+**The verb.** The grant acts through one verb of its own, `settle`, which
+names a request at the revision the caller read, never a bare unit, and gives one act and a reason.
+The list is closed per cause: each cause admits only its own acts, and `--to` never names a later stage
+than the one the unit parked in. It is not a claim verb: `answer`, `clear`, `ack`, `arm` and the rest still refuse every
+chat and seat. `settle` refuses every caller except a session that the controller identifies, from
+its host, as the grant's holder for the project of the request. Giving and ending the
 grant, `grant clear` and `grant revoke`, pass the caller check that `arm` passes and take no claim.
 They run on the CLI and, with a confirm code, on a device (ADR-0012, amendment of 2026-11-16).
 
@@ -323,20 +326,23 @@ passes the caller check that refuses a seat and a chat, and on a device each nee
 confirm code. The operator revokes it at any time. A revoke ends its generation, and the next grant takes
 the next one, so an act under an old generation is refused. A revoke commits even when the
 controller's commands are stopped, and its ledger line follows at the next start. A removed project's
-grant is not live. A device's confirm code comes with the device verbs. `halt` does not revoke it, but `halt` stops every launch, so acts
-2, 4 and 5 cannot run. The setting `authority.clear_acts` (ADR-0016, amended) can narrow the list for a
+grant is not live. A device's confirm code comes with the device verbs. `halt` does not revoke the grant, and a halted run refuses every `settle`. The setting `authority.clear_acts` (ADR-0016, amended) can narrow the list for a
 project or an agent. It can never widen it.
 
 **The caller's session, read from its host.** An environment marker may only refuse; it never grants.
-- On Linux the controller reads the caller's PID from the socket's peer credentials (a pidfd) and its
-  cgroup from `/proc`. A cgroup inside a session host's unit names the session, whatever its
-  environment says. A double fork stays in the cgroup. So the refusals above get stronger against
-  mistakes: a seat or a chat that empties its environment or double-forks is still refused on the
-  claim verbs. The cgroup is not proof against a hostile session: any process of the user can write
+- On Linux the controller reads the caller's PID from the socket's peer credentials (a pidfd) and
+  walks the caller's ancestry to a live chat session's process. Under the `systemd` launcher it also
+  needs the caller's cgroup, read from `/proc`, to be the cgroup of that session's host unit: the
+  ancestry and the host's check must both name the same chat session. It checks again at the end
+  that no process of the chain exited and no PID was used again. A double fork stays in the cgroup.
+  So under `systemd` the grant verbs refuse a caller in a chat host unit's cgroup even when it has
+  no chat ancestor and an empty environment. Under `detached` that refusal does not exist: the
+  ancestry is the whole check, and the gap is a stated residue. The cgroup is not proof against a
+  hostile session: any process of the user can write
   itself into another cgroup of the user's own systemd tree, so it can pose as another session, or as
   the controller to a host.
 - On macOS there are no cgroups. The refusals stay the marker and the process ancestry, from the
-  host's PID, until a test run verifies a stronger mechanism. Until then `settle` is refused on macOS:
+  host's PID, until a test run verifies a stronger mechanism. Until then `settle` is refused on every OS but Linux:
   the grant may be issued there, but none of its acts is admitted on a marker.
 - **Known limit, unchanged in kind.** A same-user process can leave its cgroup (`systemd-run --user`),
   move itself into another cgroup of the user's systemd tree, write the store file, or call the

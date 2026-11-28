@@ -27,7 +27,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// The most parents the caller check follows. A chain that is longer, or that does not reach the
 /// first process, refuses.
-const MAX_ANCESTORS: usize = 64;
+pub(super) const MAX_ANCESTORS: usize = 64;
 
 /// The number of random bytes in a claim token.
 const TOKEN_BYTES: usize = 32;
@@ -56,7 +56,7 @@ fn text<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 
 /// The parent of a process, from `<proc>/<pid>/stat`. The name field can hold spaces and
 /// parentheses, so the line is cut after its last `)`.
-fn parent_of(proc_root: &Path, pid: u32) -> Result<u32, String> {
+pub(super) fn parent_of(proc_root: &Path, pid: u32) -> Result<u32, String> {
     let path = proc_root.join(pid.to_string()).join("stat");
     let line = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -72,7 +72,7 @@ fn parent_of(proc_root: &Path, pid: u32) -> Result<u32, String> {
 }
 
 /// Does the environment text of a process (`NAME=value` entries split by NUL) hold the seat token?
-fn environment_has_seat_token(environ: &[u8]) -> bool {
+pub(super) fn environment_has_seat_token(environ: &[u8]) -> bool {
     environ
         .split(|b| *b == 0)
         .any(|entry| entry.starts_with(b"PF_SEAT_TOKEN="))
@@ -114,7 +114,7 @@ pub(super) fn chat_marker_key(value: &str) -> String {
 impl Controller {
     /// The processes of the seats the controller launched and still tracks: the sessions with an
     /// open row, whose adapter says which process they run.
-    fn tracked_seat_pids(&self) -> HashSet<u32> {
+    pub(super) fn tracked_seat_pids(&self) -> HashSet<u32> {
         let mut pids = HashSet::new();
         for handle in self.handles() {
             let Ok(sessions) = self.store.sessions(&handle.info.run_id) else {
@@ -644,6 +644,16 @@ impl Controller {
                 .and_then(|b| b.get(key).and_then(Value::as_str).map(str::to_string))
         };
         let decision = decision_of(&r.body);
+        // A settled request reads the class that its settle recorded, and says who settled it. Every
+        // other request reads the class as the engine computes it now.
+        let stored = r
+            .answer
+            .as_deref()
+            .filter(|_| r.status == RequestStatus::Answered);
+        let settled = stored.and_then(super::settle::settled_of);
+        let line = stored
+            .and_then(super::settle::recorded_line)
+            .unwrap_or_else(|| self.line_of_request(handle, view, r).to_string());
         RequestSummary {
             id: r.id.clone(),
             revision: r.revision,
@@ -662,7 +672,8 @@ impl Controller {
             head_sha: body("head_sha"),
             cause: decision.as_ref().map(|d| d.cause.clone()),
             summary: decision.map(|d| d.summary),
-            line: Some(self.line_of_request(handle, view, r).to_string()),
+            line: Some(line),
+            settled,
         }
     }
 

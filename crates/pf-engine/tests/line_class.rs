@@ -497,8 +497,10 @@ fn commit_of(scope: &str, id: &str, effects: Vec<Effect>) -> Commit {
     }
 }
 
+// This tests the fake store alone. The real store's grant rules are tested in `pf-store-sqlite`
+// (`store_clear_grants.rs`, `clear_grant_admission_property.rs`), so the name claims no parity.
 #[test]
-fn the_fake_store_holds_the_grant_rules_of_the_real_one() {
+fn the_fake_store_holds_the_grant_rules() {
     let store = FakeStore::new();
     let grant = |generation| {
         Effect::GrantClear(NewClearGrant {

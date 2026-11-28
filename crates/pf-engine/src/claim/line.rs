@@ -8,7 +8,7 @@
 //! The class fails closed. Every read that fails gives `above`, and the engine names no repo and
 //! no branch of its own: the caller passes the forge's repo and its default branch.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::admission::RunView;
 use crate::claim::{DECISION_VERSION, KEY_DECISION};
@@ -83,13 +83,60 @@ fn branch_name(name: &str) -> &str {
 
 /// The cause a request's stored block names. A body that is not JSON, a block of another version
 /// and a cause that this binary does not know give none.
-fn stored_cause(request: &RequestRow) -> Option<Cause> {
+pub(super) fn stored_cause(request: &RequestRow) -> Option<Cause> {
     let body: Value = serde_json::from_str(&request.body).ok()?;
     let block = body.get(KEY_DECISION)?;
     if block.get("v").and_then(Value::as_u64) != Some(DECISION_VERSION) {
         return None;
     }
     Cause::parse(block.get("cause").and_then(Value::as_str)?)
+}
+
+/// What the class of one request was made from. [`Engine::settle`] stores it with the settled
+/// request, so a reader sees the class the settle read even when the class computed now differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineRecord {
+    pub line: Line,
+    /// The cause the request's stored block names, when it names one this binary knows.
+    pub cause: Option<Cause>,
+    /// For a red check and a conflict on a track with a free merge: what the compare used.
+    pub merge: Option<MergeInputs>,
+}
+
+/// The inputs of the free-merge compare of a red check or a conflict, as the class rendered and
+/// compared them: each name without one leading `refs/heads/`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeInputs {
+    pub rule: &'static str,
+    pub base: String,
+    pub repo: String,
+    pub default_branch: String,
+}
+
+impl LineRecord {
+    /// `{"class":"below","cause":<cause>}`, and for a merge cause also `rule`, `base`, `repo` and
+    /// `default_branch`. A request with no known cause has `"cause": null`.
+    pub fn to_json(&self) -> Value {
+        let mut record = json!({
+            "class": self.line.as_str(),
+            "cause": self.cause.map(Cause::as_str),
+        });
+        if let Some(merge) = &self.merge {
+            record["rule"] = json!(merge.rule);
+            record["base"] = json!(merge.base);
+            record["repo"] = json!(merge.repo);
+            record["default_branch"] = json!(merge.default_branch);
+        }
+        record
+    }
+}
+
+/// The name of a merge rule, as the workflow file writes it.
+fn rule_name(rule: MergeRule) -> &'static str {
+    match rule {
+        MergeRule::GreenChecksInDeclaredOrder => "green_checks_in_declared_order",
+        MergeRule::ClaimAck => "claim_ack",
+    }
 }
 
 impl Engine {
@@ -114,55 +161,78 @@ impl Engine {
         request: &RequestRow,
         forge: Option<(&str, &str)>,
     ) -> Line {
+        self.request_line_record(view, request, forge).line
+    }
+
+    /// The class of one request with what it was made from: [`Engine::request_line`] is this
+    /// function's `line`, so the two cannot disagree.
+    pub fn request_line_record(
+        &self,
+        view: &RunView,
+        request: &RequestRow,
+        forge: Option<(&str, &str)>,
+    ) -> LineRecord {
+        let cause = stored_cause(request);
+        let closed = |cause| LineRecord {
+            line: Line::Above,
+            cause,
+            merge: None,
+        };
         let Some(unit_id) = request.unit_id.as_deref() else {
-            return Line::Above;
+            return closed(cause);
         };
         // A unit that the run does not hold, or whose detail does not read, fails closed for every
         // cause.
         let Some(node) = view.node(unit_id) else {
-            return Line::Above;
+            return closed(cause);
         };
         let Ok(detail) = view.unit_detail(node) else {
-            return Line::Above;
+            return closed(cause);
         };
-        let cause = stored_cause(request);
         // Only a red check and a conflict ask the merge anything.
-        let free_merge = matches!(cause, Some(Cause::MergeChecksRed | Cause::MergeConflict))
-            && self.has_free_merge(unit_id, &detail, forge);
-        line_of(cause, free_merge)
+        let merge = if matches!(cause, Some(Cause::MergeChecksRed | Cause::MergeConflict)) {
+            self.free_merge(unit_id, &detail, forge)
+        } else {
+            None
+        };
+        LineRecord {
+            line: line_of(cause, merge.is_some()),
+            cause,
+            merge,
+        }
     }
 
-    fn has_free_merge(
+    /// The compare inputs of a track with a free merge, or `None` when the track has none.
+    fn free_merge(
         &self,
         unit_id: &str,
         detail: &UnitDetail,
         forge: Option<(&str, &str)>,
-    ) -> bool {
-        let Some((forge_repo, default_branch)) = forge else {
-            return false;
-        };
+    ) -> Option<MergeInputs> {
+        let (forge_repo, default_branch) = forge?;
         let default_branch = branch_name(default_branch);
         if forge_repo.is_empty() || default_branch.is_empty() {
-            return false;
+            return None;
         }
-        let Some(def) = self
+        let def = self
             .cfg
             .workflow
             .track(&detail.track)
-            .and_then(|t| t.merge.as_ref())
-        else {
-            return false;
-        };
+            .and_then(|t| t.merge.as_ref())?;
         if def.rule == MergeRule::ClaimAck {
-            return false;
+            return None;
         }
-        let Ok(declared) = self.declared(unit_id, detail, def) else {
-            return false;
-        };
+        let declared = self.declared(unit_id, detail, def).ok()?;
         let base = branch_name(&declared.base);
-        !declared.repo.is_empty()
+        (!declared.repo.is_empty()
             && declared.repo == forge_repo
             && !base.is_empty()
-            && base != default_branch
+            && base != default_branch)
+            .then(|| MergeInputs {
+                rule: rule_name(def.rule),
+                base: base.to_string(),
+                repo: declared.repo.clone(),
+                default_branch: default_branch.to_string(),
+            })
     }
 }

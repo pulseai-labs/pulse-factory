@@ -146,7 +146,7 @@ fn a_version_eleven_store_migrates_to_twelve_and_keeps_every_row() {
     assert_eq!(MIGRATIONS[11].version, 12);
     assert_eq!(MIGRATIONS[11].name, "notices");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     assert_eq!(store.projects().unwrap().len(), 1);
     assert_eq!(store.devices().unwrap().len(), 1);
     // No notice yet, and no target.
@@ -160,8 +160,8 @@ fn a_version_eleven_store_migrates_to_twelve_and_keeps_every_row() {
         if table == "schema_version" {
             assert_eq!(
                 count(&after, table),
-                n + 2,
-                "versions 12 and 13 are recorded"
+                n + 3,
+                "versions 12 to 14 are recorded"
             );
         } else {
             assert_eq!(count(&after, table), *n, "{table} keeps every row");
@@ -496,22 +496,22 @@ fn the_triggers_are_named_and_migration_twelve_is_forward_only() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("run.db");
-    let fourteen = Migration {
-        version: 14,
+    let fifteen = Migration {
+        version: 15,
         name: "next",
         sql: "CREATE TABLE next_for_test (x INTEGER) STRICT;",
     };
-    drop(SqliteStore::open_with_migrations(&path, &[fourteen]).unwrap());
-    // A file at version 14 does not open in a binary that knows version 13 only: no roll back.
+    drop(SqliteStore::open_with_migrations(&path, &[fifteen]).unwrap());
+    // A file at version 15 does not open in a binary that knows version 14 only: no roll back.
     let err = SqliteStore::open(&path).err().unwrap();
     assert_eq!(
         err,
         OpenError::SchemaNewer {
-            database: 14,
-            supported: 13
+            database: 15,
+            supported: 14
         }
     );
-    assert_eq!(MIGRATIONS.len(), 13);
+    assert_eq!(MIGRATIONS.len(), 14);
     for (i, m) in MIGRATIONS.iter().enumerate() {
         assert_eq!(m.version as usize, i + 1);
     }

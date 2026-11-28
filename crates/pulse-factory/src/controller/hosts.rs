@@ -161,6 +161,8 @@ pub struct HostConfig {
     pub binary: PathBuf,
     pub proc_root: PathBuf,
     pub random_device: PathBuf,
+    /// The `systemctl` program that `unit_cgroup` runs.
+    pub systemctl: PathBuf,
 }
 
 /// The files of one incarnation, under `<state>/hosts/<server>/`.
@@ -329,8 +331,8 @@ impl HostService {
     }
 
     /// The cgroup the user manager names for a unit, whose last component is `<unit>.service`.
-    fn unit_cgroup(&self, unit: &str) -> Result<String, String> {
-        let out = std::process::Command::new("systemctl")
+    pub(super) fn unit_cgroup(&self, unit: &str) -> Result<String, String> {
+        let out = std::process::Command::new(&self.cfg.systemctl)
             .args(["--user", "show", "-p", "ControlGroup", "--value"])
             .arg(format!("{unit}.service"))
             .env("XDG_RUNTIME_DIR", &self.cfg.runtime_dir)

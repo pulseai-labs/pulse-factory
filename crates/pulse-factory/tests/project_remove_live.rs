@@ -225,13 +225,12 @@ fn a_seat_caller_cannot_end_sessions_through_project_remove() {
     assert_eq!(rec.stop_count(), 0);
     assert!(end_lines(&live, "rm-seat").is_empty());
 
-    // Without the field the caller check is not in the way: the store's rule answers as before.
+    // Without the field the caller check still applies: every form of `project_remove` passes it
+    // (`r2.s3.w2`, #48 F7). The seat is refused before the store's rule answers.
     let args = json!({"id": project, "command_id": "rm-seat-2"});
     let why = refused(pf_ipc::call(&live.sb.state, "project_remove", args).unwrap());
-    assert_eq!(
-        why,
-        format!("project {project} has a live chat session {session}; end it first")
-    );
+    assert!(why.contains("PF_SEAT_TOKEN"), "{why}");
+    assert!(project_is_live(&live, &project));
 }
 
 #[test]

@@ -80,8 +80,8 @@ The API and the CLI share one set of verbs (ADR-0012).
 it lands, and that work's close marks it Accepted. It goes with ADR-0005's amendment of 2026-11-16 and
 ADR-0017.
 
-- **`settle`**: the clear grant's one verb. It names a request or a unit, one act of the grant's closed
-  list and a reason (ADR-0005, amended). Only the grant's holder may call it.
+- **`settle`**: the clear grant's one verb. It names a request at the revision the caller read, one act
+  of the grant's closed list and a reason (ADR-0005, amended). Only the grant's holder may call it.
 - **`grant clear`, `grant revoke` and `grant list`**: give, end and read a project's clear grant. The
   first two are operator acts on the `arm` pattern: each passes the caller check and they
   take no claim. A seat or a chat cannot call them.

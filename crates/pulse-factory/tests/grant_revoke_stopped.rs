@@ -75,6 +75,7 @@ fn guarded_commit(
                 state: RunState::Active,
                 halted_reason: None,
                 project_id: None,
+                launch_bound: None,
                 created_at: "t7".to_string(),
                 updated_at: "t7".to_string(),
             }),

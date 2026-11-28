@@ -16,7 +16,7 @@ use crate::cli::{
     GrantRevokeArgs, HaltArgs, ProjectAddArgs, ProjectListArgs, ProjectRemoveArgs, ProposeArgs,
     RequestsArgs, SessionAnswerArgs, SessionEndArgs, SessionInterruptArgs, SessionItemsArgs,
     SessionListArgs, SessionRedactArgs, SessionSendArgs, SessionSetArgs, SessionStartArgs,
-    SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, ShowArgs, StatusArgs,
+    SettingsGetArgs, SettingsSetArgs, SettingsUnsetArgs, SettleArgs, ShowArgs, StatusArgs,
 };
 
 /// The file name of the claim token, in the state directory.
@@ -389,29 +389,68 @@ pub fn show_text(v: &Value) -> String {
     }
     // The decision block, after every line that `show` printed before it existed. A request with
     // no block prints none of these lines. A seat's text, an option's label among it, is tamed.
+    let settled = settled_line(&v["settled"]);
     if v["decision"].is_object() {
-        decision_lines(&v["decision"], v["line"].as_str(), &mut |x: String| {
-            t.push_str(&x);
-            t.push('\n');
-        });
+        decision_lines(
+            &v["decision"],
+            v["line"].as_str(),
+            settled.as_deref(),
+            &mut |x: String| {
+                t.push_str(&x);
+                t.push('\n');
+            },
+        );
     } else if let Some(class) = v["line"].as_str() {
         // A request with no block has no summary: its class is the last line.
         t.push_str(&format!("line: {}\n", tame(class)));
+        if let Some(settled) = &settled {
+            t.push_str(&format!("{settled}\n"));
+        }
     }
     t
+}
+
+/// The `settled:` line of `show`: who settled the request, under which grant, and what they did and
+/// why. The act, the stage and the reason are tamed: the reason is the Orchestrator's own text.
+fn settled_line(settled: &Value) -> Option<String> {
+    if !settled.is_object() {
+        return None;
+    }
+    let s = |p: &Value| tame(p.as_str().unwrap_or(""));
+    let to = settled["to_stage"]
+        .as_str()
+        .map(|stage| format!(" --to {}", tame(stage)))
+        .unwrap_or_default();
+    Some(format!(
+        "settled: by the Orchestrator (session {}, grant {}#{}): act={}{to} reason={}",
+        s(&settled["session"]),
+        s(&settled["project"]),
+        settled["generation"],
+        s(&settled["act"]),
+        s(&settled["reason"])
+    ))
 }
 
 /// The lines of a request's decision block (`docs/contracts/cli.md`, `show`): the cause, the
 /// summary, who asked, the attempt, whether a text answer reaches a seat, the seat the halt is
 /// about, why a stop's options could not be read, and one line for each option. An option line
 /// names who wrote the option, and for an answer the text and the stage it sends the unit to.
-fn decision_lines(d: &Value, class: Option<&str>, line: &mut dyn FnMut(String)) {
+fn decision_lines(
+    d: &Value,
+    class: Option<&str>,
+    settled: Option<&str>,
+    line: &mut dyn FnMut(String),
+) {
     let s = |p: &Value| tame(p.as_str().unwrap_or(""));
     line(format!("cause: {}", s(&d["cause"])));
     line(format!("summary: {}", s(&d["summary"])));
     // The request's line class, directly after the summary. `show` of an older controller has none.
     if let Some(class) = class {
         line(format!("line: {}", tame(class)));
+        // A settled request says who settled it, directly after its class.
+        if let Some(settled) = settled {
+            line(settled.to_string());
+        }
     }
     let asked = &d["asked_by"];
     line(match asked["kind"].as_str() {
@@ -740,6 +779,66 @@ pub fn clear(a: &ClearArgs) -> i32 {
     }
 }
 
+/// `settle`: the project's Orchestrator settles a request below the line. A seat does not call it,
+/// and the controller names the caller from its process, so a client that runs outside a chat is
+/// refused there.
+pub fn settle(a: &SettleArgs) -> i32 {
+    if let Some(code) = refuse_seat("settle") {
+        return code;
+    }
+    let args = json!({
+        "request_id": a.id,
+        "revision": a.rev,
+        "act": a.act,
+        "to_stage": a.to,
+        "reason": a.reason,
+    });
+    let state = pf_ipc::state_dir();
+    let resp = match pf_ipc::call(&state, "settle", args) {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("pulse-factory: {e}");
+            return 1;
+        }
+    };
+    if !resp.ok {
+        let why = resp
+            .error
+            .unwrap_or_else(|| "the controller refused".to_string());
+        // A moved request names the word of the refusal too, as the confirm path does.
+        match resp.result["refusal"].as_str() {
+            Some(word) => eprintln!("pulse-factory: {} ({})", tame(&why), tame(word)),
+            None => eprintln!("pulse-factory: {}", tame(&why)),
+        }
+        return 1;
+    }
+    let v = resp.result;
+    if a.json {
+        print_json(&v);
+    } else {
+        let settled = &v["settled"];
+        let to = settled["to_stage"]
+            .as_str()
+            .map(|stage| format!(" --to {}", tame(stage)))
+            .unwrap_or_default();
+        let replayed = if v["replayed"].as_bool() == Some(true) {
+            " (replayed)"
+        } else {
+            ""
+        };
+        println!(
+            "settled {}@{}: act={}{to} by grant {}#{} session {}{replayed}",
+            tame(&s_of(&v["request_id"])),
+            v["revision"],
+            tame(&s_of(&settled["act"])),
+            tame(&s_of(&settled["project"])),
+            settled["generation"],
+            tame(&s_of(&settled["session"])),
+        );
+    }
+    0
+}
+
 pub fn ack(a: &AckArgs) -> i32 {
     if let Some(code) = refuse_seat("ack") {
         return code;
@@ -1057,8 +1156,7 @@ pub fn settings_unset(a: &SettingsUnsetArgs) -> i32 {
 
 // ------------------------------------------------------------------ devices and the API
 
-/// Print a refusal or an error of a device verb and give the exit code 1. The text is tamed: a
-/// device chose its own name.
+/// Print a refusal or an error of a grant verb and give the exit code 1. The text is tamed.
 fn grant_failed(verb: &str, why: &str) -> i32 {
     eprintln!("pulse-factory: grant {verb}: {}", tame(why));
     1
@@ -1174,6 +1272,8 @@ pub fn grant_list_text(v: &Value) -> String {
     t
 }
 
+/// Print a refusal or an error of a device verb and give the exit code 1. The text is tamed: a
+/// device chose its own name.
 fn device_failed(verb: &str, why: &str) -> i32 {
     eprintln!("pulse-factory: device {verb}: {}", tame(why));
     1

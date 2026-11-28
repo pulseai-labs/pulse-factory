@@ -12,16 +12,89 @@
 //! running unit's signals, its end status, its usage and cost and its ledger lines are recorded
 //! until it ends. `halt` never stops a running session.
 
-use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
+use crate::admission::{Command, CommandBody, Decision, EngineError, RunView, body_of_content};
 use crate::engine::Engine;
 use crate::port::agent::{AgentError, LaunchPlan};
-use crate::port::store::{AdmissionOutcome, Cause, Effect, NodeKind, NodeRow};
+use crate::port::store::{AdmissionOutcome, AdmissionRow, Cause, Effect, NodeKind, NodeRow};
 use crate::render::{RenderContext, UnitView, render};
 use crate::status::{EndStatus, REASON_RUN_HALTED, Status, check_reason};
 use crate::unit::{UnitDetail, stage_node_id};
 use crate::workflow::Workflow;
 
 type Rejected = String;
+
+/// The launches a run has used and the launches it has promised, as the grant's bound counts them
+/// (`docs/contracts/requests.md`, "Settle").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaunchCount {
+    /// Every admitted `launch` admission of the run: the workflow's own launches, the operator's
+    /// clears and the grant's acts alike.
+    pub admitted: usize,
+    /// Every `running` unit that a resume sent on and that has not launched since: its launch is
+    /// promised, and not yet admitted.
+    pub pending: usize,
+}
+
+impl LaunchCount {
+    /// The number a launching act of the grant is bound by: `admitted` and `pending` together.
+    pub fn so_far(&self) -> usize {
+        self.admitted + self.pending
+    }
+}
+
+/// Does this admission resume its unit and promise a launch? A `clear_unit`, a launching `settle`
+/// and an `answer_request` that resumed the unit do. An `ack_request` does not: it sends the unit
+/// to its merge, which launches nothing. An answer whose hook failed parks the unit again.
+fn resumes_for_launch(a: &AdmissionRow) -> bool {
+    if a.outcome != AdmissionOutcome::Admitted {
+        return false;
+    }
+    match a.kind.as_str() {
+        "clear_unit" => true,
+        "settle" => matches!(
+            body_of_content(&a.content),
+            Some(CommandBody::Settle { act, .. }) if act.launches()
+        ),
+        "answer_request" => matches!(
+            body_of_content(&a.content),
+            Some(CommandBody::AnswerRequest {
+                hook_failed: None,
+                ..
+            })
+        ),
+        _ => false,
+    }
+}
+
+/// The launches so far of the run in `view`. A unit leaves `pending` when its launch is admitted
+/// (it is then in `admitted`) or when it parks again (it is no longer `running`).
+pub fn launches_so_far(view: &RunView) -> LaunchCount {
+    let launch = |a: &AdmissionRow| a.kind == "launch" && a.outcome == AdmissionOutcome::Admitted;
+    let admitted = view.admissions.iter().filter(|a| launch(a)).count();
+    let pending = view
+        .units()
+        .filter(|u| u.status == Status::Running)
+        .filter(|u| {
+            let of_unit = |a: &&AdmissionRow| a.unit_id.as_deref() == Some(u.id.as_str());
+            let newest_resume = view
+                .admissions
+                .iter()
+                .filter(of_unit)
+                .filter(|a| resumes_for_launch(a))
+                .map(|a| a.seq)
+                .max();
+            match newest_resume {
+                None => false,
+                Some(seq) => !view
+                    .admissions
+                    .iter()
+                    .filter(of_unit)
+                    .any(|a| launch(a) && a.seq > seq),
+            }
+        })
+        .count();
+    LaunchCount { admitted, pending }
+}
 
 /// Does this unit wait for a launch or a merge, with no stage running?
 pub(crate) fn next_step_is_launch_or_merge(

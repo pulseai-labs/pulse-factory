@@ -5,6 +5,7 @@
 pub mod agents;
 pub mod api;
 pub mod base_push;
+pub mod callers;
 pub mod chat_install;
 pub mod chat_verbs;
 pub mod chat_view;
@@ -29,6 +30,7 @@ pub mod run_list;
 pub mod seat;
 pub mod sessions;
 pub mod settings;
+pub mod settle;
 pub mod status;
 pub mod worktrees;
 
@@ -44,7 +46,7 @@ use pf_engine::port::agent::{AgentPort, SessionRef};
 use pf_engine::port::chat::ChatPort;
 use pf_engine::port::store::{RunState, Store};
 use pf_engine::{Engine, EngineConfig, system_clock};
-use pf_ipc::{Handler, Peer, Request, Response};
+use pf_ipc::{Handler, Peer, PeerSocket, Request, Response};
 use pf_store_sqlite::SqliteStore;
 use pf_workflow::package::Package;
 use pf_workflow::pin;
@@ -126,6 +128,14 @@ pub struct Config {
     pub host_launcher: hosts::HostLauncher,
     /// The `pf-host` binary (`PF_HOST_BIN`). `None`: `pf-host` beside `binary`.
     pub host_bin: Option<PathBuf>,
+    /// The operating system name, read once at start from `std::env::consts::OS`. `settle` is
+    /// admitted on `linux` only (`r2.s3.w2`; ADR-0005's amendment). A test sets `macos`.
+    pub os: String,
+    /// The `systemctl` program that reads a host unit's cgroup (`unit_cgroup`). A test points it at
+    /// a stub that stands in for the user manager.
+    pub systemctl: PathBuf,
+    /// The faults and pauses a test injects into `settle` and its caller check: none by default.
+    pub settle_faults: callers::SettleFaults,
 }
 
 impl Config {
@@ -161,6 +171,9 @@ impl Config {
                 .map_or_else(std::env::temp_dir, PathBuf::from),
             host_launcher: hosts::HostLauncher::Detached,
             host_bin: None,
+            os: std::env::consts::OS.to_string(),
+            systemctl: PathBuf::from("systemctl"),
+            settle_faults: callers::SettleFaults::default(),
         }
     }
 
@@ -256,6 +269,7 @@ impl Controller {
             binary: cfg.binary.clone(),
             proc_root: cfg.proc_root.clone(),
             random_device: cfg.random_device.clone(),
+            systemctl: cfg.systemctl.clone(),
         };
         let controller = Arc::new_cyclic(|me| Controller {
             hosts: hosts::HostService::new(me.clone(), host_cfg, host_server),
@@ -751,6 +765,12 @@ impl Controller {
         if let Some(project) = &plan.project_id {
             self.link_run_project(run_id, project, proposal)?;
         }
+        // The run's armed launch count: the most launches the arm summary shows for its package. A
+        // plan whose most launches are unknown stores none, and the run refuses every launching act
+        // of the grant. Written once, after the run row exists and before `arm` answers.
+        if let Some(bound) = plan.launch_bound {
+            self.set_run_launch_bound(run_id, bound)?;
+        }
         files::write_json(&dir.join("run.json"), info)?;
         // The replaced run ends after the new run's pins, start-up and record succeeded.
         if let Some(old) = old {
@@ -875,7 +895,7 @@ impl Handler for Controller {
             // These change who acts and what runs. They need to know who calls.
             "arm" | "propose" | "claim" | "answer" | "clear" | "ack" | "device_pair"
             | "device_revoke" | "grant_clear" | "grant_revoke" | "settings_set"
-            | "settings_unset" => Response::err(format!(
+            | "settings_unset" | "settle" => Response::err(format!(
                 "{} refused: the controller cannot tell which process called",
                 request.verb
             )),
@@ -884,10 +904,35 @@ impl Handler for Controller {
     }
 
     fn handle_from(&self, request: Request, peer: Peer) -> Response {
+        self.handle_with_peer(request, peer, None)
+    }
+
+    fn handle_from_socket(
+        &self,
+        request: Request,
+        peer: Peer,
+        socket: Option<PeerSocket>,
+    ) -> Response {
+        self.handle_with_peer(request, peer, socket)
+    }
+}
+
+impl Controller {
+    /// [`Handler::handle_from`] and [`Handler::handle_from_socket`]: the caller's process, and for
+    /// `settle` a duplicate of its connection.
+    fn handle_with_peer(
+        &self,
+        request: Request,
+        peer: Peer,
+        socket: Option<PeerSocket>,
+    ) -> Response {
         let verb = request.verb.clone();
-        let response = self.dispatch_from(request, peer);
+        let response = self.dispatch_from(request, peer, socket);
         // The verbs that change a request or the claim tell the open streams at once.
-        if matches!(verb.as_str(), "claim" | "answer" | "clear" | "ack") {
+        if matches!(
+            verb.as_str(),
+            "claim" | "answer" | "clear" | "ack" | "settle"
+        ) {
             self.publish_request_frames();
         }
         response
@@ -895,7 +940,7 @@ impl Handler for Controller {
 }
 
 impl Controller {
-    fn dispatch_from(&self, request: Request, peer: Peer) -> Response {
+    fn dispatch_from(&self, request: Request, peer: Peer, socket: Option<PeerSocket>) -> Response {
         // A confirm code is for a paired device: the socket takes a claim token and nothing else.
         if matches!(request.verb.as_str(), "answer" | "clear" | "ack")
             && request.args.get("code").is_some()
@@ -908,6 +953,9 @@ impl Controller {
             "answer" => self.verb_answer(&request.args, peer),
             "clear" => self.verb_clear(&request.args, peer),
             "ack" => self.verb_ack(&request.args, peer),
+            // The project's Orchestrator settles a park below the line, under the clear grant. The
+            // verb names its caller from the socket and the host.
+            "settle" => self.verb_settle(&request.args, peer, socket),
             // Neither can a chat, or a process below one (ADR-0005; `r1.s4.w1`).
             "device_pair" => match self.check_chat_caller("device_pair", peer) {
                 Ok(()) => self.verb_device_pair(),
@@ -919,11 +967,18 @@ impl Controller {
             },
             // Only the operator gives or ends the clear grant: a seat cannot, and neither can a chat.
             // The check is the one `arm` passes. The verbs take no claim (`r2.s3.w1`).
-            "grant_clear" => match self.check_chat_caller("grant_clear", peer) {
+            // Under `systemd` a caller in a chat host unit's cgroup is refused too (audit C13).
+            "grant_clear" => match self
+                .check_chat_caller("grant_clear", peer)
+                .and_then(|()| self.check_grant_caller_cgroup("grant_clear", peer))
+            {
                 Ok(()) => self.verb_grant_clear(&request.args),
                 Err(why) => Response::err(why),
             },
-            "grant_revoke" => match self.check_chat_caller("grant_revoke", peer) {
+            "grant_revoke" => match self
+                .check_chat_caller("grant_revoke", peer)
+                .and_then(|()| self.check_grant_caller_cgroup("grant_revoke", peer))
+            {
                 Ok(()) => self.verb_grant_revoke(&request.args),
                 Err(why) => Response::err(why),
             },
@@ -961,17 +1016,13 @@ impl Controller {
                     Err(why) => Response::err(why),
                 }
             }
-            // `project_remove` with `end_sessions` ends chat sessions, so a seat or a chat cannot
-            // call it that way (ADR-0015, Q2 rule 2). Without the field it ends nothing, and the
-            // verb is as it was.
-            "project_remove"
-                if request.args.get("end_sessions").and_then(Value::as_bool) == Some(true) =>
-            {
-                match self.check_chat_caller("project_remove", peer) {
-                    Ok(()) => self.handle(request),
-                    Err(why) => Response::err(why),
-                }
-            }
+            // A seat cannot add a project or remove one, and neither can a chat: `project_remove` with
+            // `end_sessions` ends chat sessions (ADR-0015, Q2 rule 2), and every form of both verbs
+            // changes what a grant covers (#48 F7).
+            verb @ ("project_add" | "project_remove") => match self.check_chat_caller(verb, peer) {
+                Ok(()) => self.handle(request),
+                Err(why) => Response::err(why),
+            },
             _ => self.handle(request),
         }
     }

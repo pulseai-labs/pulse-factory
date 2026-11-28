@@ -71,7 +71,8 @@ fn the_five_keys_read_their_built_ins_and_apply_at_the_next_notice() {
         assert!(NOTIFY_KEYS.contains(&(key, lo, hi, default)), "{key}");
         assert_eq!(at_resume_of(key), Some(AtResume::Current), "{key}");
     }
-    // The twelve keys come in the order of the registry, the five last.
+    // The thirteen keys come in the order of the registry: the five `notify.*` keys come after the seven
+    // before them, and `authority.clear_acts` is last.
     let all = cli_json(&live, &["settings", "get"]);
     let keys: Vec<&str> = all["settings"]
         .as_array()
@@ -79,9 +80,9 @@ fn the_five_keys_read_their_built_ins_and_apply_at_the_next_notice() {
         .iter()
         .map(|r| r["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys.len(), 12, "{keys:?}");
+    assert_eq!(keys.len(), 13, "{keys:?}");
     assert_eq!(
-        &keys[7..],
+        &keys[7..12],
         [
             "notify.app.on",
             "notify.orchestrator.on",

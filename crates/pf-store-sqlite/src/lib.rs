@@ -34,8 +34,8 @@ pub struct Migration {
 /// `0007` adds the scoped settings. Migration `0008` links a run to a project. Migration `0009` adds
 /// the launch records and the host registry. Migration `0010` adds the host positions. Migration
 /// `0011` adds the position of a chat's output in its host. Migration `0012` adds the notices.
-/// Migration `0013` adds the clear grants. `RunActive` covers every migration, `0013` too: the
-/// store never migrates under an active run.
+/// Migration `0013` adds the clear grants. Migration `0014` adds the run's armed launch count.
+/// `RunActive` covers every migration, `0014` too: the store never migrates under an active run.
 /// Before it applies a pending migration, the store writes a checked backup of the file (see
 /// [`backup_keep`]).
 pub const MIGRATIONS: &[Migration] = &[
@@ -103,6 +103,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 13,
         name: "clear_grants",
         sql: include_str!("../migrations/0013_clear_grants.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "run_launch_bound",
+        sql: include_str!("../migrations/0014_run_launch_bound.sql"),
     },
 ];
 

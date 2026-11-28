@@ -18,6 +18,7 @@ use pf_api::types::{
     SettingScope as WireScope, SettingScopeKind as WireKind, SettingValue, SettingsGetArgs,
     SettingsView,
 };
+use pf_engine::claim::Act;
 use pf_engine::port::agent::SessionRef;
 use pf_engine::port::chat::{DENY_COMMANDS_MAX, check_deny_commands};
 use pf_engine::port::store::{Effect, SettingRow, SettingScope, SettingScopeKind, Store};
@@ -101,6 +102,16 @@ pub const NOTIFY_KEYS: [(&str, u64, u64, u64); 5] = [
     (NOTIFY_RESEND_SECONDS, 10, 3600, 60),
 ];
 
+/// The key of the acts of the clear grant that a project's Orchestrator may use (`r2.s3.w2`). Its
+/// merge mode is `intersect`: every stored value on the chain cuts the built-in list of six acts. It
+/// is set at a project, an agent, or a project and agent, never at the server, and `settle` reads it
+/// fresh at each act.
+pub const AUTHORITY_CLEAR_ACTS: &str = "authority.clear_acts";
+
+/// The refusal of a write of [`AUTHORITY_CLEAR_ACTS`] at the server scope.
+const CLEAR_ACTS_SCOPE: &str =
+    "authority.clear_acts is set at a project, an agent, or a project and agent";
+
 /// What a resume does with a key's value (ADR-0016's amendment of 2026-11-16, which calls the flag
 /// `applies`; `SettingApplies` of `pf-api` already names when a change takes effect, so the code
 /// names this flag `at_resume` and leaves the wire type alone).
@@ -155,7 +166,7 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 13] = [
     DENY_COMMANDS,
     SELF_TURN_CAP,
     PROPOSE_PER_MIN,
@@ -168,6 +179,7 @@ const KEYS: [&str; 12] = [
     NOTIFY_APP_MAX_WORDS,
     NOTIFY_ORCHESTRATOR_MAX_WORDS,
     NOTIFY_RESEND_SECONDS,
+    AUTHORITY_CLEAR_ACTS,
 ];
 
 /// The range and the built-in value of a `session.*` or a `notify.*` key: a whole number.
@@ -194,16 +206,32 @@ fn applies_of(key: &str) -> SettingApplies {
     // A session key reaches a host when it starts, so a change applies at the next launch.
     // A `notify.*` key reads `next_turn` too: a third wire value would break the UI's typecheck, and
     // `docs/contracts/cli.md` says that for these keys it means the next notice (`r2.s11.w3`).
-    if key == SELF_TURN_CAP || key == PROPOSE_PER_MIN || key.starts_with("notify.") {
+    // `authority.clear_acts` reads `next_turn` too, and `docs/contracts/cli.md` says that for this key it
+    // means the next `settle` (`r2.s3.w2`).
+    if key == SELF_TURN_CAP
+        || key == PROPOSE_PER_MIN
+        || key == AUTHORITY_CLEAR_ACTS
+        || key.starts_with("notify.")
+    {
         SettingApplies::NextTurn
     } else {
         SettingApplies::NextLaunch
     }
 }
 
-/// The merge mode of `key`. Every key is `override`: the first row on the chain wins whole.
-fn merge_of(_key: &str) -> SettingMerge {
-    SettingMerge::Override
+/// The merge mode of `key`: `override` (the first row on the chain wins whole) for every key but
+/// `authority.clear_acts`, which is `intersect`.
+fn merge_of(key: &str) -> SettingMerge {
+    if key == AUTHORITY_CLEAR_ACTS {
+        SettingMerge::Intersect
+    } else {
+        SettingMerge::Override
+    }
+}
+
+/// The names of the six acts, in the built-in order.
+fn all_act_names() -> Vec<String> {
+    Act::ALL.iter().map(|a| a.as_str().to_string()).collect()
 }
 
 /// The built-in value of a known key.
@@ -214,6 +242,8 @@ fn built_in(key: &str) -> SettingValue {
         SettingValue::Number(DEFAULT_SELF_TURN_CAP)
     } else if key == PROPOSE_PER_MIN {
         SettingValue::Number(DEFAULT_PROPOSE_PER_MIN)
+    } else if key == AUTHORITY_CLEAR_ACTS {
+        SettingValue::List(all_act_names())
     } else {
         SettingValue::List(BUILT_IN_DENY.iter().map(ToString::to_string).collect())
     }
@@ -243,6 +273,26 @@ fn check_value(key: &str, value: &Value) -> Result<SettingValue, String> {
                 "{PROPOSE_PER_MIN} is a whole number from 0 to {PROPOSE_PER_MIN_MAX} (0 is off), not {value}"
             )),
         },
+        AUTHORITY_CLEAR_ACTS => {
+            let names = all_act_names().join(", ");
+            let Some(items) = value.as_array() else {
+                return Err(format!(
+                    "{AUTHORITY_CLEAR_ACTS} is a list of act names ({names}), not {value}"
+                ));
+            };
+            let mut list = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str().and_then(Act::parse) {
+                    Some(act) => list.push(act.as_str().to_string()),
+                    None => {
+                        return Err(format!(
+                            "{AUTHORITY_CLEAR_ACTS} holds act names only ({names}), and {item} is not one"
+                        ));
+                    }
+                }
+            }
+            Ok(SettingValue::List(list))
+        }
         DENY_COMMANDS => {
             let Some(items) = value.as_array() else {
                 return Err(format!(
@@ -513,6 +563,9 @@ impl Controller {
                 ),
             }
         }
+        if merge_of(key) == SettingMerge::Intersect {
+            return Ok(resolve_intersect(key, layers));
+        }
         match layers.split_first() {
             Some((winner, rest)) => Ok(Resolved {
                 value: winner.value.clone(),
@@ -528,6 +581,23 @@ impl Controller {
                 layers: Vec::new(),
                 masked: Vec::new(),
             }),
+        }
+    }
+
+    /// The acts that `authority.clear_acts` leaves for a project and an agent, and the scope the
+    /// value came from. A read that fails refuses the act, so the error comes back.
+    pub(super) fn resolved_clear_acts(
+        &self,
+        project: &str,
+        agent: &str,
+    ) -> Result<(Vec<String>, String), String> {
+        match self.resolve_setting(AUTHORITY_CLEAR_ACTS, Some(project), Some(agent))? {
+            Resolved {
+                value: SettingValue::List(list),
+                from_text,
+                ..
+            } => Ok((list, from_text)),
+            _ => Err(format!("{AUTHORITY_CLEAR_ACTS} resolved to no list")),
         }
     }
 
@@ -748,6 +818,9 @@ impl Controller {
         }
         if let Some(a) = &scope.agent_id {
             self.check_agent(a)?;
+        }
+        if raw.key == AUTHORITY_CLEAR_ACTS && scope.kind() == SettingScopeKind::Server {
+            return Err(CLEAR_ACTS_SCOPE.to_string());
         }
         let subject = format!("{}@{}", raw.key, scope.text());
         let who = by.text();
@@ -1023,6 +1096,35 @@ impl Controller {
             Err(text) if text == pf_engine::status::one_line_reason(why) => Ok(()),
             Err(text) => Err(text),
         }
+    }
+}
+
+/// The resolve of an `intersect` key: the built-in list cut by every stored value on the chain, in
+/// the built-in order. `from` names the most specific stored row, or `built_in`; `layers` lists every
+/// stored row; `masked` is empty, because no row hides another.
+fn resolve_intersect(key: &str, layers: Vec<SettingLayer>) -> Resolved {
+    let SettingValue::List(built) = built_in(key) else {
+        unreachable!("an intersect key has a list for its built-in value");
+    };
+    let value: Vec<String> = built
+        .into_iter()
+        .filter(|name| {
+            layers.iter().all(|l| match &l.value {
+                SettingValue::List(list) => list.contains(name),
+                SettingValue::Number(_) => true,
+            })
+        })
+        .collect();
+    let (from, from_text) = match layers.first() {
+        Some(top) => (top.scope.clone(), scope_text(&top.scope)),
+        None => (built_in_scope(), "built_in".to_string()),
+    };
+    Resolved {
+        value: SettingValue::List(value),
+        from,
+        from_text,
+        layers,
+        masked: Vec::new(),
     }
 }
 

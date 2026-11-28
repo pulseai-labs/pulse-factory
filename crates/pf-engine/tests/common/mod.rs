@@ -133,7 +133,11 @@ impl Store for FakeStore {
         s.admissions.push(row.clone());
         for effect in commit.effects {
             match effect {
-                Effect::PutRun(r) => {
+                Effect::PutRun(mut r) => {
+                    // `PutRun` never writes the launch count, as the real store's does not.
+                    if let Some(held) = s.runs.get(&r.id) {
+                        r.launch_bound = held.launch_bound;
+                    }
                     s.runs.insert(r.id.clone(), r);
                 }
                 Effect::PutNode(n) => {
@@ -332,6 +336,34 @@ impl Store for FakeStore {
                 Effect::SetRunProject { run_id, project_id } => {
                     if let Some(run) = s.runs.get_mut(&run_id) {
                         run.project_id = Some(project_id);
+                    }
+                }
+                // The same rules as the real store: the controller's scope only, an unknown run
+                // refused, a set value kept, the same value again a no-op.
+                Effect::SetRunLaunchBound { run_id, bound } => {
+                    let why = if commit.run_id != CONTROLLER_SCOPE {
+                        Some(
+                            "a run's launch count is set only in an admission under @controller"
+                                .to_string(),
+                        )
+                    } else {
+                        match s.runs.get_mut(&run_id) {
+                            None => Some(format!("run {run_id} is unknown")),
+                            Some(run) => match run.launch_bound {
+                                Some(held) if held == bound => None,
+                                Some(held) => {
+                                    Some(format!("run {run_id} keeps its launch count {held}"))
+                                }
+                                None => {
+                                    run.launch_bound = Some(bound);
+                                    None
+                                }
+                            },
+                        }
+                    };
+                    if let Some(why) = why {
+                        *s = snapshot;
+                        return Ok(Committed::Rejected(why));
                     }
                 }
             }

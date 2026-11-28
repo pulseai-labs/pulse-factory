@@ -299,9 +299,10 @@ The line names the device and never the code or the token. A seat cannot run `de
 ## Give or end a clear grant
 
 A project's **clear grant** lets its Orchestrator settle the requests that are below the line. Each
-request says which side it is on: `pulse-factory requests` and `pulse-factory show` print `line:
-below` or `line: above`. The grant is off until you give it. Nothing acts under it yet, so a grant
-changes no verb today.
+request says which side it is on: `pulse-factory show` prints `line: below` or `line: above`, and the
+JSON forms of `requests` and `show` carry it as `line` (`pulse-factory requests` prints no class). The
+grant is off until you give it. Under it, the project's Orchestrator can `settle` a request below the
+line (see "Settle a request below the line").
 
 ```
 pulse-factory grant clear --project P-1    # clear grant given: P-1 orchestrator generation 1
@@ -320,6 +321,30 @@ Only the operator gives or ends a grant: a chat or a seat that calls `grant clea
 Neither verb takes a claim. `halt` does not end a grant, and no grant verb is on the device allowlist.
 Each grant and each revoke is one line of `<state dir>/controller.ledger`.
 
+## Settle a request below the line
+
+```
+pulse-factory settle R-3 --rev 1 --act clear --reason "the screen shows nothing"
+```
+
+Only a session of the project's Orchestrator settles, under the project's clear grant, and only a request below the line: every other caller is refused.
+A seat, an operator's shell and a chat of another agent or another project are refused. A halted run refuses every settle.
+
+1. `settle` names a request at the revision you read (`--rev`), one act and a reason of 1 to 300
+   characters. `show` and the JSON forms carry the class and, once settled, who settled the
+   request and why.
+2. Each cause admits only its own acts. `stalled`: `clear`, or `redispatch --to <stage>` (a stage at
+   or before the stage the unit parked in). `seat_lost`: `resume`. `host_unreachable`: `resume`.
+   `merge_checks_red`: `rerun_check` or `redispatch --to <stage>`. `merge_conflict`:
+   `resolve_conflict`. Every other cause admits none, and the operator answers it. This server
+   builds `clear`, `redispatch` on a stall or a red check, and `resume` on a lost seat. It refuses
+   the other acts with a message that says so, and `close_stale` has no object.
+3. A settle grants no new budget. It resumes the unit and resets no outcome counter. The run
+   holds the launch count that `arm` showed, and a settle that would pass it is refused: the
+   operator can still `clear`.
+4. A retry sends the same request and revision, and it gets the first record back (`(replayed)`).
+   A revoked grant, a narrowed `authority.clear_acts` setting or a moved pinned file refuses the retry.
+
 ## Halt a run
 
 `pulse-factory halt [<run>] --reason "<why>"` stops new launches and new merges. Seats that run
@@ -333,7 +358,7 @@ process and answers with the sessions it stopped (see "Chat with a project's Orc
 - `pulse-factory hook` judges one tool call of a seat. The seat's extension runs it. You do not run
   it yourself.
 
-A seat cannot arm or halt a run, it cannot add or remove a project, it cannot start or drive a chat,
+A seat cannot arm or halt a run, it cannot add or remove a project (a chat cannot either), it cannot start or drive a chat,
 it cannot pair or revoke a device, and it cannot give or end a clear grant: those verbs refuse when
 `PF_SEAT_TOKEN` is set. A chat cannot arm a run, change a setting or give or end a clear grant: it
 proposes the start and the operator confirms it.

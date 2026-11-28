@@ -248,6 +248,8 @@ it lands, and that work's close marks it Accepted. It needs the session hosts of
   granted it, when, and when it was revoked. A revoke is set once, on its row, and the next grant
   takes the next generation. A commit can require that a project holds a live grant at one generation,
   and the store rejects the commit when it does not (ADR-0005, amendment of 2026-11-16).
+- **The run row holds the run's armed launch count.** `arm` sets it once, and a database guard keeps
+  it from changing. A grant act that would pass it is refused (ADR-0005, amendment of 2026-11-16).
 - Each write passes admission with a command ID, as every state change does.
 
 **Consequences.** A full restart has what it needs to resume each session as it was. No secret value

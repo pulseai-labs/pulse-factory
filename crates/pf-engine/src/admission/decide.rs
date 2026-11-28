@@ -80,6 +80,7 @@ pub fn decide(
             state: RunState::Active,
             halted_reason: None,
             project_id: None,
+            launch_bound: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),
         }));
@@ -319,6 +320,22 @@ pub fn decide(
             cause,
             ..
         } => claim::decide_ack_refused(view, id, *revision, *generation, cause),
+        CommandBody::Settle {
+            request_id,
+            revision,
+            act,
+            to_stage,
+            facts,
+        } => claim::decide_settle(
+            view,
+            workflow,
+            request_id,
+            *revision,
+            *act,
+            to_stage.as_deref(),
+            facts,
+            now,
+        ),
     }
 }
 

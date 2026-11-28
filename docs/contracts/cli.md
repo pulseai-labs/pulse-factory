@@ -319,7 +319,10 @@ answered and withdrawn requests, each marked with its status. With nothing open 
 `opened_at`, `answered_at`, `reason` and `verbs`, plus `pr`, `base` and `head_sha` on a
 `merge_ack`, `cause` and `summary` for a request that holds a decision block, and `line` for every
 request: `below` or `above`, the side of the line it is on (`requests.md`, "The line"), computed at
-the read for an open request and for a closed one), `claim` (the current claim as `generation`,
+the read for an open request and for a closed one, except that a settled request reads the line that
+its settle recorded), `settled` for a request that the Orchestrator settled (`act`, `to_stage`,
+`reason`, `session`, `project`, `generation` and `agent`; the key is absent for every other request;
+`requests.md`, "Settle"), `claim` (the current claim as `generation`,
 `holder`, `device` (the device ID, or null), `revoked` and `claimed_at`; null when none) and
 `grants` (the live clear grants, as `grant list` shows a row, so a reader knows which projects the
 Orchestrator may settle for; the key is absent when no grant is live, and a removed project's grant
@@ -370,6 +373,16 @@ line: below|above
 A request with a block prints it directly after the `summary:` line. A request with no block prints
 it after the last line it printed before. No other line of `show` changes, and `show --json` holds
 `line` beside `cause` and `summary`.
+
+A request that the Orchestrator settled prints one more line, directly after the `line:` line, with
+every control character of a value replaced (`requests.md`, "Settle"):
+
+```
+settled: by the Orchestrator (session <S-n>, grant <P-n>#<g>): act=<act>[ --to <stage>] reason=<text>
+```
+
+`show --json` holds the same facts as the `settled` object. For a settled request, `line` is the
+class recorded at the settle.
 
 An answered request whose answer took an option prints two more lines after the answer lines that it
 printed before (`requests.md`, "Acting on an option"):
@@ -498,6 +511,32 @@ today's ack. Another effect is refused and names the right verb. The controller,
   (`ack`), `pr`, `base`, `head_sha`, `merged` (true when the merge landed), `outcome` (`landed`, or
   the cause of the park), `after_merge_failure` (the cause, or null) and `option` (the ID, or null).
 
+## `settle`
+
+```
+pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> [--json]
+```
+
+The project's Orchestrator settles a request that is below the line, under the project's clear
+grant (`requests.md`, "Settle"). `<act>` is one of `clear`, `resume`, `rerun_check`, `redispatch`,
+`resolve_conflict` and `close_stale`, and each cause admits only its own acts. `--rev` is the
+revision the caller read. `--to` belongs to `redispatch` only, and `redispatch` needs it. The reason
+is 1 to 300 characters on one line. The verb takes no claim and reads no claim token. It is never on
+the device allowlist (`api.md`). The client refuses when `PF_SEAT_TOKEN` is set, as `claim` does.
+
+The controller admits a settle only from a process below a live chat session of the agent
+`orchestrator`, in the project that owns the request's run, under a live grant of that project, for
+an act in `authority.clear_acts`, on Linux. Every other caller is refused. A halted run refuses every
+settle. A settle grants no new budget: the run's armed launch count bounds it.
+
+- **Text.** `settled <R-n>@<k>: act=<act>[ --to <stage>] by grant <P-n>#<g> session <S-n>`, and
+  `(replayed)` after it for a replay.
+- **JSON.** `SettleAnswer`: `{"schema_version": 1, "request_id", "revision", "replayed",
+  "settled": {"act", "to_stage"?, "reason", "session", "project", "generation", "agent"}}`.
+- **Refusals** (exit 1, the reason on stderr; a `subject_moved` refusal names the word too): the
+  texts of `requests.md`, "Settle". Every refusal after the OS check is audited in
+  `controller.ledger`.
+
 ## `project`
 
 ```
@@ -581,8 +620,10 @@ command ID and one line of the controller ledger (see Common rules).
   live worktree rows removed in the same command.
 - **`--end-sessions`** (`r1.s5.w5`) ends the project's live chat sessions first, in session order, each
   through the code of `session end` with the command ID `<command-id>:end:<S-n>`, then removes the
-  project. `project remove --end-sessions` is refused for a caller that is, or descends from, a seat or
-  a live chat process (ADR-0015, Q2 rule 2). The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
+  project. `project remove`, with or without `--end-sessions`, and `project add` are refused for a caller
+  that is, or descends from, a seat or a live chat process, and for a caller that holds the chat marker
+  or `PF_SEAT_TOKEN` (ADR-0015, Q2 rule 2; the refusal reads `project_add refused: …` or
+  `project_remove refused: …`, and nothing is written). The operator's CLI is admitted. The text form then prints `sessions ended: S-2, S-3` when some ended. A command ID too long for
   its derived IDs is refused before any end.
 - **The run refusal** (`r1.s5.w5`), for `remove` with or without `--end-sessions`: a project with an active
   run is not removed, and no session is ended (`project P-1 has an active run <run>; remove it after the
@@ -795,11 +836,11 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly twelve in this release. Any other key is refused: `unknown setting <key>; the
+- **The keys.** Exactly thirteen in this release. Any other key is refused: `unknown setting <key>; the
   settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
   session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds, notify.app.on,
   notify.orchestrator.on, notify.app.max_words, notify.orchestrator.max_words,
-  notify.resend_seconds`. The confirm code, the
+  notify.resend_seconds, authority.clear_acts`. The confirm code, the
   caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
@@ -816,6 +857,14 @@ settings" in the common rules).
   | `notify.app.max_words` | a JSON integer, 5 to 200 | `30` | `override` | at the next notice |
   | `notify.orchestrator.max_words` | a JSON integer, 10 to 500 | `100` | `override` | at the next notice |
   | `notify.resend_seconds` | a JSON integer, 10 to 3600 | `60` | `override` | at the next re-send |
+  | `authority.clear_acts` | a JSON list of act names from `clear`, `resume`, `rerun_check`, `redispatch`, `resolve_conflict`, `close_stale` | all six | `intersect` | at the next `settle` |
+
+  `authority.clear_acts` narrows the acts that the Orchestrator may take under a project's clear grant
+  (`requests.md`, "Settle"). It is set at a project, an agent, or a project and agent, and a write at
+  the server scope is refused (`authority.clear_acts is set at a project, an agent, or a project and
+  agent`). An unknown act name is refused, and the refusal names the six. An empty list is allowed
+  and admits no act. `settle` reads the resolved list fresh at each act. Its `applies` reads
+  `next_turn` on the wire, and for this key it means the next `settle`.
 
   The five `notify.*` keys rule the channels of the request notices (`r2.s11.w3`, ADR-0016's amendment
   of 2026-11-21; `requests.md`, "Notices"). `notify.app.on` and `notify.orchestrator.on` turn a
@@ -861,9 +910,11 @@ settings" in the common rules).
   `git push --delete`, `git push * --delete`, `git push -d`, `git push * -d`, `git branch -D`,
   `git branch * -D`, `gh pr merge`, `gh -R * pr merge`, `gh --repo * pr merge` and
   `gh --repo=* pr merge`. The list is a speed bump, not a boundary (`chat-adapter.md`).
-- **The merge mode.** Each key declares how the rows of its scope chain combine. Every key is
-  `override` now: the first row on the chain wins whole, and every other stored row on the chain is
-  masked. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
+- **The merge mode.** Each key declares how the rows of its scope chain combine. Every key but one is
+  `override`: the first row on the chain wins whole, and every other stored row on the chain is
+  masked. `authority.clear_acts` is `intersect`: the value is the built-in list cut by every stored
+  value on the chain, in the built-in order. `from` names the most specific stored row, or
+  `built_in`, `layers` lists every stored row, and `masked` is empty, because no row hides another. `union` (for lists) and `min` (for numbers) are reserved for later keys, and need no
   migration, because the store keeps every scope's row as it is. A stored value that this binary
   cannot read (a hand edit) is skipped with one stderr line, and the next scope decides. A stored key
   that this binary does not know is ignored. There is no cache: a change applies at the next read.
@@ -874,7 +925,7 @@ settings" in the common rules).
   ["npm publish"]`. The JSON is `SettingsView`: `{"schema_version": 1, "project_id", "agent_id",
   "settings": [SettingRecord…]}`. A `SettingRecord` is `{key, value, from, built_in, merge, applies,
   layers, masked}`: `from` is `{kind, project_id, agent_id}` with `kind` one of `server`, `project`,
-  `agent`, `project_agent` or `built_in`; `merge` is `override`; `applies` is `next_turn` or
+  `agent`, `project_agent` or `built_in`; `merge` is `override` or `intersect`; `applies` is `next_turn` or
   `next_launch`; `layers` is every stored row on the chain, most specific first (`scope`, `value`,
   `set_by`, `set_at`); `masked` is the layers the resolved value hides. `get` is a read and is open to
   every caller, a chat included.
@@ -913,7 +964,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (one of the twelve keys, such as `chat.self_turn_cap`, or `other` for an unknown key
+  (one of the thirteen keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -926,8 +977,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, twenty-six
-  across the thirteen buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, twenty-eight
+  across the fourteen buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
@@ -968,7 +1019,7 @@ pulse-factory grant list [--project <P-n>] [--json]
 A project's **clear grant** says the project's Orchestrator may settle the requests that are below
 the line (`requests.md`, "The line" and "The clear grant"). Only the operator gives or ends it. The
 verbs run on the host over the socket. They launch nothing and change no run, so `halt` does not
-apply to them, and `halt` revokes no grant. Nothing acts under a grant yet.
+apply to them, and `halt` revokes no grant. `settle` acts under a grant (see `settle`).
 
 - **`clear`** gives the grant. It writes the project's next generation (from 1) for the agent
   `orchestrator`, given by `cli`. The text form is one line: `clear grant given: <P-n> orchestrator
@@ -997,6 +1048,11 @@ apply to them, and `halt` revokes no grant. Nothing acts under a grant yet.
   seat or a chat process, or to hold `PULSE_FACTORY_CHAT`. With no peer to check, both are refused
   (`grant_clear refused: the controller cannot tell which process called`). Neither reads a claim
   token or moves a claim. A new grant is refused while the controller's commands are stopped.
+  Under the `systemd` launcher, `clear` and `revoke` also refuse a caller that runs in the cgroup of
+  a live chat host unit, though it has no chat ancestor and an empty environment (`grant_clear
+  refused: the caller runs in the cgroup of chat host unit <unit>, so it runs under a chat`). A
+  read of the caller's cgroup that fails refuses. The operator's CLI runs in no chat host unit and
+  is admitted. Under the `detached` launcher the same caller is admitted: that is a stated residue.
 - **Ledger lines**, in `controller.ledger`: `grant_clear <P-n> agent=orchestrator generation=<g>
   by=cli command=<id>` and `grant_revoke <P-n> generation=<g> by=cli command=<id>`. A refused
   command writes its refusal line as the other controller commands do. No line holds a token.
