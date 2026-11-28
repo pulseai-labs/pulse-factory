@@ -139,7 +139,11 @@ fn a_fresh_store_reads_the_thirteen_built_ins() {
     for r in settings {
         assert_eq!(from_kind(r), "built_in", "{r}");
         // `authority.clear_acts` is the one key that merges by `intersect`; the other twelve override.
-        let merge = if r["key"] == "authority.clear_acts" { "intersect" } else { "override" };
+        let merge = if r["key"] == "authority.clear_acts" {
+            "intersect"
+        } else {
+            "override"
+        };
         assert_eq!(r["merge"], merge, "{r}");
         assert!(r["masked"].as_array().unwrap().is_empty(), "{r}");
         assert!(r["layers"].as_array().unwrap().is_empty(), "{r}");
