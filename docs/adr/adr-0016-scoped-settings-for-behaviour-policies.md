@@ -188,3 +188,16 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
 - **`applies` reads `next_turn` for these keys.** A third wire value of `SettingApplies` would break the
   UI's typecheck, which this work does not own. For a `notify.*` key `next_turn` means the next notice.
   `r2.s11.w5` decided not to add a third value, so these keys keep `next_turn`.
+
+## Amendment, 2026-11-24 (Proposed): the wake's two keys
+
+- `autopilot.wake` (`["off"]` or `["below"]`; built-in `["below"]`) turns the wake off or on for the
+  scope. It is a list of exactly one word, because `SettingValue` has a number and a list and no text.
+  There is no value `all`.
+- `autopilot.wakes_per_hour` (0 to 60; built-in 6) caps the wakes of a project in an hour; `0` is off.
+- Both merge by `override`, are read for the project and the agent `orchestrator`, fresh at each wake, and
+  have the resume flag `current`. A chat or a seat cannot set them. `applies` reads `next_turn` on the
+  wire, and for these keys it means the next wake. A failed read gives no wake: a wake is spend, so its
+  reads fail closed and never fall back to the built-in.
+- With them, and with `authority.rerun_checks_per_head` above, the registry holds sixteen keys, and the
+  caller check's refusal buckets are one for each key and `other`: seventeen.

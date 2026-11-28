@@ -1244,6 +1244,76 @@ fn an_interrupted_needs_you_options_stops_its_hosts() {
     interrupted_demo_with_env("needs-you-options.sh", "paper-options", &env);
 }
 
+/// The limit of `orchestrator-settles.sh`: its own bound is 200 s (two stalls of the stage's one-minute
+/// floor), and a failure it reports for a budget overrun arrives before this limit.
+const ORCHESTRATOR_SETTLES_LIMIT: Duration = Duration::from_secs(230);
+
+#[test]
+fn orchestrator_settles_passes() {
+    // d35: a stall below the line, under a live clear grant, wakes the project's Orchestrator chat, which
+    // settles it from below the chat; the question above the line is not in the wake and is refused.
+    let binaries = options_binaries();
+    let env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (out, took) = run("orchestrator-settles.sh", &env);
+    assert!(
+        out.status.success(),
+        "{:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status,
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(took < ORCHESTRATOR_SETTLES_LIMIT, "{took:?}");
+    let text = stdout(&out);
+    for want in [
+        "step 1:",
+        "step 2:",
+        "step 3:",
+        "step 4:",
+        "step 5:",
+        "step 6:",
+        "step 7:",
+        "step 8:",
+        "orchestrator-settles: ok",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    let last = text.lines().last().unwrap_or_default();
+    assert!(last.starts_with("orchestrator-settles: ok"), "{last}");
+}
+
+#[test]
+fn orchestrator_settles_fails_when_the_stall_never_parks() {
+    // A copy of `paper-settle` whose `stall` seat completes on its first launch: the item never stalls,
+    // so no request opens below the line.
+    let dir = tempfile::tempdir().unwrap();
+    let paper = dir.path().join("paper-settle");
+    copy_dir(&root().join("scripts/demo/paper-settle"), &paper);
+    edit(&paper, "seats/implementer.sh", |t| {
+        t.replace(
+            "if [ \"$launches\" -le 2 ]; then",
+            "if [ \"$launches\" -le 0 ]; then",
+        )
+    });
+    let binaries = options_binaries();
+    let mut env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    env.push(("PAPER_SRC", paper.to_str().unwrap()));
+    let (out, took) = run("orchestrator-settles.sh", &env);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(took < ORCHESTRATOR_SETTLES_LIMIT, "{took:?}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("orchestrator-settles: FAIL: step 4: the stall never parked"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_interrupted_orchestrator_settles_stops_its_hosts() {
+    let binaries = options_binaries();
+    let env: Vec<(&str, &str)> = binaries.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    interrupted_demo_with_env("orchestrator-settles.sh", "paper-settle", &env);
+}
+
 /// The limit of `start-api.sh`: one controller start, one replayed chat turn, a 4 s wait for a confirm
 /// code to expire and about forty `curl` calls. The script's own limit is 150 seconds.
 const START_API_LIMIT: Duration = Duration::from_secs(150);
@@ -1415,6 +1485,7 @@ fn the_scripts_run_no_build_and_hold_no_real_forge_call() {
         "chat-api.sh",
         "needs-you-api.sh",
         "needs-you-options.sh",
+        "orchestrator-settles.sh",
         "start-api.sh",
     ] {
         let text = std::fs::read_to_string(script(name)).unwrap();

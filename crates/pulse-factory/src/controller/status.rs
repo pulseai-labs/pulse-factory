@@ -141,6 +141,9 @@ pub fn build(c: &Controller, h: &RunHandle) -> Result<Value, String> {
         "launcher": c.hosts.launcher_name(),
         "warnings": warnings,
         "notices": notices,
+        // The wake of the run's project: the mode, the two counts and the last held reason
+        // (`r2.s3.w4`). Null for a run with no project.
+        "wake": c.wake_status(run.as_ref().and_then(|r| r.project_id.as_deref())),
         "driven": h.driven.load(Ordering::SeqCst),
         "halted_reason": run.as_ref().and_then(|r| r.halted_reason.clone()),
         "degraded": h.engine.degraded(),

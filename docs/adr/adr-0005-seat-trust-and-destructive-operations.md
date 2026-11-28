@@ -362,6 +362,7 @@ project or an agent. It can never widen it.
   own sandbox options are not enough: on a host whose AppArmor restricts unprivileged user namespaces,
   they silently do nothing. Inside such a sandbox a seat's hook needs a channel of its own to the
   controller. It is the direction, not this amendment.
+- **A woken turn keeps the chat's own tools.** A wake's turn runs with no operator present, with the chat's full tools, on a block that a seat's halt caused. The block holds only controller text and quotes a seat's words as data, and the grant's acts are bounded by `settle`'s checks, not by the persona. A woken turn in its own process with only read and `settle` tools was not taken.
 
 **Bypass plus personas** (operator, 2026-11-08).
 - Every launched session runs with its harness's permission prompts off. No harness prompt ever

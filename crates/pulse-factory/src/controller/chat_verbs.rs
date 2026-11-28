@@ -127,7 +127,7 @@ impl Controller {
 
     /// The checks of an open of a session that has no process: the launch check, the live worktree
     /// of a resume, and the cap.
-    fn ready_to_open(&self, row: &ChatSessionRow) -> Result<(), String> {
+    pub(super) fn ready_to_open(&self, row: &ChatSessionRow) -> Result<(), String> {
         let agent = self
             .agent(&row.agent_id)?
             .ok_or_else(|| format!("no agent {}", row.agent_id))?;
@@ -186,7 +186,7 @@ impl Controller {
 
     /// Run `f` on the live process of a session, holding the session's write lock. The process is
     /// opened first when there is none: the next message of the operator resumes a released one.
-    fn with_live<R>(
+    pub(super) fn with_live<R>(
         &self,
         row: &ChatSessionRow,
         f: impl FnOnce(&std::sync::Arc<LiveChat>) -> R,
@@ -377,6 +377,8 @@ impl Controller {
             live.port
                 .send(&live.chat, InputKind::Operator, &wire_text)
                 .map_err(|e| e.to_string())?;
+            // The send is in the process and its turn has not begun: no wake goes in between.
+            lock(&live.inner).input_pending = true;
             if let Some(carry) = carry {
                 self.notices_carried(live, carry);
             }
@@ -926,6 +928,7 @@ impl Controller {
             Ok(a) => a,
             Err(r) => return r,
         };
+        let session_id = args.session_id.clone();
         let done = match self.redact_chat_item(&ChatItemRedactArgs {
             session_id: args.session_id,
             seq: args.seq,
@@ -934,6 +937,9 @@ impl Controller {
             Ok(d) => d,
             Err(why) => return Response::err(why),
         };
+        // A `wake` item that the operator redacted no longer counts toward the wake's bounds: the
+        // next check reads the session again (`r2.s3.w4`, the stated limit of the count).
+        self.forget_wake_counts(&session_id);
         // A reader that follows the session sees the marks. A device that read the item before
         // keeps its copy (ADR-0015's known limit).
         if !done.replayed {

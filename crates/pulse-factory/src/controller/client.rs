@@ -137,6 +137,32 @@ pub fn status_text(v: &Value) -> String {
             s(d)
         ));
     }
+    // The wake of the run's project (`r2.s3.w4`): one line after the lines above, and one more
+    // when a wake is held back.
+    let w = &v["wake"];
+    if w.is_object() {
+        if w["mode"].as_str() == Some("off") {
+            line("wake: off".to_string());
+        } else if w["grant"].as_bool() != Some(true) {
+            line("wake: no clear grant".to_string());
+        } else {
+            let cap = w["self_turn_cap"].as_u64().unwrap_or(0);
+            let since = w["since_operator"].as_u64().unwrap_or(0);
+            let since = if cap == 0 {
+                format!("{since} since the operator's last message (cap off)")
+            } else {
+                format!("{since} of {cap} since the operator's last message")
+            };
+            line(format!(
+                "wake: below; {since}; {} of {} in the last hour",
+                w["last_hour"].as_u64().unwrap_or(0),
+                w["wakes_per_hour"].as_u64().unwrap_or(0),
+            ));
+        }
+        if let Some(why) = w["held"].as_str() {
+            line(format!("held: {why}"));
+        }
+    }
     t
 }
 

@@ -126,7 +126,7 @@ close passed it.
   before the controller saw it open gets none. The notice is data about the request: no verb changes with
   it, and no notice answers, clears or acknowledges a request.
 - **A notice is delivered on two channels**, the paired devices and the project's Orchestrator chat. It
-  starts no turn, no run and no launch, so `halt` does not stop one. A controller whose commands are
+  starts no turn, no run and no launch, so `halt` does not stop one. (Replaced by the amendment of 2026-11-24 below: a notice below the line can start one turn.) A controller whose commands are
   stopped writes none, and `status` says so.
 - **A notice is acknowledged per target and sent again until then.** A target acknowledges a position,
   and the position covers every notice of its channel at or below it. A notice that its target has not
@@ -137,3 +137,29 @@ close passed it.
   seat's words (ADR-0005), the reason, the stop text or the gaps.
 - **No give-up while the request is open** is a known limit: a client that never acknowledges gets each
   waiting notice again at most every 15 minutes.
+
+## Amendment, 2026-11-24 (Proposed): a notice below the line wakes the project's Orchestrator
+
+The Accepted amendment of 2026-11-21 said that a notice starts no turn. That sentence is replaced for one
+kind of notice. The first working form of autopilot is the project's Orchestrator, woken by a halt.
+There is no second agent.
+
+- **A notice of a request that opens below the line, in a project with a live clear grant,**
+  can start one turn of the project's Orchestrator. The controller sends the notices that wait as one marked block, an
+  `InputKind::Notice` send, and that send starts the turn. The turn may settle each request the block
+  names with `settle` and one of the acts its line lists, or end and leave the request for the operator.
+- **No other notice starts a turn.** A notice of a request above the line, a notice of a request that is
+  woken already, a `revised` and a `closed` notice wake nothing. They reach the chat as items and ride the
+  operator's next message, as before.
+- **Wakes are not lost:** a missed wake is sent when its conditions next hold. A request that opened with no grant is woken
+  when the grant is given, one that a rate bound held back at the tick that finds a slot free, one that
+  opened during a woken turn when that turn ends. Many notices go in one send. A request is woken at most
+  once, marked when the woken turn's result is stored.
+- **`halt` stops that turn, and a halted run gets none.** The wake's turn is a turn of the chat, so
+  `halt` stops it as it stops any chat, and a run that is halted has no request in the wake.
+- **The wake's input holds only controller text.** The block holds the controller's own fields, and quotes
+  a seat's words (a stall's screen tail, the forge's text) as data, redacted, cut and on lines of their
+  own. A turn that follows such text moves no act past `settle`'s checks.
+- **The spend is bounded.** `autopilot.wake` turns the wake off, `autopilot.wakes_per_hour` caps it, and
+  `chat.self_turn_cap` holds until the operator's next message. Each count is read from the store, so a
+  release of the chat's process and a restart reset nothing.

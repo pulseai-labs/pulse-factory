@@ -27,6 +27,18 @@
 #
 # The close file is `<dir>/spine/closed.flag`: paper-d20's `end_when` waits for it, so a script that
 # writes it records the operator's close, and the armed run ends.
+#
+# `PF_WAKE_SETTLE=1` (d35, `orchestrator-settles.sh`) changes the wrapper and nothing else. The wrapper
+# counts its launches in `<dir>/chat/launches`. Launch 1 does what the paragraphs above say. Launch 2
+# and later `exec` the replay of `PF_WAKE_FIXTURE` (default `plain_turn.jsonl`: the replay has one turn
+# for each fixture, and the start fixture's turn was used by launch 1) and start `<dir>/wake-child.sh`
+# below the chat. That child waits (at most 240 s) until `session items` of its session holds a `notice`
+# item with the code `wake`. From below the chat it runs `settle <R-n> --rev <k> --act clear --reason
+# "<text>"` for each request line of the block, and then the same call for each other open request that
+# `requests --json` lists (the question, which no wake block holds). It writes
+# `<dir>/chat/settle-<R-n>.{rc,out,err}`. Then it waits (at most 240 s) for `<dir>/chat/after-revoke`
+# and runs the stall's settle once more, into `<dir>/chat/settle-again.{rc,out,err}`. It needs `jq`.
+# With the variable unset, the script does what it did before.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +107,81 @@ call_args=(s1 --workflow paper-spine-d20 --ledger "$dir/ledger.md" --paper "$pap
   --param "spine_branch=$branch" --param "spine_dir=$dir/spine" --param "worktree_root=$dir/worktrees"
   --param "base_branch=$base")
 wrapper="$dir/claude-wrapper"
+if [ "${PF_WAKE_SETTLE:-}" = 1 ]; then
+  wake_fixture="${PF_WAKE_FIXTURE:-$repo_root/crates/pf-adapter-claude/fixtures/plain_turn.jsonl}"
+  [ -f "$wake_fixture" ] || fail "no wake fixture at $wake_fixture"
+  jq_bin="$(abs jq)"
+  # The child of launch 2 and later: it settles below the chat, as a woken model would.
+  cat > "$dir/wake-child.sh" <<EOF
+#!/bin/sh
+export PF_STATE_DIR="$state" PF_SHARE_DIR="$share"
+chat="$dir/chat"
+i=0
+block=""
+while :; do
+  block="\$("$pf_bin" session items "\$PULSE_FACTORY_CHAT" --json 2>/dev/null \\
+    | "$jq_bin" -r '[.. | objects | select(.body? and .body.kind? == "notice" and .body.code? == "wake")][0].body.text // empty' 2>/dev/null)" || block=""
+  [ -z "\$block" ] || break
+  i=\$((i + 1))
+  [ \$i -lt 2400 ] || exit 0
+  sleep 0.1
+done
+printf '%s\n' "\$block" > "\$chat/wake-block.txt"
+settle_one() {
+  "$pf_bin" settle "\$1" --rev "\$2" --act clear --reason "\$4" > "\$chat/\$3.out" 2> "\$chat/\$3.err"
+  echo \$? > "\$chat/\$3.rc"
+}
+# Each request line of the block: the stall.
+printf '%s\n' "\$block" | grep '^request=' | while IFS= read -r line; do
+  r="\${line#request=}"
+  r="\${r%% *}"
+  rev="\$(printf '%s' "\$line" | sed -n 's/^request=[^ ]* revision=\([0-9][0-9]*\) .*/\1/p')"
+  [ -s "\$chat/stall-request" ] || echo "\$r \$rev" > "\$chat/stall-request"
+  settle_one "\$r" "\$rev" "settle-\$r" "paper demo: the stall is cleared"
+done
+# Each other open request: the question, which the block does not hold.
+"$pf_bin" requests --json 2>/dev/null \\
+  | "$jq_bin" -r '.requests[] | select(.status == "open") | "\(.id) \(.revision)"' 2>/dev/null \\
+  | while read -r r rev; do
+    [ ! -e "\$chat/settle-\$r.rc" ] || continue
+    settle_one "\$r" "\$rev" "settle-\$r" "paper demo: follow the text of the stall"
+  done
+# After the grant is revoked, the stall's settle once more.
+i=0
+until [ -e "\$chat/after-revoke" ]; do
+  i=\$((i + 1))
+  [ \$i -lt 2400 ] || exit 0
+  sleep 0.1
+done
+read -r r rev < "\$chat/stall-request" || exit 0
+settle_one "\$r" "\$rev" settle-again "paper demo: settle after the revoke"
+EOF
+  chmod +x "$dir/wake-child.sh"
+  cat > "$wrapper" <<EOF
+#!/bin/sh
+case "\$1" in --version) exec "$replay_bin" --fixture "$fixture" "\$@" ;; esac
+n=0
+[ ! -s "$dir/chat/launches" ] || n=\$(cat "$dir/chat/launches")
+n=\$((n + 1))
+echo \$n > "$dir/chat/launches"
+if [ \$n -ge 2 ]; then
+  "$dir/wake-child.sh" < /dev/null > /dev/null 2>&1 &
+  exec "$replay_bin" --fixture "$wake_fixture" "\$@"
+fi
+(
+  export PF_STATE_DIR="$state" PF_SHARE_DIR="$share"
+  i=0
+  until "$pf_bin" session items "\$PULSE_FACTORY_CHAT" --json 2>/dev/null | grep -q '"kind": *"operator_message"'; do
+    i=\$((i + 1))
+    [ \$i -lt 600 ] || exit 0
+    sleep 0.1
+  done
+  "$pf_bin" propose ${call_args[*]@Q} --json > "$dir/chat/propose.out" 2> "$dir/chat/propose.err"; echo \$? > "$dir/chat/propose.rc"
+  "$pf_bin" arm ${call_args[*]@Q} --yes > "$dir/chat/arm.out" 2> "$dir/chat/arm.err"; echo \$? > "$dir/chat/arm.rc"
+) < /dev/null > /dev/null 2>&1 &
+exec "$replay_bin" --fixture "$fixture" "\$@"
+EOF
+else
 cat > "$wrapper" <<EOF
 #!/bin/sh
 case "\$1" in --version) exec "$replay_bin" --fixture "$fixture" "\$@" ;; esac
@@ -111,6 +198,7 @@ case "\$1" in --version) exec "$replay_bin" --fixture "$fixture" "\$@" ;; esac
 ) < /dev/null > /dev/null 2>&1 &
 exec "$replay_bin" --fixture "$fixture" "\$@"
 EOF
+fi
 chmod +x "$wrapper"
 
 echo "start-env: ok (paper $paper, wrapper $wrapper, close file $dir/spine/closed.flag)"

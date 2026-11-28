@@ -280,6 +280,17 @@ show no notifications until their next `shown`. The text output prints one line 
 notice and one for each blocked device, after the lines it printed before. With the controller's
 commands stopped, `warnings` holds a text that says no notice is written.
 
+The JSON gains `wake`, for the run's project, or `null` for a run with no project (`r2.s3.w4`):
+`{"project", "grant", "mode", "wakes_per_hour", "self_turn_cap", "since_operator", "last_hour", "held"}`.
+`grant` says whether the project's clear grant is live, and `mode` is `below` or `off` (`autopilot.wake`).
+`since_operator` and `last_hour` are the two counts of the wake for the project's live Orchestrator
+session, read from the store (`requests.md`, "The wake"), and `held` is the last reason that held a
+wake back, or `null`. The controller keeps it in memory, so a restart forgets it until the next check.
+The text form prints one line after the lines it printed before: `wake: below; 1 of 3 since the
+operator's last message; 1 of 6 in the last hour` (for a cap of 0 the first count reads `1 since the
+operator's last message (cap off)`), `wake: off` or `wake: no clear grant`, and `held: <reason>` when
+a wake is held.
+
 A failed store read is an error, never an empty list. `status` reads the run, its nodes, sessions,
 admissions and requests, and when one read fails the controller answers `cannot read run <id> from the
 store: <cause>`, and the CLI exits 1 with that text and prints no unit list. A run whose units the
@@ -776,7 +787,7 @@ stream (`api.md`).
 - **The lifetime.** One live process for each chat. A process is *not idle* while a turn runs, a
   background task runs or a request is pending. A process that is none of these for 30 minutes is
   released: it is stopped, a `notice` item says so, and `chat stop reason=idle` is written. Nothing
-  reopens a released process except the operator's next `send`: no timer, tick or notice does. The
+  reopens a released process except the operator's next `send` and, in a project's Orchestrator chat, a wake (`docs/contracts/requests.md`, "The wake"): no timer or tick does. The
   cap is `PF_CHAT_MAX_LIVE` (default 4). An open that would pass it is refused, no process is
   released early to make room, and the refusal names every live chat and why it holds its process:
   `the chat process cap (4) is reached: S-3 waits for an answer since <t>; S-5 holds background task
@@ -844,11 +855,11 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly fourteen in this release. Any other key is refused: `unknown setting <key>; the
+- **The keys.** Exactly sixteen in this release. Any other key is refused: `unknown setting <key>; the
   settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
   session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds, notify.app.on,
   notify.orchestrator.on, notify.app.max_words, notify.orchestrator.max_words,
-  notify.resend_seconds, authority.clear_acts, authority.rerun_checks_per_head`. The confirm code, the
+  notify.resend_seconds, authority.clear_acts, authority.rerun_checks_per_head, autopilot.wake, autopilot.wakes_per_hour`. The confirm code, the
   caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
@@ -867,6 +878,8 @@ settings" in the common rules).
   | `notify.resend_seconds` | a JSON integer, 10 to 3600 | `60` | `override` | at the next re-send |
   | `authority.clear_acts` | a JSON list of act names from `clear`, `resume`, `rerun_check`, `redispatch`, `resolve_conflict`, `close_stale` | all six | `intersect` | at the next `settle` |
   | `authority.rerun_checks_per_head` | a JSON integer, 0 to 5 | `1` | `override` | at the next `settle` |
+  | `autopilot.wake` | a JSON list of one word, `["off"]` or `["below"]` | `["below"]` | `override` | at the next wake |
+  | `autopilot.wakes_per_hour` | a JSON integer, 0 to 60; `0` is off | `6` | `override` | at the next wake |
 
   `authority.clear_acts` narrows the acts that the Orchestrator may take under a project's clear grant
   (`requests.md`, "Settle"). It is set at a project, an agent, or a project and agent, and a write at
@@ -880,6 +893,17 @@ settings" in the common rules).
   and agent, and `0` turns `rerun_check` off. `settle` reads the resolved value fresh at each
   `rerun_check`. Its `applies` reads `next_turn` on the wire, and for this key it means the next
   `settle`.
+
+  The two `autopilot.*` keys rule the wake (`r2.s3.w4`, ADR-0016's amendment of 2026-11-24;
+  `requests.md`, "The wake"). `autopilot.wake` is a JSON list of exactly one word: `["below"]` wakes the
+  project's Orchestrator when a request opens below the line under a live clear grant, and `["off"]`
+  never wakes it. Any other list, an empty list, a second word and a bare JSON string are refused with
+  the rule `autopilot.wake is a list of one word, ["off"] or ["below"], not <value>`. There is no `all`.
+  `autopilot.wakes_per_hour` caps the wakes of a project in an hour, counted from the store; `0` is off.
+  Both merge by `override`, are written at all four scopes, and are read for the project and the agent
+  `orchestrator`, fresh at each check; a value that cannot be read gives no wake. For these keys `applies`
+  reads `next_turn` on the wire, and it means the next wake. Each has the resume flag `current`. The
+  wake also holds to `chat.self_turn_cap`, counted from the store as well.
 
   The five `notify.*` keys rule the channels of the request notices (`r2.s11.w3`, ADR-0016's amendment
   of 2026-11-21; `requests.md`, "Notices"). `notify.app.on` and `notify.orchestrator.on` turn a
@@ -979,7 +1003,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (one of the fourteen keys, such as `chat.self_turn_cap`, or `other` for an unknown key
+  (one of the sixteen keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -992,8 +1016,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, thirty
-  across the fifteen buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, thirty-four
+  across the seventeen buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where
@@ -1034,7 +1058,8 @@ pulse-factory grant list [--project <P-n>] [--json]
 A project's **clear grant** says the project's Orchestrator may settle the requests that are below
 the line (`requests.md`, "The line" and "The clear grant"). Only the operator gives or ends it. The
 verbs run on the host over the socket. They launch nothing and change no run, so `halt` does not
-apply to them, and `halt` revokes no grant. `settle` acts under a grant (see `settle`).
+apply to them, and `halt` revokes no grant. `settle` acts under a grant (see `settle`). A grant given
+wakes the project's Orchestrator for the requests that wait below the line (`requests.md`, "The wake").
 
 - **`clear`** gives the grant. It writes the project's next generation (from 1) for the agent
   `orchestrator`, given by `cli`. The text form is one line: `clear grant given: <P-n> orchestrator

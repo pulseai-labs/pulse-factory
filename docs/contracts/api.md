@@ -124,8 +124,16 @@ holds `cause` and `summary` for a request that has a decision block, and leaves 
 it at each read, for an open request and for a closed one, except that a settled request reads the
 line that its settle recorded. A request that the Orchestrator settled also holds `settled`
 (`RequestSettled`: `act`, `to_stage`, `reason`, `session`, `project`, `generation` and `agent`;
-`requests.md`, "Settle"), and the field is left out for every other request. A client that does not
-know `line` or `settled` decodes the frame as before.
+`requests.md`, "Settle"), and the field is left out for every other request. It holds `woken_at` for
+an open request below the line that a wake listed and whose woken turn's result is stored: the time of
+the request's `woken:<R-n>` record, so a client can say that the Orchestrator was told, and when
+(`requests.md`, "The wake"). The field is left out for every other request. A client that does not
+know `line`, `settled` or `woken_at` decodes the frame as before.
+
+The chat stream's `notice` item (`{"kind":"notice","code":…,"text":…}`) has one more code, `wake`
+(`r2.s3.w4`): the block that the controller sent to the project's Orchestrator chat as a wake, stored
+before it is sent (`requests.md`, "The wake"). The text of a `wake` item holds only the controller's
+words and the quoted data lines of the block. A client that does not know a code shows the text.
 
 ```json
 {"type":"requests","requests":[{"id":"R-4","revision":1,"kind":"merge_ack","status":"open","run":"r1-s4","unit":null,"stage":"close","blocks":[],"opened_at":"2026-11-09T21:03:11.402Z","answered_at":null,"reason":"the spine PR waits for the claim's ack","verbs":["ack"],"pr":"pulseai-labs/pilot-fourseat#9","base":"main","head_sha":"9f2c0d1e5b7a43c8d6e1f0a2b3c4d5e6f7a8b9c0"}],"claim":{"generation":2,"holder":"device D-1 (MacBook)","device":"D-1","revoked":false,"claimed_at":"2026-11-09T21:04:50.118Z"}}

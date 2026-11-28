@@ -1,0 +1,6 @@
+version: 1
+role: close
+allow:
+  - delete_own_scratch
+  - push_own_branch
+  - write_own_report_and_run_files

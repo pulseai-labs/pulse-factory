@@ -31,7 +31,7 @@ use pf_engine::port::chat::{
 };
 use pf_engine::port::store::{
     AgentRow, ChatHostMark, ChatItemKind, ChatItemRow, ChatSessionRow, ChatSessionState,
-    LaunchRecordRow, NewChatItem, Store, ToolText,
+    LaunchRecordRow, NewChatItem, ORCHESTRATOR_AGENT, Store, ToolText,
 };
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
@@ -288,6 +288,14 @@ pub(super) struct LiveInner {
     /// that message is stored (`r2.s11.w3`). In memory only: a restart in the turn leaves the
     /// notices waiting for the next message.
     pub carried: Option<u64>,
+    /// True from a send (an operator's or a wake's) until the turn that it starts begins, ends, or
+    /// the process stops (`r2.s3.w4`). A wake is not sent into the gap between a send and its
+    /// `TurnStarted`, where it could steer into an operator's turn. In memory only.
+    pub input_pending: bool,
+    /// The requests and the revisions that the wake just sent lists, until the result of its turn
+    /// is stored: that result marks each of them woken (`r2.s3.w4`). In memory only: a restart in
+    /// the turn, or a process that stops first, leaves them unmarked.
+    pub woken: Option<super::notices::Woken>,
 }
 
 /// One live chat process.
@@ -988,6 +996,8 @@ impl Controller {
                 self_turns: 0,
                 held: None,
                 carried: None,
+                input_pending: false,
+                woken: None,
             }),
         })
     }
@@ -1160,7 +1170,14 @@ impl Controller {
         // The requests stay in the set: `close_pending` reads them to close this process's own
         // requests as lost, and it clears the set. The process left the table, so no answer
         // reaches them.
-        lock(&live.inner).context = None;
+        {
+            let mut inner = lock(&live.inner);
+            inner.context = None;
+            // A stopped process runs no turn: nothing is pending, and the requests of a woken turn
+            // that never gave its result stay unmarked (`r2.s3.w4`).
+            inner.input_pending = false;
+            inner.woken = None;
+        }
     }
 
     // -------------------------------------------------------------- the cap
@@ -1337,6 +1354,11 @@ impl Controller {
             let usage = live.port.context_usage(&live.chat).ok();
             lock(&live.inner).context = usage;
             self.emit_session(&live.session);
+            // The session's write lock is let go: a turn of the project's Orchestrator ended, so a
+            // request that waited for the turn is woken now (`r2.s3.w4`).
+            if live.agent == ORCHESTRATOR_AGENT {
+                self.wake_check(&live.project);
+            }
         }
     }
 
@@ -1358,6 +1380,8 @@ impl Controller {
         {
             let mut inner = lock(&live.inner);
             inner.turn_since = None;
+            inner.input_pending = false;
+            inner.woken = None;
             inner.tasks.clear();
             inner.requests.clear();
             inner.tools.clear();
@@ -1418,6 +1442,7 @@ impl Controller {
                     // the adapter opens it again at the first line that is left.
                     let since = inner.turn_since.unwrap_or_else(SystemTime::now);
                     inner.turn_since = Some(since);
+                    inner.input_pending = false;
                     // An operator's turn resets the count. A turn nobody asked for counts.
                     inner.self_turns = if self_started {
                         inner.self_turns + 1
@@ -1646,9 +1671,22 @@ impl Controller {
                 if stored && matches!(cause, TurnCause::Operator) {
                     self.ack_carried(live);
                 }
+                // The turn result of a wake is the proof that the wake's block arrived: each request
+                // it listed is marked woken now, before the turn's end runs the check (`r2.s3.w4`).
+                // A result that is an error is no proof: it marks nothing, the wake is no longer
+                // pending, and the next check can list the requests again. The wake item stays and
+                // counts, so the cap and the hour still bound the spend.
+                if matches!(cause, TurnCause::Notice) {
+                    if stored && !is_error {
+                        self.mark_woken(live);
+                    } else {
+                        lock(&live.inner).woken = None;
+                    }
+                }
                 {
                     let mut inner = lock(&live.inner);
                     inner.turn_since = None;
+                    inner.input_pending = false;
                     if inner.requests.is_empty() {
                         inner.idle_since = SystemTime::now();
                     }
@@ -1725,6 +1763,8 @@ impl Controller {
                 {
                     let mut inner = lock(&live.inner);
                     inner.turn_since = None;
+                    inner.input_pending = false;
+                    inner.woken = None;
                     inner.tasks.clear();
                     inner.requests.clear();
                     inner.context = None;
@@ -1811,6 +1851,8 @@ impl Controller {
                 self.close_pending_in(live, "the chat process exited", Some(ctx));
                 let mut inner = lock(&live.inner);
                 inner.turn_since = None;
+                inner.input_pending = false;
+                inner.woken = None;
                 inner.tasks.clear();
                 inner.requests.clear();
                 inner.tools.clear();

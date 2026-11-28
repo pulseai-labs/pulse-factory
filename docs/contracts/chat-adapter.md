@@ -227,10 +227,9 @@ degrade wins over the stored value.
 
 ## Request notices ride an `Operator` send
 
-The port has one text for each `send`, and `InputKind::Notice` is **still unsent**: nothing calls it,
-and a notice starts no turn (`r2.s3` owns the wake). A request notice (`requests.md`, "Notices")
-reaches an Orchestrator chat as a marked block before the operator's own text, in the same `Operator`
-send (`r2.s11.w3`):
+The port has one text for each `send`. A request notice (`requests.md`, "Notices") reaches an
+Orchestrator chat as a marked block before the operator's own text, in the same `Operator` send
+(`r2.s11.w3`):
 
 ```
 [Pulse Factory notice. The controller wrote this, not the operator.]
@@ -249,6 +248,22 @@ The mark is the frame. The Orchestrator's persona says that a block with that fi
 controller's, that it lists requests which wait in Needs you, and that the Orchestrator can answer
 none of them. The stored `OperatorMessage` item holds the typed text alone, and the adapter's own
 transcript holds the block. A message sent while a turn is open carries nothing.
+
+## A wake is a `Notice` send
+
+A halt below the line, under the project's clear grant, wakes the project's Orchestrator
+(`requests.md`, "The wake"). The controller sends the wake's block alone, with no operator text, as
+`InputKind::Notice`: one send, and that send starts one turn. The block has the same markers as the
+carry's and a second line that begins `Wake:`. The adapter sees one text and cannot tell the block
+from any other; the persona says what a block that begins with `Wake:` is and what the turn may do.
+
+The adapter's turn reports `TurnCause::Notice` (the Claude Code adapter notes the kind of each send by
+its message UUID, and gives the turn the cause of the send that started it; the fake chat maps `Notice`
+to the same cause). The controller counts such a turn as one the operator did not start, against
+`chat.self_turn_cap`, and when its result is stored with the cause `notice` it marks the requests that
+the block listed as woken. A turn whose send the adapter never saw (a restart with no checkpoint)
+reads `Operator`, and the wake is then not acknowledged: its requests stay unmarked, and a later check
+may list them again. No adapter changes for the wake.
 
 ## Errors
 
