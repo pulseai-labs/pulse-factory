@@ -12,6 +12,12 @@
 //! Declared order: units rank by the order their group first appeared, then by `order`, then by
 //! ID. A unit that is not merged yet holds back every later unit.
 
+mod guarded;
+
+pub use guarded::{
+    LISTED_MAX, Listed, Resolution, glob_match, resolution_changes, stored_resolution, verdict,
+};
+
 use crate::admission::{Command, CommandBody, Decision, EngineError, RunView};
 use crate::claim::{VERB_ACK, check_claim};
 use crate::engine::Engine;
@@ -323,7 +329,16 @@ impl Engine {
                     unit,
                 })
             }
-            Next::Ready(unit) => self.merge_unit(&view, &unit),
+            Next::Ready(unit) => {
+                // A settle that has not stored its effect's result holds its unit: no merge before it.
+                if let Some(pending) = crate::claim::pending_settle(&view, &unit) {
+                    return Ok(MergeStep::Waiting {
+                        why: format!("settle {} waits for its effect's result", pending.name()),
+                        unit,
+                    });
+                }
+                self.merge_unit(&view, &unit)
+            }
         }
     }
 

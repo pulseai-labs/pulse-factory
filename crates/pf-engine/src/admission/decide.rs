@@ -7,10 +7,11 @@
 use crate::claim;
 use crate::launch;
 use crate::merge;
+use crate::merge::Resolution;
 use crate::port::store::{
     AdmissionOutcome, Cause, Effect, NodeKind, NodeRow, RequestKind, RunRow, RunState,
 };
-use crate::status::{EndStatus, Status, check_reason};
+use crate::status::{EndStatus, Status, check_reason, one_line_reason};
 use crate::unit::{Signal, UnitDetail};
 use crate::workflow::Workflow;
 
@@ -117,6 +118,7 @@ pub fn decide(
             stage,
             signal,
             pr,
+            resolution,
         } => signal_stage(
             view,
             workflow,
@@ -124,7 +126,7 @@ pub fn decide(
             stage,
             signal,
             pr.clone(),
-            None,
+            Ending::Signal(resolution.as_ref()),
             now,
         ),
         CommandBody::Outcome {
@@ -140,7 +142,7 @@ pub fn decide(
             stage,
             signal,
             pr.clone(),
-            Some(*entry),
+            Ending::Outcome(*entry),
             now,
         ),
         CommandBody::Usage { session_id, usage } => {
@@ -320,6 +322,22 @@ pub fn decide(
             cause,
             ..
         } => claim::decide_ack_refused(view, id, *revision, *generation, cause),
+        CommandBody::SettleResult {
+            request_id,
+            revision,
+            outcome,
+            detail,
+            process_ref,
+        } => claim::decide_settle_result(
+            view,
+            workflow,
+            request_id,
+            *revision,
+            *outcome,
+            detail,
+            process_ref.as_deref(),
+            now,
+        ),
         CommandBody::Settle {
             request_id,
             revision,
@@ -459,8 +477,19 @@ fn running_unit<'a>(view: &'a RunView, unit_id: &str) -> Result<&'a NodeRow, Rej
     Ok(unit)
 }
 
+/// How a signal ends a stage.
+#[derive(Clone, Copy)]
+enum Ending<'a> {
+    /// The unit goes on to the next stage in order. The end of a track's conflict stage carries the
+    /// verdict of the guarded compare.
+    Signal(Option<&'a Resolution>),
+    /// Entry `n` of the stage's outcomes decides where the unit goes.
+    Outcome(u32),
+}
+
 /// What ends a stage with a signal: the stage ends `done`, and the unit goes on to the next stage
-/// in order (`outcome` is `None`) or the stage's outcome entry decides where it goes.
+/// in order or the stage's outcome entry decides where it goes. The end of a track's conflict stage
+/// goes to the track's `then` stage, and parks the unit when the guarded compare says so.
 #[allow(clippy::too_many_arguments)]
 fn signal_stage(
     view: &RunView,
@@ -469,9 +498,13 @@ fn signal_stage(
     stage: &str,
     signal: &Signal,
     pr: Option<crate::port::forge::PrRef>,
-    outcome: Option<u32>,
+    ending: Ending<'_>,
     now: &str,
 ) -> Result<Decision, Rejected> {
+    let outcome = match ending {
+        Ending::Outcome(entry) => Some(entry),
+        Ending::Signal(_) => None,
+    };
     let unit = running_unit(view, unit_id)?;
     let stage_node = view
         .stages_of(unit_id)
@@ -488,6 +521,11 @@ fn signal_stage(
             "an outcome of stage {stage} needs a signal that succeeded, not {}",
             signal.describe()
         ));
+    }
+    // The track's conflict stage ends with the guarded compare, and no path skips it.
+    let conflict = track.on_conflict().filter(|c| c.stage == stage);
+    if conflict.is_some() && signal.is_success() && !matches!(ending, Ending::Signal(Some(_))) {
+        return Err("the conflict stage's end needs the guarded compare".to_string());
     }
     if pr.is_some() {
         detail.pr = pr;
@@ -507,6 +545,9 @@ fn signal_stage(
     // Set when the entry is at its cap: the unit parks with this reason, and the request's
     // facts name the stage the entry sends the unit to and the cap's number.
     let mut cap_park: Option<(String, serde_json::Value)> = None;
+    // Set when the guarded compare parks the unit at the end of the conflict stage: the cause, the
+    // reason and the request's facts.
+    let mut guard_park: Option<(String, serde_json::Value)> = None;
     let text;
     if !signal.is_success() {
         stage_end.status = Status::Failed;
@@ -558,9 +599,43 @@ fn signal_stage(
                 target.max
             );
         }
+    } else if let (Some(c), Ending::Signal(Some(resolution))) = (conflict, ending) {
+        // The conflict stage is done. The unit goes to `then`, never to the merge.
+        stage_end.status = Status::Done;
+        let then = track.stage_index(&c.then).ok_or_else(|| {
+            format!(
+                "the conflict stage of track {} names then {}, which the track does not define",
+                track.name, c.then
+            )
+        })?;
+        detail.stages_done = u32::try_from(then).unwrap_or(u32::MAX);
+        match resolution.park_facts() {
+            None => {
+                unit_next.reason = halted.then(|| crate::status::REASON_RUN_HALTED.to_string());
+                text = format!(
+                    "stage {stage} done ({}); {}; unit goes on to {}",
+                    signal.describe(),
+                    resolution.describe(),
+                    c.then
+                );
+            }
+            Some(facts) => {
+                let reason = match resolution {
+                    Resolution::Unread { why } => {
+                        format!("the resolution could not be compared: {why}")
+                    }
+                    other => other.describe(),
+                };
+                text = format!(
+                    "stage {stage} done ({}); {reason}; unit parked",
+                    signal.describe()
+                );
+                guard_park = Some((reason, facts));
+            }
+        }
     } else {
         stage_end.status = Status::Done;
-        // A stage that only an outcome enters is passed over.
+        // A stage that only an outcome or a conflict enters is passed over.
         let next = track.next_stage_index(place + 1);
         detail.stages_done = u32::try_from(next).unwrap_or(u32::MAX);
         let all_done = next >= track.stages.len();
@@ -583,7 +658,33 @@ fn signal_stage(
         s.updated_at = now.to_string();
         d.effects.push(Effect::PutSession(s));
     }
+    // A park that follows the end of the stage reads the unit where it stands after the end: with
+    // the stage's node done, and the unit's place in the next stage.
+    let ended_view = guard_park.as_ref().map(|_| {
+        let mut ended = view.clone();
+        if let Some(slot) = ended.nodes.iter_mut().find(|n| n.id == stage_end.id) {
+            *slot = stage_end.clone();
+        }
+        ended
+    });
     d.effects.push(Effect::PutNode(stage_end));
+    if let (Some((reason, facts)), Some(ended)) = (guard_park, ended_view.as_ref()) {
+        let reason = check_reason(&one_line_reason(&reason))
+            .map_err(|e| e.to_string())?
+            .to_string();
+        d.effects.extend(claim::park_effects(
+            ended,
+            workflow,
+            &unit_next,
+            RequestKind::Park,
+            Some(Cause::ResolutionChangedGuarded),
+            &reason,
+            Some(&facts),
+            now,
+        )?);
+        d.ledger = Some(text);
+        return Ok(d);
+    }
     match cap_park {
         // The stage is over, and the unit parks in the same commit with its request (ADR-0006).
         Some((reason, facts)) => {

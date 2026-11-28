@@ -13,19 +13,26 @@
 //!    first step under its lock is the replay;
 //! 6. the grant: a live row of the project's grant (a removed project has none);
 //! 7. the act list: `authority.clear_acts`, resolved fresh;
-//! 8. the acts this server does not build, and `close_stale`;
+//! 8. `close_stale`, the one act this server does not build;
 //! 9. the pins, in [`super::driver::Driver::settle`];
-//! 10. the reason, redacted once and then bounded;
+//! 10. the reason, redacted once and then bounded; for `rerun_check`, the limit
+//!     `authority.rerun_checks_per_head`, read fresh;
 //! 11. `Engine::settle`, under the engine's lock;
-//! 12. the answer.
+//! 12. the effect of an act that has one, after an admitted commit that is not a replay: the unit
+//!     is marked on the host service for a re-attach, the engine runs the effect and stores its
+//!     result, and the mark is cleared;
+//! 13. the answer.
 //!
 //! Every refusal after step 1 is audited through [`Controller::refuse_coalesced`], under an ID the
 //! controller makes, never under the settle's own ID.
 
 use pf_api::types::{RequestSettled, SCHEMA_VERSION, SettleAnswer};
-use pf_engine::claim::{Act, SettleAsk, SettleError, SettleFacts, VERB_SETTLE, live_grant};
+use pf_engine::claim::{
+    Act, EffectKind, SettleAsk, SettleError, SettleFacts, VERB_SETTLE, effect_of, live_grant,
+};
+use pf_engine::port::store::Cause;
 use pf_engine::port::store::{ORCHESTRATOR_AGENT, Store};
-use pf_engine::status::redact;
+use pf_engine::status::{one_line_reason, redact};
 use pf_ipc::{Peer, PeerSocket, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -296,15 +303,8 @@ impl Controller {
             )));
         }
 
-        // 8. the acts that this server does not build, and `close_stale`.
+        // 8. `close_stale`: the one act this server does not build.
         let cause = decision_of(&request.body).map(|d| d.cause);
-        let host_resume = act == Act::Resume && cause.as_deref() == Some("host_unreachable");
-        if matches!(act, Act::RerunCheck | Act::ResolveConflict) || host_resume {
-            return Err(text(format!(
-                "the act {} is not built on this server yet; the operator can answer or clear the request",
-                act.as_str()
-            )));
-        }
         if act == Act::CloseStale {
             return Err(text(
                 "close_stale has no object: a revision replaces its request in the same row, so no stale request exists",
@@ -316,6 +316,16 @@ impl Controller {
             .chars()
             .take(REASON_MAX_CHARS)
             .collect();
+
+        // `rerun_check` counts the re-runs of one head against this limit, read fresh.
+        let rerun_limit = if act == Act::RerunCheck {
+            Some(
+                self.resolved_rerun_checks_per_head(&project_id, ORCHESTRATOR_AGENT)
+                    .map_err(text)?,
+            )
+        } else {
+            None
+        };
 
         // 9 and 11. the pins, then the engine.
         let ask = SettleAsk {
@@ -330,6 +340,8 @@ impl Controller {
                 generation,
                 agent,
                 line: Value::Null,
+                head_sha: None,
+                rerun_limit,
             },
         };
         let forge = (
@@ -346,7 +358,23 @@ impl Controller {
             SettleError::Engine(e) => text(e.to_string()),
         })?;
 
-        // 12. the answer: the stored record, so a replay shows the first reason.
+        // 12. the effect, for an act that has one. A replay runs nothing: the first call did, or the
+        // start-up reconcile closes it.
+        if !admission.replayed {
+            let stored_cause = cause.as_deref().and_then(Cause::parse);
+            if let Some(kind) = effect_of(act, stored_cause) {
+                self.run_settle_effect(
+                    &handle,
+                    &request.run_id,
+                    request.unit_id.as_deref().unwrap_or_default(),
+                    &request.id,
+                    args.revision,
+                    kind,
+                );
+            }
+        }
+
+        // 13. the answer: the stored record, so a replay shows the first reason.
         let stored = self
             .store
             .request(&request.id)
@@ -363,6 +391,50 @@ impl Controller {
             replayed: admission.replayed,
             settled: stored,
         })
+    }
+
+    /// Run the effect of a settle that committed, and store its result. A re-attach marks the unit
+    /// on the host service for the call, so its rebind is the grant's re-attach and not tier 1. An
+    /// error of the effect call is one line of `controller.ledger`; the start-up reconcile then
+    /// closes the settle with the result `unknown`.
+    fn run_settle_effect(
+        &self,
+        handle: &super::RunHandle,
+        run_id: &str,
+        unit_id: &str,
+        request_id: &str,
+        revision: u32,
+        kind: EffectKind,
+    ) {
+        let name = format!("{request_id}@{revision}");
+        let faults = &self.cfg.settle_faults;
+        faults.run_after_commit();
+        if faults.skip_effect.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let reattach = kind == EffectKind::Reattach;
+        if reattach {
+            self.hosts.mark_reattach(run_id, unit_id, &name);
+        }
+        let done = handle.driver.settle_effect(request_id, revision);
+        if reattach {
+            self.hosts.clear_reattach(run_id, unit_id);
+        }
+        if let Err(e) = done {
+            let why = one_line_reason(&e.to_string());
+            let id = format!("settle-effect-{request_id}-{revision}-{}", unique_suffix());
+            let line = format!("settle_effect {name} error: {why} command={id}");
+            let _ = self.run_command(
+                "settle_effect",
+                &id,
+                json!({"request": request_id, "revision": revision}).to_string(),
+                Plan::Admit {
+                    effects: Vec::new(),
+                    subject: request_id.to_string(),
+                    line,
+                },
+            );
+        }
     }
 
     /// Store a run's armed launch count, once, in an admission under `@controller` (`arm`, after the
@@ -390,4 +462,14 @@ impl Controller {
         .map(|_| ())
         .map_err(|why| format!("the run's launch count cannot be stored: {why}"))
     }
+}
+
+/// A suffix that no two calls share, for the ID of a controller note.
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{nanos:x}-{}", N.fetch_add(1, Ordering::SeqCst))
 }

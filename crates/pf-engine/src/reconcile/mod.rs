@@ -15,7 +15,7 @@
 //! A live session, and a unit already done, failed, stopped or parked, is left alone. Nothing is
 //! relaunched: the claim decides each relaunch (ADR-0007), with `clear`.
 
-use crate::admission::EngineError;
+use crate::admission::{Command, CommandBody, EngineError};
 use crate::engine::Engine;
 use crate::port::agent::{NO_SESSION_HOST, RebindOutcome, SessionRef};
 use crate::port::store::{Cause, RequestKind};
@@ -38,8 +38,13 @@ impl Engine {
     /// When the agent port cannot say whether a session is alive, the call fails and parks nothing
     /// for that unit.
     pub fn reconcile(&self) -> Result<ReconcileReport, EngineError> {
-        let view = self.view()?;
         let mut report = ReconcileReport::default();
+        // A settle whose effect never stored its result is closed first: its effect is never run a
+        // second time, and the unit parks again.
+        for unit_id in self.close_pending_settles()? {
+            report.parked.push(unit_id);
+        }
+        let view = self.view()?;
         for unit in view.units().filter(|u| u.status == Status::Running) {
             let Some(session) = view
                 .sessions
@@ -64,6 +69,36 @@ impl Engine {
             report.parked.push(unit.id.clone());
         }
         Ok(report)
+    }
+
+    /// Store `unknown` as the result of every pending settle of the run. Returns the units that this
+    /// parked.
+    fn close_pending_settles(&self) -> Result<Vec<String>, EngineError> {
+        let view = self.view()?;
+        let mut parked = Vec::new();
+        let pending: Vec<_> = view
+            .units()
+            .filter_map(|u| {
+                crate::claim::pending_settle(&view, &u.id)
+                    .map(|p| (u.id.clone(), u.status == Status::Running, p))
+            })
+            .collect();
+        for (unit_id, was_running, p) in pending {
+            self.submit(Command {
+                id: crate::claim::result_command_id(&p.request_id, p.revision),
+                body: CommandBody::SettleResult {
+                    request_id: p.request_id.clone(),
+                    revision: p.revision,
+                    outcome: crate::claim::SettleOutcome::Unknown,
+                    detail: "the controller stopped before the result was stored".to_string(),
+                    process_ref: None,
+                },
+            })?;
+            if was_running {
+                parked.push(unit_id);
+            }
+        }
+        Ok(parked)
     }
 
     /// `None` when the session lives. Otherwise the cause and the reason the unit parks with.

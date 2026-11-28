@@ -151,6 +151,7 @@ fn ports() -> Arc<TestPorts> {
         plans: Default::default(),
         gate: Default::default(),
         pids: Default::default(),
+        rebinds: Default::default(),
         block_run_json: AtomicBool::new(false),
     })
 }

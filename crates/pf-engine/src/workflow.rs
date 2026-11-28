@@ -41,6 +41,9 @@ pub struct StageDef {
     /// The stage runs only when an outcome sends the unit to it. A unit that reaches it in order
     /// goes past it, and a track that merges counts it as done.
     pub entered_by_outcome: bool,
+    /// The stage runs only when a merge conflict sends the unit to it (`merge.on_conflict`). A unit
+    /// that reaches it in order goes past it, and a track that merges counts it as done.
+    pub entered_by_conflict: bool,
     /// A text answer to a park of this stage reaches a seat: the stage declares a fallback answer
     /// hook. The engine knows no hook: it reads this flag when it writes a request's decision block.
     pub takes_text: bool,
@@ -57,6 +60,7 @@ impl StageDef {
             settings: BTreeMap::new(),
             outcomes: Vec::new(),
             entered_by_outcome: false,
+            entered_by_conflict: false,
             takes_text: false,
         }
     }
@@ -70,6 +74,16 @@ pub enum MergeRule {
     /// When the checks are green, open a `merge_ack` request for the unit's PR. The PR merges
     /// only when the claim holder acks that request, with the head SHA the request names.
     ClaimAck,
+}
+
+/// The stage that a merge conflict sends a unit to, and the stage that follows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnConflict {
+    /// The conflict stage: a stage of the track that only a conflict enters.
+    pub stage: String,
+    /// The stage a unit goes to when the conflict stage is done. It is a stage of the track's own
+    /// sequence, so the unit passes every stage from it on before the merge rule runs.
+    pub then: String,
 }
 
 /// The merge definition of a track.
@@ -88,6 +102,11 @@ pub struct MergeDef {
     /// unit and parks a unit whose PR has another head branch. Empty declares nothing. Only the
     /// `ClaimAck` rule reads it.
     pub head_branch: String,
+    /// The stage a merge conflict sends the unit to, when the track declares one.
+    pub on_conflict: Option<OnConflict>,
+    /// Globs of the paths that a conflict resolution may not change without the operator: a
+    /// resolution that changes one parks the unit above the line.
+    pub guarded: Vec<String>,
 }
 
 impl MergeDef {
@@ -99,6 +118,8 @@ impl MergeDef {
             base: String::new(),
             head_check: false,
             head_branch: String::new(),
+            on_conflict: None,
+            guarded: Vec::new(),
         }
     }
 }
@@ -115,11 +136,17 @@ pub struct Track {
 
 impl Track {
     /// The index of the first stage at or after `from` that a unit reaches in order: a stage that
-    /// only an outcome enters is passed over. The result is the stage count when none is left.
+    /// only an outcome or a conflict enters is passed over. The result is the stage count when none
+    /// is left.
     pub fn next_stage_index(&self, from: usize) -> usize {
         (from..self.stages.len())
-            .find(|i| !self.stages[*i].entered_by_outcome)
+            .find(|i| !self.stages[*i].entered_by_outcome && !self.stages[*i].entered_by_conflict)
             .unwrap_or(self.stages.len())
+    }
+
+    /// The merge's conflict stage, when the track declares one.
+    pub fn on_conflict(&self) -> Option<&OnConflict> {
+        self.merge.as_ref().and_then(|m| m.on_conflict.as_ref())
     }
 
     /// The index of the stage called `name`.
