@@ -991,6 +991,35 @@ fn set_run_project(
     }
 }
 
+/// Set a run's armed launch count, once. The trigger of migration 0014 is the backstop of these
+/// checks. The same value a second time changes nothing.
+fn set_run_launch_bound(tx: &Transaction<'_>, run_id: &str, bound: u64) -> Result<(), EffectError> {
+    let current: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT launch_bound FROM runs WHERE id = ?1",
+            [run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let value = i64::try_from(bound)
+        .map_err(|_| EffectError::Rejected(format!("{bound} is too large for a launch count")))?;
+    match current {
+        None => Err(EffectError::Rejected(format!("run {run_id} is unknown"))),
+        Some(Some(held)) if held == value => Ok(()),
+        Some(Some(held)) => Err(EffectError::Rejected(format!(
+            "run {run_id} keeps its launch count {held}"
+        ))),
+        Some(None) => {
+            tx.execute(
+                "UPDATE runs SET launch_bound = ?2 WHERE id = ?1",
+                params![run_id, value],
+            )
+            .map_err(backstop)?;
+            Ok(())
+        }
+    }
+}
+
 // ------------------------------------------------------------------ launch records and hosts
 
 const LAUNCH_RECORD_COLUMNS: &str = "session_kind, session_id, incarnation, revision, launcher, \
@@ -1678,6 +1707,7 @@ fn apply(tx: &Transaction<'_>, command_id: &str, effect: &Effect) -> Result<Assi
         Effect::SetSetting(row) => set_setting(tx, row)?,
         Effect::UnsetSetting { scope, key } => unset_setting(tx, scope, key)?,
         Effect::SetRunProject { run_id, project_id } => set_run_project(tx, run_id, project_id)?,
+        Effect::SetRunLaunchBound { run_id, bound } => set_run_launch_bound(tx, run_id, *bound)?,
         Effect::LaunchRecordWrite(n) => launch_record_write(tx, command_id, n)?,
         Effect::HostStarted(n) => host_started(tx, command_id, n)?,
         Effect::HostEnded {
@@ -1760,6 +1790,17 @@ fn commit(conn: &mut Connection, c: Commit) -> rusqlite::Result<Committed> {
     {
         return Ok(Committed::Rejected(
             "a run's project is set only in an admission under @controller".to_string(),
+        ));
+    }
+    // A run's launch count is the controller's to set, too: the effect is refused in any other
+    // scope, and the admission rolls back with it.
+    if c.run_id != CONTROLLER_SCOPE
+        && c.effects
+            .iter()
+            .any(|e| matches!(e, Effect::SetRunLaunchBound { .. }))
+    {
+        return Ok(Committed::Rejected(
+            "a run's launch count is set only in an admission under @controller".to_string(),
         ));
     }
     // A launch record, a host row and a host position are the controller's to write: the effects
@@ -2256,7 +2297,7 @@ impl Store for SqliteStore {
         let run_id = run_id.to_string();
         self.call(move |conn| {
             conn.query_row(
-                "SELECT id, workflow, ledger_file, state, halted_reason, created_at, updated_at, project_id FROM runs WHERE id = ?1",
+                "SELECT id, workflow, ledger_file, state, halted_reason, created_at, updated_at, project_id, launch_bound FROM runs WHERE id = ?1",
                 [&run_id],
                 |r| {
                     let state: String = r.get(3)?;
@@ -2269,6 +2310,9 @@ impl Store for SqliteStore {
                         created_at: r.get(5)?,
                         updated_at: r.get(6)?,
                         project_id: r.get(7)?,
+                        launch_bound: r
+                            .get::<_, Option<i64>>(8)?
+                            .and_then(|n| u64::try_from(n).ok()),
                     })
                 },
             )

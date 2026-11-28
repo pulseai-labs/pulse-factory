@@ -11,6 +11,7 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::net::{UnixListener as StdListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -92,6 +93,32 @@ pub struct Peer {
     pub pid: Option<u32>,
 }
 
+/// A duplicate of the connection's descriptor. A handler that must name its caller more closely than
+/// `SO_PEERCRED` does (a pidfd, through `SO_PEERPIDFD`) reads the option from it. The crate has no
+/// `libc`: it hands the descriptor over and reads nothing from it. The duplicate shares the
+/// connection, so the peer it names is the caller.
+#[derive(Clone, Debug)]
+pub struct PeerSocket(Arc<OwnedFd>);
+
+impl PeerSocket {
+    /// Wrap a descriptor that names a connection.
+    pub fn new(fd: OwnedFd) -> PeerSocket {
+        PeerSocket(Arc::new(fd))
+    }
+}
+
+impl AsFd for PeerSocket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl AsRawFd for PeerSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
 /// The server side of a verb. A handler may block: the server calls it off the async threads.
 pub trait Handler: Send + Sync + 'static {
     fn handle(&self, request: Request) -> Response;
@@ -100,6 +127,19 @@ pub trait Handler: Send + Sync + 'static {
     /// overrides this one. The default ignores the caller.
     fn handle_from(&self, request: Request, _peer: Peer) -> Response {
         self.handle(request)
+    }
+
+    /// Like [`Handler::handle_from`], with a duplicate of the connection's descriptor too. A handler
+    /// that names the caller from the socket overrides this one. The default calls
+    /// [`Handler::handle_from`]. `socket` is `None` when the server could not duplicate the
+    /// descriptor: a handler that needs it must then refuse.
+    fn handle_from_socket(
+        &self,
+        request: Request,
+        peer: Peer,
+        _socket: Option<PeerSocket>,
+    ) -> Response {
+        self.handle_from(request, peer)
     }
 }
 
@@ -313,6 +353,13 @@ async fn serve_one(stream: tokio::net::UnixStream, handler: Arc<dyn Handler>) {
             .and_then(|cred| cred.pid())
             .and_then(|pid| u32::try_from(pid).ok()),
     };
+    // A duplicate of the connection, taken before the stream is split. `None` when the kernel
+    // refuses one.
+    let socket = stream
+        .as_fd()
+        .try_clone_to_owned()
+        .ok()
+        .map(PeerSocket::new);
     let (mut read, mut write) = stream.into_split();
     let line = read_line(&mut read).await;
     let answer = match line {
@@ -321,11 +368,13 @@ async fn serve_one(stream: tokio::net::UnixStream, handler: Arc<dyn Handler>) {
             Err(refusal) => refusal,
             Ok(request) => {
                 let verb = request.verb.clone();
-                tokio::task::spawn_blocking(move || handler.handle_from(request, peer))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Response::err(format!("the verb {verb} failed inside the controller"))
-                    })
+                tokio::task::spawn_blocking(move || {
+                    handler.handle_from_socket(request, peer, socket)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Response::err(format!("the verb {verb} failed inside the controller"))
+                })
             }
         },
     };
@@ -442,4 +491,101 @@ pub fn call(state_dir: &Path, verb: &str, args: Value) -> Result<Response, Clien
     }
     serde_json::from_value(value)
         .map_err(|e| ClientError::Io(format!("the answer is not a response: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream as StdStream;
+
+    /// A handler that writes one byte to the duplicate it is given, and answers with whether it got one.
+    struct Probe;
+
+    impl Handler for Probe {
+        fn handle(&self, _request: Request) -> Response {
+            Response::err("handle was called")
+        }
+
+        fn handle_from(&self, _request: Request, _peer: Peer) -> Response {
+            Response::err("handle_from was called")
+        }
+
+        fn handle_from_socket(
+            &self,
+            _request: Request,
+            peer: Peer,
+            socket: Option<PeerSocket>,
+        ) -> Response {
+            let Some(socket) = socket else {
+                return Response::err("no socket");
+            };
+            let fd = socket.as_fd().try_clone_to_owned().unwrap();
+            let mut duplicate = StdStream::from(fd);
+            duplicate.write_all(b"X").unwrap();
+            Response::ok(serde_json::json!({ "pid": peer.pid }))
+        }
+    }
+
+    /// A handler that only has `handle_from`: the default of `handle_from_socket` reaches it.
+    struct Plain;
+
+    impl Handler for Plain {
+        fn handle(&self, _request: Request) -> Response {
+            Response::err("handle was called")
+        }
+
+        fn handle_from(&self, _request: Request, peer: Peer) -> Response {
+            Response::ok(serde_json::json!({ "pid": peer.pid }))
+        }
+    }
+
+    fn serve_once(handler: Arc<dyn Handler>) -> (Vec<u8>, StdStream) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (client, server) = StdStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&Request::new("probe", Value::Null)).unwrap()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        runtime.block_on(async move {
+            let stream = tokio::net::UnixStream::from_std(server).unwrap();
+            serve_one(stream, handler).await;
+        });
+        let mut reader = client.try_clone().unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        (bytes, client)
+    }
+
+    #[test]
+    fn serve_one_hands_the_handler_a_socket_whose_peer_is_the_caller() {
+        let (bytes, _client) = serve_once(Arc::new(Probe));
+        // The handler wrote one byte through its duplicate: the client reads it before the answer.
+        assert_eq!(
+            bytes.first(),
+            Some(&b'X'),
+            "{:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let answer: Response = serde_json::from_slice(bytes[1..].trim_ascii()).unwrap();
+        assert!(answer.ok, "{answer:?}");
+    }
+
+    #[test]
+    fn a_handler_without_the_new_method_gets_handle_from_by_default() {
+        let (bytes, _client) = serve_once(Arc::new(Plain));
+        let answer: Response = serde_json::from_slice(bytes.trim_ascii()).unwrap();
+        assert!(answer.ok, "{answer:?}");
+        // A socketpair has no credentials of a process that this crate reads: the call still ran.
+        assert!(answer.result.get("pid").is_some());
+    }
 }

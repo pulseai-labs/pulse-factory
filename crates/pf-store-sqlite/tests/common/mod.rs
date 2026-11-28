@@ -688,6 +688,7 @@ pub fn guarded_commit(command_id: &str, project_id: &str, generation: u64) -> Co
                 state: RunState::Active,
                 halted_reason: None,
                 project_id: None,
+                launch_bound: None,
                 created_at: "t7".to_string(),
                 updated_at: "t7".to_string(),
             }),

@@ -151,7 +151,7 @@ fn insert_device(conn: &Connection, id: &str, token_sha256: &str) -> rusqlite::R
 
 #[test]
 fn the_migration_list_has_devices_as_version_four() {
-    assert_eq!(MIGRATIONS.len(), 13);
+    assert_eq!(MIGRATIONS.len(), 14);
     assert_eq!(MIGRATIONS[3].version, 4);
     assert_eq!(MIGRATIONS[3].name, "devices");
 }
@@ -164,13 +164,13 @@ fn a_version_three_store_migrates_to_the_latest_and_keeps_every_row() {
     let before = dump(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
         versions(&conn),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(dump(&conn), before, "no row of version 3 changed");
     assert_eq!(count(&conn, "devices"), 0, "the devices table is empty");
@@ -210,12 +210,12 @@ fn a_fresh_file_opens_at_the_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
         versions(&conn),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(count(&conn, "devices"), 0);
 }
@@ -234,7 +234,7 @@ fn a_version_three_store_with_an_active_run_refuses_and_stays_at_three() {
         err,
         OpenError::RunActive {
             current: 3,
-            pending: 13
+            pending: 14
         }
     );
 

@@ -18,6 +18,7 @@ fn run_row(id: &str, state: RunState) -> RunRow {
         state,
         halted_reason: None,
         project_id: None,
+        launch_bound: None,
         created_at: "t1".to_string(),
         updated_at: "t1".to_string(),
     }

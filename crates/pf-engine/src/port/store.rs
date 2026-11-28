@@ -46,6 +46,11 @@ pub struct RunRow {
     /// `None` for every run armed from the CLI and for every run that existed before migration
     /// 0008. `PutRun` never writes it: only [`Effect::SetRunProject`] does.
     pub project_id: Option<String>,
+    /// The run's armed launch count: the most launches `arm` showed for the run's pinned package
+    /// (ADR-0003's amendment of 2026-11-16). `None` for every run armed before migration 0014 and for
+    /// a plan whose most launches are unknown. `PutRun` never writes it: only
+    /// [`Effect::SetRunLaunchBound`] does, once. A grant act that would pass it is refused.
+    pub launch_bound: Option<u64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1484,6 +1489,15 @@ pub enum Effect {
     SetRunProject {
         run_id: String,
         project_id: String,
+    },
+    /// Set a run's armed launch count, once (`arm` writes it). Allowed only in an admission under
+    /// [`CONTROLLER_SCOPE`]. An unknown run, a run that holds another value already, or a scope other
+    /// than the controller's makes the commit [`Committed::Rejected`]. The same value a second time
+    /// is a no-op that admits. A database guard backs the rule: an update that changes a set value
+    /// fails.
+    SetRunLaunchBound {
+        run_id: String,
+        bound: u64,
     },
     /// Write one revision of a launch record (ADR-0003's amendment of 2026-11-16). Allowed only in
     /// an admission under [`CONTROLLER_SCOPE`]. A kind or launcher that is not listed, a secret

@@ -58,6 +58,7 @@ fn row(id: &str, halted: bool) -> RunRow {
         },
         halted_reason: halted.then(|| "stop".to_string()),
         project_id: None,
+        launch_bound: None,
         created_at: "t1".to_string(),
         updated_at: "t2".to_string(),
     }

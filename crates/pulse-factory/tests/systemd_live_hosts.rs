@@ -17,16 +17,25 @@
 //! until the test writes `go`.
 
 mod common;
+#[path = "common/settle_rig.rs"]
+mod settle_rig;
 
+use std::cell::Cell;
 use std::os::unix::fs::DirBuilderExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use common::BIN;
+use common::chat::cli_json;
 use common::restart::{Restart, host_bin};
+use common::{code, stderr};
+use pf_engine::port::store::Store;
 use pf_host::launcher::{Launcher, StartSpec, Systemd};
+use pulse_factory::controller::hosts::HostLauncher;
 use serde_json::{Value, json};
+use settle_rig::{HostSeed, Link, SRig, WHY};
 
 const REASON_LOST: &str = "seat lost across a controller restart";
 const KEY: &str = "5f1d0c9a7b3e4d2c8a6f1e0d9c7b5a3948372615f4e3d2c1b0a99887766554a3";
@@ -530,4 +539,381 @@ fn systemd_live_every_unit_carries_the_test_server_name_and_another_servers_unit
     let _ = Systemd::from_env().unwrap().stop(&other);
     std::fs::write(live.rig.out("u1").join("go"), "").unwrap();
     live.rig.wait_unit("u1", "done");
+}
+
+// ------------------------------------------------------------------ the caller check under systemd
+//
+// `r2.s3.w2`, AC-10 (audit C13, C14; review C8 of AI #130). The controller of these tests runs in the
+// test process, with the `systemd` launcher and the user's runtime directory, over a recording chat
+// (`settle_rig`). The chat's host unit is a real transient unit, `pf-host-c0ffee<six hex>-S-1-1`,
+// whose main process is a small shell. That shell is the chat's process, and it starts the callers
+// the tests need, so that each caller runs in the cgroup the test wants and has the ancestry the
+// test wants:
+//
+// * `below`: a child of the chat's process, in the host unit's cgroup;
+// * `orphan`: a process whose parent exited, in the host unit's cgroup, with no chat on its chain;
+// * `scoped`: a child of the chat's process that `systemd-run --scope` moved out of the unit's
+//   cgroup.
+//
+// Each caller has an empty environment but the path to the controller's state, unless a test adds
+// to it. A caller writes its answer to a file that the test reads.
+
+/// A single-quoted shell word.
+fn quoted(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
+/// The unit that stands in for a chat's host, and the caller factory that runs in it.
+struct ChatUnit {
+    unit: String,
+    dir: PathBuf,
+    jobs: Cell<u32>,
+}
+
+impl ChatUnit {
+    /// Start the unit. Its factory waits for `mode.<n>` files and starts `job.<n>` as each one says.
+    fn start() -> ChatUnit {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .expect(
+                "XDG_RUNTIME_DIR must name the user's runtime directory (a user manager must run)",
+            );
+        let server = test_server();
+        let unit = format!("pf-host-{server}-S-1-1");
+        let dir = std::env::temp_dir().join(format!("pfl-{}-{server}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The factory is a file that `/bin/sh` runs, not a command line: `systemd-run` expands every
+        // `$` of a command line itself (`${m##*.}` became an empty string, so the job file `job.` was
+        // never found), and it leaves a script file alone.
+        let factory = dir.join("factory.sh");
+        std::fs::write(
+            &factory,
+            r#"d=$1
+while :; do
+  for m in "$d"/mode.*; do
+    [ -e "$m" ] || continue
+    n=${m##*.}; mode=$(cat "$m"); rm -f "$m"
+    case $mode in
+      below) sh "$d/job.$n" & ;;
+      orphan) ( sh "$d/job.$n" & ) ;;
+      scoped) systemd-run --user --scope --quiet -- sh "$d/job.$n" & ;;
+    esac
+  done
+  sleep 0.1
+done
+"#,
+        )
+        .unwrap();
+        let out = Command::new("systemd-run")
+            .args(["--user", "--collect", "--quiet"])
+            .arg(format!("--unit={unit}"))
+            .args(["-p", "KillMode=control-group"])
+            .args(["--", "/bin/sh"])
+            .arg(&factory)
+            .arg(&dir)
+            .output()
+            .expect("systemd-run runs");
+        assert!(
+            out.status.success(),
+            "systemd-run of the chat unit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        ChatUnit {
+            unit,
+            dir,
+            jobs: Cell::new(0),
+        }
+    }
+
+    /// The factory's PID: the chat's process.
+    fn main_pid(&self) -> u32 {
+        for _ in 0..100 {
+            if let Ok(pid) = property(&self.unit, "MainPID").parse::<u32>()
+                && pid != 0
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the unit {} has no main process", self.unit);
+    }
+
+    /// The host row for the unit: the one the user manager runs, under the `systemd` launcher.
+    fn seed(&self) -> HostSeed {
+        HostSeed {
+            unit: self.unit.clone(),
+            launcher: "systemd".to_string(),
+            invocation: property(&self.unit, "InvocationID"),
+        }
+    }
+
+    /// Run `cmd`, with the environment it holds and no other, as a caller of the kind `mode` names.
+    /// Answers the caller's number for [`ChatUnit::result`].
+    fn job(&self, mode: &str, cmd: &Command) -> u32 {
+        let n = self.jobs.get();
+        self.jobs.set(n + 1);
+        let mut line = String::from("env -i");
+        for (k, v) in cmd.get_envs() {
+            if let Some(v) = v {
+                line.push_str(&format!(
+                    " {}={}",
+                    quoted(&k.to_string_lossy()),
+                    quoted(&v.to_string_lossy())
+                ));
+            }
+        }
+        line.push(' ');
+        line.push_str(&quoted(&cmd.get_program().to_string_lossy()));
+        for a in cmd.get_args() {
+            line.push(' ');
+            line.push_str(&quoted(&a.to_string_lossy()));
+        }
+        // An orphan lets its parent exit before it calls.
+        let wait = if mode == "orphan" { "sleep 1\n" } else { "" };
+        let (out, rc) = (
+            self.dir.join(format!("out.{n}")),
+            self.dir.join(format!("rc.{n}")),
+        );
+        let script = format!(
+            "#!/bin/sh\n{wait}{line} > {out} 2>&1\necho $? > {rc}.tmp\nmv {rc}.tmp {rc}\n",
+            out = quoted(&out.display().to_string()),
+            rc = quoted(&rc.display().to_string()),
+        );
+        std::fs::write(self.dir.join(format!("job.{n}")), script).unwrap();
+        let tmp = self.dir.join(format!("mode.{n}.tmp"));
+        std::fs::write(&tmp, mode).unwrap();
+        std::fs::rename(&tmp, self.dir.join(format!("mode.{n}"))).unwrap();
+        n
+    }
+
+    /// The exit code and the output of caller `n`, once it ended.
+    fn result(&self, n: u32) -> (i32, String) {
+        let rc = self.dir.join(format!("rc.{n}"));
+        for _ in 0..600 {
+            if let Ok(code) = std::fs::read_to_string(&rc) {
+                let out =
+                    std::fs::read_to_string(self.dir.join(format!("out.{n}"))).unwrap_or_default();
+                return (code.trim().parse().unwrap(), out);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("caller {n} did not end");
+    }
+}
+
+impl Drop for ChatUnit {
+    fn drop(&mut self) {
+        let _ = sctl(&["stop", &format!("{}.service", self.unit)]);
+        let _ = sctl(&["reset-failed", &format!("{}.service", self.unit)]);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// An armed run whose unit is parked on a stall, a live grant, and a chat whose host is `unit`.
+fn live_rig(unit: &ChatUnit) -> SRig {
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").expect("a user manager runs"));
+    let rig = SRig::linked_on(
+        &["u1"],
+        Some(10),
+        Link::Own,
+        Some(unit.seed()),
+        move |cfg| {
+            cfg.host_launcher = HostLauncher::Systemd;
+            cfg.runtime_dir = runtime;
+        },
+    );
+    assert_eq!(rig.session, "S-1", "the unit is named for session S-1");
+    rig.rec
+        .pids
+        .lock()
+        .unwrap()
+        .insert(rig.chat.clone(), unit.main_pid());
+    rig
+}
+
+/// The test binary as a caller that talks to the controller's socket itself, with a seat token.
+fn helper_with_token(rig: &SRig, verb: &str, args: &Value, token: Option<&str>) -> Command {
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.args([
+        "--exact",
+        "settle_rig::helper_calls_the_controller",
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env_clear()
+    .env("PATH", rig.live.sb.path_env())
+    .env("PF_TEST_HELPER_STATE", &rig.live.sb.state)
+    .env("PF_TEST_HELPER_VERB", verb)
+    .env("PF_TEST_HELPER_ARGS", args.to_string());
+    if let Some(token) = token {
+        c.env("PF_SEAT_TOKEN", token);
+    }
+    c
+}
+
+/// What the controller said to the helper, as the refusal text.
+fn helper_refusal(out: &str) -> String {
+    let line = out
+        .lines()
+        .find_map(|l| l.split_once("HELPER_RESPONSE:").map(|(_, r)| r.to_string()))
+        .unwrap_or_else(|| panic!("no response from the helper: {out}"));
+    let resp: Value = serde_json::from_str(&line).unwrap();
+    settle_rig::why(&resp)
+}
+
+fn settle_cmd(rig: &SRig, id: &str, rev: u32) -> Command {
+    rig.live.sb.cmd(&[
+        "settle",
+        id,
+        "--rev",
+        &rev.to_string(),
+        "--act",
+        "clear",
+        "--reason",
+        WHY,
+    ])
+}
+
+fn request_is_open_and_unit_parked(rig: &SRig, id: &str) {
+    let r = rig.live.controller.store().request(id).unwrap().unwrap();
+    assert_eq!(r.status.as_str(), "open", "the request stays open");
+    assert_eq!(
+        rig.live.unit_status("u1"),
+        "parked",
+        "the unit keeps its park"
+    );
+    assert_eq!(
+        rig.admissions("settle"),
+        0,
+        "no settle admission in the run"
+    );
+}
+
+#[test]
+#[ignore = "systemd_live: needs a systemd user manager"]
+fn systemd_live_a_process_below_the_orchestrator_chat_settles_a_stall() {
+    let unit = ChatUnit::start();
+    let rig = live_rig(&unit);
+    let (id, rev) = rig.request("u1");
+    let n = unit.job("below", &settle_cmd(&rig, &id, rev));
+    let (rc, out) = unit.result(n);
+    assert_eq!(rc, 0, "{out}");
+    assert!(
+        out.contains(&format!("settled {id}@{rev}: act=clear")),
+        "{out}"
+    );
+    assert_eq!(rig.admissions("settle"), 1);
+    rig.tick();
+    assert_ne!(rig.live.unit_status("u1"), "parked", "the unit resumed");
+}
+
+#[test]
+#[ignore = "systemd_live: needs a systemd user manager"]
+fn systemd_live_a_seat_in_the_chat_host_units_cgroup_is_refused() {
+    let unit = ChatUnit::start();
+    let rig = live_rig(&unit);
+    let (id, rev) = rig.request("u1");
+    // A seat process in the chat host unit's cgroup, with no chat on its chain. Its environment holds
+    // no seat token, so the token step cannot be the one that refuses it: the ancestry step does,
+    // before the cgroup step is reached.
+    let args = settle_rig::settle_args(&id, rev, "clear", None, WHY);
+    let n = unit.job("orphan", &helper_with_token(&rig, "settle", &args, None));
+    let (rc, out) = unit.result(n);
+    assert_eq!(
+        rc, 0,
+        "the helper answers whatever the controller says: {out}"
+    );
+    let why = helper_refusal(&out);
+    assert!(
+        why.starts_with("settle refused:")
+            && why.contains("the caller runs under no chat session")
+            && !why.contains("PF_SEAT_TOKEN"),
+        "{why}"
+    );
+    request_is_open_and_unit_parked(&rig, &id);
+    // The same seat with its token is refused at the token step, before the ancestry.
+    let n = unit.job(
+        "orphan",
+        &helper_with_token(&rig, "settle", &args, Some("seat-token-value-1234")),
+    );
+    let (rc, out) = unit.result(n);
+    assert_eq!(rc, 0, "{out}");
+    let why = helper_refusal(&out);
+    assert!(
+        why.starts_with("settle refused:") && why.contains("PF_SEAT_TOKEN"),
+        "{why}"
+    );
+    request_is_open_and_unit_parked(&rig, &id);
+}
+
+#[test]
+#[ignore = "systemd_live: needs a systemd user manager"]
+fn systemd_live_a_descendant_of_the_chat_that_moved_out_of_its_cgroup_is_refused() {
+    let unit = ChatUnit::start();
+    let rig = live_rig(&unit);
+    let (id, rev) = rig.request("u1");
+    // The caller is a descendant of the chat's process, and `systemd-run --scope` moved it out of the
+    // host unit's cgroup into a scope of its own: the ancestry names the chat, the cgroup does not.
+    let n = unit.job("scoped", &settle_cmd(&rig, &id, rev));
+    let (rc, out) = unit.result(n);
+    assert_eq!(rc, 1, "{out}");
+    assert!(
+        out.contains("settle refused:") && out.contains("must both name the same chat session"),
+        "{out}"
+    );
+    request_is_open_and_unit_parked(&rig, &id);
+    assert_eq!(rig.refused_settles().len(), 1, "the refusal is audited");
+}
+
+#[test]
+#[ignore = "systemd_live: needs a systemd user manager"]
+fn systemd_live_grant_verbs_refuse_a_caller_in_the_chat_host_units_cgroup_and_admit_the_operators_cli()
+ {
+    let unit = ChatUnit::start();
+    let rig = live_rig(&unit);
+    let live_grant = |rig: &SRig| {
+        cli_json(&rig.live, &["grant", "list"])["grants"][0]["live"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(live_grant(&rig), "the rig gave the grant");
+
+    // The operator's CLI runs in no chat host unit: it ends the grant.
+    let out = rig
+        .live
+        .cli(&["grant", "revoke", "--project", &rig.project]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(!live_grant(&rig));
+
+    // A caller in the chat host unit's cgroup, with no chat ancestor and an empty environment, is
+    // refused on `grant clear`, and the grant stays ended.
+    let clear = rig
+        .live
+        .sb
+        .cmd(&["grant", "clear", "--project", &rig.project]);
+    let (rc, out) = unit.result(unit.job("orphan", &clear));
+    assert_eq!(rc, 1, "{out}");
+    assert!(
+        out.contains("grant_clear refused: the caller runs in the cgroup of chat host unit"),
+        "{out}"
+    );
+    assert!(!live_grant(&rig), "the refused clear gave no grant");
+
+    // The operator's CLI gives it again.
+    let out = rig.live.cli(&["grant", "clear", "--project", &rig.project]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(live_grant(&rig));
+
+    // The same caller is refused on `grant revoke`, and the grant stays live.
+    let revoke = rig
+        .live
+        .sb
+        .cmd(&["grant", "revoke", "--project", &rig.project]);
+    let (rc, out) = unit.result(unit.job("orphan", &revoke));
+    assert_eq!(rc, 1, "{out}");
+    assert!(
+        out.contains("grant_revoke refused: the caller runs in the cgroup of chat host unit"),
+        "{out}"
+    );
+    assert!(live_grant(&rig), "the refused revoke ended nothing");
 }

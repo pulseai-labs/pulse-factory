@@ -776,14 +776,17 @@ pub enum SettingScopeKind {
     BuiltIn,
 }
 
-/// How a key combines the rows of its scope chain. `override` is the one mode built: the most
-/// specific row wins whole, and every other stored row on the chain is masked. Later modes (`union`,
-/// `min`) add variants, with no migration.
+/// How a key combines the rows of its scope chain. `override`: the most specific row wins whole, and
+/// every other stored row on the chain is masked. `intersect`: every stored row cuts the built-in
+/// list. Later modes (`union`, `min`) add variants, with no migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum SettingMerge {
     Override,
+    /// The value is the built-in list cut by every stored value on the chain, in the built-in order.
+    /// No row hides another, so `masked` is empty (`authority.clear_acts`).
+    Intersect,
 }
 
 /// When a change of a setting takes effect.
@@ -949,6 +952,40 @@ pub struct RequestSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub line: Option<String>,
+    /// Who settled the request, under which grant, with which act and why. Present for a request
+    /// that the Orchestrator settled with `settle`, and for no other. For such a request `line` is
+    /// the class that the settle recorded, not a computed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub settled: Option<RequestSettled>,
+}
+
+/// What a settle recorded on its request (`docs/contracts/requests.md`, "Settle"): the act, the
+/// stage a `redispatch` resumed at, the reason (redacted and bounded), the chat session that
+/// settled, and the grant it acted under.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RequestSettled {
+    pub act: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub to_stage: Option<String>,
+    pub reason: String,
+    pub session: String,
+    pub project: String,
+    #[ts(type = "number")]
+    pub generation: u64,
+    pub agent: String,
+}
+
+/// The answer of `settle`. `replayed` is true when the settle was admitted before: `settled` is then
+/// the first record, with the first reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SettleAnswer {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: u32,
+    pub replayed: bool,
+    pub settled: RequestSettled,
 }
 
 /// The answer of `show`: the summary, the request's body and answer, the decision block, and the
@@ -1583,6 +1620,8 @@ pub fn export_all(cfg: &ts_rs::Config) -> Result<(), ts_rs::ExportError> {
     ClearGrant::export_all(cfg)?;
     GrantList::export_all(cfg)?;
     GrantChanged::export_all(cfg)?;
+    RequestSettled::export_all(cfg)?;
+    SettleAnswer::export_all(cfg)?;
     PairRequest::export_all(cfg)?;
     PairResult::export_all(cfg)?;
     ServerRef::export_all(cfg)?;

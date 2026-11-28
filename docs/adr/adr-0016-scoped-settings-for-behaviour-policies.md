@@ -155,7 +155,8 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
   value and its scope, as for `override`.
 - **The key `authority.clear_acts`**: a JSON array of the clear grant's act names (ADR-0005,
   amended), merge mode `intersect`, built-in: all six acts. It narrows the grant for a project or an
-  agent. The grant itself, its list and its holder are not settings and never become settings.
+  agent. It is set at a project, an agent, or a project and agent, and `settle` reads it fresh at each
+  act. The grant itself, its list and its holder are not settings and never become settings.
 - **A registry flag `applies`**, `record` or `current`. A resume from a launch record (ADR-0007,
   amended) uses the record's value of a `record` key and the current resolved value of a `current`
   key. `chat.deny_commands`, `chat.self_turn_cap` and every later cap are `current`, so a tighter

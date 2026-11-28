@@ -246,7 +246,7 @@ fn with_a_session() -> (tempfile::TempDir, Connection) {
 
 #[test]
 fn the_migration_list_has_the_hierarchy_as_version_five() {
-    assert_eq!(MIGRATIONS.len(), 13);
+    assert_eq!(MIGRATIONS.len(), 14);
     assert_eq!(MIGRATIONS[4].version, 5);
     assert_eq!(MIGRATIONS[4].name, "hierarchy");
 }
@@ -259,13 +259,13 @@ fn a_version_four_store_migrates_to_five_and_keeps_every_row() {
     let before = dump_v4(&Connection::open(&path).unwrap());
 
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     drop(store);
 
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
         versions(&conn),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(dump_v4(&conn), before, "no row of version 4 changed");
 
@@ -358,12 +358,12 @@ fn a_fresh_file_opens_at_five() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let store = SqliteStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 13);
+    assert_eq!(store.schema_version().unwrap(), 14);
     drop(store);
     let conn = Connection::open(&path).unwrap();
     assert_eq!(
         versions(&conn),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     );
     assert_eq!(count(&conn, "agents"), 1);
     assert_eq!(count(&conn, "chat_sessions"), 0);
@@ -383,7 +383,7 @@ fn a_version_four_store_with_an_active_run_refuses_and_stays_at_four() {
         err,
         OpenError::RunActive {
             current: 4,
-            pending: 13
+            pending: 14
         }
     );
 

@@ -270,10 +270,11 @@ fn on_a_version_eight_store_with_no_hosts_table_it_reports_no_hosts_and_exits_ze
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     let v = report(&out);
     assert_eq!(v["store_version"], 8);
-    assert_eq!(v["supported_store_version"], 13);
+    assert_eq!(v["supported_store_version"], 14);
     // Migrations 9 (launch records), 10 (host positions), 11 (the chat host cursor), 12 (the
-    // notices) and 13 (the clear grants) are pending on a version 8 store.
-    assert_eq!(v["pending_migrations"].as_array().unwrap().len(), 5);
+    // notices), 13 (the clear grants) and 14 (a run's armed launch count) are pending on a version 8
+    // store.
+    assert_eq!(v["pending_migrations"].as_array().unwrap().len(), 6);
     assert_eq!(v["pending_migrations"][1]["version"], 10);
     assert_eq!(v["pending_migrations"][1]["name"], "host_positions");
     assert_eq!(v["pending_migrations"][2]["version"], 11);
@@ -282,6 +283,8 @@ fn on_a_version_eight_store_with_no_hosts_table_it_reports_no_hosts_and_exits_ze
     assert_eq!(v["pending_migrations"][3]["name"], "notices");
     assert_eq!(v["pending_migrations"][4]["version"], 13);
     assert_eq!(v["pending_migrations"][4]["name"], "clear_grants");
+    assert_eq!(v["pending_migrations"][5]["version"], 14);
+    assert_eq!(v["pending_migrations"][5]["name"], "run_launch_bound");
     assert_eq!(v["active_runs"], serde_json::json!([]));
     assert_eq!(v["live_hosts"], serde_json::json!([]));
     assert_eq!(v["can_start"], true);

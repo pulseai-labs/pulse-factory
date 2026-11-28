@@ -51,10 +51,11 @@ pub fn peer_cred(fd: RawFd) -> io::Result<Peer> {
     })
 }
 
-/// The PID of the peer through `SO_PEERPIDFD`: the kernel hands over a pidfd of the process that
-/// made the connection, and `/proc/self/fdinfo` names its PID. It fails on a kernel without the
-/// option (before Linux 6.5), and the caller then falls back to [`peer_cred`].
-pub fn peer_pid_by_pidfd(fd: RawFd) -> io::Result<i32> {
+/// A pidfd of the peer of a connected Unix socket (`SO_PEERPIDFD`): the kernel hands over a pidfd of
+/// the process that made the connection. The descriptor names the process, not its PID number, so a
+/// PID that is used again later does not move it. It fails on a kernel without the option (before
+/// Linux 6.5).
+pub fn peer_pidfd(fd: RawFd) -> io::Result<OwnedFd> {
     let mut pidfd: libc::c_int = -1;
     let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
     // SAFETY: `pidfd` and `len` are valid for the call and `len` is the size of `pidfd`.
@@ -71,13 +72,24 @@ pub fn peer_pid_by_pidfd(fd: RawFd) -> io::Result<i32> {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: on success the kernel gave us a new descriptor that nothing else owns.
-    let owned = unsafe { OwnedFd::from_raw_fd(pidfd) };
-    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", owned.as_raw_fd()))?;
+    Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+}
+
+/// The PID that a pidfd names, from the `Pid:` line of its fdinfo. A value of 0 or less is an error:
+/// the process has exited, or it lives in a PID namespace that this one cannot see.
+pub fn pidfd_pid(pidfd: &OwnedFd) -> io::Result<i32> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))?;
     info.lines()
         .find_map(|l| l.strip_prefix("Pid:"))
         .and_then(|p| p.trim().parse::<i32>().ok())
         .filter(|p| *p > 0)
         .ok_or_else(|| io::Error::other("the pidfd names no process in this PID namespace"))
+}
+
+/// The PID of the peer through `SO_PEERPIDFD`: [`peer_pidfd`], then [`pidfd_pid`]. It fails on a
+/// kernel without the option (before Linux 6.5), and the caller then falls back to [`peer_cred`].
+pub fn peer_pid_by_pidfd(fd: RawFd) -> io::Result<i32> {
+    pidfd_pid(&peer_pidfd(fd)?)
 }
 
 /// The cgroup path in the text of `/proc/<pid>/cgroup` (the `0::` line of cgroup v2).
@@ -262,4 +274,42 @@ pub fn poll2(
         },
         fds[1].revents & libc::POLLIN != 0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn the_pidfd_of_a_connected_socket_names_the_peers_pid() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        // A socket pair is made by this process, so this process is the peer.
+        let pidfd = peer_pidfd(a.as_raw_fd()).unwrap();
+        assert_eq!(pidfd_pid(&pidfd).unwrap(), std::process::id() as i32);
+        assert_eq!(
+            peer_pid_by_pidfd(a.as_raw_fd()).unwrap(),
+            std::process::id() as i32
+        );
+    }
+
+    #[test]
+    fn pidfd_pid_fails_once_the_process_has_exited() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        // SAFETY: `pidfd_open` of our own child with no flags; it returns a new descriptor or -1.
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+        assert!(raw >= 0, "{}", io::Error::last_os_error());
+        // SAFETY: the syscall gave us a new descriptor that nothing else owns.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw as libc::c_int) };
+        assert_eq!(pidfd_pid(&pidfd).unwrap(), child.id() as i32);
+        child.wait().unwrap();
+        let err = pidfd_pid(&pidfd).unwrap_err();
+        assert!(err.to_string().contains("no process"), "{err}");
+    }
+
+    #[test]
+    fn a_descriptor_that_is_no_socket_gives_no_pidfd() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(peer_pidfd(file.as_raw_fd()).is_err());
+    }
 }

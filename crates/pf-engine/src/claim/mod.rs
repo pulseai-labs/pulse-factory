@@ -21,6 +21,7 @@ mod decision;
 mod detail;
 mod grant;
 mod line;
+mod settle;
 mod sha256;
 
 pub use decision::{
@@ -35,7 +36,12 @@ pub use detail::{
     gaps_of, park_options_detail, stop_detail,
 };
 pub use grant::{live_grant, open_grant};
-pub use line::{Line, line_of};
+pub use line::{Line, LineRecord, MergeInputs, line_of};
+pub(crate) use settle::decide_settle;
+pub use settle::{
+    Act, SettleAsk, SettleError, SettleFacts, SettlePause, VERB_SETTLE, acts_of,
+    command_id as settle_command_id,
+};
 pub use sha256::sha256_hex;
 
 use serde_json::{Value, json};
@@ -486,7 +492,8 @@ pub(crate) fn withdraw_all(view: &RunView, reason: &str, now: &str) -> Vec<Effec
 /// uses new command IDs. A unit that parked after its PR was recorded keeps its PR. On a halted
 /// run the unit carries the reason "run halted", and the driver launches and merges nothing.
 /// `reset_visits` empties the unit's outcome counters: a `clear` is the operator's grant of a new
-/// budget, so every counter starts again.
+/// budget, so every counter starts again. `answer_generation` is the claim generation that answered:
+/// `None` for a settle, which acts under the clear grant and holds no claim.
 #[allow(clippy::too_many_arguments)]
 fn resume_effects(
     view: &RunView,
@@ -494,7 +501,7 @@ fn resume_effects(
     unit: &NodeRow,
     request: &RequestRow,
     to_stage: Option<&str>,
-    generation: u64,
+    answer_generation: Option<u64>,
     reset_visits: bool,
     answer: impl FnOnce(&str) -> Value,
     now: &str,
@@ -543,7 +550,7 @@ fn resume_effects(
     closed.status = RequestStatus::Answered;
     closed.answered_at = Some(now.to_string());
     closed.answer = Some(answer(&resolved).to_string());
-    closed.answer_generation = Some(generation);
+    closed.answer_generation = answer_generation;
     Ok((
         vec![Effect::PutNode(resumed), Effect::PutRequest(closed)],
         resolved,
@@ -604,7 +611,7 @@ pub(crate) fn decide_answer(
                         unit,
                         request,
                         resolved.to_stage.as_deref(),
-                        generation,
+                        Some(generation),
                         false,
                         |_| stored.clone(),
                         now,
@@ -900,7 +907,7 @@ pub(crate) fn decide_clear(
         unit,
         request,
         stage.as_deref(),
-        generation,
+        Some(generation),
         true,
         |resolved| {
             let mut stored = json!({ "verb": VERB_CLEAR, "to_stage": resolved });
@@ -1047,7 +1054,7 @@ pub(crate) fn decide_ack(
         unit,
         request,
         None,
-        generation,
+        Some(generation),
         false,
         |_| {
             let mut stored = json!({ "verb": VERB_ACK, "head_sha": head_sha });

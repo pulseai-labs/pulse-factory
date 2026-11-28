@@ -49,6 +49,11 @@ pub struct ArmPlan {
     /// from a proposal's snapshot. The CLI never sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_package: Option<String>,
+    /// The most launches the arm summary shows for the run's pinned package (`most_launches`), or
+    /// `None` when they are unknown. The controller stores it once as the run's armed launch count:
+    /// a grant act that would pass it is refused (`r2.s3.w2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_bound: Option<u64>,
 }
 
 /// The inputs of a plan, as plain values: what `arm` takes and what `propose` takes (but for
@@ -635,6 +640,7 @@ pub fn build_plan(inputs: &ArmInputs, workflow_dir: &Path) -> Result<Prepared, S
         target_dir,
         project_id: None,
         expect_package: None,
+        launch_bound: most_launches(&package, items),
     };
     Ok(Prepared {
         plan,

@@ -62,8 +62,9 @@ session hosts of ADR-0001 (amendment of 2026-11-16).
     failed resume shows "context lost", and the operator chooses (ADR-0014);
   - **a seat** parks with a request, as before. A relaunch from its record needs the claim or the
     clear grant (ADR-0005, amendment of 2026-11-16), and counts against the run's armed launch
-    budget. The request says whether the relaunch resumes the runtime session or starts fresh with the
-    unit's handoff;
+    budget. A relaunch under the grant resets no outcome counter. The request says whether the relaunch
+    resumes the runtime session or starts fresh with the unit's handoff, and it says "starts fresh"
+    while no seat adapter resumes its runtime session;
   - **a terminal** starts a new shell at the next open, in the record's working directory with the
     record's environment. Its scrollback is lost, and the tab says so.
 - **Settings at a resume.** A resume uses the record's values, except a key whose registry entry

@@ -11,6 +11,7 @@ pub use decide::{Decision, decide};
 
 use serde::{Deserialize, Serialize};
 
+use crate::claim::{Act, SettleFacts};
 use crate::port::agent::Usage;
 use crate::port::forge::PrRef;
 use crate::port::store::{
@@ -221,6 +222,23 @@ pub enum CommandBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         option: Option<String>,
     },
+    /// Settle a request under the clear grant (ADR-0005, amended): resume the parked unit, in the
+    /// name of the project's Orchestrator, with one act and a reason. The ID is
+    /// `settle:<R-n>:<revision>`. The canonical content holds the request, the revision, the act and
+    /// `to_stage`, and nothing else: `facts` is data the controller and the engine write, and it is
+    /// not serialized, so a retry with another reason is a replay.
+    Settle {
+        request_id: String,
+        revision: u32,
+        act: Act,
+        /// The stage a `redispatch` resumes at. A settle with none has no such field in its stored
+        /// content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_stage: Option<String>,
+        /// Who settled, under which grant and why. Not part of the content.
+        #[serde(skip)]
+        facts: SettleFacts,
+    },
     /// An ack that was refused. It changes no state; it writes the ledger line. `attempt`
     /// counts the refusals of this request and revision.
     AckRefused {
@@ -282,6 +300,7 @@ impl CommandBody {
             CommandBody::ClearUnit { .. } => "clear_unit",
             CommandBody::OpenMergeAck { .. } => "open_merge_ack",
             CommandBody::AckRequest { .. } => "ack_request",
+            CommandBody::Settle { .. } => "settle",
             CommandBody::AckRefused { .. } => "ack_refused",
         }
     }

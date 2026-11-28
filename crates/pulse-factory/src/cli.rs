@@ -44,6 +44,9 @@ pub enum Verb {
     Clear(ClearArgs),
     /// Ack a merge request: the spine PR merges with the head SHA the request names.
     Ack(AckArgs),
+    /// Settle a request below the line under the project's clear grant. Only a session of the
+    /// project's Orchestrator calls it.
+    Settle(SettleArgs),
     /// Add, list and remove the projects on this host. A project is an ID, a name and one root.
     Project(ProjectArgs),
     /// Chat with a project's Orchestrator: start, send, answer, set, interrupt, end, list, read.
@@ -238,6 +241,28 @@ pub struct ClearArgs {
     /// The file that holds the claim token. The default is `<state dir>/claim-token`.
     #[arg(long, value_name = "FILE")]
     pub claim_token_file: Option<PathBuf>,
+    /// Print JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SettleArgs {
+    /// The request, such as `R-3`.
+    pub id: String,
+    /// The revision you read with `show`. Another revision is refused.
+    #[arg(long, value_name = "N")]
+    pub rev: u32,
+    /// The act: `clear`, `resume` or `redispatch` on this server. The request's cause says which
+    /// acts it admits.
+    #[arg(long, value_name = "ACT")]
+    pub act: String,
+    /// The stage a `redispatch` resumes at. No other act takes it.
+    #[arg(long, value_name = "STAGE")]
+    pub to: Option<String>,
+    /// Why: one line of 1 to 300 characters. It is stored and shown, with secrets redacted.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
     /// Print JSON.
     #[arg(long)]
     pub json: bool,
@@ -766,6 +791,7 @@ pub fn run(args: Vec<OsString>) -> i32 {
         Verb::Answer(a) => crate::controller::client::answer(&a),
         Verb::Clear(a) => crate::controller::client::clear(&a),
         Verb::Ack(a) => crate::controller::client::ack(&a),
+        Verb::Settle(a) => crate::controller::client::settle(&a),
         Verb::Project(a) => match a.verb {
             ProjectVerb::Add(a) => crate::controller::client::project_add(&a),
             ProjectVerb::List(a) => crate::controller::client::project_list(&a),

@@ -1306,6 +1306,20 @@ impl Driver {
             .map_err(|e| e.to_string())
     }
 
+    /// Settle a request under the project's clear grant (`r2.s3.w2`). The pins of the run's whole
+    /// manifest are checked first, as for a clear: a pinned file that changed after `arm` refuses,
+    /// names the file and changes nothing. Then the engine settles, under its own lock, with the run's
+    /// forge repo and default branch for the class of the request.
+    pub fn settle(
+        &self,
+        ask: pf_engine::claim::SettleAsk,
+        forge: (&str, &str),
+    ) -> Result<Admission, pf_engine::claim::SettleError> {
+        self.check_pins()
+            .map_err(pf_engine::claim::SettleError::Refused)?;
+        self.cfg.engine.settle(ask, Some(forge))
+    }
+
     /// [`Driver::clear_unit`] with an option of the request's decision block in place of a stage.
     /// The option belongs to `revision`. The pins are checked first, as for a clear.
     pub fn clear_option(

@@ -92,6 +92,8 @@ pub struct Engine {
     pub(crate) clock: Clock,
     pub(crate) capacity: Capacity,
     pub(crate) inner: Mutex<Inner>,
+    /// A test point inside `Engine::settle`: off unless a test sets it.
+    pub(crate) settle_pause: Mutex<Option<crate::claim::SettlePause>>,
 }
 
 /// What `ingest` did with the records of a source.
@@ -124,6 +126,7 @@ impl Engine {
                 degraded: None,
                 ledger,
             }),
+            settle_pause: Mutex::new(None),
         })
     }
 
@@ -220,7 +223,11 @@ impl Engine {
         self.submit_locked(&mut inner, command)
     }
 
-    fn submit_locked(&self, inner: &mut Inner, command: Command) -> Result<Admission, EngineError> {
+    pub(crate) fn submit_locked(
+        &self,
+        inner: &mut Inner,
+        command: Command,
+    ) -> Result<Admission, EngineError> {
         let run_id = &self.cfg.run_id;
         let content = canonical_content(run_id, &command);
 

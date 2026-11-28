@@ -275,8 +275,8 @@ the act does. The caller never says what an option means. An option ID is 1 to 3
 
 Every request has a **line class**, `below` or `above` (ADR-0006, amended). `below` means that the
 operator's clear grant may settle the request (see "The clear grant"), and `above` means that the
-claim alone may. Nothing acts under the grant yet, so the class changes no verb: who may `answer`,
-`clear` and `ack` a request is as before, for both classes.
+claim alone may. `settle` acts under the grant, and only on a `below` request (see "Settle"). Who may
+`answer`, `clear` and `ack` a request is as before, for both classes.
 
 The engine computes the class from the request's cause and from its track's merge, with one
 function, `line_of(cause, free_merge)`. One exhaustive `match` over the causes gives each cause a
@@ -315,8 +315,11 @@ has no known default branch, so its merge causes are `above`.
   whose view cannot be read. A request with no unit is `above`. The engine names no repo and no
   branch of its own: the controller passes the run's forge repo and its default branch on every
   call.
-- **The class is computed and never stored.** No request body, command or block holds a class key.
-  An open request and a closed one read the class at the read, from the cause in the stored block.
+- **The class is computed and never stored in a request.** No request body, command or block holds a
+  class key. An open request and a closed one read the class at the read, from the cause in the
+  stored block. One reader is the exception: a settled request reads the line that its settle
+  recorded in its answer (see "Settle"), so a later change of the computed class does not change
+  what the request showed when it was settled.
 
 `show`, `requests` and the `request` and `requests` frames carry it as `line` (`cli.md`, `api.md`).
 
@@ -324,8 +327,8 @@ has no known default branch, so its merge causes are `above`.
 
 A project's **clear grant** is a stored row that says the Orchestrator may settle the project's
 requests that are below the line. The grant is off until the operator gives it, and the operator
-can end it at any time. Nothing acts under the grant yet: this section is the record and the rules
-that a later verb reads.
+can end it at any time. `settle` acts under the grant (see "Settle"). This section is the record
+and the rules that `settle` reads.
 
 - **The row.** One row for each project and generation, in the table `clear_grants`: the project's
   ID, the generation (an integer from 1), the agent that holds the grant (`orchestrator`), who
@@ -366,6 +369,137 @@ that a later verb reads.
   commit that carries the precondition, which is then rejected, or after it. A revoke through the
   stopped-ledger path counts: it commits to the store at once.
 
+## Settle
+
+`settle` is the one verb that acts under the clear grant (ADR-0004, ADR-0005, amended). A live
+session of the project's Orchestrator calls it to settle a park that is below the line:
+
+```
+pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> [--json]
+```
+
+- **The verb.** `settle` names a request at the revision the caller read, never a bare unit. It
+  takes one act and a reason. It reads no claim token and never joins the device allowlist. An
+  admitted settle resumes the parked unit and closes the request `answered`. It grants no new
+  budget: the run's outcome counters stay as they are, and the run's armed launch count bounds it
+  (see "The launch bound").
+- **The acts.** There are six, in this order: `clear`, `resume`, `rerun_check`, `redispatch`,
+  `resolve_conflict` and `close_stale`. Each cause admits only its own acts, from one exhaustive
+  `match` over the causes, so a new cause does not compile until it has a row:
+
+  | Cause | Acts |
+  |---|---|
+  | `stalled` | `clear`, `redispatch` |
+  | `seat_lost`, `host_unreachable` | `resume` |
+  | `merge_checks_red` | `rerun_check`, `redispatch` |
+  | `merge_conflict` | `resolve_conflict` |
+  | every other cause, and a request with no cause | none |
+
+- **Which acts this server builds.** `clear` and `redispatch` on `stalled`, `redispatch` on
+  `merge_checks_red`, and `resume` on `seat_lost`. The controller refuses the others before it
+  builds a command: `rerun_check`, `resolve_conflict` and `resume` on `host_unreachable` with
+  `settle refused: the act <act> is not built on this server yet; the operator can answer or clear
+  the request`, and `close_stale` with `settle refused: close_stale has no object: a revision
+  replaces its request in the same row, so no stale request exists`.
+- **`--to`.** Only `redispatch` takes it, and `redispatch` needs it: a redispatch with no `--to`
+  would be a `clear`. It names a stage of the unit's track at or before the stage the unit parked
+  in. A unit parked at its merge has every stage before it. A later stage is refused: `--to <stage>
+  is after the stage the unit parked in (<parked>): a settle never skips a stage`. A stage that the
+  track lacks is refused with the track's stages, as `clear --to` is. A redispatch drops the done
+  mark of every stage from `--to` on.
+- **The checks, in order, and where they run.** Each refusal starts `settle refused: ` and writes
+  no admission under the settle's own ID.
+  - the controller, before the command: the OS (only Linux admits a settle); the caller (see "The
+    caller of a settle"); the arguments (an act of the six, `--to` as above, a reason of 1 to 300
+    characters on one line with no control character); who (the session is live and is of the
+    agent `orchestrator`, the request is known, its run has a project, and that project is the
+    session's); the grant (a live row for the project, of one generation; a removed project has
+    none); the act list (`authority.clear_acts`, read fresh, must hold the act); the acts that
+    this server does not build; the run's pins (a pinned file that changed after `arm` refuses and
+    names the file); and the reason, redacted once and then bounded;
+  - `Engine::settle`, under the engine's lock: a degraded engine refuses; the replay lookup comes
+    first (see "The replay"); the request must be open at the named revision; its class must be
+    `below`; its cause must admit the act; then the line record is built and the command is
+    submitted. The lock is held from the class read to the commit, so the class that is read is
+    the class of the request that the commit closes;
+  - the decision: it checks the request and the unit again, and a halted run, the cause, `--to`,
+    the launch bound, and it builds the effects. A halted run refuses every settle, for every act:
+    `run <run> is halted: a halted run refuses every settle`;
+  - the store, inside the commit: the commit carries the precondition that the grant is live at the
+    generation the controller read (`Effect::RequireLiveGrant`). A revoke that commits first,
+    through either path, makes the store reject the whole commit: nothing is written, the request
+    stays open and the unit keeps its park.
+- **The refusal texts of a moved request.** A request revised before the settle is refused with the
+  word `subject_moved` and `request <R-n> is at revision <n>, not <k>`. A request that is not open
+  is refused with the same word and `request <R-n> is not open any more`. These are the two texts of
+  the confirm path. An `above` request is refused with `request <R-n> is above the line: only the
+  claim may settle it`, with no command built. A cause that does not admit the act is refused with
+  `the cause <cause> admits <acts>, not <act>`.
+- **The replay.** The command ID is `settle:<R-n>:<revision>`. The canonical content of a settle
+  holds the run, the command ID, the act and `--to`, and nothing else. A retry with the same act
+  and `--to` returns the first record (`replayed: true`) and writes no line, also after the request
+  closed, and whatever the retry says as its reason, session or generation. Another act or another
+  `--to` on the settled revision is refused: `revision <k> of <R-n> was settled with another act`.
+  The controller does not read the admission first. A retry passes the controller's checks again,
+  so a retry that a check now refuses is refused and audited, and the first record stands. That
+  holds after a revoke, a narrowed `authority.clear_acts`, a moved pin and an ended session.
+- **The launch bound.** The run row holds the run's armed launch count, which `arm` stores once
+  (`run-launch-bound-<run>`, ledger line `run_launch_bound <run> most_launches=<n> command=<id>`).
+  A plan whose most launches are unknown stores none, and its run refuses every launching act
+  (`clear`, `resume`, `redispatch` and `resolve_conflict`): `run <run> holds no armed launch count,
+  so the grant cannot launch in it`. Otherwise the decision counts the run's **launches so far**:
+  every admitted `launch` of the run, and every `running` unit that a `clear`, an `answer` or a
+  launching settle resumed and that has not launched since. An `ack` adds nothing. A launching
+  settle is refused when that number has reached the count: `the run's launches so far (<n>, <a>
+  admitted and <p> resumed and waiting to launch) have reached its armed launch count (<m>); the
+  grant cannot launch more in this run; the operator can still clear`. The request stays open and
+  the unit keeps its park. The claim's `clear` and `answer` are not bound. The workflow's own
+  launches after a redispatch are not reserved: the unit's outcome caps bound them.
+- **The stored answer** of the request holds `{"verb":"settle","act":…,"to_stage"?:…,"reason":…,
+  "grant":{"project","generation","agent","session"},"line":{…}}`. The `line` record holds the
+  class `below`, the cause and, for a merge cause, the rule, the base, the repo and the default
+  branch as the class compared them. `answer_generation` stays empty: it is the claim's. A settled
+  request reads its `line` from this record and not from a new computation, and `settled` names
+  the act, the reason, the session, the project and the generation (`cli.md`, `api.md`).
+- **The ledger line**, in the run's ledger: `settle <R-n>@<revision> by grant <P-n>#<g> session
+  <S-n>: act=<act>[ --to <stage>] reason=<text>`. The reason is redacted before it is stored or
+  logged.
+- **Audited refusals.** Every refusal after the OS check is one refused admission in
+  `controller.ledger`, kind `settle`, under an ID the controller makes and never under the settle's
+  ID. The bucket of a refusal window is the request ID when the request is in a run the
+  controller holds, else `other`. The caller is the session when the check named it, else
+  `pid:<n>`, or `unknown` with no peer. Repeated refusals in the window coalesce. A replay writes
+  no line.
+- **The OS rule.** A controller whose OS is not Linux refuses every settle: `settle refused: this
+  server runs on <os>; the clear grant's acts are admitted on Linux only (the grant can still be
+  given and ended here)`. `settle` is refused on every OS but Linux.
+
+### The caller of a settle
+
+The controller names the caller's session from its process and from its host. The socket gives it a
+duplicate of the connection, and it reads the caller's pidfd (`SO_PEERPIDFD`) from it. A kernel with
+no such option refuses every settle. A caller with no socket (the API path) is refused. The check, in
+order, with every failed read a refusal:
+
+1. the PID from the pidfd;
+2. a seat refuses: `PF_SEAT_TOKEN` in the caller's environment, or a tracked seat on its chain;
+3. the chain: each process from the caller up is pinned by its PID and its start time, up to the
+   first live chat process, which names the session. No chat on the chain refuses, and so does a
+   chain that is too long. A chat marker that names another session refuses. A marker never names
+   a caller;
+4. the host: a live host row of kind `chat` for that session;
+5. the launcher: under `systemd` the caller's cgroup must equal the cgroup of the host row's unit,
+   so the ancestry and the host's check must both name the same chat session. Under `detached` the
+   ancestry is the whole check (a stated residue). The check opens no connection to a host and
+   writes no attach line;
+6. the end: the pidfd still names the same PID, and every pinned process still has its start time.
+   A process that exited, or a PID that is used again, refuses.
+
+Under `systemd`, `grant clear` and `grant revoke` also refuse a caller that runs in the cgroup of a
+live chat host unit: `<verb> refused: the caller runs in the cgroup of chat host unit <unit>, so it
+runs under a chat`. The operator's CLI runs in no chat host unit, so it passes. Under `detached` the
+same caller is admitted: that is the stated residue of the detached launcher.
+
 ## Command IDs
 
 Every change is an admitted command. Its ID is in the admissions table, and a replay with the same
@@ -383,6 +517,8 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Claim | `claim:<generation>` |
 | Issue a confirm code, or act with one from a device | the device's own `command_id` |
 | Clear a unit | `clear:<unit>:<park generation>` |
+| Settle a request (the Orchestrator, under the clear grant) | `settle:<R-n>:<revision>` |
+| Store a run's armed launch count (`@controller`) | `run-launch-bound-<run>` |
 | Give or end a clear grant (`@controller`) | the caller's `--command-id`, random by default; the admission's unit is `<P-n>:<generation>` |
 | Park a unit | `park:<unit>:<park generation>` |
 | Merge a unit | `merge:<unit>:<park generation>` |
@@ -452,8 +588,8 @@ The token reaches no log, ledger line, `status`, request body, `requests`, `show
 
 ### The caller check
 
-On every `claim`, `answer`, `clear`, `ack`, `arm`, `device pair`, `device revoke`, `grant clear` and
-`grant revoke`, and on the session verbs, the controller:
+On every `claim`, `answer`, `clear`, `ack`, `arm`, `device pair`, `device revoke`, `project add`,
+`project remove`, `grant clear` and `grant revoke`, and on the session verbs, the controller:
 
 1. reads the peer's PID from the socket (`SO_PEERCRED`);
 2. refuses a peer whose `/proc/<pid>/environ` holds `PF_SEAT_TOKEN`;

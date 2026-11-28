@@ -71,6 +71,7 @@ pub const VERBS: &[&str] = &[
     "grant_clear",
     "grant_revoke",
     "grant_list",
+    "settle",
     "confirm_code",
     "settings_get",
     "settings_set",
