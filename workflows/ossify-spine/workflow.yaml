@@ -573,10 +573,84 @@ tracks:
             to: review
             max: 2
 
+      # The conflict stage runs only when the Orchestrator settles a merge conflict with
+      # `resolve_conflict`. The seat merges the base into the item branch, resolves each conflict,
+      # builds and tests, pushes once and says it is done. The controller then compares the paths the
+      # resolution changed with the merge's `guarded` globs: a match parks the unit for the operator,
+      # and otherwise the unit goes on to `review` and every stage after it before the merge rule runs.
+      - name: resolve
+        role: close
+        entered_by: conflict
+        brief: [briefs/common.md, briefs/resolve.md]
+        message: >-
+          Read {param.briefs}/common.md, then {param.briefs}/resolve.md, and follow them.
+          Work item: {unit.id}. Handoff: {unit.vars.handoff_path}.
+          Worktree: {unit.vars.worktree_path}. Branch: {unit.vars.branch}.
+          Base: {param.spine_branch}.
+          Resolve done file: {run.dir}/out/{unit.id}/resolve-done.
+          OUT: {run.dir}/out/{unit.id}. Stop file: {run.dir}/out/{unit.id}/stop.
+          Rulings: {run.dir}/out/{unit.id}/rulings.md.
+          Decisions file: {run.dir}/out/{unit.id}/decisions.md.
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session, build]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/resolve-done"]
+        stop_file:
+          file: "{run.dir}/out/{unit.id}/stop"
+          on_answer:
+            - - sh
+              - "{run.package}/scripts/rule.sh"
+              - "{run.dir}/out/{unit.id}/rulings.md"
+              - "{run.dir}/out/{unit.id}/stop"
+              - "{answer.file}"
+              - "{answer.request}"
+              - "{answer.generation}"
+              - resolve
+              - "{answer.source}"
+        # The stage's fallback: a text typed on a park that no file opened reaches the next seat as a
+        # note in the same rulings file, as it does for `fix`.
+        on_answer:
+          - - sh
+            - "{run.package}/scripts/rule.sh"
+            - "{run.dir}/out/{unit.id}/rulings.md"
+            - "-"
+            - "{answer.file}"
+            - "{answer.request}"
+            - "{answer.generation}"
+            - resolve
+            - "{answer.source}"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          env.SPINE_STOP_FILE: "{run.dir}/out/{unit.id}/stop"
+          env.SPINE_DECISIONS: "{run.dir}/out/{unit.id}/decisions.md"
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - file: "{run.dir}/out/{unit.id}/resolve-done"
+
     merge:
       rule: green_checks_in_declared_order
       repo: "{param.forge_repo}"
       base: "{param.spine_branch}"
+      on_conflict:
+        stage: resolve
+        then: review
+      guarded:
+        - "**/tests/**"
+        - "**/test/**"
+        - "**/e2e/**"
+        - "**/*_test.*"
+        - "**/*.test.*"
+        - "**/*.spec.*"
+        - "docs/adr/**"
+        - "docs/contracts/**"
+        - "docs/specs/**"
       pr:
         - env
         - -C

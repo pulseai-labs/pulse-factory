@@ -108,12 +108,12 @@ fn masked_values(r: &Value) -> Vec<Value> {
 }
 
 #[test]
-fn a_fresh_store_reads_the_thirteen_built_ins() {
+fn a_fresh_store_reads_the_fourteen_built_ins() {
     let (live, _) = live();
     let v = get(&live, &[]);
     assert_eq!(v["schema_version"], 1);
     let settings = v["settings"].as_array().unwrap();
-    assert_eq!(settings.len(), 13, "{v}");
+    assert_eq!(settings.len(), 14, "{v}");
     let keys: Vec<&str> = settings
         .iter()
         .map(|r| r["key"].as_str().unwrap())
@@ -134,11 +134,12 @@ fn a_fresh_store_reads_the_thirteen_built_ins() {
             "notify.orchestrator.max_words",
             "notify.resend_seconds",
             "authority.clear_acts",
+            "authority.rerun_checks_per_head",
         ]
     );
     for r in settings {
         assert_eq!(from_kind(r), "built_in", "{r}");
-        // `authority.clear_acts` is the one key that merges by `intersect`; the other twelve override.
+        // `authority.clear_acts` is the one key that merges by `intersect`; the other thirteen override.
         let merge = if r["key"] == "authority.clear_acts" {
             "intersect"
         } else {
@@ -575,7 +576,7 @@ fn a_caller_that_descends_from_a_live_chat_can_read_but_not_write() {
     // The read answers for a descendant of the live chat.
     let resp = pf_ipc::call(&live.sb.state, "settings_get", json!({})).unwrap();
     assert!(resp.ok, "{:?}", resp.error);
-    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 13);
+    assert_eq!(resp.result["settings"].as_array().unwrap().len(), 14);
     // The write is refused, and names the chat process. Its audit is AC-25's.
     let resp = pf_ipc::call(
         &live.sb.state,

@@ -258,12 +258,17 @@ pub fn nudge_text(pkg: &Package) -> String {
 /// items × launches(track))`. The 2 is each stall's one relaunch.
 ///
 /// `launches(track)` is the launches of one unit of the track: each stage counts once, except a
-/// stage with `entered_by: outcome`, which counts 0; then every `outcomes` entry adds its `max`,
-/// because each time an entry fires it launches its `to` stage once.
+/// stage with `entered_by: outcome` or `entered_by: conflict`, which counts 0; then every `outcomes`
+/// entry adds its `max`, because each time an entry fires it launches its `to` stage once. A
+/// resolution takes its launch from the run's general room: the armed count reserves none for it.
 pub fn most_launches(pkg: &Package, items: Option<u64>) -> Option<u64> {
     let stages = |track: &str| -> u64 {
         pkg.file.track(track).map_or(0, |t| {
-            let once = t.stages.iter().filter(|s| !s.entered_by_outcome).count();
+            let once = t
+                .stages
+                .iter()
+                .filter(|s| !s.entered_by_outcome && !s.entered_by_conflict)
+                .count();
             let looped: u64 = t
                 .stages
                 .iter()

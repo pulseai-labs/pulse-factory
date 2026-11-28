@@ -111,6 +111,8 @@ A track is `{stages, merge}`. `stages` is a list of one or more stages and runs 
 | `pr` | yes | A command that prints the unit's PR URL. |
 | `head_check` | no | `true` or `false`; default `false`. When `true`, the engine's merge step compares the PR head with the last recorded push and parks the unit when there is none. |
 | `after_merge` | no | A list of commands that run after the merge, on a unit already `done`. |
+| `on_conflict` | no | `{stage: <name>, then: <name>}`. The stage a merge conflict sends the unit to, and the stage the unit goes to when that stage is done (see "The conflict stage"). Not under the rule `claim_ack`. It needs `guarded`. |
+| `guarded` | with `on_conflict` | A list of 1 to 32 path globs (see "The conflict stage"). A resolution that changes a path one of them matches parks the unit. |
 
 **The rule `claim_ack`.** The merge of a unit on such a track waits for the claim holder's ack
 (ADR-0005). When the unit is next in the declared order and every stage is done, the merge step
@@ -146,7 +148,7 @@ Each stage of a track has these fields:
 | `park_on` | no | A list of `{file, reason, on_answer, options}`. `on_answer` and `options` are optional. |
 | `on_answer` | no | The stage's fallback answer hook: a list of commands, in the answer scope. A text typed on a park of this stage that has no hook of its own reaches the next seat through it (see "Answer hooks"). |
 | `outcomes` | no | A list of `{when, to, max}`: where the unit goes when the stage ends in a way other than plain done (see "`outcomes`"). |
-| `entered_by` | no | `outcome` is the only value in version 1. The stage runs only when an outcome sends the unit to it (see "`outcomes`"). It needs at least one `outcomes` entry. |
+| `entered_by` | no | `outcome` or `conflict`. With `outcome` the stage runs only when an outcome sends the unit to it (see "`outcomes`"), and it needs at least one `outcomes` entry. With `conflict` the stage runs only when a merge conflict sends the unit to it (see "The conflict stage"), and it takes no `outcomes`. |
 | `base_push` | no | `{dir, branch}`, both templates: a branch the controller puts on `origin` before the stage launches, when `origin` lacks it (see "`base_push`"). |
 | `no_signal` | no | `{nudge, nudges, run}`: what the controller does when the seat's turn ends with no done signal. It may deliver a message into the same session, up to a cap, and it may run commands before it parks the unit (see "`no_signal`"). |
 
@@ -217,6 +219,54 @@ change for it.
 
 Each time an entry sends a unit it launches its `to` stage once. `arm` counts that, so its most
 launches adds every entry's `max` (`cli.md`).
+
+### The conflict stage
+
+A track whose merge declares `on_conflict` has a stage that resolves a merge conflict. The stage is
+`entered_by: conflict`: when the unit reaches it in order, the engine passes it over, the stage never
+runs, and the merge rule counts it as done. It runs only when the Orchestrator's `settle` with
+`resolve_conflict` sends the unit there (`requests.md`, "Settle"). The `arm` summary counts such a
+stage 0 in the most launches (`cli.md`).
+
+```yaml
+merge:
+  rule: green_checks_in_declared_order
+  on_conflict:
+    stage: resolve
+    then: review
+  guarded:
+    - "**/tests/**"
+    - "docs/adr/**"
+```
+
+- **`then`.** The stage the unit goes to when the conflict stage is done. The unit never goes from the
+  conflict stage to its merge: it runs `then` and every later stage first, so a resolution is
+  reviewed before the merge rule runs.
+- **The compare.** When the stage is done, the controller reads three trees: the tree of the head that
+  `settle` stored, the tree of the PR's head now, and the tree of the tip of the PR's base. A path is
+  changed by the resolution when its blob now differs from its blob at the stored head and from its
+  blob at the base. A path that is missing counts as one more value. A path that only took the base's
+  change is not changed, and a path that both sides changed counts as changed. A resolution that keeps
+  the PR's old content for a path that the base changed reads as not changed, and the `then` stage's
+  review sees it in the PR's diff.
+- **`guarded`.** The changed paths are matched with the globs. No match: the stage is done and the
+  unit goes to `then`. A match, or a read of a tree or a tip that fails: the stage is done, the
+  unit's place moves to `then`, and the unit parks in the same commit with the cause
+  `resolution_changed_guarded` (`requests.md`, "The causes"). The claim's `clear` resumes it at `then`.
+  A stage's end with no compare is refused, so no path advances a conflict stage without it.
+- **The glob grammar.** Paths are relative and use `/`. `*` matches within one path segment, `**`
+  matches any number of whole segments (none too), `?` matches one character, and every other
+  character is literal.
+- **Load-time checks**, each refused with the track and the field: `on_conflict` with no `then`;
+  `then` equal to the conflict stage; a `stage` or a `then` that the track lacks; a `then` that is
+  itself `entered_by` (it must be a stage of the track's own sequence); a `stage` that is not
+  `entered_by: conflict`, and an `entered_by: conflict` stage that no `on_conflict` names; `outcomes`
+  on the conflict stage, and an outcome whose `to` names it; `on_conflict` under the rule
+  `claim_ack`; `on_conflict` with no `guarded`, an empty `guarded`, and `guarded` with no
+  `on_conflict`; a glob that is empty, starts with `/`, holds a `..` segment, is over 200 characters,
+  or a list of more than 32 globs.
+- **The run's own workflow.** The engine reads `on_conflict` and `guarded` from the run's pinned copy
+  of the workflow, never from the package on disk.
 
 ### `base_push`
 

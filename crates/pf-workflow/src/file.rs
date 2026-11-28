@@ -164,6 +164,9 @@ pub struct StageSpec {
     /// `entered_by: outcome`: the stage runs only when an outcome sends the unit to it. A unit
     /// that reaches it in order goes past it.
     pub entered_by_outcome: bool,
+    /// `entered_by: conflict`: the stage runs only when a merge conflict sends the unit to it, as
+    /// the track's `merge.on_conflict` names. A unit that reaches it in order goes past it.
+    pub entered_by_conflict: bool,
     /// `base_push`: a branch the controller puts on `origin` before the stage launches, when
     /// `origin` lacks it.
     pub base_push: Option<BasePush>,
@@ -210,7 +213,26 @@ pub struct MergeSpec {
     pub pr: CommandSpec,
     pub head_check: bool,
     pub after_merge: Vec<CommandSpec>,
+    /// The stage a merge conflict sends the unit to, and the stage that follows it.
+    pub on_conflict: Option<OnConflictSpec>,
+    /// Globs of the paths that a conflict resolution may not change without the operator. A track
+    /// that declares `on_conflict` declares at least one.
+    pub guarded: Vec<String>,
 }
+
+/// The `on_conflict` key of a merge: `{stage, then}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnConflictSpec {
+    /// A stage of the track with `entered_by: conflict`.
+    pub stage: String,
+    /// A stage of the track's own sequence that a unit goes to when `stage` is done.
+    pub then: String,
+}
+
+/// The most globs a merge's `guarded` list holds.
+pub const GUARDED_MAX: usize = 32;
+/// The most characters of one guarded glob.
+pub const GUARDED_GLOB_MAX_CHARS: usize = 200;
 
 /// When a run may end. The run ends with `reason` once its seeds are finished and every unit is
 /// done, and every `when` condition holds. Until then each tick notes `waiting`.
@@ -983,6 +1005,7 @@ fn read_tracks(
         }
         let scope = Scope::Unit(&e.key);
         let mut stages: Vec<StageSpec> = Vec::new();
+        let mut stage_positions: Vec<Pos> = Vec::new();
         let mut targets: Vec<(String, String, Pos)> = Vec::new();
         let mut option_targets: Vec<(String, String, Pos)> = Vec::new();
         for s in stage_nodes {
@@ -1004,7 +1027,9 @@ fn read_tracks(
                     .map(|(to, pos)| (stage.name.clone(), to, pos)),
             );
             stages.push(stage);
+            stage_positions.push(s.pos);
         }
+        let targets_for_conflict: Vec<(String, String, Pos)> = targets.clone();
         // An outcome sends the unit to a stage of its own track, earlier or later.
         for (from, to, pos) in targets {
             if !stages.iter().any(|x| x.name == to) {
@@ -1029,8 +1054,16 @@ fn read_tracks(
         }
         let merge = match f.get("merge") {
             None => None,
-            Some(m) => Some(read_merge(m, check, scope)?),
+            Some(m) => Some((read_merge(m, check, scope, &e.key)?, m.pos)),
         };
+        check_conflict_stage(
+            &e.key,
+            &stages,
+            &stage_positions,
+            merge.as_ref(),
+            &targets_for_conflict,
+        )?;
+        let merge = merge.map(|(m, _)| m);
         tracks.push(TrackDef {
             name: e.key.clone(),
             stages,
@@ -1190,25 +1223,42 @@ fn read_stage(
         None => (Vec::new(), Vec::new()),
         Some(n) => read_outcomes(n, &name, check, scope)?,
     };
-    let entered_by_outcome = match f.get("entered_by") {
-        None => false,
+    let (entered_by_outcome, entered_by_conflict) = match f.get("entered_by") {
+        None => (false, false),
         Some(n) => {
             let value = text_of(n, "`entered_by`")?;
-            if value != "outcome" {
-                return Err(ParseError::new(
-                    n.pos,
-                    format!("`entered_by` `{value}` is unknown; version 1 accepts: outcome"),
-                ));
+            match value.as_str() {
+                "outcome" => {
+                    if outcomes.is_empty() {
+                        return Err(ParseError::new(
+                            n.pos,
+                            format!(
+                                "stage `{name}` is `entered_by: outcome`, so it must hold at least one `outcomes` entry"
+                            ),
+                        ));
+                    }
+                    (true, false)
+                }
+                "conflict" => {
+                    if !outcomes.is_empty() {
+                        return Err(ParseError::new(
+                            n.pos,
+                            format!(
+                                "stage `{name}` is `entered_by: conflict`, so it holds no `outcomes`: the unit goes on to the `then` stage of its track's `on_conflict`"
+                            ),
+                        ));
+                    }
+                    (false, true)
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        n.pos,
+                        format!(
+                            "`entered_by` `{value}` is unknown; version 1 accepts: outcome, conflict"
+                        ),
+                    ));
+                }
             }
-            if outcomes.is_empty() {
-                return Err(ParseError::new(
-                    n.pos,
-                    format!(
-                        "stage `{name}` is `entered_by: outcome`, so it must hold at least one `outcomes` entry"
-                    ),
-                ));
-            }
-            true
         }
     };
     let base_push = match f.get("base_push") {
@@ -1239,6 +1289,7 @@ fn read_stage(
         park_on,
         outcomes,
         entered_by_outcome,
+        entered_by_conflict,
         base_push,
         no_signal,
     };
@@ -1632,7 +1683,12 @@ fn read_end_when(node: &Node, check: &Checker) -> Result<EndWhen, ParseError> {
 /// The merge rules version 1 accepts, as the file spells them.
 const MERGE_RULES: &str = "green_checks_in_declared_order, claim_ack";
 
-fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, ParseError> {
+fn read_merge(
+    node: &Node,
+    check: &Checker,
+    scope: Scope,
+    track: &str,
+) -> Result<MergeSpec, ParseError> {
     let f = Fields::new(
         node,
         "`merge`",
@@ -1644,6 +1700,8 @@ fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, P
             "pr",
             "head_check",
             "after_merge",
+            "on_conflict",
+            "guarded",
         ],
     )?;
     let rule_node = f.req("rule")?;
@@ -1669,6 +1727,47 @@ fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, P
             Some(check.text_node(n, "`head_branch`", scope)?)
         }
     };
+    let on_conflict = match f.get("on_conflict") {
+        None => None,
+        Some(n) => {
+            if rule == MergeRule::ClaimAck {
+                return Err(ParseError::new(
+                    n.pos,
+                    format!(
+                        "`on_conflict` of track `{track}` is refused under the merge rule `claim_ack`: the claim holder's ack of the merge decides a conflict"
+                    ),
+                ));
+            }
+            let what = format!("`on_conflict` of track `{track}`");
+            let o = Fields::new(n, &what, &["stage", "then"])?;
+            Some(OnConflictSpec {
+                stage: name_of(o.req("stage")?, "the `stage` of `on_conflict`")?,
+                then: name_of(o.req("then")?, "the `then` of `on_conflict`")?,
+            })
+        }
+    };
+    let guarded = match f.get("guarded") {
+        None => Vec::new(),
+        Some(n) => read_guarded(n, track)?,
+    };
+    if on_conflict.is_some() && guarded.is_empty() {
+        return Err(ParseError::new(
+            node.pos,
+            format!(
+                "`on_conflict` of track `{track}` needs a `guarded` list with at least one glob: a resolution is compared with it"
+            ),
+        ));
+    }
+    if on_conflict.is_none()
+        && let Some(n) = f.get("guarded")
+    {
+        return Err(ParseError::new(
+            n.pos,
+            format!(
+                "`guarded` of track `{track}` belongs with an `on_conflict`: nothing compares it otherwise"
+            ),
+        ));
+    }
     Ok(MergeSpec {
         rule,
         repo: check.text_node(f.req("repo")?, "`repo`", scope)?,
@@ -1683,5 +1782,128 @@ fn read_merge(node: &Node, check: &Checker, scope: Scope) -> Result<MergeSpec, P
             None => Vec::new(),
             Some(n) => check.commands(n, "`after_merge`", scope)?,
         },
+        on_conflict,
+        guarded,
     })
+}
+
+/// The `guarded` list of a merge: at most [`GUARDED_MAX`] globs, each a relative path pattern of at
+/// most [`GUARDED_GLOB_MAX_CHARS`] characters with no `..` segment.
+fn read_guarded(node: &Node, track: &str) -> Result<Vec<String>, ParseError> {
+    let list = items(node, "`guarded`")?;
+    if list.len() > GUARDED_MAX {
+        return Err(ParseError::new(
+            node.pos,
+            format!(
+                "`guarded` of track `{track}` holds {} globs; the most is {GUARDED_MAX}",
+                list.len()
+            ),
+        ));
+    }
+    let mut globs = Vec::new();
+    for n in list {
+        let glob = text_of(n, "a `guarded` glob")?;
+        let bad = |why: &str| {
+            ParseError::new(
+                n.pos,
+                format!("a `guarded` glob of track `{track}` {why}: `{glob}`"),
+            )
+        };
+        if glob.trim().is_empty() {
+            return Err(bad("is empty"));
+        }
+        if glob.starts_with('/') {
+            return Err(bad("starts with `/`: a path is relative"));
+        }
+        if glob.split('/').any(|segment| segment == "..") {
+            return Err(bad("holds a `..` segment"));
+        }
+        if glob.chars().count() > GUARDED_GLOB_MAX_CHARS {
+            return Err(bad(&format!("is over {GUARDED_GLOB_MAX_CHARS} characters")));
+        }
+        globs.push(glob);
+    }
+    Ok(globs)
+}
+
+/// The cross-checks of a track's conflict stage, once its stages and its merge are read.
+fn check_conflict_stage(
+    track: &str,
+    stages: &[StageSpec],
+    positions: &[Pos],
+    merge: Option<&(MergeSpec, Pos)>,
+    outcome_targets: &[(String, String, Pos)],
+) -> Result<(), ParseError> {
+    let declared = merge.and_then(|(m, pos)| m.on_conflict.as_ref().map(|o| (o, *pos)));
+    // A conflict stage that the track's `on_conflict` does not name has no way to run.
+    let stray = || {
+        for (stage, at) in stages
+            .iter()
+            .zip(positions)
+            .filter(|(s, _)| s.entered_by_conflict)
+        {
+            if declared.is_none_or(|(o, _)| o.stage != stage.name) {
+                return Err(ParseError::new(
+                    *at,
+                    format!(
+                        "stage `{}` of track `{track}` is `entered_by: conflict`, but no `on_conflict` of the track names it",
+                        stage.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    };
+    let Some((on, pos)) = declared else {
+        return stray();
+    };
+    let named = |name: &str, field: &str| {
+        stages.iter().find(|s| s.name == name).ok_or_else(|| {
+            ParseError::new(
+                pos,
+                format!(
+                    "the `{field}` of `on_conflict` of track `{track}` is `{name}`, which the track does not define"
+                ),
+            )
+        })
+    };
+    let conflict = named(&on.stage, "stage")?;
+    let then = named(&on.then, "then")?;
+    if on.stage == on.then {
+        return Err(ParseError::new(
+            pos,
+            format!(
+                "the `then` of `on_conflict` of track `{track}` is the conflict stage `{}` itself",
+                on.stage
+            ),
+        ));
+    }
+    if !conflict.entered_by_conflict {
+        return Err(ParseError::new(
+            pos,
+            format!(
+                "the conflict stage `{}` of track `{track}` must be `entered_by: conflict`",
+                on.stage
+            ),
+        ));
+    }
+    if then.entered_by_outcome || then.entered_by_conflict {
+        return Err(ParseError::new(
+            pos,
+            format!(
+                "the `then` of `on_conflict` of track `{track}` is `{}`, which only an outcome or a conflict enters: it must be a stage of the track's own sequence",
+                on.then
+            ),
+        ));
+    }
+    if let Some((from, _, at)) = outcome_targets.iter().find(|(_, to, _)| *to == on.stage) {
+        return Err(ParseError::new(
+            *at,
+            format!(
+                "an outcome of stage `{from}` of track `{track}` sends the unit to the conflict stage `{}`: only a merge conflict enters it",
+                on.stage
+            ),
+        ));
+    }
+    stray()
 }

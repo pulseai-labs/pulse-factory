@@ -37,11 +37,12 @@ pub use detail::{
 };
 pub use grant::{live_grant, open_grant};
 pub use line::{Line, LineRecord, MergeInputs, line_of};
-pub(crate) use settle::decide_settle;
 pub use settle::{
-    Act, SettleAsk, SettleError, SettleFacts, SettlePause, VERB_SETTLE, acts_of,
-    command_id as settle_command_id,
+    Act, EffectKind, PendingSettle, RESULT_DETAIL_MAX, SettleAsk, SettleError, SettleFacts,
+    SettleOutcome, SettlePause, VERB_SETTLE, acts_of, command_id as settle_command_id, effect_of,
+    pending_settle, result_command_id, stored_result,
 };
+pub(crate) use settle::{decide_settle, decide_settle_result};
 pub use sha256::sha256_hex;
 
 use serde_json::{Value, json};

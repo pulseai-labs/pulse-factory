@@ -58,7 +58,29 @@ impl Gate {
     }
 }
 
+/// What `rebind` answers and what `is_alive` says, when a test scripts them (`r2.s3.w3`). With no
+/// script, `rebind` is the default of an adapter that runs no host: `Lost` with `no session host`.
+#[derive(Clone, Debug)]
+pub enum RebindScript {
+    Survived,
+    Lost(String),
+    Unreachable(String),
+    Error(String),
+}
+
+#[derive(Default)]
+pub struct Rebinds {
+    pub script: Mutex<Option<RebindScript>>,
+    /// When set, `is_alive` answers this and ignores the fake.
+    pub alive: Mutex<Option<bool>>,
+    /// The session reference of each `rebind` call, in order.
+    pub calls: Mutex<Vec<String>>,
+    /// Called at each `rebind`, before it answers: a test reads what holds at that moment.
+    pub on_call: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
 pub struct Recording {
+    pub rebinds: Arc<Rebinds>,
     pub inner: Arc<FakeAdapter>,
     pub plans: Arc<Mutex<Vec<LaunchPlan>>>,
     pub gate: Arc<Gate>,
@@ -99,7 +121,27 @@ impl AgentPort for Recording {
         self.inner.hand_off(s, p)
     }
     fn is_alive(&self, s: &SessionRef) -> Result<bool, AgentError> {
+        if let Some(alive) = *self.rebinds.alive.lock().unwrap() {
+            return Ok(alive);
+        }
         self.inner.is_alive(s)
+    }
+    fn rebind(&self, s: &SessionRef) -> Result<RebindOutcome, AgentError> {
+        self.rebinds.calls.lock().unwrap().push(s.0.clone());
+        let hook = self.rebinds.on_call.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+        let script = self.rebinds.script.lock().unwrap().clone();
+        match script {
+            None => Ok(RebindOutcome::Lost {
+                cause: NO_SESSION_HOST.to_string(),
+            }),
+            Some(RebindScript::Survived) => Ok(RebindOutcome::Survived),
+            Some(RebindScript::Lost(cause)) => Ok(RebindOutcome::Lost { cause }),
+            Some(RebindScript::Unreachable(why)) => Ok(RebindOutcome::Unreachable { why }),
+            Some(RebindScript::Error(why)) => Err(AgentError::Failed(why)),
+        }
     }
     fn process_id(&self, s: &SessionRef) -> Option<u32> {
         self.pids.lock().unwrap().get(&s.0).copied()
@@ -120,6 +162,8 @@ pub struct TestPorts {
     pub plans: Arc<Mutex<Vec<LaunchPlan>>>,
     pub gate: Arc<Gate>,
     pub pids: Arc<Mutex<BTreeMap<String, u32>>>,
+    /// The scripted `rebind` and `is_alive` of the seats' adapter.
+    pub rebinds: Arc<Rebinds>,
     /// When set, the next runs cannot write `run.json`: a directory of that name is in the way.
     /// It makes an arm fail late, after the engine has started and committed.
     pub block_run_json: std::sync::atomic::AtomicBool,
@@ -136,6 +180,7 @@ impl Ports for TestPorts {
         let forge = pf_forge_bare::BareForge::open(&spec.forge_repo).map_err(|e| e.to_string())?;
         Ok(RunPorts {
             agent: Arc::new(Recording {
+                rebinds: self.rebinds.clone(),
                 inner: self.fake.clone(),
                 plans: self.plans.clone(),
                 gate: self.gate.clone(),
@@ -187,6 +232,7 @@ impl Live {
             plans: Arc::new(Mutex::new(Vec::new())),
             gate: Arc::new(Gate::default()),
             pids: Arc::new(Mutex::new(BTreeMap::new())),
+            rebinds: Arc::new(Rebinds::default()),
             block_run_json: std::sync::atomic::AtomicBool::new(false),
         });
         let bare = sb.root.path().join("forge.git");

@@ -170,52 +170,15 @@ fn a_stall_is_settled_with_redispatch_at_an_earlier_stage() {
     assert_eq!(status_of(&rig, &id), "open", "the request stays open");
 }
 
-// ------------------------------------------------------------------ the acts this server does not build
+// ------------------------------------------------------------------ the act this server does not build
 
 #[test]
-fn the_acts_that_are_not_built_are_refused_and_write_no_admission() {
+fn close_stale_is_refused_and_writes_no_admission() {
     let rig = SRig::new(&["u1"], Some(10));
-    rig.live.queue_item("u2", 2);
-    rig.live.queue_item("u3", 3);
     rig.tick();
-    rig.tick();
-    let engine = rig.live.handle().engine.clone();
-    engine
-        .park_with(
-            "u2",
-            pf_engine::port::store::RequestKind::MergeFailed,
-            Cause::MergeChecksRed,
-            "the checks are red",
-            None,
-        )
-        .unwrap();
-    engine
-        .park_with(
-            "u3",
-            pf_engine::port::store::RequestKind::MergeFailed,
-            Cause::HostUnreachable,
-            "the host is unreachable",
-            None,
-        )
-        .unwrap();
     rig.tick();
     let before = rig.admissions("settle");
-    let (red, red_rev) = rig.request("u2");
-    let (host, host_rev) = rig.request("u3");
     let (stall, stall_rev) = rig.request("u1");
-    for (id, rev, act) in [
-        (&red, red_rev, "rerun_check"),
-        (&host, host_rev, "resume"),
-        (&stall, stall_rev, "resolve_conflict"),
-    ] {
-        let text = why(&rig.settle(id, rev, act, None, WHY));
-        assert!(
-            text.contains(&format!(
-                "settle refused: the act {act} is not built on this server yet; the operator can answer or clear the request"
-            )),
-            "{act}: {text}"
-        );
-    }
     let text = why(&rig.settle(&stall, stall_rev, "close_stale", None, WHY));
     assert!(
         text.contains(
@@ -224,9 +187,7 @@ fn the_acts_that_are_not_built_are_refused_and_write_no_admission() {
         "{text}"
     );
     assert_eq!(rig.admissions("settle"), before, "no admission in the run");
-    for id in [&red, &host, &stall] {
-        assert_eq!(status_of(&rig, id), "open");
-    }
+    assert_eq!(status_of(&rig, &stall), "open");
 }
 
 #[test]

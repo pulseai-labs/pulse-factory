@@ -88,6 +88,12 @@ ADR-0017.
 - **`plugin add`, `plugin list` and `plugin remove`** (ADR-0017). `plugin add` and `plugin remove` are
   claim acts. A seat or a chat cannot call them.
 - Each new verb takes `--json`, and its JSON carries a `schema_version`, as every verb does.
+- **A track's `merge` may declare `on_conflict` and `guarded`.** `on_conflict` names the conflict stage
+  (a stage with `entered_by: conflict`) and the `then` stage that follows it. `guarded` is a list of
+  path globs. Both are read from the run's pinned workflow, and the file refuses a track that declares
+  one without the other, or `on_conflict` under the rule `claim_ack`. When the conflict stage is
+  done, the controller compares the paths the resolution changed with `guarded`, and a match parks
+  the unit (ADR-0005, ADR-0006).
 - **A workflow file can come from an installed plugin.** It is read as strictly as before, and a run
   pins the plugin's content-hash manifest with it (ADR-0007). The plugins the workflow file declares for
   its seats are harness plugins, as before; a Pulse Factory plugin does not install them.

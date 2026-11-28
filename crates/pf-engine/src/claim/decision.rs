@@ -225,6 +225,9 @@ fn summary_of(inputs: &Inputs, pr: Option<&str>) -> String {
             format!("The forge refused to merge {pr_text} of unit {unit}.")
         }
         Cause::MergeError => format!("The merge of {pr_text} of unit {unit} did not land."),
+        Cause::ResolutionChangedGuarded => format!(
+            "The resolution of the merge conflict of {pr_text} of unit {unit} changed a guarded path, or its paths could not be read. It waits for the operator."
+        ),
         Cause::SeatLost => format!(
             "The seat of unit {unit} is gone: its process ended at stage {stage} (attempt {attempts})."
         ),

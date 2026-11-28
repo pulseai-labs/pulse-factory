@@ -11,7 +11,8 @@ pub use decide::{Decision, decide};
 
 use serde::{Deserialize, Serialize};
 
-use crate::claim::{Act, SettleFacts};
+use crate::claim::{Act, SettleFacts, SettleOutcome};
+use crate::merge::Resolution;
 use crate::port::agent::Usage;
 use crate::port::forge::PrRef;
 use crate::port::store::{
@@ -59,6 +60,10 @@ pub enum CommandBody {
         stage: String,
         signal: Signal,
         pr: Option<PrRef>,
+        /// The verdict of the guarded compare, for the end of a track's conflict stage. Every other
+        /// signal has none, and none has no such field in its stored content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<Resolution>,
     },
     /// A signal ends a stage, and entry `entry` of the stage's outcomes holds: the unit goes to
     /// the entry's stage, or parks when the entry has sent it as often as its cap allows.
@@ -239,6 +244,19 @@ pub enum CommandBody {
         #[serde(skip)]
         facts: SettleFacts,
     },
+    /// What the effect of a settle did (ADR-0005, amended). The ID is `settle-result:<R-n>:<revision>`.
+    /// Only the engine builds it. The whole body is the canonical content: the same result again is
+    /// a replay, and another result for the same settle is a conflict.
+    SettleResult {
+        request_id: String,
+        revision: u32,
+        outcome: SettleOutcome,
+        /// One redacted line, at most 300 characters.
+        detail: String,
+        /// The host's session reference, for `attached` only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_ref: Option<String>,
+    },
     /// An ack that was refused. It changes no state; it writes the ledger line. `attempt`
     /// counts the refusals of this request and revision.
     AckRefused {
@@ -301,6 +319,7 @@ impl CommandBody {
             CommandBody::OpenMergeAck { .. } => "open_merge_ack",
             CommandBody::AckRequest { .. } => "ack_request",
             CommandBody::Settle { .. } => "settle",
+            CommandBody::SettleResult { .. } => "settle_result",
             CommandBody::AckRefused { .. } => "ack_refused",
         }
     }

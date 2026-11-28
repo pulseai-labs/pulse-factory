@@ -7,6 +7,8 @@
 //! ```text
 //! <dir>/repo.git          the bare repo (any name)
 //! <dir>/prs/<n>.json     {"head_branch": "...", "base": "...", "checks": "green|red|pending"}
+//!                        and, for a red PR, `failed: [{"name", "rerunnable"}]` and `rerun_error`
+//! <dir>/prs/<n>.reruns   one JSON line `{"sha", "ran"}` for each time the failed checks ran again
 //! <dir>/scratch/         one clone per merge, removed when the merge ends
 //! ```
 //!
@@ -14,12 +16,15 @@
 //! bare base. Nothing here deletes a branch, and nothing reaches the network. Every git call is
 //! an argv list with no shell, away from the host's git config.
 
+use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pf_engine::port::forge::{
-    Checks, ForgeEffect, ForgeError, ForgeOutcome, ForgePort, Mergeable, PrRef, PrStatus,
+    Checks, FailedCheck, FailedChecks, ForgeEffect, ForgeError, ForgeOutcome, ForgePort, Mergeable,
+    PrRef, PrStatus, RerunEffect,
 };
 use pf_engine::status::{one_line_reason, redact};
 use serde::{Deserialize, Serialize};
@@ -33,14 +38,32 @@ pub enum PrChecks {
     Pending,
 }
 
-/// The content of `prs/<n>.json`.
+/// One failed check of a PR file, and whether this forge may run it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedSpec {
+    pub name: String,
+    pub rerunnable: bool,
+}
+
+/// The content of `prs/<n>.json`. A file of before has no `failed` and no `rerun_error`, and reads
+/// the same.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrFile {
     head_branch: String,
     base: String,
     checks: PrChecks,
+    /// The failed checks. Red checks with no list read as one rerunnable check called `checks`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failed: Vec<FailedSpec>,
+    /// Makes a run again fail with this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rerun_error: Option<String>,
 }
+
+/// The name of the one check that a red PR file with no `failed` list holds.
+const DEFAULT_CHECK: &str = "checks";
 
 /// The most bytes of a PR file the forge reads.
 const MAX_PR_FILE: u64 = 64 * 1024;
@@ -163,10 +186,25 @@ impl BareForge {
         base: &str,
         checks: PrChecks,
     ) -> Result<(), ForgeError> {
+        self.write_pr_with(number, head_branch, base, checks, &[], None)
+    }
+
+    /// [`BareForge::write_pr`] with the failed checks and the text that makes a run again fail.
+    pub fn write_pr_with(
+        &self,
+        number: u64,
+        head_branch: &str,
+        base: &str,
+        checks: PrChecks,
+        failed: &[FailedSpec],
+        rerun_error: Option<&str>,
+    ) -> Result<(), ForgeError> {
         let file = PrFile {
             head_branch: head_branch.to_string(),
             base: base.to_string(),
             checks,
+            failed: failed.to_vec(),
+            rerun_error: rerun_error.map(str::to_string),
         };
         std::fs::create_dir_all(&self.prs).map_err(err)?;
         let body = serde_json::to_string(&file).map_err(err)?;
@@ -175,6 +213,11 @@ impl BareForge {
 
     fn pr_path(&self, number: u64) -> PathBuf {
         self.prs.join(format!("{number}.json"))
+    }
+
+    /// The file that counts the runs again of PR `number`.
+    pub fn reruns_path(&self, number: u64) -> PathBuf {
+        self.prs.join(format!("{number}.reruns"))
     }
 
     fn check_repo(&self, pr: &PrRef) -> Result<(), ForgeError> {
@@ -232,6 +275,20 @@ impl BareForge {
             branch: branch.to_string(),
             sha: sha.to_string(),
             outcome,
+        }
+    }
+}
+
+impl PrFile {
+    /// The failed checks, or the one default check when the checks are red and none is listed.
+    fn failed_or_default(&self) -> Vec<FailedSpec> {
+        if self.failed.is_empty() {
+            vec![FailedSpec {
+                name: DEFAULT_CHECK.to_string(),
+                rerunnable: true,
+            }]
+        } else {
+            self.failed.clone()
         }
     }
 }
@@ -375,6 +432,127 @@ impl ForgePort for BareForge {
             ],
         )?;
         Ok(self.effect(pr, &file.head_branch, &head, ForgeOutcome::Merged))
+    }
+
+    fn failed_checks(&self, pr: &PrRef) -> Result<FailedChecks, ForgeError> {
+        self.check_repo(pr)?;
+        let file = self.read_pr(pr.number)?;
+        let head_sha = self.tip(&file.head_branch)?;
+        let failed = if file.checks == PrChecks::Red {
+            file.failed_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok(FailedChecks {
+            head_sha,
+            failed: failed
+                .into_iter()
+                .map(|c| FailedCheck {
+                    blocked: (!c.rerunnable)
+                        .then(|| "the PR file marks the check as not rerunnable".to_string()),
+                    name: c.name,
+                })
+                .collect(),
+        })
+    }
+
+    fn rerun_failed_checks(
+        &self,
+        pr: &PrRef,
+        expected_sha: &str,
+    ) -> Result<RerunEffect, ForgeError> {
+        self.check_repo(pr)?;
+        if !sha_ok(expected_sha) {
+            return Err(err(format!(
+                "the expected head {expected_sha:?} is not a full object name"
+            )));
+        }
+        let mut file = self.read_pr(pr.number)?;
+        if let Some(why) = &file.rerun_error {
+            return Err(err(why));
+        }
+        let head = self.tip(&file.head_branch)?;
+        let effect = |ran: Vec<String>,
+                      not_ran: Vec<(String, String)>,
+                      head_moved: Option<String>| RerunEffect {
+            repo: pr.repo.clone(),
+            number: pr.number,
+            sha: head.clone(),
+            ran,
+            not_ran,
+            head_moved,
+        };
+        if !head.eq_ignore_ascii_case(expected_sha) {
+            return Ok(effect(Vec::new(), Vec::new(), Some(head.clone())));
+        }
+        let mut ran = Vec::new();
+        let mut not_ran = Vec::new();
+        for check in file.failed_or_default() {
+            if check.rerunnable {
+                ran.push(check.name);
+            } else {
+                not_ran.push((
+                    check.name,
+                    "the PR file marks the check as not rerunnable".to_string(),
+                ));
+            }
+        }
+        if ran.is_empty() {
+            return Ok(effect(ran, not_ran, None));
+        }
+        // One line for each run again: the count a test reads.
+        let line = serde_json::json!({ "sha": head, "ran": ran }).to_string();
+        let mut counted = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.reruns_path(pr.number))
+            .map_err(err)?;
+        writeln!(counted, "{line}").map_err(err)?;
+        file.checks = PrChecks::Pending;
+        let body = serde_json::to_string(&file).map_err(err)?;
+        std::fs::write(self.pr_path(pr.number), body).map_err(err)?;
+        Ok(effect(ran, not_ran, None))
+    }
+
+    fn tree(&self, repo: &str, sha: &str) -> Result<BTreeMap<String, String>, ForgeError> {
+        self.check_repo(&PrRef {
+            repo: repo.to_string(),
+            number: 0,
+        })?;
+        if !sha_ok(sha) {
+            return Err(err(format!("{sha:?} is not a full object name")));
+        }
+        let out = git(&self.bare, &["ls-tree", "-r", "-z", sha])?;
+        if !out.status.success() {
+            return Err(err(format!(
+                "git ls-tree failed: {}",
+                redact(&text(&out.stderr))
+            )));
+        }
+        let mut files = BTreeMap::new();
+        for record in out.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let record = String::from_utf8_lossy(record);
+            let (meta, path) = record
+                .split_once('\t')
+                .ok_or_else(|| err("git ls-tree gave a record with no path"))?;
+            let blob = meta
+                .split_whitespace()
+                .nth(2)
+                .ok_or_else(|| err("git ls-tree gave a record with no object name"))?;
+            files.insert(path.to_string(), blob.to_string());
+        }
+        Ok(files)
+    }
+
+    fn branch_tip(&self, repo: &str, branch: &str) -> Result<String, ForgeError> {
+        self.check_repo(&PrRef {
+            repo: repo.to_string(),
+            number: 0,
+        })?;
+        if !branch_ok(branch) {
+            return Err(err(format!("{branch:?} is not a plain branch name")));
+        }
+        self.tip(branch)
     }
 
     fn merge_landed(&self, pr: &PrRef) -> Result<ForgeEffect, ForgeError> {

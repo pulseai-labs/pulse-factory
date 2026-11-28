@@ -2,9 +2,13 @@
 //!
 //! The stub is a shell script in a temporary directory. It records its argv, one argument per
 //! line and each call after a `--call` line, then answers from files in the same directory. A
-//! call picks its answer by name: `pr view` reads `pr-view.*`, `pr merge` reads `pr-merge.*`
-//! and `api` reads `api.*`. The files are `.out` (stdout), `.err` (stderr), `.rc` (exit code)
-//! and `.sleep` (seconds to wait before the answer).
+//! call picks its answer by name: `pr view` reads `pr-view.*`, `pr merge` reads `pr-merge.*`,
+//! `run rerun` reads `run.*` and `api` reads `api.*`, except an API call for the repo itself
+//! (`api-repo.*`), a tree (`api-tree.*`) or a ref (`api-ref.*`). The files are `.out` (stdout),
+//! `.err` (stderr), `.rc` (exit code) and `.sleep` (seconds to wait before the answer).
+//!
+//! A key can also hold a sequence: the nth call of a key reads `<key>.<n>.out`, `.err` and `.rc`
+//! when any of them exists, and the plain key files otherwise.
 //!
 //! The forge puts the stub directory first on the `PATH` of its own child process
 //! (`GithubForge::with_path_prefix`), so tests that run in parallel never share a `PATH`.
@@ -33,6 +37,20 @@ d='{d}'
 echo "--call" >> "$d/argv.log"
 for a in "$@"; do printf '%s\n' "$a" >> "$d/argv.log"; done
 if [ "$1" = pr ]; then key="pr-$2"; else key="$1"; fi
+if [ "$1" = api ]; then
+  for a in "$@"; do
+    case "$a" in
+      repos/*/git/trees/*) key=api-tree ;;
+      repos/*/git/ref/*) key=api-ref ;;
+      repos/*/compare/*) key=api ;;
+      repos/*) key=api-repo ;;
+    esac
+  done
+fi
+n=$(cat "$d/$key.n" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$d/$key.n"
+if [ -f "$d/$key.$n.out" ] || [ -f "$d/$key.$n.rc" ] || [ -f "$d/$key.$n.err" ]; then key="$key.$n"; fi
 if [ -f "$d/$key.sleep" ]; then exec sleep "$(cat "$d/$key.sleep")"; fi
 if [ -f "$d/$key.out" ]; then cat "$d/$key.out"; fi
 if [ -f "$d/$key.err" ]; then cat "$d/$key.err" >&2; fi
@@ -67,6 +85,11 @@ exit 0
         std::fs::write(p("out"), out).unwrap();
         std::fs::write(p("err"), err).unwrap();
         std::fs::write(p("rc"), rc.to_string()).unwrap();
+    }
+
+    /// Script the nth call of a key (from 1): stdout, stderr and the exit code.
+    pub fn answer_nth(&self, key: &str, n: u32, out: &str, err: &str, rc: i32) {
+        self.answer(&format!("{key}.{n}"), out, err, rc);
     }
 
     pub fn out(&self, key: &str, out: &str) {
@@ -105,6 +128,11 @@ exit 0
             .collect()
     }
 
+    /// The calls of the `gh run rerun` kind.
+    pub fn rerun_calls(&self) -> Vec<Vec<String>> {
+        self.calls_of("run", "rerun")
+    }
+
     pub fn merge_calls(&self) -> Vec<Vec<String>> {
         self.calls_of("pr", "merge")
     }
@@ -136,4 +164,41 @@ pub fn running(status: &str) -> Value {
 /// A commit status, as the rollup reports one.
 pub fn context(state: &str) -> Value {
     json!({"__typename": "StatusContext", "context": "ci/legacy", "state": state})
+}
+
+/// An entry of the rollup: a finished GitHub Actions check run of this repo's workflow run `id`.
+pub fn actions_run(name: &str, conclusion: &str, id: u64) -> Value {
+    json!({
+        "__typename": "CheckRun",
+        "name": name,
+        "status": "COMPLETED",
+        "conclusion": conclusion,
+        "detailsUrl": format!("https://github.com/{REPO}/actions/runs/{id}/job/9{id}"),
+    })
+}
+
+/// A finished check run of another app, with a URL outside GitHub Actions.
+pub fn other_app_run(name: &str, conclusion: &str) -> Value {
+    json!({
+        "__typename": "CheckRun",
+        "name": name,
+        "status": "COMPLETED",
+        "conclusion": conclusion,
+        "detailsUrl": "https://ci.example.invalid/builds/1",
+    })
+}
+
+/// A failed commit status that an outside CI wrote.
+pub fn failed_status(context: &str) -> Value {
+    json!({"__typename": "StatusContext", "context": context, "state": "FAILURE"})
+}
+
+/// The JSON of `gh pr view --json headRefOid,statusCheckRollup`.
+pub fn failed_view_json(head: &str, rollup: Vec<Value>) -> String {
+    json!({"headRefOid": head, "statusCheckRollup": rollup}).to_string()
+}
+
+/// The JSON of `gh api repos/<repo> --jq .permissions`.
+pub fn permissions(push: bool) -> String {
+    json!({"admin": false, "maintain": false, "push": push, "pull": true}).to_string()
 }

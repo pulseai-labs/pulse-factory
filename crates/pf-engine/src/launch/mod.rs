@@ -66,8 +66,30 @@ fn resumes_for_launch(a: &AdmissionRow) -> bool {
     }
 }
 
+/// Does this resume end its count by itself? A `resume` settle whose result is `attached` sent the
+/// unit on without a launch: the host answered and the stage runs on, so the unit holds no room. A
+/// `failed` or an `unknown` result parks the unit, which leaves `pending` through its status. A
+/// `gone` result keeps the unit in `pending` until its relaunch is admitted.
+fn attached_without_launch(view: &RunView, a: &AdmissionRow) -> bool {
+    if a.kind != "settle" {
+        return false;
+    }
+    let Some(CommandBody::Settle {
+        request_id,
+        revision,
+        act: crate::claim::Act::Resume,
+        ..
+    }) = body_of_content(&a.content)
+    else {
+        return false;
+    };
+    crate::claim::stored_result(view, &request_id, revision)
+        == Some(crate::claim::SettleOutcome::Attached)
+}
+
 /// The launches so far of the run in `view`. A unit leaves `pending` when its launch is admitted
-/// (it is then in `admitted`) or when it parks again (it is no longer `running`).
+/// (it is then in `admitted`), when it parks again (it is no longer `running`) or when its
+/// re-attach found the host (see [`attached_without_launch`]).
 pub fn launches_so_far(view: &RunView) -> LaunchCount {
     let launch = |a: &AdmissionRow| a.kind == "launch" && a.outcome == AdmissionOutcome::Admitted;
     let admitted = view.admissions.iter().filter(|a| launch(a)).count();
@@ -81,15 +103,17 @@ pub fn launches_so_far(view: &RunView) -> LaunchCount {
                 .iter()
                 .filter(of_unit)
                 .filter(|a| resumes_for_launch(a))
-                .map(|a| a.seq)
-                .max();
+                .max_by_key(|a| a.seq);
             match newest_resume {
                 None => false,
-                Some(seq) => !view
-                    .admissions
-                    .iter()
-                    .filter(of_unit)
-                    .any(|a| launch(a) && a.seq > seq),
+                Some(resume) => {
+                    !attached_without_launch(view, resume)
+                        && !view
+                            .admissions
+                            .iter()
+                            .filter(of_unit)
+                            .any(|a| launch(a) && a.seq > resume.seq)
+                }
             }
         })
         .count();
@@ -149,6 +173,13 @@ pub(crate) fn decide_launch(
         return Err(format!(
             "unit {unit_id} is {}, not running",
             unit.status.as_str()
+        ));
+    }
+    // A settle that has not stored its effect's result holds its unit: no launch before it.
+    if let Some(pending) = crate::claim::pending_settle(view, unit_id) {
+        return Err(format!(
+            "unit {unit_id} waits for the result of settle {}",
+            pending.name()
         ));
     }
     let detail = view.unit_detail(unit)?;

@@ -841,6 +841,9 @@ impl PrScript {
     }
 }
 
+/// The head of a PR and each failed check with the reason this forge cannot run it again.
+pub type FailedScript = (String, Vec<(String, Option<String>)>);
+
 #[derive(Default)]
 pub struct FakeForge {
     pub scripts: Mutex<HashMap<u64, PrScript>>,
@@ -849,6 +852,27 @@ pub struct FakeForge {
     pub status_reads: Mutex<Vec<u64>>,
     /// Every `merge` call: the PR number and the head the caller pinned.
     pub merge_calls: Mutex<Vec<(u64, String)>>,
+    /// The failed checks `failed_checks` answers, by PR number: the head and each check with the
+    /// reason this forge cannot run it again.
+    pub failed: Mutex<HashMap<u64, FailedScript>>,
+    /// Make `failed_checks` fail with this text.
+    pub failed_error: Mutex<Option<String>>,
+    /// Make `rerun_failed_checks` fail with this text.
+    pub rerun_error: Mutex<Option<String>>,
+    /// The checks a re-run leaves not run, with the reason.
+    pub rerun_not_ran: Mutex<Vec<(String, String)>>,
+    /// After the next `failed_checks` read, the PR's head becomes this SHA: a push after the read.
+    pub head_after_failed_read: Mutex<Option<String>>,
+    /// Every `failed_checks` call, by PR number.
+    pub failed_reads: Mutex<Vec<u64>>,
+    /// Every `rerun_failed_checks` call: the PR number and the head the caller pinned.
+    pub rerun_calls: Mutex<Vec<(u64, String)>>,
+    /// The tree of a commit, by SHA.
+    pub trees: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    /// The tip of a branch, by name.
+    pub tips: Mutex<HashMap<String, String>>,
+    /// Make `tree` fail for these SHAs.
+    pub tree_errors: Mutex<HashSet<String>>,
 }
 
 impl FakeForge {
@@ -862,6 +886,42 @@ impl FakeForge {
 
     pub fn merged(&self) -> Vec<u64> {
         self.merges.lock().unwrap().clone()
+    }
+
+    /// Script the failed checks of a PR: its head, and each failed check with the reason this forge
+    /// cannot run it again (`None` for a check it can run again).
+    pub fn script_failed(&self, number: u64, head: &str, checks: &[(&str, Option<&str>)]) {
+        self.failed.lock().unwrap().insert(
+            number,
+            (
+                head.to_string(),
+                checks
+                    .iter()
+                    .map(|(n, b)| (n.to_string(), b.map(str::to_string)))
+                    .collect(),
+            ),
+        );
+    }
+
+    pub fn reruns(&self) -> Vec<(u64, String)> {
+        self.rerun_calls.lock().unwrap().clone()
+    }
+
+    pub fn script_tree(&self, sha: &str, files: &[(&str, &str)]) {
+        self.trees.lock().unwrap().insert(
+            sha.to_string(),
+            files
+                .iter()
+                .map(|(p, b)| (p.to_string(), b.to_string()))
+                .collect(),
+        );
+    }
+
+    pub fn script_tip(&self, branch: &str, sha: &str) {
+        self.tips
+            .lock()
+            .unwrap()
+            .insert(branch.to_string(), sha.to_string());
     }
 
     fn get(&self, pr: &PrRef) -> Result<PrScript, ForgeError> {
@@ -937,6 +997,101 @@ impl ForgePort for FakeForge {
                 ForgeOutcome::NotLanded
             },
         })
+    }
+    fn failed_checks(&self, pr: &PrRef) -> Result<FailedChecks, ForgeError> {
+        self.failed_reads.lock().unwrap().push(pr.number);
+        if let Some(why) = self.failed_error.lock().unwrap().clone() {
+            return Err(ForgeError(why));
+        }
+        let (head, checks) = self
+            .failed
+            .lock()
+            .unwrap()
+            .get(&pr.number)
+            .cloned()
+            .ok_or_else(|| ForgeError(format!("no failed checks scripted for PR {}", pr.number)))?;
+        // A push after the read: the PR's head changes, and this read still shows the old one.
+        if let Some(moved) = self.head_after_failed_read.lock().unwrap().take()
+            && let Some(script) = self.scripts.lock().unwrap().get_mut(&pr.number)
+        {
+            script.sha = moved;
+        }
+        Ok(FailedChecks {
+            head_sha: head,
+            failed: checks
+                .into_iter()
+                .map(|(name, blocked)| FailedCheck { name, blocked })
+                .collect(),
+        })
+    }
+    fn rerun_failed_checks(
+        &self,
+        pr: &PrRef,
+        expected_sha: &str,
+    ) -> Result<RerunEffect, ForgeError> {
+        self.rerun_calls
+            .lock()
+            .unwrap()
+            .push((pr.number, expected_sha.to_string()));
+        if let Some(why) = self.rerun_error.lock().unwrap().clone() {
+            return Err(ForgeError(why));
+        }
+        let mut scripts = self.scripts.lock().unwrap();
+        let script = scripts
+            .get_mut(&pr.number)
+            .ok_or_else(|| ForgeError(format!("no PR {}", pr.number)))?;
+        if script.sha != expected_sha {
+            return Ok(RerunEffect {
+                repo: pr.repo.clone(),
+                number: pr.number,
+                sha: script.sha.clone(),
+                ran: Vec::new(),
+                not_ran: Vec::new(),
+                head_moved: Some(script.sha.clone()),
+            });
+        }
+        let not_ran = self.rerun_not_ran.lock().unwrap().clone();
+        let names: Vec<String> = self
+            .failed
+            .lock()
+            .unwrap()
+            .get(&pr.number)
+            .map(|(_, c)| c.iter().map(|(n, _)| n.clone()).collect())
+            .unwrap_or_default();
+        let ran: Vec<String> = names
+            .into_iter()
+            .filter(|n| !not_ran.iter().any(|(m, _)| m == n))
+            .collect();
+        if !ran.is_empty() {
+            script.checks = Checks::Pending;
+        }
+        Ok(RerunEffect {
+            repo: pr.repo.clone(),
+            number: pr.number,
+            sha: expected_sha.to_string(),
+            ran,
+            not_ran,
+            head_moved: None,
+        })
+    }
+    fn tree(&self, _repo: &str, sha: &str) -> Result<BTreeMap<String, String>, ForgeError> {
+        if self.tree_errors.lock().unwrap().contains(sha) {
+            return Err(ForgeError(format!("tree {sha} cannot be read")));
+        }
+        self.trees
+            .lock()
+            .unwrap()
+            .get(sha)
+            .cloned()
+            .ok_or_else(|| ForgeError(format!("no tree scripted for {sha}")))
+    }
+    fn branch_tip(&self, _repo: &str, branch: &str) -> Result<String, ForgeError> {
+        self.tips
+            .lock()
+            .unwrap()
+            .get(branch)
+            .cloned()
+            .ok_or_else(|| ForgeError(format!("no tip scripted for {branch}")))
     }
 }
 

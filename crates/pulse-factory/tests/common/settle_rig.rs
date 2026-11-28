@@ -14,11 +14,15 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use pf_adapter_fake::{Scenario, Step};
+use pf_engine::admission::PushOutcome;
+use pf_engine::port::agent::{SessionRef, Usage};
 use pf_engine::port::chat::ChatId;
 use pf_engine::port::store::{
     AdmissionOutcome, CONTROLLER_SCOPE, Commit, Committed, Effect, NewAdmission, NewHost,
     NewLaunchRecord, Store,
 };
+use pf_forge_bare::{BareForge, PrChecks};
 use pulse_factory::controller::Config;
 use serde_json::{Value, json};
 
@@ -282,9 +286,41 @@ impl SRig {
         host: Option<HostSeed>,
         tweak: impl FnOnce(&mut Config) + Send + 'static,
     ) -> SRig {
+        SRig::build(units, bound, link, host, Options::default(), None, tweak)
+    }
+
+    /// The general constructor: the fixture package of `opts`, and, when `base` is set, a run whose
+    /// item track merges into that branch (`main` is the forge's default branch, so a unit of such
+    /// a run is `above`).
+    pub fn build(
+        units: &[&str],
+        bound: Option<u64>,
+        link: Link,
+        host: Option<HostSeed>,
+        opts: Options,
+        base: Option<&str>,
+        tweak: impl FnOnce(&mut Config) + Send + 'static,
+    ) -> SRig {
         let rec = Rec::new(strict_fake());
-        let live = start_with(rec.clone(), tweak);
-        live.arm_with_units(units);
+        let chat_rec = rec.clone();
+        let live = Live::start_package(BIN.into(), &opts, move |cfg| {
+            cfg.chat_runtimes.insert(RUNTIME.to_string(), chat_rec);
+            cfg.server_name = "test-server".to_string();
+            tweak(cfg);
+        });
+        match base {
+            None => live.arm_with_units(units),
+            Some(base) => {
+                let mut plan = live.plan();
+                plan.params.insert("spine_branch".into(), base.to_string());
+                live.controller.arm(plan).unwrap();
+                for (i, u) in units.iter().enumerate() {
+                    live.queue_item(u, u32::try_from(i + 1).unwrap());
+                }
+                live.controller.tick_all();
+                live.controller.tick_all();
+            }
+        }
         let run = live.handle().info.run_id.clone();
         let (project, session) = started(&live, "alpha");
         let chat = rec.chats.lock().unwrap()[0].clone();
@@ -575,4 +611,267 @@ pub fn why(resp: &Value) -> String {
 pub fn done(resp: &Value) -> Value {
     assert_eq!(resp["ok"], true, "{resp}");
     resp["result"].clone()
+}
+
+/// The branch the fixture item track merges into.
+pub const SPINE_BRANCH: &str = "spine/s1";
+
+/// The cost step of a seat's script.
+pub fn cost(micros: u64) -> Step {
+    Step::Usage(Usage {
+        input_tokens: 10,
+        cost_micros: micros,
+        ..Usage::default()
+    })
+}
+
+impl SRig {
+    pub fn out(&self, unit: &str, name: &str) -> std::path::PathBuf {
+        self.live.run_dir().join("out").join(unit).join(name)
+    }
+
+    pub fn report(&self, unit: &str) -> std::path::PathBuf {
+        self.live
+            .sb
+            .spine_dir
+            .join(format!("work-{unit}"))
+            .join("report.md")
+    }
+
+    pub fn touch(&self, path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x\n").unwrap();
+    }
+
+    /// The process reference of the unit's newest session that has not ended.
+    pub fn session_of(&self, unit: &str) -> SessionRef {
+        self.live
+            .handle()
+            .engine
+            .view()
+            .unwrap()
+            .sessions
+            .iter()
+            .rfind(|s| s.unit_id == unit && !s.ended)
+            .and_then(|s| s.process_ref.clone())
+            .map(SessionRef)
+            .unwrap_or_else(|| panic!("no open session for {unit}"))
+    }
+
+    /// Write the stage's done file, end the turn and tick.
+    pub fn pass(&self, unit: &str, done: &Path) {
+        self.touch(done);
+        self.live.ports.fake.finish(&self.session_of(unit));
+        self.tick();
+    }
+
+    /// The unit's status, as text.
+    pub fn status_of(&self, unit: &str) -> String {
+        self.live.unit_status(unit)
+    }
+
+    /// The names of the unit's stage nodes, oldest first, each with its status.
+    pub fn stage_nodes(&self, unit: &str) -> Vec<(String, String)> {
+        self.live
+            .handle()
+            .engine
+            .view()
+            .unwrap()
+            .stages_of(unit)
+            .iter()
+            .map(|n| (n.detail.clone(), n.status.as_str().to_string()))
+            .collect()
+    }
+
+    /// The stored settle answer of a request, as JSON.
+    pub fn answer_of(&self, request: &str) -> Value {
+        let a = self
+            .live
+            .controller
+            .store()
+            .request(request)
+            .unwrap()
+            .unwrap()
+            .answer
+            .unwrap_or_default();
+        serde_json::from_str(&a).unwrap_or(Value::Null)
+    }
+
+    /// The `settle-result` admissions of the run, as `(command ID, body)`.
+    pub fn results(&self) -> Vec<(String, Value)> {
+        self.live
+            .controller
+            .store()
+            .admissions(&self.run)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.kind == "settle_result")
+            .map(|a| {
+                let content: Value = serde_json::from_str(&a.content).unwrap();
+                (a.command_id, content["body"].clone())
+            })
+            .collect()
+    }
+}
+
+/// A clone of the run's bare repo with `main` and the spine branch, and the forge over it. It stands
+/// for the forge of a paper env: PRs are files, branches are real.
+pub struct Forge {
+    pub work: std::path::PathBuf,
+    pub forge: BareForge,
+}
+
+impl Forge {
+    pub fn new(rig: &SRig) -> Forge {
+        let work = rig.live.sb.root.path().join("work-forge");
+        git(
+            rig.live.sb.root.path(),
+            &[
+                "clone",
+                "--quiet",
+                rig.live.bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, &["config", "user.name", "Test"]);
+        git(&work, &["config", "user.email", "test@example.invalid"]);
+        git(&work, &["checkout", "--quiet", "-b", "main"]);
+        std::fs::write(work.join("README"), "start\n").unwrap();
+        std::fs::write(work.join("shared.txt"), "one\n").unwrap();
+        std::fs::create_dir_all(work.join("tests")).unwrap();
+        std::fs::write(work.join("tests/a.txt"), "a1\n").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "--quiet", "-m", "start"]);
+        git(&work, &["push", "--quiet", "origin", "main"]);
+        git(
+            &work,
+            &["push", "--quiet", "origin", &format!("main:{SPINE_BRANCH}")],
+        );
+        let forge = BareForge::open(&rig.live.bare).unwrap();
+        Forge { work, forge }
+    }
+
+    pub fn head(&self, rig: &SRig, branch: &str) -> String {
+        git(
+            &rig.live.bare,
+            &["rev-parse", &format!("refs/heads/{branch}")],
+        )
+    }
+
+    /// Commit `file` with `text` on `branch`, which starts at `from` when it is new, and push.
+    pub fn commit(&self, branch: &str, from: &str, file: &str, text: &str) {
+        git(&self.work, &["fetch", "--quiet", "origin"]);
+        git(
+            &self.work,
+            &[
+                "checkout",
+                "--quiet",
+                "-B",
+                branch,
+                &format!("origin/{from}"),
+            ],
+        );
+        std::fs::write(self.work.join(file), text).unwrap();
+        git(&self.work, &["add", "-A"]);
+        git(&self.work, &["commit", "--quiet", "-m", branch]);
+        git(&self.work, &["push", "--quiet", "origin", branch]);
+    }
+
+    /// Commit on `branch` off the spine branch, and write PR `number` with `checks`. Returns the head.
+    pub fn pr(&self, rig: &SRig, number: u64, branch: &str, checks: PrChecks) -> String {
+        self.commit(
+            branch,
+            SPINE_BRANCH,
+            &format!("{branch}.txt").replace('/', "_"),
+            "x\n",
+        );
+        self.forge
+            .write_pr(number, branch, SPINE_BRANCH, checks)
+            .unwrap();
+        self.head(rig, branch)
+    }
+
+    /// An item: a PR, a script that pushes its head and spends, and a queue record.
+    pub fn item(&self, rig: &SRig, id: &str, order: u32, number: u64, checks: PrChecks) {
+        let branch = format!("work/{id}");
+        let head = self.pr(rig, number, &branch, checks);
+        rig.live.ports.fake.script(
+            id,
+            Scenario::Script(vec![
+                Step::Push {
+                    branch,
+                    sha: head,
+                    outcome: PushOutcome::Pushed,
+                },
+                cost(100),
+                Step::TurnEnd,
+            ]),
+        );
+        rig.live.queue_item(id, order);
+    }
+
+    /// Pass `implement` and `verify`, then print the PR and end `close`: the item meets its merge.
+    pub fn finish_item(&self, rig: &SRig, id: &str, number: u64) {
+        rig.tick();
+        rig.pass(id, &rig.report(id));
+        rig.pass(id, &rig.out(id, "verdict.json"));
+        std::fs::create_dir_all(rig.out(id, "")).unwrap();
+        std::fs::write(
+            rig.out(id, "pr.url"),
+            format!("file://{}#{number}\n", self.forge.repo()),
+        )
+        .unwrap();
+        rig.live.ports.fake.finish(&rig.session_of(id));
+        rig.tick();
+    }
+}
+
+impl SRig {
+    /// Call `verb` twice at the same time, from two helpers below one shell that is the chat's
+    /// process. The answers come back in the order the helpers finished.
+    pub fn call_twice(&self, verb: &str, args: &Value) -> Vec<Value> {
+        let n = RUNS.fetch_add(1, Ordering::SeqCst);
+        let go = self.live.sb.root.path().join(format!("go-{n}"));
+        let exe = std::env::current_exe().unwrap();
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(
+                "while [ ! -e \"$GO\" ]; do sleep 0.02; done; \
+                 ( \"$EXE\" --exact settle_rig::helper_calls_the_controller --nocapture --test-threads=1 ) & \
+                 ( \"$EXE\" --exact settle_rig::helper_calls_the_controller --nocapture --test-threads=1 ) & \
+                 wait",
+            )
+            .env_clear()
+            .env("PATH", self.live.sb.path_env())
+            .env("GO", &go)
+            .env("EXE", &exe)
+            .env("PF_TEST_HELPER_STATE", &self.live.sb.state)
+            .env("PF_TEST_HELPER_VERB", verb)
+            .env("PF_TEST_HELPER_ARGS", args.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        self.rec
+            .pids
+            .lock()
+            .unwrap()
+            .insert(self.chat.clone(), child.id());
+        std::fs::write(&go, "").unwrap();
+        let out = child.wait_with_output().unwrap();
+        self.rec.pids.lock().unwrap().clear();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let answers: Vec<Value> = text
+            .lines()
+            .filter_map(|l| l.split_once("HELPER_RESPONSE:").map(|(_, r)| r.to_string()))
+            .map(|r| serde_json::from_str(&r).unwrap())
+            .collect();
+        assert_eq!(
+            answers.len(),
+            2,
+            "two answers expected: {text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        answers
+    }
 }

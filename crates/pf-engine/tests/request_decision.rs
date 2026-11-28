@@ -129,7 +129,7 @@ fn every_cause_opens_a_block_that_names_it_and_holds_no_seat_words() {
         assert!(block["options"].as_array().unwrap().len() <= 4, "{cause:?}");
     }
     // The cause names itself in code, and a closed list holds each once.
-    assert_eq!(Cause::ALL.len(), 22);
+    assert_eq!(Cause::ALL.len(), 23);
     for c in Cause::ALL {
         assert_eq!(Cause::parse(c.as_str()), Some(c));
     }

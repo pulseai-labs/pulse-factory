@@ -72,6 +72,7 @@ pub fn line_of(cause: Option<Cause>, free_merge: bool) -> Line {
         | Cause::NoPr
         | Cause::MergeRefused
         | Cause::MergeError
+        | Cause::ResolutionChangedGuarded
         | Cause::MergeWaitsAck => Line::Above,
     }
 }

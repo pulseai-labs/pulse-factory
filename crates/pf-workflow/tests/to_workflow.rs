@@ -35,11 +35,21 @@ fn the_tracks_stages_and_runtime_come_over() {
 
     let item = wf.track("item").unwrap();
     let stages: Vec<&str> = item.stages.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(stages, ["implement", "verify", "close", "review", "fix"]);
+    assert_eq!(
+        stages,
+        ["implement", "verify", "close", "review", "fix", "resolve"]
+    );
     let roles: Vec<&str> = item.stages.iter().map(|s| s.role.as_str()).collect();
     assert_eq!(
         roles,
-        ["implementer", "verifier", "close", "reviewer", "close"]
+        [
+            "implementer",
+            "verifier",
+            "close",
+            "reviewer",
+            "close",
+            "close"
+        ]
     );
     for stage in wf.tracks.iter().flat_map(|t| &t.stages) {
         assert_eq!(stage.runtime, "omp", "{}", stage.name);

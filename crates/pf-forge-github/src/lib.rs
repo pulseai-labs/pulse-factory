@@ -3,22 +3,33 @@
 //! `gh` runs as an argv list with no shell, and each call has a time limit. Everything `gh`
 //! prints is untrusted: it is parsed as strict JSON, and a malformed answer is a [`ForgeError`].
 //! The merge pins the head SHA the engine read, and it never passes `--admin`, `--auto`,
-//! `--squash`, `--rebase` or `--delete-branch`.
+//! `--squash`, `--rebase` or `--delete-branch`. A re-run of failed checks pins the head too, runs
+//! each GitHub Actions workflow run again once with `--failed`, and never passes `--debug`.
 
 mod parse;
 mod run;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pf_engine::port::forge::{ForgeEffect, ForgeError, ForgeOutcome, ForgePort, PrRef, PrStatus};
+use pf_engine::port::forge::{
+    FailedCheck, FailedChecks, ForgeEffect, ForgeError, ForgeOutcome, ForgePort, PrRef, PrStatus,
+    RerunEffect,
+};
 use pf_engine::status::{one_line_reason, redact};
 
 use run::{Output, RunError};
 
 /// The limit on each `gh` call.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The wait before each read of the checks after a re-run.
+pub const DEFAULT_RERUN_DELAY: Duration = Duration::from_secs(5);
+
+/// How many times the checks are read after a re-run.
+const RERUN_READS: usize = 3;
 
 /// A forge for one GitHub repo, `owner/name`.
 #[derive(Clone, Debug)]
@@ -27,6 +38,7 @@ pub struct GithubForge {
     program: OsString,
     path_prefix: Option<PathBuf>,
     timeout: Duration,
+    rerun_delay: Duration,
 }
 
 impl GithubForge {
@@ -43,6 +55,7 @@ impl GithubForge {
             program: OsString::from("gh"),
             path_prefix: None,
             timeout: DEFAULT_TIMEOUT,
+            rerun_delay: DEFAULT_RERUN_DELAY,
         })
     }
 
@@ -65,8 +78,51 @@ impl GithubForge {
         self
     }
 
+    /// Change the wait before each read of the checks after a re-run. The default is
+    /// [`DEFAULT_RERUN_DELAY`]. Tests set it to zero.
+    pub fn with_rerun_delay(mut self, delay: Duration) -> GithubForge {
+        self.rerun_delay = delay;
+        self
+    }
+
     pub fn repo(&self) -> &str {
         &self.repo
+    }
+
+    fn check_repo_name(&self, repo: &str) -> Result<(), ForgeError> {
+        if repo == self.repo {
+            Ok(())
+        } else {
+            Err(ForgeError(one_line_reason(&format!(
+                "repo {repo} is not the repo of this forge, {}",
+                self.repo
+            ))))
+        }
+    }
+
+    /// Read the head and the failed checks of a PR.
+    fn read_failed(&self, pr: &PrRef) -> Result<parse::FailedRead, ForgeError> {
+        let out = self.gh_ok(&args(&[
+            "pr",
+            "view",
+            &pr.number.to_string(),
+            "-R",
+            &self.repo,
+            "--json",
+            parse::FAILED_FIELDS,
+        ]))?;
+        parse::failed_view(&self.repo, &out.stdout)
+    }
+
+    /// May the token run checks again on this repo?
+    fn token_may_rerun(&self) -> Result<bool, ForgeError> {
+        let out = self.gh_ok(&args(&[
+            "api",
+            &format!("repos/{}", self.repo),
+            "--jq",
+            ".permissions",
+        ]))?;
+        parse::can_push(&out.stdout)
     }
 
     fn check_repo(&self, pr: &PrRef) -> Result<(), ForgeError> {
@@ -215,5 +271,145 @@ impl ForgePort for GithubForge {
         } else {
             ForgeOutcome::NotLanded
         }))
+    }
+
+    fn failed_checks(&self, pr: &PrRef) -> Result<FailedChecks, ForgeError> {
+        self.check_repo(pr)?;
+        let may = self.token_may_rerun()?;
+        let read = self.read_failed(pr)?;
+        let failed = read
+            .failed
+            .into_iter()
+            .map(|item| {
+                let blocked = if !may {
+                    Some(format!("the token may not re-run checks on {}", self.repo))
+                } else {
+                    match item.kind {
+                        parse::Kind::Actions { .. } => None,
+                        parse::Kind::Status => {
+                            Some("a commit status that an outside CI wrote".to_string())
+                        }
+                        parse::Kind::OtherApp => {
+                            Some("a check run of another app than GitHub Actions".to_string())
+                        }
+                    }
+                };
+                FailedCheck {
+                    name: item.name,
+                    blocked,
+                }
+            })
+            .collect();
+        Ok(FailedChecks {
+            head_sha: read.head_sha,
+            failed,
+        })
+    }
+
+    fn rerun_failed_checks(
+        &self,
+        pr: &PrRef,
+        expected_sha: &str,
+    ) -> Result<RerunEffect, ForgeError> {
+        self.check_repo(pr)?;
+        if !parse::is_sha(expected_sha) {
+            return Err(ForgeError(one_line_reason(&format!(
+                "the expected head {expected_sha:?} is not a full object name"
+            ))));
+        }
+        // Read the head again: a head that moved gets no re-run.
+        let read = self.read_failed(pr)?;
+        let mut effect = RerunEffect {
+            repo: self.repo.clone(),
+            number: pr.number,
+            sha: expected_sha.to_string(),
+            ran: Vec::new(),
+            not_ran: Vec::new(),
+            head_moved: None,
+        };
+        if !read.head_sha.eq_ignore_ascii_case(expected_sha) {
+            effect.sha = read.head_sha.clone();
+            effect.head_moved = Some(read.head_sha);
+            return Ok(effect);
+        }
+        // One call per workflow run, with `--failed`: it runs the failed jobs of that run again.
+        let mut runs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for item in read.failed {
+            match item.kind {
+                parse::Kind::Actions { run_id } => runs.entry(run_id).or_default().push(item.name),
+                parse::Kind::Status => effect.not_ran.push((
+                    item.name,
+                    "a commit status that an outside CI wrote".to_string(),
+                )),
+                parse::Kind::OtherApp => effect.not_ran.push((
+                    item.name,
+                    "a check run of another app than GitHub Actions".to_string(),
+                )),
+            }
+        }
+        let mut started: Vec<String> = Vec::new();
+        for (run_id, names) in runs {
+            let result = self.gh_ok(&args(&[
+                "run", "rerun", &run_id, "--failed", "-R", &self.repo,
+            ]));
+            match result {
+                Ok(_) => started.extend(names),
+                Err(e) => effect
+                    .not_ran
+                    .extend(names.into_iter().map(|n| (n, e.0.clone()))),
+            }
+        }
+        // GitHub takes a moment to show the new run. A check that still reads failed after the
+        // reads below was not run again.
+        let mut still: BTreeSet<String> = started.iter().cloned().collect();
+        for _ in 0..RERUN_READS {
+            if still.is_empty() {
+                break;
+            }
+            if !self.rerun_delay.is_zero() {
+                std::thread::sleep(self.rerun_delay);
+            }
+            let now = self.read_failed(pr)?;
+            still = now
+                .failed
+                .into_iter()
+                .map(|f| f.name)
+                .filter(|n| still.contains(n))
+                .collect();
+        }
+        for name in started {
+            if still.contains(&name) {
+                effect
+                    .not_ran
+                    .push((name, "still reads failed after the re-run".to_string()));
+            } else {
+                effect.ran.push(name);
+            }
+        }
+        Ok(effect)
+    }
+
+    fn tree(&self, repo: &str, sha: &str) -> Result<BTreeMap<String, String>, ForgeError> {
+        self.check_repo_name(repo)?;
+        if !parse::is_sha(sha) {
+            return Err(ForgeError(one_line_reason(&format!(
+                "{sha:?} is not a full object name"
+            ))));
+        }
+        let path = format!("repos/{}/git/trees/{sha}?recursive=1", self.repo);
+        let out = self.gh_ok(&args(&["api", "--method", "GET", &path]))?;
+        parse::tree(&out.stdout)
+    }
+
+    fn branch_tip(&self, repo: &str, branch: &str) -> Result<String, ForgeError> {
+        self.check_repo_name(repo)?;
+        if !parse::is_branch(branch) {
+            return Err(ForgeError(one_line_reason(&format!(
+                "{branch:?} is not a plain branch name"
+            ))));
+        }
+        let path = format!("repos/{}/git/ref/heads/{branch}", self.repo);
+        let out = self.gh_ok(&args(&["api", "--method", "GET", &path]))?;
+        parse::branch_tip(&out.stdout)
     }
 }

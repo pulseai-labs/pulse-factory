@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use pf_engine::port::agent::RuleSet;
-use pf_engine::{MergeDef, OutcomeDef, StageDef, Track, Workflow};
+use pf_engine::{MergeDef, OnConflict, OutcomeDef, StageDef, Track, Workflow};
 
 use crate::file::{StageSpec, TrackDef, WorkflowFile};
 
@@ -34,6 +34,11 @@ impl WorkflowFile {
                 base: m.base.clone(),
                 head_check: m.head_check,
                 head_branch: m.head_branch.clone().unwrap_or_default(),
+                on_conflict: m.on_conflict.as_ref().map(|o| OnConflict {
+                    stage: o.stage.clone(),
+                    then: o.then.clone(),
+                }),
+                guarded: m.guarded.clone(),
             }),
         }
     }
@@ -64,6 +69,7 @@ impl WorkflowFile {
             })
             .collect();
         def.entered_by_outcome = stage.entered_by_outcome;
+        def.entered_by_conflict = stage.entered_by_conflict;
         // A stage's fallback hook delivers a text to the next seat, on a park its own file did not
         // open. The engine knows no hook: it reads this flag for the decision block.
         def.takes_text = !stage.on_answer.is_empty();

@@ -157,6 +157,12 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
   amended), merge mode `intersect`, built-in: all six acts. It narrows the grant for a project or an
   agent. It is set at a project, an agent, or a project and agent, and `settle` reads it fresh at each
   act. The grant itself, its list and its holder are not settings and never become settings.
+- **The key `authority.rerun_checks_per_head`**: the most times `settle` may run a PR's failed checks
+  again for one head SHA (ADR-0005, amended). A whole number from 0 to 5, built-in 1, merge mode
+  `override`, resume flag `current`. It is set at the server, a project, an agent, or a project and
+  agent, and `settle` reads it fresh at each `rerun_check`. It reads `next_turn` on the wire: the next
+  `settle`. With it the registry holds fourteen keys, and the caller check's refusal buckets are one
+  for each key and `other`: fifteen.
 - **A registry flag `applies`**, `record` or `current`. A resume from a launch record (ADR-0007,
   amended) uses the record's value of a `record` key and the current resolved value of a `current`
   key. `chat.deny_commands`, `chat.self_turn_cap` and every later cap are `current`, so a tighter
@@ -172,13 +178,13 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's and A
 
 - **Five keys join the registry**, each a whole number, merge mode `override`, resume flag `current`:
   `notify.app.on` and `notify.orchestrator.on` (0 or 1; built-in 1), `notify.app.max_words` (5 to 200;
-  30), `notify.orchestrator.max_words` (10 to 500; 100) and `notify.resend_seconds` (10 to 3600; 60). The
-  registry holds twelve keys.
+  30), `notify.orchestrator.max_words` (10 to 500; 100) and `notify.resend_seconds` (10 to 3600; 60).
+  With them the registry held twelve keys.
 - **The context of a notice is its run's project**, or the server scope when the run has none. The two
   orchestrator keys also resolve at the agent. `on` and `max_words` are read when a notice is written,
   and `resend_seconds` at each re-send.
 - **A chat or a seat cannot set them**, as for every key. The caller check's refusal buckets are one for
-  each key and `other`: thirteen.
+  each key and `other`: thirteen at that time.
 - **`applies` reads `next_turn` for these keys.** A third wire value of `SettingApplies` would break the
   UI's typecheck, which this work does not own. For a `notify.*` key `next_turn` means the next notice.
   `r2.s11.w5` decided not to add a third value, so these keys keep `next_turn`.

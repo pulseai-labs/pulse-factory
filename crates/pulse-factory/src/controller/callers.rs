@@ -40,8 +40,12 @@ pub struct SettleFaults {
     /// time than the walk pinned, as it does when that PID is used again by a new process. A test
     /// cannot make the kernel give a live process's PID to another process.
     pub reuse_top_ancestor_pid: AtomicBool,
+    /// Make the verb answer after the commit and run no effect, as a controller that stopped
+    /// between the commit and the effect would.
+    pub skip_effect: AtomicBool,
     after_grant: Mutex<Option<Pause>>,
     before_end_check: Mutex<Option<Pause>>,
+    after_commit: Mutex<Option<Pause>>,
 }
 
 impl SettleFaults {
@@ -50,6 +54,15 @@ impl SettleFaults {
     pub fn set_after_grant(&self, pause: Option<Pause>) {
         *self
             .after_grant
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pause;
+    }
+
+    /// A test point: call `pause` after the settle committed and before its effect runs. It runs
+    /// only for a settle whose act has an effect. `None` clears it.
+    pub fn set_after_commit(&self, pause: Option<Pause>) {
+        *self
+            .after_commit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = pause;
     }
@@ -66,6 +79,17 @@ impl SettleFaults {
     pub(super) fn run_after_grant(&self) {
         let pause = self
             .after_grant
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pause) = pause {
+            pause();
+        }
+    }
+
+    pub(super) fn run_after_commit(&self) {
+        let pause = self
+            .after_commit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();

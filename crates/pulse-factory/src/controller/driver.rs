@@ -905,6 +905,23 @@ impl Driver {
                             t.note(format!("session {}: cannot stop: {e}", session.id));
                         }
                         self.read(st, t, session, &r, true);
+                        // A done verdict of the conflict stage goes through the guarded compare:
+                        // the engine reads the resolution's paths and parks a unit that changed a
+                        // guarded one.
+                        if let (true, StageVerdict::Done { pr, signal }) =
+                            (stage.entered_by_conflict, &verdict)
+                        {
+                            let done = self.cfg.engine.conflict_done(
+                                &unit.id,
+                                &stage.name,
+                                signal.clone(),
+                                pr.clone(),
+                            );
+                            if let Err(e) = done {
+                                t.note(format!("signal of {}: {e}", unit.id));
+                            }
+                            continue;
+                        }
                         match apply(&self.cfg.engine, &unit.id, &stage.name, &verdict) {
                             Ok(ApplyResult::Parked(why)) => {
                                 t.note(format!("unit {} parked: {why}", unit.id))
@@ -1123,6 +1140,11 @@ impl Driver {
             if view.running_stage_of(&unit.id).is_some() {
                 continue;
             }
+            // A unit that waits for the result of a settle's effect launches nothing: the result
+            // decides where it goes. No note: the wait is the settle's, and it is short.
+            if matches!(engine.pending_settle_of(&unit.id), Ok(Some(_))) {
+                continue;
+            }
             // Slots: a model session always, a cold build when the stage lists it.
             let mut slots = Vec::new();
             match engine.capacity().try_acquire_model_session() {
@@ -1318,6 +1340,17 @@ impl Driver {
         self.check_pins()
             .map_err(pf_engine::claim::SettleError::Refused)?;
         self.cfg.engine.settle(ask, Some(forge))
+    }
+
+    /// Run the effect of an admitted settle that has one (`rerun_check`, or `resume` on
+    /// `host_unreachable`), then store its result. A stored result is returned as it is. The pins
+    /// are not checked again: the settle that this effect belongs to checked them.
+    pub fn settle_effect(
+        &self,
+        request_id: &str,
+        revision: u32,
+    ) -> Result<Admission, pf_engine::claim::SettleError> {
+        self.cfg.engine.settle_effect(request_id, revision)
     }
 
     /// [`Driver::clear_unit`] with an option of the request's decision block in place of a stage.
