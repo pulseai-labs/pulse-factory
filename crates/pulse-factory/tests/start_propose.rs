@@ -181,12 +181,12 @@ fn propose_posts_a_card_with_the_dry_run_plan_and_arms_nothing() {
     assert!(persona.contains("pulse-factory propose"), "{persona}");
     assert!(persona.contains("never run pulse-factory arm"), "{persona}");
 
-    // `settings get` lists twelve keys: the three chat keys, the four `session.*` keys and the five
-    // `notify.*` keys.
+    // `settings get` lists thirteen keys: the three chat keys, the four `session.*` keys, the five
+    // `notify.*` keys and `authority.clear_acts`.
     let settings = cli_json(&s.live, &["settings", "get"]);
     assert_eq!(
         settings["settings"].as_array().unwrap().len(),
-        12,
+        13,
         "{settings}"
     );
 }
