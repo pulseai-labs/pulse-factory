@@ -3,7 +3,7 @@
 //! one word, `["off"]` or `["below"]` (built-in `["below"]`); the second is a whole number from 0 to
 //! 60 (built-in 6; 0 is off). Both merge by `override`, are written at all four scopes and read at
 //! the project and the agent `orchestrator`, read `next_turn` on the wire and `current` at a resume,
-//! and a chat or a seat is refused on a write. `settings get` lists fifteen keys, the two last.
+//! and a chat or a seat is refused on a write. `settings get` lists sixteen keys, the two last.
 //!
 //! The controller runs in the test process on a `FakeChat`. Nothing here starts `claude`, spends a
 //! token or reaches beyond `127.0.0.1`.
@@ -83,9 +83,10 @@ fn settings_get_lists_fifteen_keys_and_the_two_wake_keys_are_the_last() {
         .iter()
         .map(|r| r["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys.len(), 15, "{keys:?}");
-    assert_eq!(&keys[13..], [WAKE, HOUR]);
+    assert_eq!(keys.len(), 16, "{keys:?}");
+    assert_eq!(&keys[14..], [WAKE, HOUR]);
     assert_eq!(keys[12], "authority.clear_acts");
+    assert_eq!(keys[13], "authority.rerun_checks_per_head");
 }
 
 #[test]

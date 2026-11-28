@@ -416,6 +416,7 @@ impl Engine {
                 stage: stage.to_string(),
                 signal,
                 pr,
+                resolution: None,
             },
         })
     }

@@ -187,6 +187,17 @@ The controller checks the host too: `peer_check` in the client library reads the
 and the controller compares `hello`'s `invocation_id` with the registry row. The controller's half
 is `r2.s2.w3`.
 
+A re-attach under the clear grant runs the same checks. It is the effect of the Orchestrator's `settle`
+with `resume` on a request with the cause `host_unreachable` (`requests.md`, "An act with an effect").
+The controller marks the seat's host for the call, and a rebind of a marked host differs from a
+start-up rebind in two ways: its `host_attach` line is mandatory, so a re-attach whose attach line
+cannot be written is refused as `unreachable` (`the attach line cannot be written: <why>`) and writes
+nothing else; and its outcome line is `host_reattach <unit> <survived|lost|unreachable> session=…
+incarnation=… settle=<R-n>@<k> reason=… command=…`, in place of `host_tier1`. A host that is gone is
+`lost`: its row ends and its files go, as at start-up. The hello, its checks and the rebuild of the
+seat's key table are the start-up path, unchanged, and the start-up rebind keeps its best-effort
+lines.
+
 ## The limits of the checks
 
 These checks stop mistakes and stale connections, such as a second controller on the same state

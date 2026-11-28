@@ -108,6 +108,16 @@ pub const NOTIFY_KEYS: [(&str, u64, u64, u64); 5] = [
 /// fresh at each act.
 pub const AUTHORITY_CLEAR_ACTS: &str = "authority.clear_acts";
 
+/// The key of how many times `settle` may run a PR's failed checks again for one head SHA
+/// (`r2.s3.w3`): a whole number from 0 to 5, built-in 1, merge mode `override`, set at the server, a
+/// project, an agent, or a project and agent. `settle` reads it fresh at each `rerun_check`.
+pub const AUTHORITY_RERUN_CHECKS_PER_HEAD: &str = "authority.rerun_checks_per_head";
+
+/// The `authority.*` keys that hold a whole number, with their range and built-in value:
+/// (key, lowest, highest, built-in).
+pub const AUTHORITY_NUMBER_KEYS: [(&str, u64, u64, u64); 1] =
+    [(AUTHORITY_RERUN_CHECKS_PER_HEAD, 0, 5, 1)];
+
 /// The refusal of a write of [`AUTHORITY_CLEAR_ACTS`] at the server scope.
 const CLEAR_ACTS_SCOPE: &str =
     "authority.clear_acts is set at a project, an agent, or a project and agent";
@@ -186,7 +196,7 @@ pub const BUILT_IN_DENY: [&str; 15] = [
 ];
 
 /// The keys of this release, in the order `settings get` lists them.
-const KEYS: [&str; 15] = [
+const KEYS: [&str; 16] = [
     DENY_COMMANDS,
     SELF_TURN_CAP,
     PROPOSE_PER_MIN,
@@ -200,17 +210,20 @@ const KEYS: [&str; 15] = [
     NOTIFY_ORCHESTRATOR_MAX_WORDS,
     NOTIFY_RESEND_SECONDS,
     AUTHORITY_CLEAR_ACTS,
-    // `r2.s3.w3`'s `authority.rerun_checks_per_head` goes right after `authority.clear_acts` when
-    // that item is on the base, and these two stay last in either merge order.
+    // `r2.s3.w3`'s `authority.rerun_checks_per_head` follows `authority.clear_acts`, and the two
+    // `autopilot.*` keys (`r2.s3.w4`) are last.
+    AUTHORITY_RERUN_CHECKS_PER_HEAD,
     AUTOPILOT_WAKE,
     AUTOPILOT_WAKES_PER_HOUR,
 ];
 
-/// The range and the built-in value of a `session.*` or a `notify.*` key: a whole number.
+/// The range and the built-in value of a `session.*`, a `notify.*` or an `authority.*` number key:
+/// a whole number.
 fn session_key(key: &str) -> Option<(u64, u64, u64)> {
     SESSION_KEYS
         .iter()
         .chain(NOTIFY_KEYS.iter())
+        .chain(AUTHORITY_NUMBER_KEYS.iter())
         .find(|(k, ..)| *k == key)
         .map(|(_, lo, hi, d)| (*lo, *hi, *d))
 }
@@ -231,11 +244,14 @@ fn applies_of(key: &str) -> SettingApplies {
     // A `notify.*` key reads `next_turn` too: a third wire value would break the UI's typecheck, and
     // `docs/contracts/cli.md` says that for these keys it means the next notice (`r2.s11.w3`).
     // `authority.clear_acts` reads `next_turn` too, and `docs/contracts/cli.md` says that for this key it
-    // means the next `settle` (`r2.s3.w2`). The two `autopilot.*` keys read `next_turn` too, and for
-    // them it means the next wake (`r2.s3.w4`).
+    // means the next `settle` (`r2.s3.w2`).
+    // `authority.rerun_checks_per_head` reads `next_turn` too: for this key it means the next
+    // `settle` (`r2.s3.w3`). The two `autopilot.*` keys read `next_turn` too, and for them it means
+    // the next wake (`r2.s3.w4`).
     if key == SELF_TURN_CAP
         || key == PROPOSE_PER_MIN
         || key == AUTHORITY_CLEAR_ACTS
+        || key == AUTHORITY_RERUN_CHECKS_PER_HEAD
         || key.starts_with("notify.")
         || key.starts_with("autopilot.")
     {
@@ -673,6 +689,25 @@ impl Controller {
                 ..
             } => Ok((list, from_text)),
             _ => Err(format!("{AUTHORITY_CLEAR_ACTS} resolved to no list")),
+        }
+    }
+
+    /// The number of times `settle` may run the failed checks of a PR again for one head SHA, for a
+    /// project and an agent, read fresh. A read that fails refuses the act, so the error comes back.
+    pub(super) fn resolved_rerun_checks_per_head(
+        &self,
+        project: &str,
+        agent: &str,
+    ) -> Result<u32, String> {
+        match self.resolve_setting(AUTHORITY_RERUN_CHECKS_PER_HEAD, Some(project), Some(agent))? {
+            Resolved {
+                value: SettingValue::Number(n),
+                ..
+            } => u32::try_from(n)
+                .map_err(|_| format!("{AUTHORITY_RERUN_CHECKS_PER_HEAD} resolved to {n}")),
+            _ => Err(format!(
+                "{AUTHORITY_RERUN_CHECKS_PER_HEAD} resolved to no number"
+            )),
         }
     }
 

@@ -337,9 +337,15 @@ A seat, an operator's shell and a chat of another agent or another project are r
 2. Each cause admits only its own acts. `stalled`: `clear`, or `redispatch --to <stage>` (a stage at
    or before the stage the unit parked in). `seat_lost`: `resume`. `host_unreachable`: `resume`.
    `merge_checks_red`: `rerun_check` or `redispatch --to <stage>`. `merge_conflict`:
-   `resolve_conflict`. Every other cause admits none, and the operator answers it. This server
-   builds `clear`, `redispatch` on a stall or a red check, and `resume` on a lost seat. It refuses
-   the other acts with a message that says so, and `close_stale` has no object.
+   `resolve_conflict`. Every other cause admits none, and the operator answers it. This server builds every act but `close_stale`, which has no object.
+   `rerun_check` runs the PR's failed checks again, at most `authority.rerun_checks_per_head` times
+   for one head (built-in 1), and refuses a check that this forge cannot run again.
+   `resume` on `host_unreachable` attaches to the host again first: a host that answers keeps its
+   stage, a gone host is replaced by a relaunch, and a host that still does not answer parks the unit
+   again. `resolve_conflict` sends the unit to its track's conflict stage, and a resolution that
+   changes a guarded path waits for the operator (cause `resolution_changed_guarded`).
+   An act with an effect runs it before `settle` answers, and a failed effect is the unit's next
+   request.
 3. A settle grants no new budget. It resumes the unit and resets no outcome counter. The run
    holds the launch count that `arm` showed, and a settle that would pass it is refused: the
    operator can still `clear`.

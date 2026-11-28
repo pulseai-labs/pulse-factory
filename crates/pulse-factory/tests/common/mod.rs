@@ -60,6 +60,9 @@ pub struct Options {
     /// The `stop_file:` entry of the item stage `close`, indented by 8 spaces, with a final
     /// newline. The default is a plain path. A mapping adds an `on_answer` hook.
     pub close_stop: String,
+    /// Add the conflict stage `resolve` (`entered_by: conflict`) and the item track's `on_conflict`
+    /// and `guarded` (`r2.s3.w3`). The merge's `then` is `review`, so it needs `review_loop`.
+    pub conflict_stage: bool,
 }
 
 impl Default for Options {
@@ -82,6 +85,7 @@ impl Default for Options {
             spine_close: false,
             close_extra: String::new(),
             close_stop: "        stop_file: \"{run.dir}/out/{unit.id}/stop\"\n".to_string(),
+            conflict_stage: false,
         }
     }
 }
@@ -90,6 +94,40 @@ impl Default for Options {
 pub fn real_scripts_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/ossify-spine/scripts")
 }
+
+/// The conflict stage, indented as the stages of the item track, and the merge keys that name it.
+const CONFLICT_STAGE: &str = r#"      - name: resolve
+        role: close
+        entered_by: conflict
+        brief: [briefs/common.md]
+        message: "Resolve {unit.id}."
+        cwd: "{unit.vars.worktree_path}"
+        slots: [session]
+        before:
+          - [mkdir, -p, "{run.dir}/out/{unit.id}"]
+          - [rm, -f, "{run.dir}/out/{unit.id}/resolve-done"]
+        stop_file: "{run.dir}/out/{unit.id}/stop"
+        stall_minutes: 20
+        first_turn_seconds: 180
+        settings:
+          push_dir: "{unit.vars.worktree_path}"
+          push_branch: "{unit.vars.branch}"
+          report_dir: "{param.spine_dir}/work-{unit.id}"
+          worktree: "{unit.vars.worktree_path}"
+          own_branch: "{unit.vars.branch}"
+          decisions_file: "{run.dir}/out/{unit.id}/decisions.md"
+        done:
+          - file: "{run.dir}/out/{unit.id}/resolve-done"
+"#;
+
+const CONFLICT_MERGE: &str = r#"      on_conflict:
+        stage: resolve
+        then: review
+      guarded:
+        - "**/tests/**"
+        - "docs/adr/**"
+        - "**/*.test.*"
+"#;
 
 const REVIEWER_ROLE: &str = "  reviewer:
     runtime: omp
@@ -316,13 +354,13 @@ seeds:
           - pr:
               argv: [cat, "{{run.dir}}/out/{{unit.id}}/pr.url"]
               test: url
-{review_stages}    merge:
+{review_stages}{conflict_stage}    merge:
       rule: green_checks_in_declared_order
       repo: "{{param.forge_repo}}"
       base: "{{param.spine_branch}}"
       pr: [cat, "{{run.dir}}/out/{{unit.id}}/pr.url"]
       head_check: true
-      after_merge:
+{conflict_merge}      after_merge:
         - [sh, -c, "echo {{unit.id}} >> {{run.dir}}/after_merge.log"]
 {spine_track}"#,
         extra_param = if o.spine_close { ", base_branch" } else { "" },
@@ -341,6 +379,8 @@ seeds:
         close_extra = o.close_extra,
         close_stop = o.close_stop,
         review_role = if o.review_loop { REVIEWER_ROLE } else { "" },
+        conflict_stage = if o.conflict_stage { CONFLICT_STAGE } else { "" },
+        conflict_merge = if o.conflict_stage { CONFLICT_MERGE } else { "" },
         review_stages = if o.review_loop {
             // The first `stall_minutes` of the block is the stage `review`'s.
             REVIEW_STAGES.replacen(

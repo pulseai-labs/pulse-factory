@@ -71,8 +71,9 @@ fn the_five_keys_read_their_built_ins_and_apply_at_the_next_notice() {
         assert!(NOTIFY_KEYS.contains(&(key, lo, hi, default)), "{key}");
         assert_eq!(at_resume_of(key), Some(AtResume::Current), "{key}");
     }
-    // The fifteen keys come in the order of the registry: the five `notify.*` keys come after the seven
-    // before them, `authority.clear_acts` follows, and the two `autopilot.*` keys are last.
+    // The sixteen keys come in the order of the registry: the five `notify.*` keys come after the seven
+    // before them, `authority.clear_acts` and `authority.rerun_checks_per_head` follow, and the two
+    // `autopilot.*` keys are last.
     let all = cli_json(&live, &["settings", "get"]);
     let keys: Vec<&str> = all["settings"]
         .as_array()
@@ -80,7 +81,7 @@ fn the_five_keys_read_their_built_ins_and_apply_at_the_next_notice() {
         .iter()
         .map(|r| r["key"].as_str().unwrap())
         .collect();
-    assert_eq!(keys.len(), 15, "{keys:?}");
+    assert_eq!(keys.len(), 16, "{keys:?}");
     assert_eq!(
         &keys[7..12],
         [

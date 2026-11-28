@@ -292,18 +292,27 @@ them, so each one waits for the operator. A launched session must still never an
 
 **The clear grant's acts.** A closed list in code. No setting, plugin or workflow adds to it.
 1. Clear a park whose reason has the class `below` (ADR-0006, amendment of 2026-11-16).
-2. Resume a parked unit from its launch record (ADR-0003, amended), inside the run's armed caps.
-3. Re-run a failed check on an item PR.
+2. Resume a parked unit from its launch record (ADR-0003, amended), inside the run's armed caps. On a
+   park with the cause `host_unreachable`, the act
+   attaches to the recorded host again before any relaunch.
+3. Re-run the failed checks of a PR, at most `authority.rerun_checks_per_head` times for one head SHA.
 4. Dispatch a seat again, inside the dispatch cap and the run's armed launch count. It never raises
    either.
 5. Send a seat to resolve a merge conflict on an item branch or a spine branch, never on a default
-   branch. If the resolution changes a test or a spec file, the seat's done record says so, and the
-   controller parks the unit with an `above` reason.
+   branch. If the resolution changes a guarded path, the unit waits for the operator:
+   the controller compares the paths the resolution changed with the track's `guarded` globs,
+   and parks the unit with the cause `resolution_changed_guarded`, which is `above`, when one matches
+   or a read fails. Otherwise the unit goes to the track's `then` stage, so a reviewer sees the
+   resolution before the merge.
 6. Close a request that a newer revision of the same request replaced. `close_stale` has no object,
    because a revision replaces its request in the same row, so no stale request exists.
 
 Each act is an admitted command with a command ID and one ledger line that names the grant, its
 generation, the acting session, the request or unit, and the reason.
+An act with an effect outside the store commits first and runs its effect after: the effect's result is its own command,
+`settle-result:<R-n>:<revision>`. Until the result is stored, no launch or merge of the unit is
+admitted, and a start-up reconcile closes a result that was never stored as `unknown` and parks the
+unit again, so an effect never runs twice.
 
 **The verb.** The grant acts through one verb of its own, `settle`, which
 names a request at the revision the caller read, never a bare unit, and gives one act and a reason.

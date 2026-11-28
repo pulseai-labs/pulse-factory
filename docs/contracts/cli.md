@@ -157,9 +157,10 @@ pulse-factory arm <spine> --workflow <name-or-path> --ledger <file> [--param k=v
   turn, not a launch, so it does not change the most launches (`workflow-file.md`, "`no_signal`").
   The most launches is `2 x (seed max x seed-track launches + items x item-track launches)`, summed
   over every seed and track. The launches of one unit of a track are its stages, each counted once
-  except a stage with `entered_by: outcome`, which counts 0, plus the `max` of every `outcomes`
-  entry of the track: each time an entry fires, it launches its `to` stage once. The 2 is the one
-  relaunch after a stall. The number is what the plan shows. It is not a limit the run enforces.
+  except a stage with `entered_by: outcome` or `entered_by: conflict`, which counts 0, plus the `max` of every `outcomes`
+  entry of the track: each time an entry fires, it launches its `to` stage once. A resolution of a
+  merge conflict takes its launch from the run's general room: the count reserves none for it. The 2
+  is the one relaunch after a stall. The number is what the plan shows. It is not a limit the run enforces.
 - **Flags.** `--dry-run` prints the summary, exits 0 and records nothing. It needs no controller;
   with none it skips the checks on earlier runs and says so. With neither flag, `arm` prints the
   summary, says `re-run with --yes to start` and exits 2. `--yes` sends the plan to the controller,
@@ -540,6 +541,13 @@ The controller admits a settle only from a process below a live chat session of 
 an act in `authority.clear_acts`, on Linux. Every other caller is refused. A halted run refuses every
 settle. A settle grants no new budget: the run's armed launch count bounds it.
 
+An act with an effect runs its effect before the verb answers. `rerun_check` asks the forge to run the
+PR's failed checks again, and `resume` on `host_unreachable` attaches to the recorded host again. The
+verb commits the settle first, runs the effect, and the engine stores what it did as the command
+`settle-result:<R-n>:<revision>`. The answer does not change. The result is in the run's ledger
+(`settle-result <R-n>@<k>: …`), and a failed effect is the unit's next request (`requests.md`, "An act
+with an effect"). `resolve_conflict` has no result: its effect is the launch of the conflict stage.
+
 - **Text.** `settled <R-n>@<k>: act=<act>[ --to <stage>] by grant <P-n>#<g> session <S-n>`, and
   `(replayed)` after it for a replay.
 - **JSON.** `SettleAnswer`: `{"schema_version": 1, "request_id", "revision", "replayed",
@@ -847,11 +855,11 @@ settings" in the common rules).
   project, then the server default, then the binary's own value. A project value is the operator's
   choice for that project and every agent in it, so it sits above an agent value. A context with no
   project skips the two project scopes, and one with no agent skips the two agent scopes.
-- **The keys.** Exactly fifteen in this release. Any other key is refused: `unknown setting <key>; the
+- **The keys.** Exactly sixteen in this release. Any other key is refused: `unknown setting <key>; the
   settings are chat.deny_commands, chat.self_turn_cap, chat.propose_per_min, session.replay_bytes,
   session.exit_hold_minutes, session.attach_wait_ms, session.hook_wait_seconds, notify.app.on,
   notify.orchestrator.on, notify.app.max_words, notify.orchestrator.max_words,
-  notify.resend_seconds, authority.clear_acts, autopilot.wake, autopilot.wakes_per_hour`. The confirm code, the
+  notify.resend_seconds, authority.clear_acts, authority.rerun_checks_per_head, autopilot.wake, autopilot.wakes_per_hour`. The confirm code, the
   caller checks and the claim are authority floors, not settings, and never become keys.
 
   | Key | Value | Built-in | Merge | A change applies |
@@ -869,6 +877,7 @@ settings" in the common rules).
   | `notify.orchestrator.max_words` | a JSON integer, 10 to 500 | `100` | `override` | at the next notice |
   | `notify.resend_seconds` | a JSON integer, 10 to 3600 | `60` | `override` | at the next re-send |
   | `authority.clear_acts` | a JSON list of act names from `clear`, `resume`, `rerun_check`, `redispatch`, `resolve_conflict`, `close_stale` | all six | `intersect` | at the next `settle` |
+  | `authority.rerun_checks_per_head` | a JSON integer, 0 to 5 | `1` | `override` | at the next `settle` |
   | `autopilot.wake` | a JSON list of one word, `["off"]` or `["below"]` | `["below"]` | `override` | at the next wake |
   | `autopilot.wakes_per_hour` | a JSON integer, 0 to 60; `0` is off | `6` | `override` | at the next wake |
 
@@ -878,6 +887,12 @@ settings" in the common rules).
   agent`). An unknown act name is refused, and the refusal names the six. An empty list is allowed
   and admits no act. `settle` reads the resolved list fresh at each act. Its `applies` reads
   `next_turn` on the wire, and for this key it means the next `settle`.
+
+  `authority.rerun_checks_per_head` is the most times `settle` may run a PR's failed checks again for
+  one head SHA (`requests.md`, "Settle"). It is set at the server, a project, an agent, or a project
+  and agent, and `0` turns `rerun_check` off. `settle` reads the resolved value fresh at each
+  `rerun_check`. Its `applies` reads `next_turn` on the wire, and for this key it means the next
+  `settle`.
 
   The two `autopilot.*` keys rule the wake (`r2.s3.w4`, ADR-0016's amendment of 2026-11-24;
   `requests.md`, "The wake"). `autopilot.wake` is a JSON list of exactly one word: `["below"]` wakes the
@@ -988,7 +1003,7 @@ settings" in the common rules).
   (a marker is audited even when the caller left its chat by a double fork, and the raw value is never
   written to a ledger or to a refusal text); with no marker, the walk of the ancestors gives
   `chat:<S-n>`, `seat:<pid>` or `unknown`. The bucket is the key the arguments name
-  (one of the fifteen keys, such as `chat.self_turn_cap`, or `other` for an unknown key
+  (one of the sixteen keys, such as `chat.self_turn_cap`, or `other` for an unknown key
   or arguments that do not parse). A refused write is answered at once. For each caller and bucket, one window of a
   minute holds the audit:
   - the window's first refusal commits one refused admission under a command ID that the controller
@@ -1001,8 +1016,8 @@ settings" in the common rules).
     reason="<the last refusal's text>" command=caller-refused-<hex>`, where `refused` counts the
     refusals after the first.
 
-  So a caller gets at most two refused admissions and two lines for each bucket in a minute, thirty-two
-  across the sixteen buckets, whatever it sends. A crash or a restart loses the count of an open
+  So a caller gets at most two refused admissions and two lines for each bucket in a minute, thirty-four
+  across the seventeen buckets, whatever it sends. A crash or a restart loses the count of an open
   window. A stopped ledger, or a random source that cannot be read, still refuses the caller and
   prints one stderr line for each window, in place of the ledger line.
 - **What the check guarantees, and what it does not.** It refuses a caller that is honest about where

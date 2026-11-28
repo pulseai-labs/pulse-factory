@@ -87,6 +87,7 @@ fn port(
     let fake = Arc::new(FakeAdapter::new());
     let plans = Arc::new(std::sync::Mutex::new(Vec::new()));
     let rec = Arc::new(Recording {
+        rebinds: Default::default(),
         inner: fake.clone(),
         plans: plans.clone(),
         gate: Arc::new(Gate::default()),
@@ -240,6 +241,7 @@ fn a_seat_port_gives_a_repeat_of_the_lane_its_seed_directory_and_no_other() {
     let fake = Arc::new(FakeAdapter::new());
     let plans = Arc::new(std::sync::Mutex::new(Vec::new()));
     let rec = Arc::new(Recording {
+        rebinds: Default::default(),
         inner: fake,
         plans: plans.clone(),
         gate: Arc::new(Gate::default()),

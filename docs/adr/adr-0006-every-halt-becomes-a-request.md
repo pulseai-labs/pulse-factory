@@ -60,7 +60,8 @@ it lands, and that work's close marks it Accepted. It goes with ADR-0005's amend
   check or a merge conflict on a track that needs no ack and does not merge into the default branch
   of the forge. A failed launch is below the line only once an adapter marks its cause as
   transient, and none does today. Every other cause is `above`, and so is a request whose class
-  cannot be computed: the class fails closed.
+  cannot be computed: the class fails closed. The cause `resolution_changed_guarded`, which is `above`,
+  parks a unit whose conflict resolution changed a path that the track guards (ADR-0005).
 - **No request kind carries a class.** The class is per request, from its cause. Every request kind
   a plugin adds is `above` (ADR-0017).
 - **A `below` request may be settled by the clear grant** or by the claim. An `above` request is

@@ -73,9 +73,12 @@ fn it_has_a_lane_track_and_an_item_track_with_verify_before_close() {
     assert!(at("implement") < at("verify"), "{names:?}");
     assert!(at("verify") < at("close"), "{names:?}");
     assert_eq!(file.track("lane").unwrap().stages.len(), 1);
-    assert_eq!(names, ["implement", "verify", "close", "review", "fix"]);
+    assert_eq!(
+        names,
+        ["implement", "verify", "close", "review", "fix", "resolve"]
+    );
     assert!(
-        at("close") < at("review") && at("review") < at("fix"),
+        at("close") < at("review") && at("review") < at("fix") && at("fix") < at("resolve"),
         "{names:?}"
     );
 }
@@ -1245,6 +1248,7 @@ fn the_fix_stage_runs_only_by_outcome_pushes_its_branch_and_returns_to_review() 
         "{before:?}"
     );
     // No other stage is entered by an outcome, and none of the older stages has an outcome.
+    // (`resolve` is entered by a conflict, not by an outcome, and holds no outcome.)
     for stage in &file.track("item").unwrap().stages {
         assert_eq!(
             stage.entered_by_outcome,
@@ -1255,6 +1259,71 @@ fn the_fix_stage_runs_only_by_outcome_pushes_its_branch_and_returns_to_review() 
         if stage.name != "review" && stage.name != "fix" {
             assert!(stage.outcomes.is_empty(), "{}", stage.name);
         }
+    }
+}
+
+#[test]
+fn the_resolve_stage_runs_only_by_conflict_pushes_its_branch_and_names_its_brief() {
+    let file = load().file;
+    let resolve = item_stage(&file, "resolve");
+    assert!(resolve.entered_by_conflict);
+    assert!(!resolve.entered_by_outcome);
+    assert_eq!(resolve.role, "close");
+    assert_eq!(resolve.brief, ["briefs/common.md", "briefs/resolve.md"]);
+    assert_eq!(resolve.slots, ["session", "build"]);
+    assert!(resolve.outcomes.is_empty());
+    assert!(resolve.no_signal.is_none());
+    assert_eq!(
+        resolve.done,
+        [DoneCond::File(
+            "{run.dir}/out/{unit.id}/resolve-done".to_string()
+        )]
+    );
+    assert_eq!(resolve.settings["push_dir"], "{unit.vars.worktree_path}");
+    assert_eq!(resolve.settings["push_branch"], "{unit.vars.branch}");
+    let before: Vec<String> = resolve.before.iter().map(|c| flatten(&c.argv)).collect();
+    assert!(
+        before
+            .iter()
+            .any(|c| c.contains("rm -f") && c.ends_with("/resolve-done")),
+        "{before:?}"
+    );
+    assert!(!resolve.on_answer.is_empty(), "the fallback on_answer");
+    assert!(
+        !resolve.stop_on_answer.is_empty(),
+        "the stop file's on_answer"
+    );
+    // No other stage is entered by a conflict.
+    for stage in &file.track("item").unwrap().stages {
+        assert_eq!(
+            stage.entered_by_conflict,
+            stage.name == "resolve",
+            "{}",
+            stage.name
+        );
+    }
+    // The merge names it, goes on to `review`, and guards the tests, the specs and the contracts.
+    let merge = file.track("item").unwrap().merge.as_ref().unwrap();
+    let on = merge.on_conflict.as_ref().expect("on_conflict");
+    assert_eq!((on.stage.as_str(), on.then.as_str()), ("resolve", "review"));
+    assert_eq!(
+        merge.guarded,
+        [
+            "**/tests/**",
+            "**/test/**",
+            "**/e2e/**",
+            "**/*_test.*",
+            "**/*.test.*",
+            "**/*.spec.*",
+            "docs/adr/**",
+            "docs/contracts/**",
+            "docs/specs/**",
+        ]
+    );
+    // The other tracks declare no conflict stage.
+    for track in ["lane", "spine"] {
+        let merge = file.track(track).unwrap().merge.as_ref();
+        assert!(merge.is_none_or(|m| m.on_conflict.is_none() && m.guarded.is_empty()));
     }
 }
 

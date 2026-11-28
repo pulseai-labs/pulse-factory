@@ -168,6 +168,7 @@ repeat it.
 | `merge_checks_red` | `merge_failed` | `resume` | `resume`, `by: "controller"`. |
 | `merge_refused` | `merge_failed` | `resume` | None. |
 | `merge_error` | `merge_failed` | `resume` | None. A forge error, and an outcome no other merge cause fits. |
+| `resolution_changed_guarded` | `park` | `resume` | None. The unit resumes at the stage after the conflict stage. |
 | `seat_lost` | `seat_lost` | `resume` | `resume`, `by: "controller"`. |
 | `host_unreachable` | `seat_lost` | `resume` | `resume`, `by: "controller"`. |
 | `merge_waits_ack` | `merge_ack` | `approve` (`ack`) | Never. |
@@ -286,6 +287,7 @@ row, so a new cause does not compile until it has one:
 |---|---|
 | `stalled`, `seat_lost`, `host_unreachable` | `below` |
 | `merge_checks_red`, `merge_conflict` | `below` when the track's merge is free (below), else `above` |
+| `resolution_changed_guarded` | `above` |
 | every other cause, `launch_failed` included | `above` |
 | no cause (a park stored before the cause existed, a request with no block) | `above` |
 
@@ -393,14 +395,13 @@ pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> 
   | `seat_lost`, `host_unreachable` | `resume` |
   | `merge_checks_red` | `rerun_check`, `redispatch` |
   | `merge_conflict` | `resolve_conflict` |
-  | every other cause, and a request with no cause | none |
+  | `resolution_changed_guarded`, every other cause, and a request with no cause | none |
 
-- **Which acts this server builds.** `clear` and `redispatch` on `stalled`, `redispatch` on
-  `merge_checks_red`, and `resume` on `seat_lost`. The controller refuses the others before it
-  builds a command: `rerun_check`, `resolve_conflict` and `resume` on `host_unreachable` with
-  `settle refused: the act <act> is not built on this server yet; the operator can answer or clear
-  the request`, and `close_stale` with `settle refused: close_stale has no object: a revision
-  replaces its request in the same row, so no stale request exists`.
+- **Which acts this server builds.** Every act but `close_stale`. `clear` and `redispatch` on
+  `stalled`; `rerun_check` and `redispatch` on `merge_checks_red`; `resume` on `seat_lost` and on
+  `host_unreachable`; `resolve_conflict` on `merge_conflict`. The controller refuses `close_stale`
+  before it builds a command, with `settle refused: close_stale has no object: a revision replaces
+  its request in the same row, so no stale request exists`.
 - **`--to`.** Only `redispatch` takes it, and `redispatch` needs it: a redispatch with no `--to`
   would be a `clear`. It names a stage of the unit's track at or before the stage the unit parked
   in. A unit parked at its merge has every stage before it. A later stage is refused: `--to <stage>
@@ -414,9 +415,11 @@ pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> 
     characters on one line with no control character); who (the session is live and is of the
     agent `orchestrator`, the request is known, its run has a project, and that project is the
     session's); the grant (a live row for the project, of one generation; a removed project has
-    none); the act list (`authority.clear_acts`, read fresh, must hold the act); the acts that
-    this server does not build; the run's pins (a pinned file that changed after `arm` refuses and
-    names the file); and the reason, redacted once and then bounded;
+    none); the act list (`authority.clear_acts`, read fresh, must hold the act); `close_stale`; the
+    run's pins (a pinned file that changed after `arm` refuses and
+    names the file); and the reason, redacted once and then bounded. For `rerun_check` the
+    controller also reads `authority.rerun_checks_per_head` for the project and the agent
+    `orchestrator`, fresh, and hands it to the engine as the limit;
   - `Engine::settle`, under the engine's lock: a degraded engine refuses; the replay lookup comes
     first (see "The replay"); the request must be open at the named revision; its class must be
     `below`; its cause must admit the act; then the line record is built and the command is
@@ -449,20 +452,29 @@ pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> 
   (`clear`, `resume`, `redispatch` and `resolve_conflict`): `run <run> holds no armed launch count,
   so the grant cannot launch in it`. Otherwise the decision counts the run's **launches so far**:
   every admitted `launch` of the run, and every `running` unit that a `clear`, an `answer` or a
-  launching settle resumed and that has not launched since. An `ack` adds nothing. A launching
+  launching settle resumed and that has not launched since. An `ack` adds nothing. What each act
+  adds, and where its count ends: `clear` and `redispatch` add their unit from the commit until
+  the stage's `launch` is admitted. `resolve_conflict` does the same, for the conflict stage's
+  launch. `resume` on `host_unreachable` adds its unit from the commit until its result: `attached`
+  frees the room again, because nothing launched; `failed` and `unknown` park the unit, so it is no
+  longer `running` and leaves the count; `gone` keeps the unit in the count until the relaunch's
+  `launch` is admitted, so it is counted once from the commit on. `rerun_check` is not a launching
+  act and adds nothing. A launching
   settle is refused when that number has reached the count: `the run's launches so far (<n>, <a>
   admitted and <p> resumed and waiting to launch) have reached its armed launch count (<m>); the
   grant cannot launch more in this run; the operator can still clear`. The request stays open and
   the unit keeps its park. The claim's `clear` and `answer` are not bound. The workflow's own
   launches after a redispatch are not reserved: the unit's outcome caps bound them.
 - **The stored answer** of the request holds `{"verb":"settle","act":…,"to_stage"?:…,"reason":…,
-  "grant":{"project","generation","agent","session"},"line":{…}}`. The `line` record holds the
+  "grant":{"project","generation","agent","session"},"line":{…}}`, and `"head_sha"` for `rerun_check`
+  and `resolve_conflict`: the head of the unit's PR that the engine read before the commit. The `line` record holds the
   class `below`, the cause and, for a merge cause, the rule, the base, the repo and the default
   branch as the class compared them. `answer_generation` stays empty: it is the claim's. A settled
   request reads its `line` from this record and not from a new computation, and `settled` names
   the act, the reason, the session, the project and the generation (`cli.md`, `api.md`).
 - **The ledger line**, in the run's ledger: `settle <R-n>@<revision> by grant <P-n>#<g> session
-  <S-n>: act=<act>[ --to <stage>] reason=<text>`. The reason is redacted before it is stored or
+  <S-n>: act=<act>[ head=<sha>][ --to <stage>] reason=<text>`. The `head=` part is there for
+  `rerun_check` and `resolve_conflict`. The reason is redacted before it is stored or
   logged.
 - **Audited refusals.** Every refusal after the OS check is one refused admission in
   `controller.ledger`, kind `settle`, under an ID the controller makes and never under the settle's
@@ -473,6 +485,75 @@ pulse-factory settle <R-n> --rev <k> --act <act> [--to <stage>] --reason <text> 
 - **The OS rule.** A controller whose OS is not Linux refuses every settle: `settle refused: this
   server runs on <os>; the clear grant's acts are admitted on Linux only (the grant can still be
   given and ended here)`. `settle` is refused on every OS but Linux.
+
+### An act with an effect
+
+An act with an effect commits first and runs its effect after. Two acts have an effect outside the
+store: `rerun_check` asks the forge to run a PR's failed checks again, and `resume` on
+`host_unreachable` attaches to the recorded host again. `resolve_conflict` has no effect of its own:
+its effect is the normal launch of the conflict stage, and it has no result command.
+
+- **The pending mark.** It is not a field of any row. A unit has a *pending settle* when its newest
+  admitted `settle` is of an act with an effect and no admitted `settle-result` names the same
+  request and revision.
+- **The result command.** After the commit, the controller runs the effect before it answers the
+  verb, and the engine stores what the effect did as one command, `settle-result:<R-n>:<revision>`.
+  Its content is the request, the revision, the outcome, one redacted line of detail (at most 300
+  characters) and, for `attached`, the process reference. The same content again is a replay; another
+  outcome is a conflict. No verb sends it. A replay of the settle runs no second effect.
+- **The five outcomes.** `ran` (the forge ran every failed check again): nothing else changes, and
+  the unit runs on at its merge. `attached` (the host answered): a new stage node of the parked stage
+  runs on the same process reference, with no `launch` admission, and the unit stays `running`.
+  `gone` (the host is gone): the unit stays resumed at its parked stage, and the next tick launches
+  the stage as a new incarnation. `failed` and `unknown`: the unit parks again, as a new request with
+  the same kind and cause as the settled one, and a reason that names the settle
+  (`<R-n>@<k>`). The park generation was raised by the settle, so the park is a new request.
+  `unknown` means the result was never stored because the controller stopped.
+- **The hold.** Until the result is stored, no launch of the unit is admitted, the driver starts no
+  stage of it, and the merge step waits for it (`settle <R-n>@<k> waits for its effect's result`).
+- **The halt after the commit.** A run halted between the commit and the effect runs no effect. The
+  result is `failed` with the text `the run is halted: the effect did not run`, and the unit parks
+  again.
+- **The start-up reconcile.** Before tier 1, the reconcile closes every pending settle of the run with
+  one `unknown` result, which parks the unit. The effect is never run a second time.
+- **The ledger line of a result**, one per result, in the run's ledger: `settle-result <R-n>@<k>:
+  rerun_check ran repo=<repo> pr=<n> sha=<sha> checks=<a,b>`; `… rerun_check failed repo=… pr=…
+  sha=…: ran=<…> not_ran=<name: why; …>; unit <u> parked`; `… resume attached host=<unit> session=<S>
+  stage=<stage> attempt=<n>`; `… resume gone host=<unit>: stage <stage> launches again`; `… resume
+  failed: <why>; unit <u> parked`; `… unknown: <act> was not run again; unit <u> parked`. The
+  `rerun_check ran` line is the audit line of the re-run. It is written only when the forge answered
+  and ran every failed check again on the stored head. After a forge error its `ran=` list is empty
+  and no `ran` line is written.
+
+**`rerun_check`.** The engine reads the unit's PR before the commit, with no lock held, and only for
+a settle that the class and the cause check admitted. A PR with no failed check is refused (`PR
+<repo>#<n> has no failed check to run again`). A failed check that the forge cannot run again is
+refused and named (`the failed check <name> of PR <repo>#<n> cannot be run again by this forge:
+<why>`). A read that fails is refused (`the PR's checks cannot be read: <why>`). The head that the
+read gave is stored in the answer as `head_sha`. The decision counts the unit's answered requests
+whose stored answer is a `rerun_check` on that head. At or above `authority.rerun_checks_per_head`
+(built-in 1) the act is refused: `the act rerun_check was admitted <n> times for head <sha> of this
+unit's PR, and authority.rerun_checks_per_head is <limit>; redispatch, or the operator, remains`. A
+new head starts the count at 0. The unit resumes at its merge, and the effect asks the forge to run
+the failed checks again on the stored head only. A head that moved gets no re-run, and the result is
+`failed`. The merge then waits while the checks are pending.
+
+**The re-attach of `resume`.** On `host_unreachable`, `resume` attaches to the recorded host again
+before any relaunch. The effect reads the unit's newest session with a process reference and asks the
+agent to rebind it. A host that answers is `attached`, and its stage runs on. A host that is gone is
+`gone`, and the stage launches again. With the cause `no session host`, liveness decides, as tier 1
+does. A host that still does not answer, a session with no process reference and an agent error are
+`failed`: the unit parks again. A re-attach runs the host's and the controller's attach checks (see
+`session-host.md`, "The attach checks").
+
+**`resolve_conflict`.** The unit's track must declare `merge.on_conflict` in the run's pinned
+workflow, else the act is refused: `track <t> declares no on_conflict stage, so resolve_conflict has
+no stage to send the unit to`. The engine reads the PR's head before the commit and stores it as
+`head_sha`. The unit resumes at the conflict stage and the next tick launches it. When the stage is
+done, the controller compares the paths that the resolution changed with the track's `guarded` globs
+(see `workflow-file.md`, "The conflict stage"). A change of a guarded path, or a read that fails,
+parks the unit with the cause `resolution_changed_guarded`, in the same commit as the stage's end.
+Otherwise the unit goes to the track's `then` stage, and the merge rule runs only after it.
 
 ### The caller of a settle
 
@@ -518,6 +599,7 @@ content returns the stored receipt. The same ID with other content is a conflict
 | Issue a confirm code, or act with one from a device | the device's own `command_id` |
 | Clear a unit | `clear:<unit>:<park generation>` |
 | Settle a request (the Orchestrator, under the clear grant) | `settle:<R-n>:<revision>` |
+| Record the result of a settle's effect | `settle-result:<R-n>:<revision>` |
 | Store a run's armed launch count (`@controller`) | `run-launch-bound-<run>` |
 | Give or end a clear grant (`@controller`) | the caller's `--command-id`, random by default; the admission's unit is `<P-n>:<generation>` |
 | Park a unit | `park:<unit>:<park generation>` |

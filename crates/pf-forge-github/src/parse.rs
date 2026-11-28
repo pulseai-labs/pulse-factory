@@ -1,5 +1,7 @@
 //! Read `gh` output. The output is untrusted: strict JSON, every value checked before use.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use pf_engine::port::forge::{Checks, ForgeError, Mergeable, PrStatus};
 use pf_engine::status::redact;
 use serde::Deserialize;
@@ -7,6 +9,9 @@ use serde::Deserialize;
 /// The fields `pr_status` asks for.
 pub(crate) const STATUS_FIELDS: &str =
     "headRefName,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup";
+
+/// The fields `failed_checks` and `rerun_failed_checks` ask for.
+pub(crate) const FAILED_FIELDS: &str = "headRefOid,statusCheckRollup";
 
 /// The fields `merge_landed` asks for.
 pub(crate) const LANDED_FIELDS: &str = "state,mergeCommit,headRefName,headRefOid,baseRefName";
@@ -58,6 +63,13 @@ struct View {
 /// One entry of the rollup: a check run, or a commit status.
 #[derive(Deserialize)]
 struct Check {
+    /// A check run's name.
+    name: Option<String>,
+    /// A commit status's context.
+    context: Option<String>,
+    /// Where a check run's details are. A GitHub Actions job points into `actions/runs/<id>`.
+    #[serde(rename = "detailsUrl")]
+    details_url: Option<String>,
     /// A check run: `COMPLETED`, `IN_PROGRESS`, `QUEUED`…
     status: Option<String>,
     /// A check run's result, empty until it completes.
@@ -204,4 +216,158 @@ pub(crate) fn is_descendant_status(stdout: &[u8]) -> Result<bool, ForgeError> {
         "behind" | "diverged" => Ok(false),
         other => Err(bad(format!("unknown compare status {other:?}"))),
     }
+}
+
+/// What the token may do on the repo: `gh api repos/<repo> --jq .permissions`.
+#[derive(Deserialize)]
+struct Permissions {
+    #[serde(default)]
+    admin: bool,
+    #[serde(default)]
+    maintain: bool,
+    #[serde(default)]
+    push: bool,
+}
+
+/// Does the token have `push`, `maintain` or `admin` rights? `null` (no permissions given) is no.
+pub(crate) fn can_push(stdout: &[u8]) -> Result<bool, ForgeError> {
+    let perms: Option<Permissions> = serde_json::from_slice(stdout).map_err(bad)?;
+    Ok(perms.is_some_and(|p| p.admin || p.maintain || p.push))
+}
+
+/// Why a failed check is, or is not, one this forge can run again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// A check run of a GitHub Actions workflow run of this repo.
+    Actions { run_id: String },
+    /// A commit status that an outside CI wrote.
+    Status,
+    /// A check run of another app.
+    OtherApp,
+}
+
+/// One failed check of the rollup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FailedItem {
+    pub name: String,
+    pub kind: Kind,
+}
+
+/// The head of a PR and its failed checks.
+pub(crate) struct FailedRead {
+    pub head_sha: String,
+    pub failed: Vec<FailedItem>,
+}
+
+/// The workflow run ID of a `detailsUrl` such as
+/// `https://github.com/<repo>/actions/runs/<id>/job/<job>`; `None` for any other URL.
+fn actions_run_id(repo: &str, url: &str) -> Option<String> {
+    let rest = url.strip_prefix(&format!("https://github.com/{repo}/actions/runs/"))?;
+    let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let after = &rest[id.len()..];
+    let ends = after.is_empty() || after.starts_with(['/', '?', '#']);
+    (!id.is_empty() && id.len() <= 20 && ends).then_some(id)
+}
+
+pub(crate) fn failed_view(repo: &str, stdout: &[u8]) -> Result<FailedRead, ForgeError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FailedView {
+        head_ref_oid: String,
+        status_check_rollup: Option<Vec<Check>>,
+    }
+    let view: FailedView = serde_json::from_slice(stdout).map_err(bad)?;
+    if !is_sha(&view.head_ref_oid) {
+        return Err(bad("the head is not a full object name"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut failed = Vec::new();
+    for check in view.status_check_rollup.as_deref().unwrap_or(&[]) {
+        if verdict(check)? != Verdict::Failed {
+            continue;
+        }
+        let name = check
+            .name
+            .as_deref()
+            .or(check.context.as_deref())
+            .unwrap_or("");
+        if name.is_empty() {
+            return Err(bad("a failed check has no name"));
+        }
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let kind = if check.state.is_some() {
+            Kind::Status
+        } else {
+            match check
+                .details_url
+                .as_deref()
+                .and_then(|u| actions_run_id(repo, u))
+            {
+                Some(run_id) => Kind::Actions { run_id },
+                None => Kind::OtherApp,
+            }
+        };
+        failed.push(FailedItem {
+            name: name.to_string(),
+            kind,
+        });
+    }
+    Ok(FailedRead {
+        head_sha: view.head_ref_oid,
+        failed,
+    })
+}
+
+/// The answer of the tree API: every file of a commit, with its blob ID.
+pub(crate) fn tree(stdout: &[u8]) -> Result<BTreeMap<String, String>, ForgeError> {
+    #[derive(Deserialize)]
+    struct Tree {
+        tree: Vec<Entry>,
+        truncated: bool,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        path: String,
+        #[serde(rename = "type")]
+        kind: String,
+        sha: String,
+    }
+    let tree: Tree = serde_json::from_slice(stdout).map_err(bad)?;
+    if tree.truncated {
+        return Err(ForgeError(
+            "the tree of the commit is too large for the API and came back cut".to_string(),
+        ));
+    }
+    let mut files = BTreeMap::new();
+    for entry in tree.tree {
+        match entry.kind.as_str() {
+            "tree" => continue,
+            "blob" | "commit" => {}
+            other => return Err(bad(format!("unknown tree entry type {other:?}"))),
+        }
+        if entry.path.is_empty() || !is_sha(&entry.sha) {
+            return Err(bad("a tree entry has no path or no object name"));
+        }
+        files.insert(entry.path, entry.sha);
+    }
+    Ok(files)
+}
+
+/// The answer of the ref API: the object a branch points at.
+pub(crate) fn branch_tip(stdout: &[u8]) -> Result<String, ForgeError> {
+    #[derive(Deserialize)]
+    struct Ref {
+        object: Object,
+    }
+    #[derive(Deserialize)]
+    struct Object {
+        sha: String,
+    }
+    let r: Ref = serde_json::from_slice(stdout).map_err(bad)?;
+    if !is_sha(&r.object.sha) {
+        return Err(bad("the tip is not a full object name"));
+    }
+    Ok(r.object.sha)
 }

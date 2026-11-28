@@ -272,6 +272,9 @@ pub enum Cause {
     MergeRefused,
     /// A forge error, or an outcome no other cause fits.
     MergeError,
+    /// The resolution of a merge conflict changed a path that the track guards, or the compare of
+    /// its paths could not be read.
+    ResolutionChangedGuarded,
     /// The seat's process is gone.
     SeatLost,
     /// The seat's host did not answer.
@@ -282,7 +285,7 @@ pub enum Cause {
 
 impl Cause {
     /// Every cause, in the order the contract lists them.
-    pub const ALL: [Cause; 22] = [
+    pub const ALL: [Cause; 23] = [
         Cause::StopFile,
         Cause::ParkFile,
         Cause::NoDoneSignal,
@@ -302,6 +305,7 @@ impl Cause {
         Cause::MergeChecksRed,
         Cause::MergeRefused,
         Cause::MergeError,
+        Cause::ResolutionChangedGuarded,
         Cause::SeatLost,
         Cause::HostUnreachable,
         Cause::MergeWaitsAck,
@@ -328,6 +332,7 @@ impl Cause {
             Cause::MergeChecksRed => "merge_checks_red",
             Cause::MergeRefused => "merge_refused",
             Cause::MergeError => "merge_error",
+            Cause::ResolutionChangedGuarded => "resolution_changed_guarded",
             Cause::SeatLost => "seat_lost",
             Cause::HostUnreachable => "host_unreachable",
             Cause::MergeWaitsAck => "merge_waits_ack",

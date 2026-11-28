@@ -56,7 +56,10 @@ session hosts of ADR-0001 (amendment of 2026-11-16).
   - **lost:** no host job exists, or its exit file is there. The controller records the exit, and the
     session is lost (tier 2);
   - **unreachable:** the job exists but gives no valid `hello` in time. The controller parks the
-    session with the reason "host unreachable" and never launches a second copy.
+    session with the reason "host unreachable" and never launches a second copy. The clear grant's
+    `resume` on such a park attaches to the recorded host again before any relaunch (ADR-0005): a
+    host that answers is rebound and its stage runs on, a gone host is replaced by a relaunch, and a
+    host that still does not answer parks the unit again.
 - **Tier 2: a lost session comes back from its launch record, never from defaults** (ADR-0003):
   - **a chat** resumes at the operator's next open, on the record's runtime and runtime session ID. A
     failed resume shows "context lost", and the operator chooses (ADR-0014);

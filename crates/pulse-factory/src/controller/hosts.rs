@@ -186,6 +186,10 @@ pub struct HostService {
     launch_lock: Mutex<()>,
     /// Why the orphan sweep did not run, for `status`.
     sweep_skipped: Mutex<Option<String>>,
+    /// The units that a settle's re-attach marked: the seat's `session_id` (`<run>/<unit>`) to the
+    /// settle's name (`<R-n>@<k>`). A rebind of a marked row is the clear grant's re-attach, not
+    /// tier 1.
+    reattach: Mutex<BTreeMap<String, String>>,
     pub faults: HostFaults,
 }
 
@@ -243,8 +247,30 @@ impl HostService {
             server_error,
             launch_lock: Mutex::new(()),
             sweep_skipped: Mutex::new(None),
+            reattach: Mutex::new(BTreeMap::new()),
             faults: HostFaults::default(),
         })
+    }
+
+    /// Mark the seat of `unit_id` in `run_id` for the re-attach of the settle `settle`
+    /// (`<R-n>@<k>`). A rebind of that seat's host, while the mark holds, is a re-attach under the
+    /// clear grant: its attach line is mandatory and its outcome line is `host_reattach`. The
+    /// controller clears the mark when the settle's effect is done.
+    pub fn mark_reattach(&self, run_id: &str, unit_id: &str, settle: &str) {
+        locked(&self.reattach).insert(format!("{run_id}/{unit_id}"), settle.to_string());
+    }
+
+    /// The marks that hold now, as `(session_id, settle)`. A test reads them.
+    pub fn reattach_marks(&self) -> Vec<(String, String)> {
+        locked(&self.reattach)
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Clear the mark of [`HostService::mark_reattach`].
+    pub fn clear_reattach(&self, run_id: &str, unit_id: &str) {
+        locked(&self.reattach).remove(&format!("{run_id}/{unit_id}"));
     }
 
     fn arc(&self) -> Arc<HostService> {
@@ -979,6 +1005,42 @@ impl HostService {
         }
     }
 
+    /// The outcome line of a re-attach under the clear grant, in place of `host_tier1`.
+    fn reattach_line(
+        &self,
+        ctl: &Controller,
+        row: &HostRow,
+        settle: &str,
+        outcome: &str,
+        reason: &str,
+    ) {
+        let id = format!("host-reattach-{}-{}", row.unit, unique());
+        let line = format!(
+            "host_reattach {} {outcome} session={} incarnation={} settle={settle} reason={} command={id}",
+            row.unit,
+            field(&row.session_id),
+            row.incarnation,
+            field(reason)
+        );
+        let content = json!({"unit": row.unit, "outcome": outcome, "settle": settle}).to_string();
+        if let Err(e) = self.admit(
+            ctl,
+            Commit {
+                kind: "host_reattach",
+                command_id: &id,
+                content,
+                effects: Vec::new(),
+                subject: &row.unit,
+                line,
+            },
+        ) {
+            eprintln!(
+                "pulse-factory: cannot write the re-attach line of {}: {e}",
+                row.unit
+            );
+        }
+    }
+
     fn rebind_inner(&self, unit: &str) -> Rebind {
         if let Some(why) = &self.server_error {
             return Rebind::Unreachable {
@@ -1011,6 +1073,13 @@ impl HostService {
                 .unwrap_or(Value::Null);
             return Rebind::Lost { exit };
         }
+        // A seat that a settle marked is re-attached under the clear grant: the same hello and
+        // checks as tier 1, a mandatory attach line and its own outcome line.
+        let mark = locked(&self.reattach).get(&row.session_id).cloned();
+        let outcome_line = |outcome: &str, reason: &str| match &mark {
+            Some(settle) => self.reattach_line(&ctl, &row, settle, outcome, reason),
+            None => self.tier1_line(&ctl, &row, outcome, reason),
+        };
         let state = self.launcher.state(unit);
         if state == HostState::Gone {
             let exit = self.what_it_left(unit);
@@ -1021,11 +1090,11 @@ impl HostService {
                 .and_then(Value::as_str)
                 .unwrap_or("gone")
                 .to_string();
-            self.tier1_line(&ctl, &row, "lost", &why);
+            outcome_line("lost", &why);
             return Rebind::Lost { exit };
         }
         let unreachable = |why: String| {
-            self.tier1_line(&ctl, &row, "unreachable", &why);
+            outcome_line("unreachable", &why);
             Rebind::Unreachable { why }
         };
         let Some((session, inc)) = names::parse_unit(&self.server, unit) else {
@@ -1097,9 +1166,16 @@ impl HostService {
                 line: attach_line,
             },
         ) {
+            if mark.is_some() {
+                // The re-attach is an act under the grant: with no attach line it is refused, and
+                // nothing else is written.
+                return Rebind::Unreachable {
+                    why: format!("the attach line cannot be written: {e}"),
+                };
+            }
             eprintln!("pulse-factory: cannot write the attach line of {unit}: {e}");
         }
-        self.tier1_line(&ctl, &row, "survived", "the host answered its hello");
+        outcome_line("survived", "the host answered its hello");
         Rebind::Survived(self.handle_of(conn, &hello, unit, &session, inc, record))
     }
 
